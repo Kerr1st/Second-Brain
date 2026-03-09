@@ -8,8 +8,8 @@ A personal knowledge management and ideation system powered by AI. Gives AI agen
 # Start PostgreSQL + pgvector
 cd docker && docker compose up -d
 
-# Apply schema
-psql -h localhost -U memory_bank -d memory_bank -f docker/schema.sql
+# Apply database migrations
+cd .. && ./migrations/migrate.sh
 
 # Install Python dependencies
 pip install -r requirements.txt
