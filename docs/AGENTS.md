@@ -272,20 +272,20 @@ Encryption key stored in: local file + Google Secret Manager + AWS Secrets Manag
 - [ ] Database schema creation (auto-runs via `migrations/migrate.sh`)
 - [x] `src/db.py` — PostgreSQL connection, CRUD, semantic search, relationships, deduplication (10 functions)
 - [x] `src/embeddings.py` — Bedrock Titan v2 embedding generation (1536-dim, truncation, batch)
-- [ ] `src/ingest.py` — shared ingestion pipeline (chunk → embed → store)
-- [ ] `src/mcp_server.py` — MCP server (memory read/write/search)
+- [x] `src/ingest.py` — shared ingestion pipeline (parse header → chunk by section → embed → store)
+- [ ] `src/mcp_server.py` — MCP server (memory read/write/search) — needs end-to-end testing
 - [x] `src/parsers/crawlee.py` — Crawlee knowledge store parser — 290 sources (1 YouTube + 289 web pages)
 - [x] `src/parsers/cli_chat.py` — Kiro CLI chat parser (Phase 1) — 68/97 pass (70%)
 - [x] `src/parsers/ide_chat.py` — Kiro IDE chat parser (Phase 1) — 5,493/12,447 pass (44%)
 - [x] `scripts/chat_extract.py` — daily Phase 1 chat extraction — 5,561 total, backfill complete
-- [ ] `scripts/ingest_staged.sh` — Phase 2 wrapper (Kiro headless + Opus 4.6-1m)
-- [ ] `scripts/crawlee_ingest.py` — daily Crawlee ingestion
+- [x] `scripts/ingest_staged.sh` — Phase 2 wrapper (Kiro headless + Opus 4.6-1m)
+- [x] `scripts/crawlee_ingest.py` — daily Crawlee ingestion
 - [ ] Capture API (multi-channel: Slack, mobile, browser, email)
 - [ ] Metadata extraction on ingest (people, topics, action items)
 - [ ] Memory migration (Claude, ChatGPT, Notion imports)
 - [ ] Weekly synthesis review (scheduled digest)
 - [ ] Backup scripts (rclone + GPG)
-- [ ] Backup scheduling (launchd plists)
+- [x] Backup scheduling (launchd plists — 4 plists in scheduling/, ready to symlink)
 - [ ] Weekly verification scheduling
 - [ ] Encryption key setup (Google + AWS)
 - [ ] Integration testing
