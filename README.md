@@ -25,6 +25,7 @@ pip install -r requirements.txt
 
 ```
 docker/          PostgreSQL + pgvector setup
+migrations/      Numbered SQL migrations + runner script
 src/             Core library (MCP server, DB, embeddings, ingestion, parsers)
 scripts/         Scheduled jobs (chat extraction, Crawlee ingestion, backup)
 scheduling/      macOS launchd plists

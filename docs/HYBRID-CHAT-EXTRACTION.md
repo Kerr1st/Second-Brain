@@ -5,7 +5,7 @@
 
 ## Overview
 
-Chat ingestion is split into two phases: a deterministic script for mechanical cleanup (runs unattended via launchd) and an LLM-powered step for intelligent processing (runs via MCP server or agent session). A staging directory decouples the two phases.
+Chat ingestion is split into two phases: a deterministic script for mechanical cleanup (runs unattended via launchd) and Kiro CLI in headless mode for intelligent processing. A staging directory decouples the two phases.
 
 ```
 Phase 1: Script (launchd, 2:30 AM)       Phase 2: Kiro headless (launchd, 3:00 AM)
@@ -135,7 +135,7 @@ Before writing to staging, check if the file already exists in staging or if the
 
 ### Schedule
 
-launchd job at 2:30 AM daily. Plist at `~/Library/LaunchAgents/com.second-brain.chat-extraction.plist`.
+launchd job at 2:30 AM daily. Plist at `scheduling/com.second-brain.chat-extract.plist`.
 
 Runs after the 2:00 AM backup, before the 3:00 AM Crawlee ingestion.
 

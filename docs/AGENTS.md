@@ -166,7 +166,7 @@ Crawlee (`~/Work/Tools/Crawlee/`) is the content acquisition tool. It scrapes we
 | Content type | Output path | Format |
 |---|---|---|
 | YouTube transcripts | `~/Work/Tools/Crawlee/knowledge/sources/*.md` | Markdown with metadata header |
-| Web pages | `~/Work/Tools/Crawlee/output/*.md` | Markdown with source URL |
+| Web pages | `~/Work/Tools/Crawlee/knowledge/sources/*.md` + `output/*.md` | Markdown with metadata header (knowledge/) + legacy format (output/) |
 | Master index | `~/Work/Tools/Crawlee/knowledge/index.md` | Markdown table (title, URL, type, date) |
 | Type indexes | `~/Work/Tools/Crawlee/knowledge/indexes/*.md` | Per-type markdown tables |
 | Summaries | `~/Work/Tools/Crawlee/knowledge/summaries/*.summary.md` | Markdown |
@@ -192,12 +192,14 @@ Video ID: {id}
 {transcript text}
 ```
 
-Web page files include a minimal header:
+Web page files (in `knowledge/sources/`) include the same metadata header:
 
 ```
 # {page_title}
 
 Source: {url}
+Type: web-page
+Date: {YYYY-MM-DD}
 
 ---
 
@@ -236,8 +238,8 @@ Current volume: ~96 CLI sessions, ~12,400 IDE chats (current), ~49 IDE chats (le
 ### Hybrid Pipeline Summary
 
 ```
-Phase 1: Script (launchd, 2:30 AM)       Phase 2: Agent / MCP server
-├── Read from 3 chat sources              ├── Read from staging queue
+Phase 1: Script (launchd, 2:30 AM)       Phase 2: Kiro headless (launchd, 3:00 AM)
+├── Read from 3 chat sources              ├── One chat per Kiro session (Opus 4.6-1m)
 ├── Structural stripping                  ├── Chunk by topic (LLM)
 ├── Size filtering                        ├── Extract metadata (LLM)
 ├── Content filtering                     ├── Generate embeddings (Bedrock)
@@ -286,6 +288,6 @@ Encryption key stored in: local file + Google Secret Manager + AWS Secrets Manag
 - [ ] Weekly synthesis review (scheduled digest)
 - [ ] Backup scripts (rclone + GPG)
 - [x] Backup scheduling (launchd plists — 4 plists in scheduling/, ready to symlink)
-- [ ] Weekly verification scheduling
+- [x] Weekly verification scheduling (included in launchd plists above)
 - [ ] Encryption key setup (Google + AWS)
 - [ ] Integration testing
