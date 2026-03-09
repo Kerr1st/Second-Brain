@@ -10,7 +10,7 @@ import boto3
 
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "us-east-1")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0")
-EMBEDDING_DIMENSION = 1536
+EMBEDDING_DIMENSION = 1024
 
 _client = None
 

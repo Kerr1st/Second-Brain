@@ -6,7 +6,7 @@ CREATE TABLE memories (
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     summary TEXT,
-    embedding vector(1536),
+    embedding vector(1024),
     tags TEXT[] DEFAULT '{}',
     source_url TEXT,
     source_type TEXT,

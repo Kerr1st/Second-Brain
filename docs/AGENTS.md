@@ -101,7 +101,7 @@ CREATE TABLE memories (
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     summary TEXT,                 -- agent-generated summary for long content
-    embedding vector(1536),
+    embedding vector(1024),
     tags TEXT[] DEFAULT '{}',
     source_url TEXT,              -- origin: YouTube URL, article URL, etc.
     source_type TEXT,             -- youtube, article, pdf, course, kiro_cli_chat, kiro_ide_chat, notes, manual
