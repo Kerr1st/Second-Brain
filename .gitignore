@@ -1,0 +1,22 @@
+# Dependencies
+__pycache__/
+*.pyc
+.venv/
+
+# Staging (transient data, not source controlled)
+staging/
+
+# Docker volumes
+docker/data/
+
+# Backup artifacts
+*.dump
+*.dump.gpg
+*.json.gpg
+
+# OS
+.DS_Store
+
+# Secrets
+.backup-key
+.env

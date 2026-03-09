@@ -8,7 +8,7 @@ The core problem it solves: AI agents forget everything between sessions. Sessio
 
 ## Workflow
 
-1. You gather information (YouTube, articles, PDFs, courses, conversations)
+1. You gather information (YouTube, articles, PDFs, courses, AI chats, notes)
 2. The system ingests and indexes that information
 3. You synthesize and share your thinking with the agent
 4. The agent stores your ideas, connects them to existing knowledge, and tracks open threads
@@ -36,16 +36,28 @@ The core problem it solves: AI agents forget everything between sessions. Sessio
 │  │  ideas       │  │  YouTube     │  │               │  │
 │  │  syntheses   │  │  articles    │  │  supports     │  │
 │  │  decisions   │  │  PDFs        │  │  contradicts  │  │
-│  │  insights    │  │  notes       │  │  extends      │  │
-│  │  questions   │  │  courses     │  │  inspires     │  │
-│  │  priorities  │  │              │  │  derived_from │  │
+│  │  insights    │  │  courses     │  │  extends      │  │
+│  │  questions   │  │  AI chats    │  │  inspires     │  │
+│  │  priorities  │  │  notes       │  │  derived_from │  │
 │  └─────────────┘  └──────────────┘  └───────────────┘  │
 ├─────────────────────────────────────────────────────────┤
+│  Capture API (planned)                                  │
+│  Lightweight HTTP endpoint for multi-channel capture:   │
+│  Slack webhook → extract metadata → embed → store       │
+│  Mobile shortcut → POST → store                         │
+│  Browser extension → POST → store                       │
+│  Email forward → parse → store                          │
+├─────────────────────────────────────────────────────────┤
+│  Content Acquisition: Crawlee                           │
+│  ~/Work/Tools/Crawlee/                                  │
+│  scraper.js → web pages → markdown files                │
+│  youtube.js → transcripts → markdown files              │
+│  Output: ~/Work/Tools/Crawlee/knowledge/sources/        │
+├─────────────────────────────────────────────────────────┤
 │  Ingestion Pipeline                                     │
-│  MCP tools for frictionless content capture:            │
-│  YouTube → transcript → chunk → embed → store           │
-│  Articles → scrape → chunk → embed → store              │
-│  PDFs → extract → chunk → embed → store                 │
+│  Reads content and writes to PostgreSQL:                │
+│  Crawlee markdown → chunk → embed → store               │
+│  AI Chats → parse → chunk → embed → store (see below)  │
 │  Notes → embed → store                                  │
 ├─────────────────────────────────────────────────────────┤
 │  Execution Engine                                       │
@@ -76,6 +88,7 @@ The core problem it solves: AI agents forget everything between sessions. Sessio
 | Backup secondary | AWS S3 | Off-Google disaster recovery |
 | Key storage | Google Secret Manager + AWS Secrets Manager | Dual-site key recovery |
 | Scheduling | macOS launchd | Native, reliable, no dependencies |
+| Content acquisition | Crawlee (`~/Work/Tools/Crawlee/`) | Custom Node.js tool for web scraping and YouTube transcript extraction; outputs clean markdown |
 
 ## Database Schema
 
@@ -84,14 +97,15 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE memories (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    type TEXT NOT NULL,           -- idea, synthesis, research, insight, question, decision, priority, project, source
+    type TEXT NOT NULL,           -- idea, synthesis, research, insight, question, decision, priority, project, connection, source
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     summary TEXT,                 -- agent-generated summary for long content
     embedding vector(1536),
     tags TEXT[] DEFAULT '{}',
     source_url TEXT,              -- origin: YouTube URL, article URL, etc.
-    source_type TEXT,             -- youtube, article, pdf, conversation, manual
+    source_type TEXT,             -- youtube, article, pdf, course, kiro_cli_chat, kiro_ide_chat, notes, manual
+    metadata JSONB DEFAULT '{}', -- flexible extracted metadata (people, topics, action_items, project, files)
     status TEXT DEFAULT 'active', -- active, explored, archived, superseded
     confidence FLOAT DEFAULT 1.0,
     parent_id UUID REFERENCES memories(id),
@@ -111,6 +125,7 @@ CREATE TABLE memory_relationships (
 CREATE INDEX ON memories USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX ON memories (type, status);
 CREATE INDEX ON memories USING gin (tags);
+CREATE INDEX ON memories USING gin (metadata);
 CREATE INDEX ON memories (created_at DESC);
 CREATE INDEX ON memories (source_type);
 ```
@@ -142,6 +157,95 @@ CREATE INDEX ON memories (source_type);
 | `requires` | This memory depends on the target |
 | `derived_from` | This memory was synthesized from the target source |
 
+## Crawlee Integration
+
+Crawlee (`~/Work/Tools/Crawlee/`) is the content acquisition tool. It scrapes web pages and extracts YouTube transcripts, outputting clean markdown files. The Second Brain ingestion pipeline reads from Crawlee's output — Crawlee never writes to the database directly.
+
+### Crawlee Output Locations
+
+| Content type | Output path | Format |
+|---|---|---|
+| YouTube transcripts | `~/Work/Tools/Crawlee/knowledge/sources/*.md` | Markdown with metadata header |
+| Web pages | `~/Work/Tools/Crawlee/output/*.md` | Markdown with source URL |
+| Master index | `~/Work/Tools/Crawlee/knowledge/index.md` | Markdown table (title, URL, type, date) |
+| Type indexes | `~/Work/Tools/Crawlee/knowledge/indexes/*.md` | Per-type markdown tables |
+| Summaries | `~/Work/Tools/Crawlee/knowledge/summaries/*.summary.md` | Markdown |
+
+### File Formats
+
+YouTube transcript files include a structured metadata header:
+
+```
+# {title}
+
+Source: {youtube_url}
+Type: youtube-transcript
+Date: {YYYY-MM-DD}
+Uploader: {channel_name}
+Duration: {MM:SS}
+Video ID: {id}
+
+---
+
+## Transcript
+
+{transcript text}
+```
+
+Web page files include a minimal header:
+
+```
+# {page_title}
+
+Source: {url}
+
+---
+
+{page content as markdown}
+```
+
+### Ingestion Handoff
+
+All Crawlee content types write to `knowledge/sources/` with consistent metadata headers and register in `knowledge/index.md`. This gives the ingestion pipeline a single discovery mechanism regardless of source type.
+
+1. **Discovery** — Read `knowledge/index.md` to find new entries not yet in PostgreSQL (compare by `source_url`)
+2. **Read** — Load the markdown file from `knowledge/sources/`
+3. **Parse metadata** — Extract title, source URL, type, date from the header (all types use the same header format)
+4. **Chunk** — Split content by topic/section (not fixed-size)
+5. **Embed** — Generate vector per chunk via Bedrock Titan/Cohere
+6. **Store** — Parent record as `source` type with `source_type` mapped from Crawlee's `Type:` header, chunks as child records with `parent_id`
+
+The index-based discovery means the pipeline only processes new content, avoiding re-ingestion of already-stored sources.
+
+## Chat Ingestion
+
+AI chat conversations are a primary source of decisions, reasoning, and context. Two separate storage systems require two parsers feeding a shared ingestion path. A hybrid two-phase approach splits the work: a deterministic script handles mechanical cleanup (runs unattended via launchd), and an LLM-powered step handles intelligent chunking and metadata extraction.
+
+See `HYBRID-CHAT-EXTRACTION.md` for the full extraction spec, including file formats, stripping rules, filtering thresholds, staging directory layout, and backfill strategy.
+
+### Source Locations (macOS)
+
+| Source | Location | Format |
+|---|---|---|
+| Kiro CLI | `~/Library/Application Support/kiro-cli/data.sqlite3` | SQLite → `conversations_v2` table, JSON `value` with `transcript` array of strings |
+| Kiro IDE (current) | `~/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent/.../*.chat` | JSON with `chat` array of `{role, content}` objects |
+| Kiro IDE (legacy) | `~/Library/Application Support/Kiro/User/globalStorage/amazonwebservices.aieditoragent/.../*.chat` | Same JSON format as current |
+
+Current volume: ~96 CLI sessions, ~12,400 IDE chats (current), ~49 IDE chats (legacy).
+
+### Hybrid Pipeline Summary
+
+```
+Phase 1: Script (launchd, 2:30 AM)       Phase 2: Agent / MCP server
+├── Read from 3 chat sources              ├── Read from staging queue
+├── Structural stripping                  ├── Chunk by topic (LLM)
+├── Size filtering                        ├── Extract metadata (LLM)
+├── Content filtering                     ├── Generate embeddings (Bedrock)
+└── Write cleaned chats to staging/       └── Store in PostgreSQL
+```
+
+Staging directory: `~/second-brain/staging/chats/` — cleaned markdown files with metadata headers, same format as Crawlee output.
+
 ## Backup & Disaster Recovery
 
 Full recovery is possible from either Google Drive or AWS alone. See `DISASTER-RECOVERY.md` for the complete runbook.
@@ -162,8 +266,12 @@ Encryption key stored in: local file + Google Secret Manager + AWS Secrets Manag
 - [ ] PostgreSQL + pgvector Docker setup
 - [ ] Database schema creation
 - [ ] MCP server (memory read/write)
-- [ ] Ingestion pipeline (YouTube, articles, PDFs)
-- [ ] Embedding generation (Bedrock Titan/Cohere)
+- [ ] Ingestion pipeline (YouTube, articles, PDFs, embeddings via Bedrock Titan/Cohere)
+- [ ] Chat ingestion (Kiro CLI + Kiro IDE parsers)
+- [ ] Capture API (multi-channel: Slack, mobile, browser, email)
+- [ ] Metadata extraction on ingest (people, topics, action items)
+- [ ] Memory migration (Claude, ChatGPT, Notion imports)
+- [ ] Weekly synthesis review (scheduled digest)
 - [ ] Backup scripts (rclone + GPG)
 - [ ] Backup scheduling (launchd)
 - [ ] Weekly verification scheduling

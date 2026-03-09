@@ -2,5 +2,32 @@
 
 A personal knowledge management and ideation system powered by AI. Gives AI agents persistent memory across sessions, turning them into thinking partners that accumulate knowledge over time.
 
-See [AGENTS.md](AGENTS.md) for architecture and project details.
-See [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md) for backup and recovery procedures.
+## Quickstart
+
+```bash
+# Start PostgreSQL + pgvector
+cd docker && docker compose up -d
+
+# Apply schema
+psql -h localhost -U memory_bank -d memory_bank -f docker/schema.sql
+
+# Install Python dependencies
+pip install -r requirements.txt
+```
+
+## Documentation
+
+- [docs/AGENTS.md](docs/AGENTS.md) — Architecture, schema, and project status
+- [docs/HYBRID-CHAT-EXTRACTION.md](docs/HYBRID-CHAT-EXTRACTION.md) — Chat ingestion pipeline spec
+- [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) — Backup and recovery procedures
+
+## Project Structure
+
+```
+docker/          PostgreSQL + pgvector setup
+src/             Core library (MCP server, DB, embeddings, ingestion, parsers)
+scripts/         Scheduled jobs (chat extraction, Crawlee ingestion, backup)
+scheduling/      macOS launchd plists
+staging/         Transient data between pipeline phases (gitignored)
+docs/            Architecture specs and runbooks
+```
