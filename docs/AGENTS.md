@@ -270,8 +270,8 @@ Encryption key stored in: local file + Google Secret Manager + AWS Secrets Manag
 - [x] Crawlee unified knowledge store (web pages now write to knowledge/index.md alongside YouTube)
 - [ ] PostgreSQL + pgvector Docker setup (blocked: Docker Desktop license)
 - [ ] Database schema creation (auto-runs via `migrations/migrate.sh`)
-- [ ] `src/db.py` — PostgreSQL connection and query helpers
-- [ ] `src/embeddings.py` — Bedrock Titan/Cohere embedding generation
+- [x] `src/db.py` — PostgreSQL connection, CRUD, semantic search, relationships, deduplication (10 functions)
+- [x] `src/embeddings.py` — Bedrock Titan v2 embedding generation (1536-dim, truncation, batch)
 - [ ] `src/ingest.py` — shared ingestion pipeline (chunk → embed → store)
 - [ ] `src/mcp_server.py` — MCP server (memory read/write/search)
 - [x] `src/parsers/crawlee.py` — Crawlee knowledge store parser — 290 sources (1 YouTube + 289 web pages)
