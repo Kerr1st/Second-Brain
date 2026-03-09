@@ -274,7 +274,7 @@ Encryption key stored in: local file + Google Secret Manager + AWS Secrets Manag
 - [ ] `src/embeddings.py` — Bedrock Titan/Cohere embedding generation
 - [ ] `src/ingest.py` — shared ingestion pipeline (chunk → embed → store)
 - [ ] `src/mcp_server.py` — MCP server (memory read/write/search)
-- [ ] `src/parsers/crawlee.py` — Crawlee knowledge store parser
+- [x] `src/parsers/crawlee.py` — Crawlee knowledge store parser — 290 sources (1 YouTube + 289 web pages)
 - [x] `src/parsers/cli_chat.py` — Kiro CLI chat parser (Phase 1) — 68/97 pass (70%)
 - [x] `src/parsers/ide_chat.py` — Kiro IDE chat parser (Phase 1) — 5,493/12,447 pass (44%)
 - [x] `scripts/chat_extract.py` — daily Phase 1 chat extraction — 5,561 total, backfill complete
