@@ -260,19 +260,19 @@ Full recovery is possible from either Google Drive or AWS alone. See `DISASTER-R
 
 Encryption key stored in: local file + Google Secret Manager + AWS Secrets Manager.
 
-## Current Blocker
+## Current Status
 
-Docker Desktop license pending. PostgreSQL + pgvector cannot start until Docker is licensed and running.
+Docker running. PostgreSQL + pgvector operational. Full pipeline tested end-to-end. MCP server built and tested.
 
 ## Next Steps (in order)
 
-1. Start Docker Desktop → `cd docker && docker compose up -d`
-2. Run migrations → `./migrations/migrate.sh`
-3. Install Python deps → `pip install -r requirements.txt`
-4. Test `src/db.py` against live database
-5. Test `src/ingest.py` end-to-end with one Crawlee source
-6. Build `src/mcp_server.py` — expose Second Brain to agents
-7. Test MCP server with Kiro
+1. ~~Start Docker Desktop~~ ✅
+2. ~~Run migrations~~ ✅
+3. ~~Install Python deps~~ ✅
+4. ~~Test db.py~~ ✅
+5. ~~Test ingest.py end-to-end~~ ✅
+6. ~~Build MCP server~~ ✅
+7. Connect MCP server to Kiro CLI
 8. Run Phase 2 backfill against staging/chats/ (5,561 files)
 
 ## Project Status
@@ -290,7 +290,7 @@ Docker Desktop license pending. PostgreSQL + pgvector cannot start until Docker 
 - [x] `src/db.py` — PostgreSQL connection, CRUD, semantic search, relationships, deduplication (10 functions)
 - [x] `src/embeddings.py` — Bedrock Titan v2 embedding generation (1536-dim, truncation, batch)
 - [x] `src/ingest.py` — shared ingestion pipeline (parse header → chunk by section → embed → store)
-- [ ] `src/mcp_server.py` — MCP server (memory read/write/search) — needs end-to-end testing
+- [x] `src/mcp_server.py` — MCP server (7 tools: create, search, read, update, relate, list, graph)
 - [x] `src/parsers/crawlee.py` — Crawlee knowledge store parser — 290 sources (1 YouTube + 289 web pages)
 - [x] `src/parsers/cli_chat.py` — Kiro CLI chat parser (Phase 1) — 68/97 pass (70%)
 - [x] `src/parsers/ide_chat.py` — Kiro IDE chat parser (Phase 1) — 5,493/12,447 pass (44%)
