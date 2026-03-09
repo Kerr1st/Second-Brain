@@ -18,6 +18,7 @@ pip install -r requirements.txt
 ## Documentation
 
 - [docs/AGENTS.md](docs/AGENTS.md) — Architecture, schema, and project status
+- [docs/DESIGN-DECISIONS.md](docs/DESIGN-DECISIONS.md) — Why key architectural choices were made
 - [docs/HYBRID-CHAT-EXTRACTION.md](docs/HYBRID-CHAT-EXTRACTION.md) — Chat ingestion pipeline spec
 - [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) — Backup and recovery procedures
 

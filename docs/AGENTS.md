@@ -260,6 +260,21 @@ Full recovery is possible from either Google Drive or AWS alone. See `DISASTER-R
 
 Encryption key stored in: local file + Google Secret Manager + AWS Secrets Manager.
 
+## Current Blocker
+
+Docker Desktop license pending. PostgreSQL + pgvector cannot start until Docker is licensed and running.
+
+## Next Steps (in order)
+
+1. Start Docker Desktop → `cd docker && docker compose up -d`
+2. Run migrations → `./migrations/migrate.sh`
+3. Install Python deps → `pip install -r requirements.txt`
+4. Test `src/db.py` against live database
+5. Test `src/ingest.py` end-to-end with one Crawlee source
+6. Build `src/mcp_server.py` — expose Second Brain to agents
+7. Test MCP server with Kiro
+8. Run Phase 2 backfill against staging/chats/ (5,561 files)
+
 ## Project Status
 
 - [x] Architecture design
