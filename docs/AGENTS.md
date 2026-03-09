@@ -263,17 +263,29 @@ Encryption key stored in: local file + Google Secret Manager + AWS Secrets Manag
 - [x] Architecture design
 - [x] Schema design
 - [x] Disaster recovery runbook
-- [ ] PostgreSQL + pgvector Docker setup
-- [ ] Database schema creation
-- [ ] MCP server (memory read/write)
-- [ ] Ingestion pipeline (YouTube, articles, PDFs, embeddings via Bedrock Titan/Cohere)
-- [ ] Chat ingestion (Kiro CLI + Kiro IDE parsers)
+- [x] Repo structure and module stubs (`src/`, `scripts/`, `docker/`, `scheduling/`)
+- [x] Database migrations system (`migrations/migrate.sh`, numbered SQL files)
+- [x] Hybrid chat extraction spec (`docs/HYBRID-CHAT-EXTRACTION.md`)
+- [x] Error handling, logging, and monitoring design (staging/failed/, logs/, status JSON)
+- [x] Crawlee unified knowledge store (web pages now write to knowledge/index.md alongside YouTube)
+- [ ] PostgreSQL + pgvector Docker setup (blocked: Docker Desktop license)
+- [ ] Database schema creation (auto-runs via `migrations/migrate.sh`)
+- [ ] `src/db.py` — PostgreSQL connection and query helpers
+- [ ] `src/embeddings.py` — Bedrock Titan/Cohere embedding generation
+- [ ] `src/ingest.py` — shared ingestion pipeline (chunk → embed → store)
+- [ ] `src/mcp_server.py` — MCP server (memory read/write/search)
+- [ ] `src/parsers/crawlee.py` — Crawlee knowledge store parser
+- [ ] `src/parsers/cli_chat.py` — Kiro CLI chat parser (Phase 1)
+- [ ] `src/parsers/ide_chat.py` — Kiro IDE chat parser (Phase 1)
+- [ ] `scripts/chat_extract.py` — daily Phase 1 chat extraction
+- [ ] `scripts/ingest_staged.sh` — Phase 2 wrapper (Kiro headless + Opus 4.6-1m)
+- [ ] `scripts/crawlee_ingest.py` — daily Crawlee ingestion
 - [ ] Capture API (multi-channel: Slack, mobile, browser, email)
 - [ ] Metadata extraction on ingest (people, topics, action items)
 - [ ] Memory migration (Claude, ChatGPT, Notion imports)
 - [ ] Weekly synthesis review (scheduled digest)
 - [ ] Backup scripts (rclone + GPG)
-- [ ] Backup scheduling (launchd)
+- [ ] Backup scheduling (launchd plists)
 - [ ] Weekly verification scheduling
 - [ ] Encryption key setup (Google + AWS)
 - [ ] Integration testing
