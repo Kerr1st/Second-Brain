@@ -275,9 +275,9 @@ Encryption key stored in: local file + Google Secret Manager + AWS Secrets Manag
 - [ ] `src/ingest.py` — shared ingestion pipeline (chunk → embed → store)
 - [ ] `src/mcp_server.py` — MCP server (memory read/write/search)
 - [ ] `src/parsers/crawlee.py` — Crawlee knowledge store parser
-- [ ] `src/parsers/cli_chat.py` — Kiro CLI chat parser (Phase 1)
-- [ ] `src/parsers/ide_chat.py` — Kiro IDE chat parser (Phase 1)
-- [ ] `scripts/chat_extract.py` — daily Phase 1 chat extraction
+- [x] `src/parsers/cli_chat.py` — Kiro CLI chat parser (Phase 1) — 68/97 pass (70%)
+- [x] `src/parsers/ide_chat.py` — Kiro IDE chat parser (Phase 1) — 5,493/12,447 pass (44%)
+- [x] `scripts/chat_extract.py` — daily Phase 1 chat extraction — 5,561 total, backfill complete
 - [ ] `scripts/ingest_staged.sh` — Phase 2 wrapper (Kiro headless + Opus 4.6-1m)
 - [ ] `scripts/crawlee_ingest.py` — daily Crawlee ingestion
 - [ ] Capture API (multi-channel: Slack, mobile, browser, email)
