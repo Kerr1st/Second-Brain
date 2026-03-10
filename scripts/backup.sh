@@ -37,7 +37,7 @@ docker exec "$CONTAINER" pg_dump -Fc -U "$DB_USER" "$DB_NAME" > "$BACKUP_DIR/mem
 
 log "Exporting JSON fallback..."
 docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
-  "COPY (SELECT json_agg(row_to_json(m)) FROM memories m) TO STDOUT" \
+  "COPY (SELECT row_to_json(m) FROM memories m) TO STDOUT" \
   > "$BACKUP_DIR/memories_${TIMESTAMP}.json"
 
 log "Encrypting..."
