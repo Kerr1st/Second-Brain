@@ -332,7 +332,7 @@ Docker running. PostgreSQL + pgvector operational. Full pipeline tested end-to-e
 
 ### V2 — Cognitive Science Enhancements (see `docs/V2-ROADMAP.md` for research grounding)
 
-- [ ] `memory_learn` MCP tool — elaborative interrogation (Dunlosky 2013), connect new knowledge to existing
+- [x] `memory_learn` MCP tool — elaborative interrogation (Dunlosky 2013), connect new knowledge to existing
 - [ ] Memory classification — auto-classify semantic/episodic/procedural (Tulving 1972), boost semantic in reranking
 - [ ] Consolidation pipeline — cluster episodic memories → extract principles/patterns (Stickgold 2005, Walker 2009)
 - [ ] Spaced retrieval reinforcement — track `last_accessed_at`, weight spaced retrievals over massed (Roediger & Karpicke 2006)
