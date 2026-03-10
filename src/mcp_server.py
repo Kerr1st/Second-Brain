@@ -7,10 +7,21 @@ from mcp.server.fastmcp import FastMCP
 from src.db import (
     create_memory, get_memory, update_memory, list_memories,
     search_similar, create_relationship, get_relationships,
+    hybrid_search, rerank, increment_access_count,
 )
 from src.embeddings import generate_embedding
 
 mcp = FastMCP("Second Brain")
+
+
+import re as _re
+
+_DEPTH_RE = _re.compile(
+    r"(because|when .{5,40}(?:then|,)|the fix|the cost|this means|"
+    r"which (?:causes|leads|means)|→|producing \d|cost us|"
+    r"so (?:that|each|every)|if you don.t|without .{3,30} you)",
+    _re.IGNORECASE,
+)
 
 
 @mcp.tool()
@@ -27,23 +38,45 @@ def memory_create(
 
     type: idea, synthesis, research, insight, question, decision, priority, project, connection, source
     source_type: youtube, article, pdf, course, kiro_cli_chat, kiro_ide_chat, notes, manual
+
+    DEPTH REQUIREMENT for ideas/insights/decisions: explain WHAT, WHAT HAPPENS when violated, and WHY.
+    Include 'Questions this answers:' with 3-5 natural-language queries.
     """
     embedding = generate_embedding(content)
     mid = create_memory(
         type=type, title=title, content=content, embedding=embedding,
         tags=tags, source_type=source_type, source_url=source_url, metadata=metadata,
     )
-    return f"Created memory {mid}"
+
+    # Quality warnings for knowledge-type memories
+    warnings = []
+    if type in ("idea", "synthesis", "insight", "decision"):
+        if len(_DEPTH_RE.findall(content)) < 2:
+            warnings.append("Low depth: add 'because...' or 'when X, then Y' to explain WHY.")
+        if "questions this answers" not in content.lower():
+            warnings.append("Missing 'Questions this answers:' — add 3-5 natural queries for better retrieval.")
+
+    result = f"Created memory {mid}"
+    if warnings:
+        result += "\n⚠ " + "\n⚠ ".join(warnings)
+    return result
 
 
 @mcp.tool()
 def memory_search(query: str, type: str | None = None, limit: int = 10) -> list[dict]:
-    """Semantic search across all memories. Returns most relevant matches."""
+    """Semantic + keyword search across all memories. Uses hybrid retrieval
+    (BM25 + vector embeddings + RRF) with utility reranking (recency, type boost,
+    token overlap, retrieval reinforcement)."""
     embedding = generate_embedding(query)
-    results = search_similar(embedding, limit=limit, type=type)
+    results = hybrid_search(query, embedding, limit=limit, type=type)
+    results = rerank(results, query)
+
+    # Retrieval reinforcement — bump access_count for returned memories
+    increment_access_count([str(r["id"]) for r in results])
+
     return [
         {"id": str(r["id"]), "title": r["title"], "type": r["type"],
-         "similarity": round(float(r["similarity"]), 3),
+         "score": round(float(r.get("rerank_score", 0)), 3),
          "content": r["content"][:500], "tags": r["tags"]}
         for r in results
     ]
