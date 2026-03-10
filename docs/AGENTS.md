@@ -301,6 +301,7 @@ Docker running. PostgreSQL + pgvector operational. Full pipeline tested end-to-e
 - [ ] Metadata extraction on ingest (people, topics, action items)
 - [ ] Memory migration (Claude, ChatGPT, Notion imports)
 - [ ] Weekly synthesis review (scheduled digest)
+- [ ] Evaluation framework (4-layer: retrieval accuracy with ground truth cases, integration tests, consolidation quality, cold vs warm agent output comparison)
 - [ ] Backup scripts (rclone + GPG)
 - [x] Backup scheduling (launchd plists — 4 plists in scheduling/, ready to symlink)
 - [x] Weekly verification scheduling (included in launchd plists above)
