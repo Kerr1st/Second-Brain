@@ -32,7 +32,10 @@ SKIP_PATTERNS = re.compile(
 INTERNAL_DOMAINS = re.compile(
     r"(w\.amazon\.com|quip-amazon\.com|highspot|"
     r"broadcast\.amazon|atoz\.amazon|amazon\.awsapps|"
-    r"ivy-help-center|talent\.a2z|docs\.hub\.amazon)"
+    r"ivy-help-center|talent\.a2z|docs\.hub\.amazon|"
+    r"meetings\.amazon|inside\.amazon|pathfinder\.legal\.amazon|"
+    r"idp\.federate\.amazon|amazon-mentoring|"
+    r"console\.harmony\.a2z)"
 )
 
 
@@ -93,20 +96,31 @@ def scrape_with_cookies(name, url):
         return False
 
 
-def scrape_with_crawlee(name, url):
-    """Scrape a public page via Crawlee."""
+def scrape_with_crawlee(urls):
+    """Scrape public pages via Crawlee batch scraper (single instance)."""
+    if not urls:
+        return
+    url_file = os.path.join(CRAWLEE_DIR, ".bookmark-urls.txt")
+    with open(url_file, "w") as f:
+        for _, url in urls:
+            f.write(url + "\n")
+
+    print(f"\nScraping {len(urls)} public URLs via Crawlee (batch)...")
     try:
         result = subprocess.run(
-            ["node", "scraper.js", url],
-            cwd=CRAWLEE_DIR, capture_output=True, timeout=60,
+            ["node", "batch-scrape.js", url_file],
+            cwd=CRAWLEE_DIR, timeout=3600, capture_output=True, text=True,
         )
-        return result.returncode == 0
+        # Count results from stderr
+        ok = result.stderr.count("✓")
+        fail = result.stderr.count("✗")
+        skip = result.stderr.count("⚠")
+        print(f"  Crawlee batch: {ok} scraped, {fail} failed, {skip} skipped")
+        print(result.stderr[-500:] if len(result.stderr) > 500 else result.stderr)
     except subprocess.TimeoutExpired:
-        print(f"    ⚠ Timeout")
-        return False
-    except Exception as e:
-        print(f"    ✗ {e}")
-        return False
+        print("  ⚠ Batch scrape timed out after 1 hour")
+    finally:
+        os.remove(url_file) if os.path.exists(url_file) else None
 
 
 def main():
@@ -141,17 +155,11 @@ def main():
             else:
                 fail += 1
 
-    # Public links with Crawlee
-    if public:
-        print(f"\n--- Public links ({len(public)}) ---")
-        for i, (name, url) in enumerate(public):
-            print(f"  [{i+1}/{len(public)}] {name[:50]}")
-            if scrape_with_crawlee(name, url):
-                ok += 1
-            else:
-                fail += 1
+    # Public links with Crawlee (single batch)
+    scrape_with_crawlee(public)
 
-    print(f"\nDone: {ok} scraped, {fail} failed")
+    print(f"\nInternal: {ok} scraped, {fail} failed")
+    print(f"Public: {len(public)} sent to Crawlee batch")
 
 
 if __name__ == "__main__":
