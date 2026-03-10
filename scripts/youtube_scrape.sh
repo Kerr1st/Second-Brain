@@ -37,7 +37,6 @@ if [ "$MODE" = "history" ]; then
       yt.extractPlaylist('$PLAYLIST_URL', {
         output: '$CRAWLEE_DIR/knowledge',
         lang: 'en',
-        maxVideos: 20,
         ytDlpArgs: ['--cookies-from-browser', 'chrome']
       });
     });
