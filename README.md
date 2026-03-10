@@ -19,6 +19,7 @@ pip install -r requirements.txt
 
 - [docs/AGENTS.md](docs/AGENTS.md) — Architecture, schema, and project status
 - [docs/DESIGN-DECISIONS.md](docs/DESIGN-DECISIONS.md) — Why key architectural choices were made
+- [docs/V2-ROADMAP.md](docs/V2-ROADMAP.md) — Cognitive science-grounded enhancements roadmap
 - [docs/HYBRID-CHAT-EXTRACTION.md](docs/HYBRID-CHAT-EXTRACTION.md) — Chat ingestion pipeline spec
 - [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) — Backup and recovery procedures
 
