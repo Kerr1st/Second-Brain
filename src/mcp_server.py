@@ -163,5 +163,66 @@ def memory_graph(memory_id: str) -> dict:
     }
 
 
+@mcp.tool()
+def memory_learn(
+    content: str,
+    topics: str,
+    source: str | None = None,
+) -> str:
+    """Internalize external knowledge by connecting it to what you already know.
+
+    Use when the user shares an article, talk, paper, video, or any external content.
+
+    This is a TWO-STEP process:
+    STEP 1 (this tool): Provide the content and 2-4 key topics. The tool searches
+    existing memories for related knowledge and returns both together.
+
+    STEP 2 (you, the agent): Synthesize connections and call memory_create for each
+    atomic insight. Each insight MUST:
+    1. State the insight (WHAT)
+    2. Connect it to an existing memory — extends, contradicts, or explains it (HOW)
+    3. Explain the causal mechanism — why this matters for future work (WHY)
+    4. Include 'Questions this answers:' as future work queries
+    5. Prefix the title with 'From [source]:' for attribution
+
+    Create ONE memory per atomic insight, not one giant summary.
+    The value is in the CONNECTIONS to existing knowledge, not the summary.
+    """
+    topic_list = [t.strip() for t in topics.split(",") if t.strip()]
+
+    # Search existing memories for each topic
+    related_sections = []
+    for topic in topic_list:
+        embedding = generate_embedding(f"principles and lessons for {topic}")
+        results = hybrid_search(f"principles and lessons for {topic}", embedding, limit=5)
+        results = rerank(results, topic)
+        if results:
+            lines = [f"### Existing knowledge: \"{topic}\""]
+            for r in results[:3]:
+                lines.append(f"- [{r['type']}] {r['title']}")
+                lines.append(f"  {r['content'][:300]}")
+            related_sections.append("\n".join(lines))
+
+    source_line = f"**Source:** {source}\n" if source else ""
+    related = "\n\n".join(related_sections) if related_sections else "(No related memories found — this is new territory)"
+
+    return "\n".join([
+        "# External Knowledge to Internalize\n",
+        source_line,
+        "## New Content\n",
+        content,
+        "\n## Related Existing Memories\n",
+        related,
+        "\n## Your Task",
+        "Synthesize: for each key insight in the new content, call memory_create with:",
+        "1. WHAT is the insight",
+        "2. HOW it connects to an existing memory above (extends, contradicts, explains)",
+        "3. WHY this matters for future work (causal mechanism)",
+        "4. 'Questions this answers:' phrased as future work queries",
+        f"5. Prefix title with: 'From {source or '[source]'}:'",
+        "\nCreate ONE memory per atomic insight, not one giant summary.",
+    ])
+
+
 if __name__ == "__main__":
     mcp.run()
