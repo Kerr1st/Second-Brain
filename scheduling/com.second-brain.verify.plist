@@ -7,7 +7,9 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
+        <string>/Users/kerrfir/second-brain/scripts/job_wrapper.sh</string>
         <string>/Users/kerrfir/second-brain/scripts/verify_backup.sh</string>
+        <string>verify</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -18,9 +20,5 @@
         <key>Minute</key>
         <integer>0</integer>
     </dict>
-    <key>StandardOutPath</key>
-    <string>/Users/kerrfir/second-brain/logs/verify.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/kerrfir/second-brain/logs/verify.log</string>
 </dict>
 </plist>

@@ -7,7 +7,9 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
+        <string>/Users/kerrfir/second-brain/scripts/job_wrapper.sh</string>
         <string>/Users/kerrfir/second-brain/scripts/backup.sh</string>
+        <string>backup</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -16,9 +18,5 @@
         <key>Minute</key>
         <integer>0</integer>
     </dict>
-    <key>StandardOutPath</key>
-    <string>/Users/kerrfir/second-brain/logs/backup.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/kerrfir/second-brain/logs/backup.log</string>
 </dict>
 </plist>
