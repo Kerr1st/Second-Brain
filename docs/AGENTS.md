@@ -110,7 +110,9 @@ CREATE TABLE memories (
     confidence FLOAT DEFAULT 1.0,
     parent_id UUID REFERENCES memories(id),
     created_at TIMESTAMPTZ DEFAULT now(),
-    updated_at TIMESTAMPTZ DEFAULT now()
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    search_vector TSVECTOR,      -- auto-populated by trigger for BM25 full-text search
+    access_count INTEGER DEFAULT 0 -- retrieval reinforcement (testing effect)
 );
 
 CREATE TABLE memory_relationships (
@@ -123,12 +125,25 @@ CREATE TABLE memory_relationships (
 );
 
 CREATE INDEX ON memories USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX ON memories USING gin (search_vector);
 CREATE INDEX ON memories (type, status);
 CREATE INDEX ON memories USING gin (tags);
 CREATE INDEX ON memories USING gin (metadata);
 CREATE INDEX ON memories (created_at DESC);
 CREATE INDEX ON memories (source_type);
 ```
+
+### Search Architecture
+
+Queries use hybrid retrieval (added 2026-03-09, inspired by kiro-memory project):
+
+1. **BM25 full-text search** — PostgreSQL `tsvector/tsquery` with GIN index. Catches exact keyword matches.
+2. **Vector cosine search** — pgvector HNSW index. Catches semantic similarity.
+3. **Reciprocal Rank Fusion (RRF)** — Merges both result sets: `score = 1/(k+rank_vec) + 1/(k+rank_bm25)`, k=60.
+4. **Utility reranking** — Re-scores by: fusion score (0.35), token overlap (0.20), title overlap (0.20), recency decay τ=60d (0.15), content length (0.10), plus type boost and `access_count` reinforcement.
+5. **Retrieval reinforcement** — `access_count` incremented on every retrieval. Boost: `0.03 * log(1 + access_count)`.
+
+See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale behind these choices.
 
 ## Memory Types
 
@@ -299,6 +314,9 @@ Docker running. PostgreSQL + pgvector operational. Full pipeline tested end-to-e
 - [x] `scripts/crawlee_ingest.py` — daily Crawlee ingestion
 - [ ] Capture API (multi-channel: Slack, mobile, browser, email)
 - [ ] Metadata extraction on ingest (people, topics, action items)
+- [x] Hybrid retrieval (BM25 + vector + RRF reranking) — see Search Architecture
+- [x] Retrieval reinforcement (access_count with logarithmic boost)
+- [x] Depth enforcement on memory_create (causal depth check + quality warnings)
 - [ ] Memory migration (Claude, ChatGPT, Notion imports)
 - [ ] Weekly synthesis review (scheduled digest)
 - [ ] Evaluation framework (4-layer: retrieval accuracy with ground truth cases, integration tests, consolidation quality, cold vs warm agent output comparison)
