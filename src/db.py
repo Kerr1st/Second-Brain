@@ -10,7 +10,7 @@ import math
 import re
 from datetime import datetime, timezone
 import psycopg2
-from psycopg2.extras import RealDictCursor, execute_values
+from psycopg2.extras import RealDictCursor
 
 DB_CONFIG = {
     "host": os.environ.get("DB_HOST", "localhost"),
@@ -71,8 +71,15 @@ def get_memory(memory_id):
         conn.close()
 
 
+ALLOWED_UPDATE_FIELDS = {
+    "title", "content", "summary", "embedding", "tags", "source_url",
+    "source_type", "metadata", "status", "confidence", "type",
+}
+
+
 def update_memory(memory_id, **fields):
-    """Update specific fields on a memory."""
+    """Update specific fields on a memory. Only allowlisted fields accepted."""
+    fields = {k: v for k, v in fields.items() if k in ALLOWED_UPDATE_FIELDS}
     if not fields:
         return
     set_clause = ", ".join(f"{k} = %s" for k in fields)
@@ -287,8 +294,7 @@ def rerank(results, query_text):
         created = r.get("created_at")
         if created and hasattr(created, "timestamp"):
             if created.tzinfo is None:
-                from datetime import timezone as tz
-                created = created.replace(tzinfo=tz.utc)
+                created = created.replace(tzinfo=timezone.utc)
             days_old = max(0, (now - created).total_seconds() / 86400)
             recency = math.exp(-days_old / 60)
         else:
@@ -328,7 +334,7 @@ def increment_access_count(memory_ids):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE memories SET access_count = coalesce(access_count, 0) + 1 WHERE id = ANY(%s)",
+                "UPDATE memories SET access_count = coalesce(access_count, 0) + 1 WHERE id = ANY(%s::uuid[])",
                 (memory_ids,)
             )
         conn.commit()

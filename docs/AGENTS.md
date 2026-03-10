@@ -300,10 +300,10 @@ Docker running. PostgreSQL + pgvector operational. Full pipeline tested end-to-e
 - [x] Hybrid chat extraction spec (`docs/HYBRID-CHAT-EXTRACTION.md`)
 - [x] Error handling, logging, and monitoring design (staging/failed/, logs/, status JSON)
 - [x] Crawlee unified knowledge store (web pages now write to knowledge/index.md alongside YouTube)
-- [ ] PostgreSQL + pgvector Docker setup (blocked: Docker Desktop license)
-- [ ] Database schema creation (auto-runs via `migrations/migrate.sh`)
-- [x] `src/db.py` — PostgreSQL connection, CRUD, semantic search, relationships, deduplication (10 functions)
-- [x] `src/embeddings.py` — Bedrock Titan v2 embedding generation (1536-dim, truncation, batch)
+- [x] PostgreSQL + pgvector Docker setup
+- [x] Database schema creation (via `migrations/migrate.sh`)
+- [x] `src/db.py` — PostgreSQL connection, CRUD, semantic search, hybrid retrieval, reranking, relationships
+- [x] `src/embeddings.py` — Bedrock Titan v2 embedding generation (1024-dim, truncation, batch)
 - [x] `src/ingest.py` — shared ingestion pipeline (parse header → chunk by section → embed → store)
 - [x] `src/mcp_server.py` — MCP server (7 tools: create, search, read, update, relate, list, graph)
 - [x] `src/parsers/crawlee.py` — Crawlee knowledge store parser — 290 sources (1 YouTube + 289 web pages)
@@ -312,6 +312,15 @@ Docker running. PostgreSQL + pgvector operational. Full pipeline tested end-to-e
 - [x] `scripts/chat_extract.py` — daily Phase 1 chat extraction — 5,561 total, backfill complete
 - [x] `scripts/ingest_staged.sh` — Phase 2 wrapper (Kiro headless + Opus 4.6-1m)
 - [x] `scripts/crawlee_ingest.py` — daily Crawlee ingestion
+- [x] `scripts/ingest_chats.py` — batch chat ingestion (5,561 chats → 74,013 memories)
+- [x] `scripts/scrape_bookmarks.py` — Chrome bookmarks scraper (cookie auth for internal, Crawlee batch for public)
+- [x] `scripts/youtube_scrape.sh` — nightly YouTube playlist/history scrape
+- [x] `scripts/backup.sh` — daily encrypted backup to Google Drive + S3
+- [x] `scripts/verify_backup.sh` — weekly backup verification (both clouds)
+- [x] `scripts/job_wrapper.sh` — macOS notification on job failure
+- [x] Encryption key generated and stored locally
+- [x] Backup scheduling (launchd plists — 6 plists in scheduling/, all installed)
+- [x] Weekly verification scheduling (included in launchd plists above)
 - [ ] Capture API (multi-channel: Slack, mobile, browser, email)
 - [ ] Metadata extraction on ingest (people, topics, action items)
 - [x] Hybrid retrieval (BM25 + vector + RRF reranking) — see Search Architecture

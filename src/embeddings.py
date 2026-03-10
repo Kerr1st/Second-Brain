@@ -30,7 +30,7 @@ def generate_embedding(text, max_chars=25000):
         max_chars: Truncate text to this length (Titan v2 limit is ~8k tokens ≈ 25k chars).
 
     Returns:
-        List of floats (1536 dimensions for Titan v2).
+        List of floats (1024 dimensions for Titan v2).
     """
     client = _get_client()
     truncated = text[:max_chars] if len(text) > max_chars else text

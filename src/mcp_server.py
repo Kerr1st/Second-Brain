@@ -3,6 +3,7 @@
 Run: python -m src.mcp_server (stdio transport for Kiro/Claude Code)
 """
 
+import re
 from mcp.server.fastmcp import FastMCP
 from src.db import (
     create_memory, get_memory, update_memory, list_memories,
@@ -13,14 +14,11 @@ from src.embeddings import generate_embedding
 
 mcp = FastMCP("Second Brain")
 
-
-import re as _re
-
-_DEPTH_RE = _re.compile(
+_DEPTH_RE = re.compile(
     r"(because|when .{5,40}(?:then|,)|the fix|the cost|this means|"
     r"which (?:causes|leads|means)|→|producing \d|cost us|"
     r"so (?:that|each|every)|if you don.t|without .{3,30} you)",
-    _re.IGNORECASE,
+    re.IGNORECASE,
 )
 
 
@@ -48,7 +46,6 @@ def memory_create(
         tags=tags, source_type=source_type, source_url=source_url, metadata=metadata,
     )
 
-    # Quality warnings for knowledge-type memories
     warnings = []
     if type in ("idea", "synthesis", "insight", "decision"):
         if len(_DEPTH_RE.findall(content)) < 2:
@@ -71,7 +68,6 @@ def memory_search(query: str, type: str | None = None, limit: int = 10) -> list[
     results = hybrid_search(query, embedding, limit=limit, type=type)
     results = rerank(results, query)
 
-    # Retrieval reinforcement — bump access_count for returned memories
     increment_access_count([str(r["id"]) for r in results])
 
     return [
@@ -88,12 +84,34 @@ def memory_read(memory_id: str) -> dict:
     mem = get_memory(memory_id)
     if not mem:
         return {"error": "Not found"}
-    return {k: str(v) if k == "id" else v for k, v in mem.items() if k != "embedding"}
+    out = {}
+    for k, v in mem.items():
+        if k == "embedding":
+            continue
+        elif hasattr(v, "isoformat"):
+            out[k] = v.isoformat()
+        elif k == "id":
+            out[k] = str(v)
+        else:
+            out[k] = v
+    return out
 
 
 @mcp.tool()
-def memory_update(memory_id: str, **fields) -> str:
-    """Update fields on a memory. Pass only the fields to change (title, content, status, tags, etc.)."""
+def memory_update(
+    memory_id: str,
+    title: str | None = None,
+    content: str | None = None,
+    status: str | None = None,
+    tags: list[str] | None = None,
+    summary: str | None = None,
+    type: str | None = None,
+) -> str:
+    """Update fields on a memory. Pass only the fields to change."""
+    fields = {k: v for k, v in {
+        "title": title, "content": content, "status": status,
+        "tags": tags, "summary": summary, "type": type,
+    }.items() if v is not None}
     if "content" in fields:
         fields["embedding"] = generate_embedding(fields["content"])
     update_memory(memory_id, **fields)

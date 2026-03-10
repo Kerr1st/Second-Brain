@@ -21,3 +21,4 @@ docker/data/
 .backup-key
 .env
 backups/
+logs/
