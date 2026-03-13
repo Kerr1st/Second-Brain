@@ -80,46 +80,117 @@ All jobs use `scripts/job_wrapper.sh` which sends macOS notification on failure.
 - Key ideas we improved on: PostgreSQL vs in-memory Qdrant, relationship graph,
   chunking pipeline, multi-source ingestion, backup/DR
 
-## V2 Roadmap — What to Build
+## V2 Roadmap — What to Build and WHY
 
-Full spec in `docs/V2-ROADMAP.md`. Implementation plan:
+Full spec in `docs/V2-ROADMAP.md`. Each item is grounded in cognitive science
+research on how human memory works — and specifically what makes knowledge
+stick and be retrievable. The kiro-memory project (`~/KiromemoryMCP/mainline/`)
+independently implemented many of these same principles, validating the approach.
+
+### The Core Problem V2 Solves
+
+V1 stores and retrieves. V2 learns. Right now the Second Brain is a search
+engine over your chat history. V2 makes it a thinking partner that:
+- Knows what's a principle vs a raw event (classification)
+- Connects new knowledge to existing knowledge automatically (relationships)
+- Surfaces deeper, more useful memories first (depth scoring)
+- Gets better at retrieval the more you use it, without popularity bias (spaced retrieval)
+- Keeps project-specific decisions from leaking across projects (scoping)
+- Periodically distills raw experiences into reusable principles (consolidation)
+
+### Research Grounding for Each V2 Item
 
 ### Layer 1 — Ingest-time enhancements (free, automatic)
 
-1. **Memory classification** (Tulving 1972)
-   - Auto-classify as semantic/episodic/procedural based on content signals
-   - Add `mem_class` column to schema
-   - Boost semantic memories in reranking (+0.06 already exists for idea/synthesis/insight/decision, extend to mem_class)
+1. **Memory classification** (Tulving 1972, Squire 1992)
+   - *Research:* Tulving proposed that human long-term memory has distinct systems:
+     semantic (facts, principles, knowledge), episodic (personal experiences, events),
+     and procedural (how-to steps). Squire (1992) extended this with neurological
+     evidence showing these systems use different brain structures. Critically,
+     semantic memories are more broadly useful for retrieval — abstracted principles
+     transfer across contexts better than specific episodes.
+   - *Why we need it:* Our 74K memories are mostly raw chat sessions (episodic).
+     A principle like "always use idempotent migrations" should outrank a session
+     log that happens to mention migrations. Without classification, they rank equally.
+   - *Implementation:* Auto-classify as semantic/episodic/procedural via content
+     signals. Add `mem_class` column. Boost semantic in reranking.
 
 2. **Depth scoring** (Craik & Lockhart 1972)
-   - Compute numeric depth_score 0.0–1.0 at ingest time
-   - Store in metadata JSONB
-   - Use as reranking factor (deeper = higher rank)
+   - *Research:* Craik & Lockhart's levels-of-processing framework showed that
+     information processed at deeper semantic levels (understanding WHY something
+     is true, connecting it to existing knowledge) is retained and retrieved far
+     more effectively than shallow processing (just reading or listing facts).
+     This has been replicated consistently for 50+ years.
+   - *Why we need it:* V1 has binary depth enforcement (warn or don't warn).
+     But depth is a spectrum. A memory explaining "we chose PostgreSQL because
+     pgvector eliminates the need to sync between a relational DB and a vector
+     store, which caused data loss in our previous architecture" is far more
+     retrievable than "use PostgreSQL." Scoring this lets us rank accordingly.
+   - *Implementation:* Compute 0.0–1.0 depth_score at ingest. Store in metadata.
+     Use as reranking factor.
 
 3. **Project tagging** (Tulving & Thomson 1973)
-   - Add `project` column to schema
-   - Set from workspace path during chat ingestion
-   - Apply cross-project penalty (0.15) in reranking
+   - *Research:* The encoding specificity principle states that memory retrieval
+     is most effective when the retrieval context matches the encoding context.
+     Tulving & Thomson demonstrated that even strong associations fail when the
+     encoding context doesn't match. Applied to our system: a decision made in
+     Project A may be irrelevant or actively harmful in Project B.
+   - *Why we need it:* With 74K memories across many projects, search results
+     from unrelated projects will increasingly pollute results. A React convention
+     shouldn't override a Python decision.
+   - *Implementation:* Add `project` column. Tag from workspace path during
+     ingestion. Apply 0.15 cross-project penalty in reranking.
 
-4. **Automatic relationship discovery**
-   - After storing new memory, search for top-3 similar existing memories
-   - Create `related_to` relationships automatically
-   - Also find temporal neighbors (±24 hours) and relate them
+4. **Automatic relationship discovery** (Howard & Kahana 2002 + elaborative encoding)
+   - *Research:* Howard & Kahana's temporal context model shows that memories
+     encoded close in time are naturally associated — retrieving one makes
+     temporally adjacent memories more accessible. Additionally, elaborative
+     encoding research shows that connecting new information to existing knowledge
+     creates richer retrieval paths (multiple ways to find the same memory).
+   - *Why we need it:* Our relationship graph is empty — no automatic connections
+     exist between the 74K memories. If you worked on a problem across 5 chats
+     in one day, retrieving one should surface the others. And if two memories
+     from different times are semantically similar, that connection is valuable.
+   - *Implementation:* After storing new memory, search for top-3 similar existing
+     memories and create `related_to` relationships. Also find temporal neighbors
+     (±24 hours) and relate them.
 
-5. **Spaced retrieval** (Roediger & Karpicke 2006)
-   - Add `last_accessed_at` column
-   - Update reranking: `reinforcement = 0.03 * log(1 + access_count) * spacing_bonus`
-   - `spacing_bonus = min(1.0, days_since_last_access / 7)`
+5. **Spaced retrieval** (Roediger & Karpicke 2006, Bjork 1975)
+   - *Research:* The testing effect shows that retrieving information strengthens
+     the memory trace more than re-studying. But Roediger & Karpicke's follow-up
+     work revealed that SPACING matters: equally spaced retrieval produces superior
+     long-term retention vs massed retrieval. A memory retrieved once a week for
+     10 weeks is stronger than one retrieved 10 times in one day. Bjork's
+     "desirable difficulties" framework explains why — harder retrieval (after a
+     delay) produces stronger encoding.
+   - *Why we need it:* V1 just counts total retrievals. A memory retrieved 50
+     times in one session gets the same boost as one retrieved 50 times over 50
+     weeks. This creates popularity bias — recently-hammered memories dominate.
+   - *Implementation:* Add `last_accessed_at`. Change reinforcement formula to
+     weight spaced retrievals: `spacing_bonus = min(1.0, days_since_last_access / 7)`.
 
 ### Layer 2 — Weekly synthesis (Kiro headless, controlled cost)
 
 6. **Consolidation pipeline** (Stickgold 2005, Walker 2009)
-   - Weekly job clusters the week's new episodic memories by topic similarity
-   - Generates consolidation templates with source excerpts
-   - Runs through Kiro headless to synthesize principles/patterns
-   - Writes semantic memories with "Questions this answers:" sections
-   - Links back to source episodes via relationships
-   - Produces a weekly digest for the user
+   - *Research:* During sleep, the hippocampus replays episodic experiences and
+     gradually transfers abstracted knowledge to neocortical long-term storage.
+     Stickgold (2005) showed this isn't just passive decay — it's active
+     reorganization. The brain extracts patterns, discards irrelevant details,
+     and creates generalizable knowledge. Walker (2009) demonstrated that sleep
+     specifically enhances the extraction of hidden rules and patterns from
+     experiences that weren't apparent during waking.
+   - *Why we need it:* We have 74K raw episodic memories (chat sessions). Without
+     consolidation, the agent has to re-derive patterns from raw transcripts every
+     time. With consolidation, patterns are pre-extracted: "across 15 sessions
+     about database design, the recurring principle is..." This is the single
+     biggest quality improvement possible — turning raw data into usable knowledge.
+   - *Implementation:* Weekly job that clusters episodic memories by topic,
+     generates templates, runs through Kiro headless to synthesize principles.
+     Writes semantic memories with "Questions this answers:" sections. Links
+     back to source episodes. Produces a weekly digest.
+   - *Reference implementation:* kiro-memory's `consolidate_knowledge.py` clusters
+     by keyword overlap and generates templates with the depth framework
+     (WHAT / WHAT HAPPENS / WHY).
 
 ### Schema Changes Needed
 ```sql
