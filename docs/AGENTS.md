@@ -2,9 +2,11 @@
 
 ## Purpose
 
-This system is a personal knowledge management and ideation platform powered by AI. It gives AI agents (Kiro CLI, Claude Code) persistent memory across sessions, turning them from stateless tools into thinking partners that know how you work, what you're working on, and what you've learned.
+This system is a personal knowledge management and ideation platform powered by AI. It gives AI agents (Kiro CLI, Claude Code) persistent memory across sessions, turning them from stateless tools into proactive thinking partners that know how you work, what you're working on, and what you've learned.
 
 The core problem it solves: AI agents forget everything between sessions. Session 100 is no better than session 1. This system makes the agent accumulate institutional knowledge over time — your decisions, ideas, research, syntheses, and open questions — so it can reason across your entire knowledge base and help you think.
+
+But storage and retrieval is just the foundation. The real purpose is to create a proactive collaborator — an agent that surfaces connections, patterns, and ideas you can't see because no human can hold 74,000+ memories in their head simultaneously. The agent digests and synthesizes at a scale you can't, finding hidden structure in your thinking: contradictions between decisions, recurring patterns across unrelated projects, implicit principles you follow but haven't named. It doesn't wait to be asked — it tells you what it found.
 
 ## Workflow
 
