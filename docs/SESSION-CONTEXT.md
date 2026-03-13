@@ -228,3 +228,32 @@ ALTER TABLE memories ADD COLUMN last_accessed_at TIMESTAMPTZ;
 - Docker Desktop is licensed and running
 - Crawlee web pages are for Kiro knowledge base, NOT for Second Brain
 - YouTube transcripts and chat histories ARE for Second Brain
+- Chrome bookmarks ARE for Second Brain (both internal Amazon + public)
+- Always document the WHY, not just the WHAT — design decisions matter
+- Proactive collaboration: the agent should surface ideas, not wait to be asked
+- Update docs immediately when things change — future sessions depend on it
+- Run long operations in background processes, not blocking
+- macOS notifications on job failure for visibility
+
+## How to Resume This Project
+
+A new session should:
+1. Read `~/second-brain/docs/SESSION-CONTEXT.md` (this file) for full state
+2. Read `~/second-brain/docs/AGENTS.md` for architecture + checklist
+3. Read `~/second-brain/docs/V2-ROADMAP.md` for research grounding
+4. Read `~/second-brain/docs/DESIGN-DECISIONS.md` for rationale behind choices
+5. Check `docker exec second-brain-db pg_isready -U memory_bank` (DB should be up)
+6. Check `launchctl list | grep second-brain` (6 scheduled jobs should be loaded)
+7. Pick up V2 Layer 1 implementation (schema changes → classification → depth scoring → project tagging → relationship discovery → spaced retrieval)
+
+## Working Style Notes for Future Agents
+
+The user:
+- Thinks strategically — wants to understand WHY before building WHAT
+- Values research-grounded decisions (cognitive science, not just engineering intuition)
+- Prefers to review and discuss before committing to implementation
+- Wants the agent to be proactive — suggest improvements, catch inconsistencies, anticipate needs
+- Cares deeply about documentation quality and project continuity
+- Likes to test things end-to-end and troubleshoot together
+- Runs background processes and checks on them periodically
+- Will share external projects (like kiro-memory) for inspiration and integration ideas
