@@ -1,8 +1,7 @@
 """Dream Cycle Orchestrator — four-agent pipeline coordination.
 
 Coordinates Explorer → Thinker → Consensus Panel pipeline.
-Manages run lifecycle, feedback injection, inter-agent data flow,
-consensus tallying, deduplication, memory storage, and digest generation.
+Delegates to consensus, storage, digest, and feedback modules.
 
 Requirements: 1, 3, 9 (this file — task 6.1 skeleton)
 """

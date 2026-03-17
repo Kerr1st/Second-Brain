@@ -277,20 +277,29 @@ Full recovery is possible from either Google Drive or AWS alone. See `DISASTER-R
 
 Encryption key stored in: local file + Google Secret Manager + AWS Secrets Manager.
 
+## Scheduled Jobs
+
+All jobs use `scripts/job_wrapper.sh` which sends macOS notification on failure.
+
+| Time | Job | Script | Status |
+|---|---|---|---|
+| Sat 1:00 AM | Bookmark scrape | scrape_bookmarks.py | Working |
+| Daily 1:30 AM | YouTube scrape | youtube_scrape.sh | Stubbed |
+| Daily 2:00 AM | Backup | backup.sh | Working |
+| Daily 2:30 AM | Chat extraction | chat_extract.py | Working |
+| Daily 3:00 AM | Staged ingestion | ingest_staged.sh | Stubbed |
+| Sun 3:00 AM | Backup verify | verify_backup.sh | Working |
+| Sun 4:00 AM | Dream cycle | dream_cycle_scheduled.sh | Working |
+
 ## Current Status
 
 Docker running. PostgreSQL + pgvector operational. Full pipeline tested end-to-end. MCP server built and tested.
 
-## Next Steps (in order)
+## Next Steps
 
-1. ~~Start Docker Desktop~~ ✅
-2. ~~Run migrations~~ ✅
-3. ~~Install Python deps~~ ✅
-4. ~~Test db.py~~ ✅
-5. ~~Test ingest.py end-to-end~~ ✅
-6. ~~Build MCP server~~ ✅
-7. Connect MCP server to Kiro CLI
-8. Run Phase 2 backfill against staging/chats/ (5,561 files)
+1. Run dream cycle migration (`migrations/migrate.sh`) to create dream cycle tables
+2. First live dream cycle run to test end-to-end with real data
+3. V2 Tasks 0-9 (see `docs/V2-TASKS.md`): test infrastructure, schema migration, spaced retrieval, memory classification, depth scoring, project scoping, relationship discovery, temporal contiguity, doc sync
 
 ## Project Status
 
@@ -307,7 +316,7 @@ Docker running. PostgreSQL + pgvector operational. Full pipeline tested end-to-e
 - [x] `src/db.py` — PostgreSQL connection, CRUD, semantic search, hybrid retrieval, reranking, relationships
 - [x] `src/embeddings.py` — Bedrock Titan v2 embedding generation (1024-dim, truncation, batch)
 - [x] `src/ingest.py` — shared ingestion pipeline (parse header → chunk by section → embed → store)
-- [x] `src/mcp_server.py` — MCP server (7 tools: create, search, read, update, relate, list, graph)
+- [x] `src/mcp_server.py` — MCP server (8 tools: create, search, read, update, relate, list, graph, learn)
 - [x] `src/parsers/crawlee.py` — Crawlee knowledge store parser — 290 sources (1 YouTube + 289 web pages)
 - [x] `src/parsers/cli_chat.py` — Kiro CLI chat parser (Phase 1) — 68/97 pass (70%)
 - [x] `src/parsers/ide_chat.py` — Kiro IDE chat parser (Phase 1) — 5,493/12,447 pass (44%)
@@ -328,6 +337,15 @@ Docker running. PostgreSQL + pgvector operational. Full pipeline tested end-to-e
 - [x] Hybrid retrieval (BM25 + vector + RRF reranking) — see Search Architecture
 - [x] Retrieval reinforcement (access_count with logarithmic boost)
 - [x] Depth enforcement on memory_create (causal depth check + quality warnings)
+- [x] `src/dream_cycle/` — Dream cycle four-agent pipeline (Explorer → Thinker → Consensus Panel), decomposed into orchestrator, consensus, storage, digest, feedback modules
+- [x] `src/dream_cycle_db.py` — Dream cycle database operations (18 functions)
+- [x] `src/agent_invoker.py` — Subprocess-based agent invocation with JSON parsing
+- [x] `src/models.py` — Data models (DreamCycleResult, MemorySlice, CandidateInsight, EvaluatorVerdict)
+- [x] `src/prompts/` — Agent prompt templates (explorer, thinker, panel)
+- [x] `scripts/dream_cycle_run.py` — CLI entry point for dream cycle
+- [x] `scripts/golden_queries.py` — Tier 3 metrics (MRR, hit rates)
+- [x] `tests/` — 157 tests (property-based + unit + integration)
+- [x] `migrations/003_dream_cycle.sql` — Dream cycle tables + indexes
 - [ ] Memory migration (Claude, ChatGPT, Notion imports)
 - [ ] Weekly synthesis review (scheduled digest)
 - [ ] Evaluation framework (4-layer: retrieval accuracy with ground truth cases, integration tests, consolidation quality, cold vs warm agent output comparison)
@@ -336,7 +354,8 @@ Docker running. PostgreSQL + pgvector operational. Full pipeline tested end-to-e
 
 - [x] `memory_learn` MCP tool — elaborative interrogation (Dunlosky 2013), connect new knowledge to existing
 - [ ] Memory classification — auto-classify semantic/episodic/procedural (Tulving 1972), boost semantic in reranking
-- [ ] Consolidation pipeline — cluster episodic memories → extract principles/patterns (Stickgold 2005, Walker 2009)
+- [x] Dream cycle pipeline — replaced consolidation with four-agent autonomous learning (Explorer → Thinker → 3-evaluator Consensus Panel). See `docs/DREAM-CYCLE-DESIGN.md`
+- [x] Dream cycle module decomposition — `src/dream_cycle/` package with 6 focused modules
 - [ ] Spaced retrieval reinforcement — track `last_accessed_at`, weight spaced retrievals over massed (Roediger & Karpicke 2006)
 - [ ] Project scoping — `project` column, cross-project penalty in reranking (Tulving & Thomson 1973)
 - [ ] Depth scoring — numeric 0.0–1.0 score stored in metadata, used as reranking factor (Craik & Lockhart 1972)

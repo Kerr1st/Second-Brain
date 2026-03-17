@@ -1,5 +1,9 @@
 # Dream Cycle — Multi-Agent Autonomous Learning Architecture
 
+> **Implementation status:** Complete. The pipeline is implemented in `src/dream_cycle/`
+> as a decomposed package (orchestrator, consensus, storage, digest, feedback modules).
+> See `.kiro/specs/dream-cycle-decomposition/` for the decomposition spec.
+
 > Design document for the Second Brain's proactive learning capability.
 > Grounded in cognitive science (Stickgold 2005, Walker 2009, Dunlosky 2013,
 > Roediger & Karpicke 2006, McClelland 1995/2016, Bjork 1992, Bartlett 1932,
