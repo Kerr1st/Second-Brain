@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 .venv/
 
+# Hypothesis (property-based testing)
+.hypothesis/
+
 # Staging (transient data, not source controlled)
 staging/
 

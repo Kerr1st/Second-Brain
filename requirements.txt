@@ -3,3 +3,5 @@ boto3
 mcp
 browser-cookie3
 requests
+hypothesis
+pytest
