@@ -7,8 +7,17 @@ Pipeline: parse metadata header → chunk by section → embed → store.
 """
 
 import re
-from src.db import create_memory, get_processed_source_urls
+from src.db import (
+    create_memory,
+    create_relationship,
+    find_temporal_neighbors,
+    get_memory,
+    get_processed_source_urls,
+    search_similar,
+)
 from src.embeddings import generate_embedding
+from src.classify import classify_memory
+from src.depth import compute_depth_score
 
 
 def parse_metadata_header(content):
@@ -89,13 +98,58 @@ def chunk_by_section(body, max_chunk_chars=4000):
     return merged if merged else [body]
 
 
-def ingest_content(content, source_type, source_url=None):
+def _discover_relationships(parent_id, body):
+    """Discover and create semantic + temporal relationships for a parent memory.
+
+    Finds up to 3 semantic neighbors (cosine similarity > 0.75) and up to 3
+    temporal neighbors (±24h), creating `related_to` relationships for each.
+    Silently skips duplicate relationship errors.
+    """
+    # Semantic neighbors: embed parent content, search top-3
+    try:
+        embedding = generate_embedding(body)
+        neighbors = search_similar(embedding, limit=3)
+        for neighbor in neighbors:
+            nid = str(neighbor["id"])
+            sim = neighbor.get("similarity", 0)
+            if sim > 0.75 and nid != parent_id and neighbor.get("parent_id") is None:
+                try:
+                    create_relationship(
+                        parent_id, nid, "related_to",
+                        note=f"semantic_neighbor (sim={sim:.3f})",
+                    )
+                except Exception:
+                    pass  # duplicate key or other error — skip
+    except Exception:
+        pass  # embedding or search failure — skip semantic discovery
+
+    # Temporal neighbors: get parent record for created_at, find top-3 within ±24h
+    try:
+        parent_record = get_memory(parent_id)
+        if parent_record and parent_record.get("created_at"):
+            temporal = find_temporal_neighbors(
+                parent_id, parent_record["created_at"], limit=3,
+            )
+            for neighbor in temporal:
+                try:
+                    create_relationship(
+                        parent_id, neighbor["id"], "related_to",
+                        note="temporal_neighbor",
+                    )
+                except Exception:
+                    pass  # duplicate key or other error — skip
+    except Exception:
+        pass  # temporal discovery failure — skip
+
+
+def ingest_content(content, source_type, source_url=None, project=None):
     """Ingest a single piece of content through the full pipeline.
 
     Args:
         content: Full markdown text with metadata header.
         source_type: e.g. 'youtube', 'article', 'kiro_cli_chat', 'kiro_ide_chat'
         source_url: Unique identifier for deduplication.
+        project: Optional project tag for scoping.
 
     Returns:
         parent_id (str) or None if skipped/failed.
@@ -107,6 +161,9 @@ def ingest_content(content, source_type, source_url=None):
         return None
 
     # Store parent record (full content, no embedding)
+    mem_class = classify_memory("source", source_type, body)
+    depth_score = compute_depth_score(body)
+    meta["depth_score"] = depth_score
     parent_id = create_memory(
         type="source",
         title=title,
@@ -114,12 +171,18 @@ def ingest_content(content, source_type, source_url=None):
         source_url=source_url or meta.get("source"),
         source_type=source_type,
         metadata=meta,
+        mem_class=mem_class,
+        project=project,
     )
+
+    # Relationship discovery for parent memories
+    _discover_relationships(parent_id, body)
 
     # Chunk and embed
     chunks = chunk_by_section(body)
     for i, chunk_text in enumerate(chunks):
         embedding = generate_embedding(chunk_text)
+        chunk_mem_class = classify_memory("source", source_type, chunk_text)
         create_memory(
             type="source",
             title=f"{title} (chunk {i+1}/{len(chunks)})",
@@ -129,6 +192,8 @@ def ingest_content(content, source_type, source_url=None):
             source_type=source_type,
             metadata={**meta, "chunk_index": i, "total_chunks": len(chunks)},
             parent_id=parent_id,
+            mem_class=chunk_mem_class,
+            project=project,
         )
 
     return parent_id

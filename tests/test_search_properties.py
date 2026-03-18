@@ -18,7 +18,7 @@ class TestHybridSearchBehavioralEquivalence:
 
         sig = inspect.signature(hybrid_search)
         params = list(sig.parameters.keys())
-        assert params == ["query_text", "query_embedding", "limit", "type", "status"]
+        assert params == ["query_text", "query_embedding", "limit", "type", "status", "project"]
 
     def test_hybrid_search_signature_defaults(self):
         """hybrid_search has correct default values for optional params."""
@@ -28,6 +28,7 @@ class TestHybridSearchBehavioralEquivalence:
         assert sig.parameters["limit"].default == 10
         assert sig.parameters["type"].default is None
         assert sig.parameters["status"].default is None
+        assert sig.parameters["project"].default is None
 
     def test_hybrid_search_uses_get_connection_from_db(self):
         """hybrid_search module imports get_connection from src.db."""

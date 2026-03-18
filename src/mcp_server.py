@@ -3,23 +3,17 @@
 Run: python -m src.mcp_server (stdio transport for Kiro/Claude Code)
 """
 
-import re
 from mcp.server.fastmcp import FastMCP
 from src.db import (
     create_memory, get_memory, update_memory, list_memories,
-    create_relationship, get_relationships,
+    create_relationship, get_relationships, find_temporal_neighbors,
 )
 from src.search import hybrid_search, rerank, increment_access_count
 from src.embeddings import generate_embedding
+from src.classify import classify_memory
+from src.depth import compute_depth_score
 
 mcp = FastMCP("Second Brain")
-
-_DEPTH_RE = re.compile(
-    r"(because|when .{5,40}(?:then|,)|the fix|the cost|this means|"
-    r"which (?:causes|leads|means)|→|producing \d|cost us|"
-    r"so (?:that|each|every)|if you don.t|without .{3,30} you)",
-    re.IGNORECASE,
-)
 
 
 @mcp.tool()
@@ -31,6 +25,7 @@ def memory_create(
     source_type: str | None = None,
     source_url: str | None = None,
     metadata: dict | None = None,
+    project: str | None = None,
 ) -> str:
     """Create a new memory and generate its embedding.
 
@@ -41,14 +36,20 @@ def memory_create(
     Include 'Questions this answers:' with 3-5 natural-language queries.
     """
     embedding = generate_embedding(content)
+    mem_class = classify_memory(type, source_type, content)
+    depth_score = compute_depth_score(content)
+    if metadata is None:
+        metadata = {}
+    metadata["depth_score"] = depth_score
     mid = create_memory(
         type=type, title=title, content=content, embedding=embedding,
         tags=tags, source_type=source_type, source_url=source_url, metadata=metadata,
+        mem_class=mem_class, project=project,
     )
 
     warnings = []
     if type in ("idea", "synthesis", "insight", "decision"):
-        if len(_DEPTH_RE.findall(content)) < 2:
+        if depth_score < 0.3:
             warnings.append("Low depth: add 'because...' or 'when X, then Y' to explain WHY.")
         if "questions this answers" not in content.lower():
             warnings.append("Missing 'Questions this answers:' — add 3-5 natural queries for better retrieval.")
@@ -60,22 +61,44 @@ def memory_create(
 
 
 @mcp.tool()
-def memory_search(query: str, type: str | None = None, limit: int = 10) -> list[dict]:
+def memory_search(query: str, type: str | None = None, limit: int = 10, project: str | None = None) -> dict:
     """Semantic + keyword search across all memories. Uses hybrid retrieval
     (BM25 + vector embeddings + RRF) with utility reranking (recency, type boost,
     token overlap, retrieval reinforcement)."""
     embedding = generate_embedding(query)
-    results = hybrid_search(query, embedding, limit=limit, type=type)
-    results = rerank(results, query)
+    results = hybrid_search(query, embedding, limit=limit, type=type, project=project)
+    results = rerank(results, query, query_project=project)
 
     increment_access_count([str(r["id"]) for r in results])
 
-    return [
+    formatted = [
         {"id": str(r["id"]), "title": r["title"], "type": r["type"],
          "score": round(float(r.get("rerank_score", 0)), 3),
          "content": r["content"][:500], "tags": r["tags"]}
         for r in results
     ]
+
+    # Temporal context: find neighbors of the top result, deduplicated
+    temporal_context = []
+    if results:
+        top_id = str(results[0]["id"])
+        top_record = get_memory(top_id)
+        if top_record and top_record.get("created_at"):
+            result_ids = {str(r["id"]) for r in results}
+            neighbors = find_temporal_neighbors(top_id, top_record["created_at"], limit=3)
+            for n in neighbors:
+                if n["id"] not in result_ids:
+                    created_at = n["created_at"]
+                    temporal_context.append({
+                        "id": n["id"],
+                        "title": n["title"],
+                        "type": n["type"],
+                        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+                        "relation": "temporal_neighbor",
+                    })
+            temporal_context = temporal_context[:3]
+
+    return {"results": formatted, "temporal_context": temporal_context}
 
 
 @mcp.tool()

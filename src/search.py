@@ -19,7 +19,7 @@ from src.db import get_connection
 
 # --- Hybrid Search (BM25 + Vector + RRF) ---
 
-def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None):
+def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None, project=None):
     """Combine pgvector cosine search + PostgreSQL full-text search via RRF.
 
     Returns list of dicts with 'rrf_score' field, sorted by fused rank.
@@ -35,18 +35,22 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None)
     if status:
         conditions.append("status = %s")
         params_base.append(status)
+    if project:
+        conditions.append("(project = %s OR project IS NULL)")
+        params_base.append(project)
     where = "WHERE " + " AND ".join(conditions)
 
     conn = get_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Vector search
-            vec_params = [str(query_embedding)] + params_base + [prefetch]
+            emb_str = str(query_embedding)
+            vec_params = [emb_str] + params_base + [emb_str, prefetch]
             cur.execute(f"""
                 SELECT id, 1 - (embedding <=> %s::vector) AS similarity
                 FROM memories {where}
                 ORDER BY embedding <=> %s::vector LIMIT %s
-            """, (vec_params[0], vec_params[0], *vec_params[1:]))
+            """, vec_params)
             vec_results = {str(r["id"]): i + 1 for i, r in enumerate(cur.fetchall())}
 
             # Full-text search
@@ -90,7 +94,27 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None)
         conn.close()
 
 
-def rerank(results, query_text):
+def compute_spacing_bonus(last_accessed_at, now=None):
+    """Compute the spacing bonus for spaced retrieval reinforcement.
+
+    Args:
+        last_accessed_at: datetime or None. When the memory was last accessed.
+        now: datetime or None. Current time (defaults to utcnow if not provided).
+
+    Returns:
+        float in [0.0, 1.0]. NULL last_accessed_at → 1.0, 0 days → 0.0, 7+ days → 1.0.
+    """
+    if last_accessed_at is None or not hasattr(last_accessed_at, "timestamp"):
+        return 1.0
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if last_accessed_at.tzinfo is None:
+        last_accessed_at = last_accessed_at.replace(tzinfo=timezone.utc)
+    days_since = max(0.0, (now - last_accessed_at).total_seconds() / 86400)
+    return min(1.0, days_since / 7.0)
+
+
+def rerank(results, query_text, query_project=None):
     """Utility reranking: recency, type boost, token overlap, access reinforcement.
 
     Mutates results in-place, adding 'rerank_score'. Returns sorted list.
@@ -127,18 +151,33 @@ def rerank(results, query_text):
         mem_type = r.get("type", "")
         type_boost = 0.06 if mem_type in ("idea", "synthesis", "insight", "decision") else 0.0
 
-        # Retrieval reinforcement (logarithmic, diminishing returns)
+        # Memory classification boost (semantic > procedural > episodic)
+        mem_class = r.get("mem_class")
+        mem_class_boost = {"semantic": 0.04, "procedural": 0.02}.get(mem_class, 0.0)
+
+        # Depth score from metadata (numeric depth of explanation)
+        depth_score = (r.get("metadata") or {}).get("depth_score", 0.0)
+
+        # Spaced retrieval reinforcement (logarithmic, modulated by spacing bonus)
         access = r.get("access_count") or 0
-        reinforcement = 0.03 * math.log1p(access)
+        spacing_bonus = compute_spacing_bonus(r.get("last_accessed_at"), now)
+        reinforcement = 0.03 * math.log1p(access) * spacing_bonus
+
+        # Cross-project penalty
+        mem_project = r.get("project")
+        project_penalty = -0.15 if (query_project and mem_project and mem_project != query_project) else 0.0
 
         r["rerank_score"] = (
-            0.35 * r.get("rrf_score", 0)
-            + 0.20 * overlap
-            + 0.20 * title_overlap
-            + 0.15 * recency
-            + 0.10 * length_score
+            0.30 * r.get("rrf_score", 0)
+            + 0.18 * overlap
+            + 0.18 * title_overlap
+            + 0.12 * recency
+            + 0.08 * length_score
+            + 0.05 * depth_score
             + type_boost
+            + mem_class_boost
             + reinforcement
+            + project_penalty
         )
 
     results.sort(key=lambda r: r["rerank_score"], reverse=True)
@@ -153,7 +192,7 @@ def increment_access_count(memory_ids):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE memories SET access_count = coalesce(access_count, 0) + 1 WHERE id = ANY(%s::uuid[])",
+                "UPDATE memories SET access_count = coalesce(access_count, 0) + 1, last_accessed_at = now() WHERE id = ANY(%s::uuid[])",
                 (memory_ids,)
             )
         conn.commit()

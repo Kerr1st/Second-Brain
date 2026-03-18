@@ -38,19 +38,20 @@ def is_reachable():
 
 def create_memory(type, title, content, embedding=None, tags=None, source_url=None,
                    source_type=None, metadata=None, status="active", confidence=1.0,
-                   parent_id=None, summary=None):
+                   parent_id=None, summary=None, mem_class=None, project=None):
     """Insert a new memory. Returns the UUID."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO memories (type, title, content, summary, embedding, tags,
-                    source_url, source_type, metadata, status, confidence, parent_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    source_url, source_type, metadata, status, confidence, parent_id,
+                    mem_class, project)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (type, title, content, summary, embedding, tags or [],
                   source_url, source_type, json.dumps(metadata or {}),
-                  status, confidence, parent_id))
+                  status, confidence, parent_id, mem_class, project))
             memory_id = cur.fetchone()[0]
         conn.commit()
         return str(memory_id)
@@ -72,6 +73,7 @@ def get_memory(memory_id):
 ALLOWED_UPDATE_FIELDS = {
     "title", "content", "summary", "embedding", "tags", "source_url",
     "source_type", "metadata", "status", "confidence", "type",
+    "mem_class", "project", "last_accessed_at",
 }
 
 
@@ -194,4 +196,36 @@ def get_processed_source_urls(source_type=None):
             return {row[0] for row in cur.fetchall()}
     finally:
         conn.close()
+
+def find_temporal_neighbors(memory_id: str, created_at, limit: int = 3) -> list[dict]:
+    """Find memories created within ±24 hours of the given timestamp.
+
+    Excludes the specified memory_id. Returns list of dicts with
+    id, title, type, created_at fields.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, title, type, created_at
+                FROM memories
+                WHERE id != %s
+                  AND created_at BETWEEN %s - interval '24 hours' AND %s + interval '24 hours'
+                ORDER BY ABS(EXTRACT(EPOCH FROM (created_at - %s)))
+                LIMIT %s
+            """, (memory_id, created_at, created_at, created_at, limit))
+            rows = cur.fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "title": row["title"],
+                "type": row["type"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
 
