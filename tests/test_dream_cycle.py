@@ -2268,6 +2268,7 @@ class TestFinalOrchestratorMethodSet:
             "invoke_thinker",
             "invoke_evaluator",
             "_invoke_evaluator_safe",
+            "_capture",
         }
 
         actual_methods = {

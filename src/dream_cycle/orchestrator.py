@@ -41,17 +41,43 @@ class DreamCycleOrchestrator:
     def __init__(self, mcp_config: str | None = None):
         self.invoker = AgentInvoker()
         self.mcp_config = mcp_config or DEFAULT_MCP_CONFIG
+        self._capture_dir: str | None = None
 
-    def run(self, run_type: str, scope: dict | None = None) -> DreamCycleResult:
+    def _capture(self, name: str, *, inputs: dict | None = None, output: object = None) -> None:
+        """Write agent call inputs/outputs to capture_dir as JSON fixtures.
+
+        No-op when capture_dir is not set. Failures are logged but never
+        propagate — fixture capture must not break the pipeline.
+        """
+        if not self._capture_dir:
+            return
+        try:
+            os.makedirs(self._capture_dir, exist_ok=True)
+            data: dict = {}
+            if inputs is not None:
+                data["inputs"] = inputs
+            if output is not None:
+                data["output"] = output
+            path = os.path.join(self._capture_dir, f"{name}.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=str)
+            logger.debug("Captured fixture: %s", path)
+        except Exception:
+            logger.warning("Failed to capture fixture %s", name, exc_info=True)
+
+    def run(self, run_type: str, scope: dict | None = None, capture_dir: str | None = None) -> DreamCycleResult:
         """Execute a full dream cycle pipeline.
 
         Args:
             run_type: 'scheduled', 'post_learn', 'session_start', 'user_triggered'
             scope: Optional scoping for non-scheduled runs.
+            capture_dir: Optional directory path. When set, raw agent inputs
+                and outputs are written as JSON fixtures for replay testing.
 
         Returns:
             DreamCycleResult with stats and digest path.
         """
+        self._capture_dir = capture_dir
         started_at = datetime.now(timezone.utc)
         logger.info("Starting dream cycle: run_type=%s, scope=%s", run_type, scope)
 
@@ -408,6 +434,8 @@ class DreamCycleOrchestrator:
             mcp_config=self.mcp_config,
         )
 
+        self._capture("explorer", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
+
         # Parse output into MemorySlice objects
         raw_slices = result["output"]
         if not isinstance(raw_slices, list):
@@ -475,6 +503,9 @@ class DreamCycleOrchestrator:
             user_message=user_message,
             mcp_config=self.mcp_config,
         )
+
+        safe_name = slice.name.replace(" ", "_").replace("/", "_")[:50]
+        self._capture(f"thinker_{safe_name}", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
 
         # Parse output into CandidateInsight objects
         raw_candidates = result["output"]
@@ -555,6 +586,9 @@ class DreamCycleOrchestrator:
             system_prompt=prompt,
             user_message=user_message,
         )
+
+        safe_title = candidate.title.replace(" ", "_").replace("/", "_")[:40]
+        self._capture(f"evaluator_{role}_{safe_title}", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
 
         output = result["output"]
         if isinstance(output, list):
