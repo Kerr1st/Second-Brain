@@ -32,15 +32,12 @@ from src.dream_cycle.feedback import build_feedback_injection
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MCP_CONFIG = os.path.expanduser("~/.kiro/settings/mcp.json")
-
 
 class DreamCycleOrchestrator:
     """Coordinates the four-agent dream cycle pipeline."""
 
-    def __init__(self, mcp_config: str | None = None):
+    def __init__(self):
         self.invoker = AgentInvoker()
-        self.mcp_config = mcp_config or DEFAULT_MCP_CONFIG
         self._capture_dir: str | None = None
 
     def _capture(self, name: str, *, inputs: dict | None = None, output: object = None) -> None:
@@ -431,7 +428,7 @@ class DreamCycleOrchestrator:
         result = self.invoker.invoke(
             system_prompt=prompt,
             user_message=user_message,
-            mcp_config=self.mcp_config,
+            mcp_config="second-brain",
         )
 
         self._capture("explorer", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
@@ -501,7 +498,7 @@ class DreamCycleOrchestrator:
         result = self.invoker.invoke(
             system_prompt=prompt,
             user_message=user_message,
-            mcp_config=self.mcp_config,
+            mcp_config="second-brain",
         )
 
         safe_name = slice.name.replace(" ", "_").replace("/", "_")[:50]

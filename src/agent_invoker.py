@@ -1,7 +1,12 @@
-"""Agent Invoker — abstraction layer for kiro --no-interactive subprocesses.
+"""Agent Invoker — abstraction layer for kiro-cli chat subprocesses.
 
-Handles process spawning, timeout enforcement, output parsing, and error handling.
-Used by the DreamCycleOrchestrator for all agent invocations.
+Handles agent config creation, process spawning, timeout enforcement,
+output parsing, and error handling. Used by the DreamCycleOrchestrator
+for all agent invocations.
+
+Each invocation writes a temporary agent config to ~/.kiro/agents/ with
+the system prompt in the "prompt" field and MCP servers (if needed) in
+the "mcpServers" field, then invokes kiro-cli chat --no-interactive.
 
 Requirements: 13.1, 13.2, 13.3, 13.4, 13.5
 """
@@ -10,14 +15,32 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 
 logger = logging.getLogger(__name__)
 
+KIRO_CLI = os.environ.get("KIRO_CLI", os.path.expanduser("~/.local/bin/kiro-cli"))
+AGENTS_DIR = os.path.expanduser("~/.kiro/agents")
+DEFAULT_MODEL = "claude-opus-4.6-1m"
+
+# MCP server config for the Second Brain — Explorer and Thinker need this
+# to query memories via memory_search, memory_read, etc.
+_SECOND_BRAIN_MCP = {
+    "second-brain": {
+        "command": "python",
+        "args": ["-m", "src.mcp_server"],
+        "cwd": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    }
+}
+
 
 class AgentInvoker:
-    """Invoke kiro --no-interactive as isolated subprocesses with system prompts."""
+    """Invoke kiro-cli chat --no-interactive as isolated subprocesses."""
+
+    def __init__(self, model: str | None = None):
+        self.model = model or DEFAULT_MODEL
 
     def invoke(
         self,
@@ -26,13 +49,17 @@ class AgentInvoker:
         mcp_config: str | None = None,
         timeout: int = 300,
     ) -> dict:
-        """Invoke kiro --no-interactive as a subprocess.
+        """Invoke kiro-cli chat --no-interactive as a subprocess.
+
+        Creates a temporary agent config with the system prompt, invokes
+        kiro-cli chat, and parses the JSON output.
 
         Args:
-            system_prompt: The agent's role prompt.
-            user_message: Input data (memory slices, candidates, etc.).
-            mcp_config: File path to MCP server config for tool access
-                        (Explorer/Thinker need it, evaluators don't).
+            system_prompt: The agent's role prompt (written to agent config).
+            user_message: Input data passed as the chat input argument.
+            mcp_config: When truthy, the Second Brain MCP server is included
+                in the agent config so the agent can use memory tools.
+                Evaluators should pass None (no tool access).
             timeout: Max seconds before killing the process (default 300).
 
         Returns:
@@ -42,40 +69,75 @@ class AgentInvoker:
             TimeoutError: If the subprocess exceeds the timeout.
             RuntimeError: If the subprocess exits with a non-zero code.
         """
-        cmd = ["kiro", "--no-interactive", "--system-prompt", system_prompt]
+        # Build agent config
+        agent_name = f"dream_cycle_{os.getpid()}"
+        needs_tools = mcp_config is not None
+        agent_config = {
+            "name": agent_name,
+            "prompt": system_prompt,
+            "mcpServers": _SECOND_BRAIN_MCP if needs_tools else {},
+            "tools": ["*"] if needs_tools else [],
+        }
 
-        if mcp_config is not None:
-            cmd.extend(["--mcp-config", mcp_config])
-
-        logger.debug("Invoking agent: timeout=%ds, mcp_config=%s", timeout, mcp_config)
+        agent_path = os.path.join(AGENTS_DIR, f"{agent_name}.json")
+        os.makedirs(AGENTS_DIR, exist_ok=True)
 
         try:
-            result = subprocess.run(
-                cmd,
-                input=user_message,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
-            stderr = exc.stderr or ""
-            logger.error("Agent timed out after %ds: %s", timeout, stderr)
-            raise TimeoutError(
-                f"Agent subprocess timed out after {timeout}s: {stderr}"
-            ) from exc
+            with open(agent_path, "w", encoding="utf-8") as f:
+                json.dump(agent_config, f)
 
-        if result.returncode != 0:
-            logger.error(
-                "Agent exited with code %d: %s", result.returncode, result.stderr
-            )
-            raise RuntimeError(
-                f"Agent subprocess failed (exit code {result.returncode}): {result.stderr}"
+            cmd = [
+                KIRO_CLI, "chat",
+                "--no-interactive",
+                "--agent", agent_name,
+                "--model", self.model,
+            ]
+            if needs_tools:
+                cmd.append("--trust-all-tools")
+
+            # User message is the positional INPUT argument
+            cmd.append(user_message)
+
+            logger.debug(
+                "Invoking agent: name=%s, timeout=%ds, tools=%s",
+                agent_name, timeout, needs_tools,
             )
 
-        raw = result.stdout
-        parsed = self.parse_json_output(raw)
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stderr = exc.stderr or ""
+                logger.error("Agent timed out after %ds: %s", timeout, stderr)
+                raise TimeoutError(
+                    f"Agent subprocess timed out after {timeout}s: {stderr}"
+                ) from exc
 
-        return {"output": parsed, "raw": raw}
+            if result.returncode != 0:
+                logger.error(
+                    "Agent exited with code %d: %s",
+                    result.returncode, result.stderr,
+                )
+                raise RuntimeError(
+                    f"Agent subprocess failed (exit code {result.returncode}): "
+                    f"{result.stderr}"
+                )
+
+            raw = result.stdout
+            parsed = self.parse_json_output(raw)
+
+            return {"output": parsed, "raw": raw}
+
+        finally:
+            # Clean up the temporary agent config
+            try:
+                os.remove(agent_path)
+            except OSError:
+                pass
 
     @staticmethod
     def parse_json_output(raw: str) -> dict | list:
@@ -84,7 +146,7 @@ class AgentInvoker:
         Handles:
         - Bare JSON objects/arrays
         - JSON wrapped in markdown code fences (```json ... ```)
-        - JSON with surrounding non-JSON text
+        - JSON with surrounding non-JSON text (kiro-cli adds credit/timing lines)
 
         Returns:
             The parsed JSON object or array.

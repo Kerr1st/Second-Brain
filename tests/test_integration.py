@@ -111,11 +111,9 @@ def _verdict_reject(role: str, reasoning: str = "Rejected") -> EvaluatorVerdict:
 
 def _make_orchestrator():
     """Instantiate DreamCycleOrchestrator with mocked AgentInvoker."""
-    with patch("src.dream_cycle.orchestrator.AgentInvoker"), \
-         patch("src.dream_cycle.orchestrator.os.path.expanduser", return_value="/fake/mcp.json"):
+    with patch("src.dream_cycle.orchestrator.AgentInvoker"):
         from src.dream_cycle import DreamCycleOrchestrator
         orch = DreamCycleOrchestrator()
-        orch.mcp_config = "/fake/mcp.json"
         return orch
 
 

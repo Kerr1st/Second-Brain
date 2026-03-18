@@ -26,8 +26,7 @@ from src.models import (
 
 def _make_orchestrator():
     """Instantiate DreamCycleOrchestrator with mocked __init__ dependencies."""
-    with patch("src.dream_cycle.orchestrator.AgentInvoker"), \
-         patch("src.dream_cycle.orchestrator.os.path.expanduser", return_value="/fake/mcp.json"):
+    with patch("src.dream_cycle.orchestrator.AgentInvoker"):
         from src.dream_cycle import DreamCycleOrchestrator
         return DreamCycleOrchestrator()
 
