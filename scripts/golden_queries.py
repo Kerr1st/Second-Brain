@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.dream_cycle_db import get_golden_queries
 from src.embeddings import generate_embedding
-from src.db import hybrid_search, rerank
+from src.search import hybrid_search, rerank
 
 logger = logging.getLogger(__name__)
 

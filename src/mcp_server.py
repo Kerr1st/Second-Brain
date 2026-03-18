@@ -7,9 +7,9 @@ import re
 from mcp.server.fastmcp import FastMCP
 from src.db import (
     create_memory, get_memory, update_memory, list_memories,
-    search_similar, create_relationship, get_relationships,
-    hybrid_search, rerank, increment_access_count,
+    create_relationship, get_relationships,
 )
+from src.search import hybrid_search, rerank, increment_access_count
 from src.embeddings import generate_embedding
 
 mcp = FastMCP("Second Brain")
