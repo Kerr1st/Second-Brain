@@ -5,14 +5,14 @@ Runs the orchestrator end-to-end with deterministic mock data, verifying:
 - Feedback injection built
 - Explorer invoked with correct prompt
 - Thinker invoked for each slice
-- All 3 evaluators invoked for each candidate
-- Consensus tallied correctly
+- All 4 evaluators invoked for each candidate
+- Consensus tallied correctly (binary BFT: ≥3/4 ACCEPTED, ≤2/4 REJECTED)
 - Deduplication checked for accepted candidates
 - Memory created for accepted candidates
 - Candidates stored with correct verdicts
 - Digest generated
 
-Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 7.1, 8.1, 12.1
+Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 3.1, 6.5, 7.1, 8.1, 12.1
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ SLICE_2 = MemorySlice(
     hypothesis="Some syntheses may be outdated",
 )
 
-# Candidate 1: will get 3/3 ACCEPT → ACCEPTED
+# Candidate 1: will get 4/4 ACCEPT → ACCEPTED
 CANDIDATE_1 = CandidateInsight(
     title="Implicit DB Migration Convention",
     type="insight",
@@ -70,7 +70,7 @@ CANDIDATE_1 = CandidateInsight(
     strategy_that_found_it="cross_project_collision",
 )
 
-# Candidate 2: will get 2 ACCEPT, 1 REJECT → DEFERRED
+# Candidate 2: will get 2 ACCEPT, 2 REJECT → REJECTED (binary BFT: ≤2/4 = REJECTED)
 CANDIDATE_2 = CandidateInsight(
     title="Outdated Caching Strategy",
     type="insight",
@@ -147,16 +147,16 @@ class TestFullPipelineIntegration:
             if candidate.title == "Implicit DB Migration Convention":
                 return _verdict_accept(role, f"{role} approves: solid evidence")
             elif candidate.title == "Outdated Caching Strategy":
-                if role == "epistemologist":
-                    return _verdict_reject(role, "Insufficient novelty")
+                if role in ("epistemologist", "methodologist"):
+                    return _verdict_reject(role, "Insufficient novelty" if role == "epistemologist" else "Weak methodology")
                 return _verdict_accept(role, f"{role} approves: relevant")
             return _verdict_reject(role, "unknown")
 
         # Track thinker invocations
         thinker_calls = []
 
-        def mock_invoke_thinker(slice_obj, deferred):
-            thinker_calls.append({"slice_name": slice_obj.name, "deferred_count": len(deferred)})
+        def mock_invoke_thinker(slice_obj):
+            thinker_calls.append({"slice_name": slice_obj.name})
             if slice_obj.name == "Cross-project DB patterns":
                 return [CANDIDATE_1]
             elif slice_obj.name == "Stale synthesis check":
@@ -191,10 +191,9 @@ class TestFullPipelineIntegration:
                 mock_dc_db.get_memory_stats.return_value = MOCK_MEMORY_STATS
                 mock_dc_db.get_recent_rejections.return_value = []
                 mock_dc_db.get_user_rejections.return_value = []
-                mock_dc_db.get_deferred_candidates.return_value = []
+                mock_dc_db.get_accepted_dissents.return_value = []
                 mock_dc_db.store_candidate.return_value = "candidate-uuid-001"
                 mock_dc_db.should_run_briefing.return_value = True
-                mock_dc_db.get_previous_run_id.return_value = None
 
                 # Mock digest file writing
                 with patch("pathlib.Path.mkdir"), \
@@ -228,8 +227,8 @@ class TestFullPipelineIntegration:
 
         assert result.candidates_generated == 2
         assert result.candidates_accepted == 1
-        assert result.candidates_deferred == 1
-        assert result.candidates_rejected == 0
+        assert result.candidates_deferred == 0
+        assert result.candidates_rejected == 1
         assert result.aborted_early is False
 
     def test_run_record_created_and_completed(self):
@@ -249,8 +248,8 @@ class TestFullPipelineIntegration:
         stats = complete_kwargs["stats"]
         assert stats["candidates_generated"] == 2
         assert stats["candidates_accepted"] == 1
-        assert stats["candidates_deferred"] == 1
-        assert stats["candidates_rejected"] == 0
+        assert stats["candidates_deferred"] == 0
+        assert stats["candidates_rejected"] == 1
 
     def test_feedback_injection_built(self):
         """Verify feedback injection was queried from DB.
@@ -287,29 +286,29 @@ class TestFullPipelineIntegration:
         assert mocks["thinker_calls"][1]["slice_name"] == "Stale synthesis check"
 
     def test_evaluators_invoked_for_each_candidate(self):
-        """Verify all 3 evaluators were invoked for each of the 2 candidates (6 total).
+        """Verify all 4 evaluators were invoked for each of the 2 candidates (8 total).
 
-        **Validates: Requirement 1.3**
+        **Validates: Requirement 1.3, 3.1**
         """
         _, mocks = self._run_pipeline()
 
-        assert len(mocks["evaluator_calls"]) == 6
+        assert len(mocks["evaluator_calls"]) == 8
 
-        # Candidate 1 evaluated by all 3 roles
+        # Candidate 1 evaluated by all 4 roles
         c1_roles = {c["role"] for c in mocks["evaluator_calls"]
                      if c["candidate_title"] == "Implicit DB Migration Convention"}
-        assert c1_roles == {"skeptic", "advocate", "epistemologist"}
+        assert c1_roles == {"skeptic", "advocate", "epistemologist", "methodologist"}
 
-        # Candidate 2 evaluated by all 3 roles
+        # Candidate 2 evaluated by all 4 roles
         c2_roles = {c["role"] for c in mocks["evaluator_calls"]
                      if c["candidate_title"] == "Outdated Caching Strategy"}
-        assert c2_roles == {"skeptic", "advocate", "epistemologist"}
+        assert c2_roles == {"skeptic", "advocate", "epistemologist", "methodologist"}
 
     def test_consensus_tallied_correctly(self):
         """Verify candidates stored with correct final verdicts.
 
-        Candidate 1: 3/3 ACCEPT → ACCEPTED
-        Candidate 2: 2/3 ACCEPT → DEFERRED
+        Candidate 1: 4/4 ACCEPT → ACCEPTED
+        Candidate 2: 2/4 ACCEPT → REJECTED (binary BFT: ≤2/4 = REJECTED)
 
         **Validates: Requirements 1.4, 2.1, 2.2**
         """
@@ -321,7 +320,7 @@ class TestFullPipelineIntegration:
         # Extract final verdicts
         verdicts_stored = [c[0][3] for c in store_calls]
         assert "ACCEPTED" in verdicts_stored
-        assert "DEFERRED" in verdicts_stored
+        assert "REJECTED" in verdicts_stored
 
     def test_deduplication_checked_for_accepted(self):
         """Verify deduplication (embedding similarity search) was performed for the accepted candidate.
@@ -363,9 +362,9 @@ class TestFullPipelineIntegration:
         assert rel_call[0][2] == "supports"  # relation_type
 
     def test_candidates_stored_with_evaluator_verdicts(self):
-        """Verify each candidate is stored with all 3 evaluator verdicts.
+        """Verify each candidate is stored with all 4 evaluator verdicts.
 
-        **Validates: Requirements 1.6, 2.5**
+        **Validates: Requirements 1.6, 2.5, 3.1**
         """
         _, mocks = self._run_pipeline()
 
@@ -380,6 +379,8 @@ class TestFullPipelineIntegration:
             assert "evaluator_b_reasoning" in verdicts_dict
             assert "evaluator_c_verdict" in verdicts_dict
             assert "evaluator_c_reasoning" in verdicts_dict
+            assert "evaluator_d_verdict" in verdicts_dict
+            assert "evaluator_d_reasoning" in verdicts_dict
 
     def test_accepted_candidate_stored_with_memory_id(self):
         """Verify the ACCEPTED candidate's store_candidate call includes the created memory ID.
@@ -393,18 +394,18 @@ class TestFullPipelineIntegration:
         assert len(accepted_call) == 1
         assert accepted_call[0][0][4] == "new-memory-001"
 
-    def test_deferred_candidate_stored_without_memory_id(self):
-        """Verify the DEFERRED candidate's store_candidate call has no memory ID.
+    def test_rejected_candidate_stored_without_memory_id(self):
+        """Verify the REJECTED candidate's store_candidate call has no memory ID.
 
-        **Validates: Requirement 1.6**
+        **Validates: Requirement 1.6, 6.5**
         """
         _, mocks = self._run_pipeline()
 
         store_calls = mocks["dc_db"].store_candidate.call_args_list
-        deferred_calls = [c for c in store_calls if c[0][3] == "DEFERRED"]
-        assert len(deferred_calls) == 1
-        # DEFERRED candidates have 4 positional args (no memory_id)
-        assert len(deferred_calls[0][0]) == 4
+        rejected_calls = [c for c in store_calls if c[0][3] == "REJECTED"]
+        assert len(rejected_calls) == 1
+        # REJECTED candidates have 4 positional args (no memory_id)
+        assert len(rejected_calls[0][0]) == 4
 
     def test_digest_generated(self):
         """Verify digest generation produced a file path in the run completion.
@@ -430,25 +431,29 @@ class TestFullPipelineIntegration:
     def test_evaluator_verdicts_match_expected(self):
         """Verify the specific evaluator verdicts stored match our deterministic setup.
 
-        Candidate 1: skeptic=ACCEPT, advocate=ACCEPT, epistemologist=ACCEPT
-        Candidate 2: skeptic=ACCEPT, advocate=ACCEPT, epistemologist=REJECT
+        Candidate 1: skeptic=ACCEPT, advocate=ACCEPT, epistemologist=ACCEPT, methodologist=ACCEPT
+        Candidate 2: skeptic=ACCEPT, advocate=ACCEPT, epistemologist=REJECT, methodologist=REJECT
 
-        **Validates: Requirements 1.4, 2.1, 2.2**
+        **Validates: Requirements 1.4, 2.1, 2.2, 3.1**
         """
         _, mocks = self._run_pipeline()
 
         store_calls = mocks["dc_db"].store_candidate.call_args_list
 
-        # ACCEPTED candidate: all 3 ACCEPT
+        # ACCEPTED candidate: all 4 ACCEPT
         accepted_call = [c for c in store_calls if c[0][3] == "ACCEPTED"][0]
         av = accepted_call[0][2]
         assert av["evaluator_a_verdict"] == "ACCEPT"
         assert av["evaluator_b_verdict"] == "ACCEPT"
         assert av["evaluator_c_verdict"] == "ACCEPT"
+        assert av["evaluator_d_verdict"] == "ACCEPT"
 
-        # DEFERRED candidate: 2 ACCEPT + 1 REJECT
-        deferred_call = [c for c in store_calls if c[0][3] == "DEFERRED"][0]
-        dv = deferred_call[0][2]
-        verdict_values = [dv["evaluator_a_verdict"], dv["evaluator_b_verdict"], dv["evaluator_c_verdict"]]
+        # REJECTED candidate: 2 ACCEPT + 2 REJECT
+        rejected_call = [c for c in store_calls if c[0][3] == "REJECTED"][0]
+        rv = rejected_call[0][2]
+        verdict_values = [
+            rv["evaluator_a_verdict"], rv["evaluator_b_verdict"],
+            rv["evaluator_c_verdict"], rv["evaluator_d_verdict"],
+        ]
         assert verdict_values.count("ACCEPT") == 2
-        assert verdict_values.count("REJECT") == 1
+        assert verdict_values.count("REJECT") == 2

@@ -19,6 +19,8 @@ from src.dream_cycle_db import (
     get_recent_rejections,
     get_user_rejections,
     get_deferred_candidates,
+    get_accepted_dissents,
+    get_tier1_metrics,
     should_run_briefing,
     mark_user_rejected,
     get_evaluator_verdicts_for_run,
@@ -267,7 +269,6 @@ class TestGetRecentRejections(unittest.TestCase):
         sql_arg = mock_cur.execute.call_args[0][0]
         params = mock_cur.execute.call_args[0][1]
         self.assertIn("REJECTED", sql_arg)
-        self.assertIn("DEFERRED", sql_arg)
         self.assertEqual(params, (3,))
         mock_conn.close.assert_called_once()
 
@@ -554,6 +555,7 @@ class TestGetEvaluatorVerdictsForRun(unittest.TestCase):
                 "ACCEPT", "Solid reasoning",
                 "ACCEPT", "User relevant",
                 "ACCEPT", "Epistemically sound",
+                "ACCEPT", "Methodologically rigorous",
             ),
         ]
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
@@ -566,6 +568,7 @@ class TestGetEvaluatorVerdictsForRun(unittest.TestCase):
         self.assertEqual(result["Insight A"]["skeptic"], {"verdict": "ACCEPT", "reasoning": "Solid reasoning"})
         self.assertEqual(result["Insight A"]["advocate"], {"verdict": "ACCEPT", "reasoning": "User relevant"})
         self.assertEqual(result["Insight A"]["epistemologist"], {"verdict": "ACCEPT", "reasoning": "Epistemically sound"})
+        self.assertEqual(result["Insight A"]["methodologist"], {"verdict": "ACCEPT", "reasoning": "Methodologically rigorous"})
         mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
@@ -592,6 +595,7 @@ class TestGetEvaluatorVerdictsForRun(unittest.TestCase):
                 "ACCEPT", "Good",
                 "REJECT", "Bad",
                 "ACCEPT", "OK",
+                "ACCEPT", "Solid method",
             ),
         ]
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
@@ -609,7 +613,7 @@ class TestGetEvaluatorVerdictsForRun(unittest.TestCase):
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_cur.fetchall.return_value = [
-            (None, "ACCEPT", "R1", "ACCEPT", "R2", "ACCEPT", "R3"),
+            (None, "ACCEPT", "R1", "ACCEPT", "R2", "ACCEPT", "R3", "ACCEPT", "R4"),
         ]
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
@@ -625,8 +629,8 @@ class TestGetEvaluatorVerdictsForRun(unittest.TestCase):
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_cur.fetchall.return_value = [
-            (json.dumps({"title": "A"}), "ACCEPT", "r1", "ACCEPT", "r2", "ACCEPT", "r3"),
-            (json.dumps({"title": "B"}), "ACCEPT", "r4", "REJECT", "r5", "ACCEPT", "r6"),
+            (json.dumps({"title": "A"}), "ACCEPT", "r1", "ACCEPT", "r2", "ACCEPT", "r3", "ACCEPT", "r7"),
+            (json.dumps({"title": "B"}), "ACCEPT", "r4", "REJECT", "r5", "ACCEPT", "r6", "REJECT", "r8"),
         ]
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
@@ -830,6 +834,7 @@ class TestDreamCycleDbQueryProperties(unittest.TestCase):
                 "ACCEPT", f"skeptic reason {i}",
                 "ACCEPT", f"advocate reason {i}",
                 "ACCEPT", f"epistemologist reason {i}",
+                "ACCEPT", f"methodologist reason {i}",
             ))
 
         mock_conn = MagicMock()
@@ -845,8 +850,192 @@ class TestDreamCycleDbQueryProperties(unittest.TestCase):
         for title in expected_titles:
             self.assertIn(title, result)
             entry = result[title]
-            for role in ("skeptic", "advocate", "epistemologist"):
+            for role in ("skeptic", "advocate", "epistemologist", "methodologist"):
                 self.assertIn(role, entry)
                 self.assertIn("verdict", entry[role])
                 self.assertIn("reasoning", entry[role])
         mock_conn.close.assert_called()
+
+
+
+class TestStoreCandidatePersistsEvaluatorD(unittest.TestCase):
+    """Property 9: store_candidate Persists Evaluator D
+
+    For any verdicts dictionary containing evaluator_d_verdict and
+    evaluator_d_reasoning, store_candidate() persists both values to
+    the dream_cycle_candidates table.
+
+    **Validates: Requirements 5.2**
+    """
+
+    @given(
+        verdict_d=st.sampled_from(["ACCEPT", "REJECT"]),
+        reasoning_d=st.text(min_size=1, max_size=200, alphabet=st.characters(whitelist_categories=("L", "N", "Z"))),
+    )
+    @settings(max_examples=100)
+    @patch("src.dream_cycle_db.get_connection")
+    def test_store_candidate_persists_evaluator_d(self, mock_get_conn, verdict_d, reasoning_d):
+        """For any evaluator_d verdict and reasoning, store_candidate INSERT
+        includes evaluator_d_verdict and evaluator_d_reasoning columns.
+
+        **Validates: Requirements 5.2**
+        """
+        candidate_id = uuid4()
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = (candidate_id,)
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value = mock_conn
+
+        run_id = str(uuid4())
+        candidate = {
+            "title": "Test Insight",
+            "content": "Some content",
+            "operation": "CREATE",
+            "target_memory_id": None,
+            "schema_operation": "assimilation",
+        }
+        verdicts = {
+            "evaluator_a_verdict": "ACCEPT",
+            "evaluator_a_reasoning": "Good",
+            "evaluator_b_verdict": "ACCEPT",
+            "evaluator_b_reasoning": "Relevant",
+            "evaluator_c_verdict": "ACCEPT",
+            "evaluator_c_reasoning": "Sound",
+            "evaluator_d_verdict": verdict_d,
+            "evaluator_d_reasoning": reasoning_d,
+        }
+
+        store_candidate(run_id, candidate, verdicts, "ACCEPTED")
+
+        # Verify the SQL includes evaluator_d columns
+        sql_arg = mock_cur.execute.call_args[0][0]
+        assert "evaluator_d_verdict" in sql_arg, "INSERT SQL must include evaluator_d_verdict column"
+        assert "evaluator_d_reasoning" in sql_arg, "INSERT SQL must include evaluator_d_reasoning column"
+
+        # Verify the parameters include evaluator_d values
+        params = mock_cur.execute.call_args[0][1]
+        params_list = list(params)
+        assert verdict_d in params_list, f"evaluator_d_verdict '{verdict_d}' must be in INSERT params"
+        assert reasoning_d in params_list, f"evaluator_d_reasoning '{reasoning_d}' must be in INSERT params"
+
+        # Verify evaluator_d values are at the correct positions (after evaluator_c, before final_verdict)
+        # Column order: run_id, candidate_json, operation, target_memory_id, schema_operation,
+        #   eval_a_verdict, eval_a_reasoning, eval_b_verdict, eval_b_reasoning,
+        #   eval_c_verdict, eval_c_reasoning, eval_d_verdict, eval_d_reasoning,
+        #   final_verdict, created_memory_id
+        assert params[11] == verdict_d, f"Position 11 should be evaluator_d_verdict, got {params[11]}"
+        assert params[12] == reasoning_d, f"Position 12 should be evaluator_d_reasoning, got {params[12]}"
+
+
+class TestGetAcceptedDissents(unittest.TestCase):
+    """Test get_accepted_dissents returns accepted candidates with at least one REJECT."""
+
+    @patch("src.dream_cycle_db.get_connection")
+    def test_returns_dissents_with_evaluator_reasoning(self, mock_get_conn):
+        """Accepted candidates with a dissenting evaluator are returned."""
+        expected_rows = [
+            {
+                "candidate_id": uuid4(),
+                "candidate_json": {"title": "Non-unanimous insight"},
+                "evaluator_a_verdict": "ACCEPT",
+                "evaluator_a_reasoning": "Solid",
+                "evaluator_b_verdict": "ACCEPT",
+                "evaluator_b_reasoning": "Relevant",
+                "evaluator_c_verdict": "REJECT",
+                "evaluator_c_reasoning": "Insufficient evidence",
+                "evaluator_d_verdict": "ACCEPT",
+                "evaluator_d_reasoning": "Sound method",
+                "final_verdict": "ACCEPTED",
+            }
+        ]
+
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = expected_rows
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value = mock_conn
+
+        result = get_accepted_dissents(n_cycles=3)
+
+        self.assertEqual(result, expected_rows)
+        sql_arg = mock_cur.execute.call_args[0][0]
+        params = mock_cur.execute.call_args[0][1]
+        # SQL must filter for ACCEPTED with at least one REJECT
+        self.assertIn("ACCEPTED", sql_arg)
+        self.assertIn("evaluator_a_verdict = 'REJECT'", sql_arg)
+        self.assertIn("evaluator_b_verdict = 'REJECT'", sql_arg)
+        self.assertIn("evaluator_c_verdict = 'REJECT'", sql_arg)
+        self.assertIn("evaluator_d_verdict = 'REJECT'", sql_arg)
+        self.assertEqual(params, (3,))
+        mock_conn.close.assert_called_once()
+
+    @patch("src.dream_cycle_db.get_connection")
+    def test_returns_empty_when_no_dissents(self, mock_get_conn):
+        """Returns empty list when all accepted candidates are unanimous."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value = mock_conn
+
+        result = get_accepted_dissents()
+
+        self.assertEqual(result, [])
+        mock_conn.close.assert_called_once()
+
+
+class TestGetTier1MetricsNonUnanimousRate(unittest.TestCase):
+    """Test non_unanimous_acceptance_rate in get_tier1_metrics."""
+
+    @patch("src.dream_cycle_db.get_connection")
+    def test_distinguishes_unanimous_from_non_unanimous(self, mock_get_conn):
+        """3/4 accepts count as non-unanimous, 4/4 do not."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value = mock_conn
+
+        run_id = uuid4()
+
+        # Query 1: get runs
+        # Query 2: non_unanimous count
+        # Query 3: strategy diversity
+        mock_cur.fetchall.side_effect = [
+            # Runs: 1 run with 4 generated, 3 accepted, 1 rejected
+            [{"id": run_id, "candidates_generated": 4, "candidates_accepted": 3,
+              "candidates_deferred": 0, "candidates_rejected": 1}],
+            # Strategy diversity
+            [],
+        ]
+        mock_cur.fetchone.side_effect = [
+            # Non-unanimous rate: 3 accepted total, 1 non-unanimous
+            {"total_accepted": 3, "non_unanimous": 1},
+            # Strategy diversity
+            {"diversity": 2},
+        ]
+
+        result = get_tier1_metrics(n_cycles=1)
+
+        self.assertAlmostEqual(result["non_unanimous_acceptance_rate"], 1 / 3)
+        self.assertAlmostEqual(result["acceptance_rate"], 3 / 4)
+        self.assertNotIn("deferred_to_accepted_rate", result)
+
+    @patch("src.dream_cycle_db.get_connection")
+    def test_no_runs_returns_zero_rate(self, mock_get_conn):
+        """When no completed runs exist, non_unanimous_acceptance_rate is 0.0."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value = mock_conn
+
+        result = get_tier1_metrics(n_cycles=5)
+
+        self.assertEqual(result["non_unanimous_acceptance_rate"], 0.0)
+        self.assertNotIn("deferred_to_accepted_rate", result)

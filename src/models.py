@@ -59,6 +59,6 @@ class CandidateInsight:
 class EvaluatorVerdict:
     """A binary verdict from a single evaluator on the Consensus Panel."""
 
-    role: str  # skeptic, advocate, epistemologist
+    role: str  # skeptic, advocate, epistemologist, methodologist
     verdict: str  # ACCEPT, REJECT
     reasoning: str = ""  # Full reasoning text

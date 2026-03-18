@@ -1,8 +1,9 @@
 """Consensus Panel evaluator prompt templates.
 
-Three independent evaluators (Skeptic, User Advocate, Epistemologist) each
-assess every candidate insight. Prompts accept the evaluator role, candidate
-JSON, and source memories content as interpolation variables.
+Four independent evaluators (Skeptic, User Advocate, Epistemologist,
+Methodologist) each assess every candidate insight.  Prompts accept the
+evaluator role, candidate JSON, and source memories content as interpolation
+variables.
 """
 
 _SKEPTIC_CRITERIA = """\
@@ -65,17 +66,43 @@ the confirmation itself is surprising.
 5. RETRIEVABILITY — Will it be findable when needed? Clear "Questions this \
 answers"? Keywords specific enough for BM25, semantics clear for vector?"""
 
+_METHODOLOGIST_CRITERIA = """\
+## Evaluate on these criteria:
+
+1. INTERNAL CONSISTENCY — Do the insight's claims, evidence citations, and \
+conclusions form a logically coherent argument? Are there self-contradictions \
+between what the EVIDENCE section says and what the WHAT section claims?
+
+2. SOURCE INDEPENDENCE — Do the cited source memories represent genuinely \
+independent data points? Or are they derivatives of the same original source \
+(e.g., a memory and its chunk, or two memories from the same conversation)?
+
+3. REASONING STRUCTURE — Does the insight follow the depth framework \
+(WHAT, EVIDENCE, WHY IT MATTERS) with each section substantively contributing? \
+Or does WHY IT MATTERS merely restate WHAT in different words?
+
+4. REPRODUCIBILITY — Would another agent examining the same source memories \
+plausibly arrive at the same or a compatible conclusion? Or does the insight \
+depend on unstated assumptions or creative leaps not grounded in the sources?
+
+For UPDATE/SUPERSEDE operations, apply additional scrutiny:
+5. TRACEABLE REASONING — Does the proposed change follow from the cited \
+evidence through a traceable chain of reasoning? Or does it introduce \
+conclusions that require unstated assumptions not present in the sources?"""
+
 
 _ROLE_DESCRIPTIONS = {
     "skeptic": "THE SKEPTIC — you look for reasons the insight might be wrong, shallow, or misleading.",
     "advocate": "THE USER ADVOCATE — you evaluate whether this insight is genuinely valuable to the human who owns this knowledge base.",
     "epistemologist": "THE EPISTEMOLOGIST — you evaluate the quality of the knowledge claim itself.",
+    "methodologist": "THE METHODOLOGIST — you evaluate the methodological rigor of the insight: internal consistency, source independence, reasoning structure, and reproducibility.",
 }
 
 _ROLE_CRITERIA = {
     "skeptic": _SKEPTIC_CRITERIA,
     "advocate": _ADVOCATE_CRITERIA,
     "epistemologist": _EPISTEMOLOGIST_CRITERIA,
+    "methodologist": _METHODOLOGIST_CRITERIA,
 }
 
 
@@ -95,7 +122,7 @@ def get_evaluator_prompt(
     """Build evaluator prompt for the given role.
 
     Args:
-        role: One of "skeptic", "advocate", "epistemologist".
+        role: One of "skeptic", "advocate", "epistemologist", "methodologist".
         candidate_json: JSON string of the candidate insight.
         source_memories_content: Formatted content of the source memories
             referenced by the candidate.
@@ -104,12 +131,12 @@ def get_evaluator_prompt(
         Complete evaluator system prompt string.
 
     Raises:
-        ValueError: If role is not one of the three valid roles.
+        ValueError: If role is not one of the four valid roles.
     """
     if role not in _ROLE_DESCRIPTIONS:
         raise ValueError(
             f"Invalid evaluator role: {role!r}. "
-            f"Must be one of: {', '.join(_ROLE_DESCRIPTIONS)}"
+            f"Must be one of: skeptic, advocate, epistemologist, methodologist"
         )
 
     role_description = _ROLE_DESCRIPTIONS[role]

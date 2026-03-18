@@ -108,8 +108,8 @@ class TestExplorerPromptProperty:
 class TestExplorerPromptExplicit:
     """Explicit unit tests for Explorer prompt variants."""
 
-    def test_scheduled_mode_includes_all_11_strategies(self):
-        """Scheduled mode includes all 11 strategies.
+    def test_scheduled_mode_includes_all_10_strategies(self):
+        """Scheduled mode includes all 10 strategies.
 
         **Validates: Requirements 17.5**
         """
@@ -131,7 +131,6 @@ class TestExplorerPromptExplicit:
             "STALE SYNTHESIS CHECK",
             "RETRIEVAL FAILURE ANALYSIS",
             "DESIRABLE DIFFICULTY",
-            "DEFERRED EVIDENCE GATHERING",
         ]
         for strategy in strategies:
             assert strategy in prompt, f"Missing strategy: {strategy}"

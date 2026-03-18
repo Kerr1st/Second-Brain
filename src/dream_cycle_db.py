@@ -85,8 +85,9 @@ def store_candidate(
                Also extracts operation, target_memory_id, schema_operation.
     verdicts: dict with keys evaluator_a_verdict, evaluator_a_reasoning,
               evaluator_b_verdict, evaluator_b_reasoning,
-              evaluator_c_verdict, evaluator_c_reasoning.
-    final_verdict: ACCEPTED, DEFERRED, or REJECTED.
+              evaluator_c_verdict, evaluator_c_reasoning,
+              evaluator_d_verdict, evaluator_d_reasoning.
+    final_verdict: ACCEPTED or REJECTED.
     created_memory_id: UUID of the memory created for ACCEPTED candidates.
     """
     conn = get_connection()
@@ -100,9 +101,10 @@ def store_candidate(
                     evaluator_a_verdict, evaluator_a_reasoning,
                     evaluator_b_verdict, evaluator_b_reasoning,
                     evaluator_c_verdict, evaluator_c_reasoning,
+                    evaluator_d_verdict, evaluator_d_reasoning,
                     final_verdict, created_memory_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -117,6 +119,8 @@ def store_candidate(
                     verdicts.get("evaluator_b_reasoning"),
                     verdicts.get("evaluator_c_verdict"),
                     verdicts.get("evaluator_c_reasoning"),
+                    verdicts.get("evaluator_d_verdict"),
+                    verdicts.get("evaluator_d_reasoning"),
                     final_verdict,
                     created_memory_id,
                 ),
@@ -129,12 +133,12 @@ def store_candidate(
 
 
 def get_recent_rejections(n_cycles: int = 3) -> list[dict]:
-    """Query last N completed cycles' rejected/deferred candidates with evaluator reasoning.
+    """Query last N completed cycles' rejected candidates with evaluator reasoning.
 
     Returns list of dicts with: run_id, run_type, completed_at, candidate_id,
     final_verdict, evaluator_a_verdict, evaluator_a_reasoning,
     evaluator_b_verdict, evaluator_b_reasoning, evaluator_c_verdict,
-    evaluator_c_reasoning.
+    evaluator_c_reasoning, evaluator_d_verdict, evaluator_d_reasoning.
 
     Used for feedback injection into the Explorer prompt.
     """
@@ -154,11 +158,13 @@ def get_recent_rejections(n_cycles: int = 3) -> list[dict]:
                     c.evaluator_b_verdict,
                     c.evaluator_b_reasoning,
                     c.evaluator_c_verdict,
-                    c.evaluator_c_reasoning
+                    c.evaluator_c_reasoning,
+                    c.evaluator_d_verdict,
+                    c.evaluator_d_reasoning
                 FROM dream_cycle_candidates c
                 JOIN dream_cycle_runs r ON r.id = c.run_id
                 WHERE r.completed_at IS NOT NULL
-                  AND c.final_verdict IN ('REJECTED', 'DEFERRED')
+                  AND c.final_verdict = 'REJECTED'
                   AND r.id IN (
                       SELECT id FROM dream_cycle_runs
                       WHERE completed_at IS NOT NULL
@@ -217,8 +223,61 @@ def get_user_rejections(n_cycles: int = 3) -> list[dict]:
 
 
 
+def get_accepted_dissents(n_cycles: int = 3) -> list[dict]:
+    """Query accepted candidates with at least one REJECT verdict from recent cycles.
+
+    Returns rows where final_verdict = 'ACCEPTED' and at least one of
+    evaluator_a/b/c/d_verdict = 'REJECT'. Used for feedback injection
+    to surface dissenting concerns on accepted insights.
+    Requirements: 8.1.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    c.id AS candidate_id,
+                    c.candidate_json,
+                    c.evaluator_a_verdict,
+                    c.evaluator_a_reasoning,
+                    c.evaluator_b_verdict,
+                    c.evaluator_b_reasoning,
+                    c.evaluator_c_verdict,
+                    c.evaluator_c_reasoning,
+                    c.evaluator_d_verdict,
+                    c.evaluator_d_reasoning,
+                    c.final_verdict
+                FROM dream_cycle_candidates c
+                JOIN dream_cycle_runs r ON r.id = c.run_id
+                WHERE r.completed_at IS NOT NULL
+                  AND c.final_verdict = 'ACCEPTED'
+                  AND (c.evaluator_a_verdict = 'REJECT'
+                       OR c.evaluator_b_verdict = 'REJECT'
+                       OR c.evaluator_c_verdict = 'REJECT'
+                       OR c.evaluator_d_verdict = 'REJECT')
+                  AND r.id IN (
+                      SELECT id FROM dream_cycle_runs
+                      WHERE completed_at IS NOT NULL
+                      ORDER BY completed_at DESC
+                      LIMIT %s
+                  )
+                ORDER BY r.completed_at DESC, c.created_at DESC
+                """,
+                (n_cycles,),
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
 def get_deferred_candidates(previous_run_id: str) -> list[dict]:
     """Get all DEFERRED candidates from a specific run for re-evaluation.
+
+    .. deprecated::
+        No longer called by the orchestrator. The DEFERRED state has been
+        removed in favour of binary BFT consensus (≥3/4 ACCEPTED, ≤2/4 REJECTED).
+        Retained for backward compatibility only.
 
     Returns list of dicts with: id, candidate_json, evaluator_a_verdict,
     evaluator_a_reasoning, evaluator_b_verdict, evaluator_b_reasoning,
@@ -428,6 +487,11 @@ def mark_user_rejected(candidate_id: str, reason: str) -> None:
 def mark_deferred_twice_rejected(candidate_id: str) -> None:
     """Mark a candidate as rejected due to two consecutive deferrals.
 
+    .. deprecated::
+        No longer called by the orchestrator. The DEFERRED state and two-strike
+        rule have been removed in favour of binary BFT consensus
+        (≥3/4 ACCEPTED, ≤2/4 REJECTED). Retained for backward compatibility only.
+
     Updates the deferred_twice_rejected flag to TRUE on the
     dream_cycle_candidates record. Called when a candidate that was
     DEFERRED in the previous cycle gets DEFERRED again in the current cycle,
@@ -541,7 +605,7 @@ def get_tier1_metrics(n_cycles: int = 10) -> dict:
     Returns dict with:
       - acceptance_rate: float (candidates_accepted / candidates_generated across last n_cycles)
       - acceptance_rate_trend: list[float] (acceptance rate per cycle, oldest first)
-      - deferred_to_accepted_rate: float (deferred candidates later accepted / total deferred)
+      - non_unanimous_acceptance_rate: float (accepted candidates with 3/4 verdict / total accepted)
       - strategy_diversity: int (distinct strategies used across last n_cycles)
       - cost_efficiency: float (candidates_accepted / estimated agent invocations)
 
@@ -569,7 +633,7 @@ def get_tier1_metrics(n_cycles: int = 10) -> dict:
                 return {
                     "acceptance_rate": 0.0,
                     "acceptance_rate_trend": [],
-                    "deferred_to_accepted_rate": 0.0,
+                    "non_unanimous_acceptance_rate": 0.0,
                     "strategy_diversity": 0,
                     "cost_efficiency": 0.0,
                 }
@@ -588,46 +652,28 @@ def get_tier1_metrics(n_cycles: int = 10) -> dict:
                 acc = r["candidates_accepted"] or 0
                 acceptance_rate_trend.append(acc / gen if gen > 0 else 0.0)
 
-            # Deferred-to-accepted rate: candidates DEFERRED in one cycle
-            # that were later ACCEPTED in a subsequent cycle.
-            # We identify these by matching candidate_json content across cycles.
+            # Non-unanimous acceptance rate: accepted candidates with 3/4 (not 4/4)
+            # verdict, indicating at least one evaluator dissented.
             cur.execute(
                 """
-                SELECT count(*) AS total_deferred
+                SELECT
+                    count(*) FILTER (WHERE final_verdict = 'ACCEPTED') AS total_accepted,
+                    count(*) FILTER (
+                        WHERE final_verdict = 'ACCEPTED'
+                          AND (evaluator_a_verdict = 'REJECT'
+                               OR evaluator_b_verdict = 'REJECT'
+                               OR evaluator_c_verdict = 'REJECT'
+                               OR evaluator_d_verdict = 'REJECT')
+                    ) AS non_unanimous
                 FROM dream_cycle_candidates
                 WHERE run_id = ANY(%s)
-                  AND final_verdict = 'DEFERRED'
                 """,
                 (run_ids,),
             )
-            total_deferred = cur.fetchone()["total_deferred"]
-
-            # Count deferred candidates that share the same candidate title/content
-            # with a later ACCEPTED candidate (indicating re-evaluation success)
-            cur.execute(
-                """
-                WITH deferred AS (
-                    SELECT c.id, c.candidate_json->>'title' AS title, r.completed_at
-                    FROM dream_cycle_candidates c
-                    JOIN dream_cycle_runs r ON r.id = c.run_id
-                    WHERE c.run_id = ANY(%s)
-                      AND c.final_verdict = 'DEFERRED'
-                ),
-                accepted AS (
-                    SELECT c.candidate_json->>'title' AS title, r.completed_at
-                    FROM dream_cycle_candidates c
-                    JOIN dream_cycle_runs r ON r.id = c.run_id
-                    WHERE c.run_id = ANY(%s)
-                      AND c.final_verdict = 'ACCEPTED'
-                )
-                SELECT count(DISTINCT d.id) AS converted
-                FROM deferred d
-                JOIN accepted a ON d.title = a.title AND a.completed_at > d.completed_at
-                """,
-                (run_ids, run_ids),
-            )
-            converted = cur.fetchone()["converted"]
-            deferred_to_accepted_rate = converted / total_deferred if total_deferred > 0 else 0.0
+            row = cur.fetchone()
+            t_accepted = row["total_accepted"]
+            non_unanimous = row["non_unanimous"]
+            non_unanimous_acceptance_rate = non_unanimous / t_accepted if t_accepted > 0 else 0.0
 
             # Strategy diversity: distinct strategies from candidate_json->>'strategy_that_found_it'
             cur.execute(
@@ -652,7 +698,7 @@ def get_tier1_metrics(n_cycles: int = 10) -> dict:
                 estimated_slices = max(1, -(-gen // 2))  # ceil division
                 explorer_calls = 1
                 thinker_calls = estimated_slices
-                evaluator_calls = 3 * gen
+                evaluator_calls = 4 * gen
                 total_invocations += explorer_calls + thinker_calls + evaluator_calls
 
             cost_efficiency = total_accepted / total_invocations if total_invocations > 0 else 0.0
@@ -660,7 +706,7 @@ def get_tier1_metrics(n_cycles: int = 10) -> dict:
         return {
             "acceptance_rate": acceptance_rate,
             "acceptance_rate_trend": acceptance_rate_trend,
-            "deferred_to_accepted_rate": deferred_to_accepted_rate,
+            "non_unanimous_acceptance_rate": non_unanimous_acceptance_rate,
             "strategy_diversity": strategy_diversity,
             "cost_efficiency": cost_efficiency,
         }
@@ -763,7 +809,7 @@ def get_evaluator_verdicts_for_run(run_id: str) -> dict[str, dict]:
 
     Returns:
         Dict keyed by candidate title, each value a dict with keys
-        'skeptic', 'advocate', 'epistemologist', each containing
+        'skeptic', 'advocate', 'epistemologist', 'methodologist', each containing
         {"verdict": str, "reasoning": str}.
     """
     conn = get_connection()
@@ -774,7 +820,8 @@ def get_evaluator_verdicts_for_run(run_id: str) -> dict[str, dict]:
                 SELECT candidate_json,
                        evaluator_a_verdict, evaluator_a_reasoning,
                        evaluator_b_verdict, evaluator_b_reasoning,
-                       evaluator_c_verdict, evaluator_c_reasoning
+                       evaluator_c_verdict, evaluator_c_reasoning,
+                       evaluator_d_verdict, evaluator_d_reasoning
                 FROM dream_cycle_candidates
                 WHERE run_id = %s AND final_verdict = 'ACCEPTED'
                 """,
@@ -793,6 +840,7 @@ def get_evaluator_verdicts_for_run(run_id: str) -> dict[str, dict]:
                     "skeptic": {"verdict": row[1], "reasoning": row[2]},
                     "advocate": {"verdict": row[3], "reasoning": row[4]},
                     "epistemologist": {"verdict": row[5], "reasoning": row[6]},
+                    "methodologist": {"verdict": row[7], "reasoning": row[8]},
                 }
             return verdicts_by_title
     finally:

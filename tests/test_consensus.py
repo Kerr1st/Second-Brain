@@ -1,11 +1,12 @@
 """Property-based and explicit tests for consensus tally correctness.
 
-**Validates: Requirements 1.4, 2.1, 2.2, 2.3**
-- WHEN all evaluators return verdicts for a candidate, THE Orchestrator SHALL
-  tally consensus: 3/3 ACCEPT = ACCEPTED, 2/3 ACCEPT = DEFERRED, otherwise REJECTED.
-- WHEN a candidate receives 3 ACCEPT verdicts → ACCEPTED.
-- WHEN a candidate receives exactly 2 ACCEPT verdicts → DEFERRED.
-- WHEN a candidate receives fewer than 2 ACCEPT verdicts → REJECTED.
+**Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5, 2.6**
+- WHEN a candidate receives ≥3 ACCEPT verdicts out of 4 → ACCEPTED.
+- WHEN a candidate receives ≤2 ACCEPT verdicts out of 4 → REJECTED.
+- THE Tally_Consensus function SHALL NOT return DEFERRED for any input.
+- THE Tally_Consensus function SHALL accept exactly 4 EvaluatorVerdict objects.
+- THE Tally_Consensus function SHALL raise ValueError if len != 4.
+- THE Tally_Consensus function SHALL remain a pure function with no side effects.
 """
 
 from unittest.mock import patch
@@ -34,35 +35,36 @@ def _make_orchestrator():
 
 verdict_values = st.sampled_from(["ACCEPT", "REJECT"])
 
-three_verdicts = st.lists(verdict_values, min_size=3, max_size=3)
+four_verdicts = st.lists(verdict_values, min_size=4, max_size=4)
 
-roles = ["skeptic", "advocate", "epistemologist"]
+roles = ["skeptic", "advocate", "epistemologist", "methodologist"]
 
 
 def _build_evaluator_verdicts(verdict_list: list[str]) -> list[EvaluatorVerdict]:
-    """Build 3 EvaluatorVerdict objects from a list of verdict strings."""
+    """Build 4 EvaluatorVerdict objects from a list of verdict strings."""
     return [
         EvaluatorVerdict(role=roles[i], verdict=verdict_list[i], reasoning=f"reason_{i}")
-        for i in range(3)
+        for i in range(len(verdict_list))
     ]
 
 
 # ---------------------------------------------------------------------------
-# Property 1: Consensus Tally Correctness
-# **Validates: Requirements 1.4, 2.1, 2.2, 2.3**
+# Property 1: Binary BFT Consensus Tally Correctness
+# **Validates: Requirements 2.1, 2.2, 2.3**
 # ---------------------------------------------------------------------------
 
 class TestConsensusTallyProperty:
-    """Property-based tests for tally_consensus."""
+    """Property-based tests for tally_consensus — binary 4-verdict model."""
 
-    @given(verdicts=three_verdicts)
-    @settings(deadline=None)
-    def test_tally_returns_correct_mapping(self, verdicts):
-        """For any list of 3 verdicts (each ACCEPT or REJECT), tally_consensus
-        returns exactly one of ACCEPTED/DEFERRED/REJECTED with the correct mapping:
-        3 ACCEPT → ACCEPTED, 2 ACCEPT → DEFERRED, 0-1 ACCEPT → REJECTED.
+    @given(verdicts=four_verdicts)
+    @settings(max_examples=100, deadline=None)
+    def test_tally_returns_correct_binary_mapping(self, verdicts):
+        """For any list of 4 verdicts (each ACCEPT or REJECT), tally_consensus
+        returns exactly one of ACCEPTED/REJECTED with the correct mapping:
+        accept_count ≥ 3 → ACCEPTED, accept_count ≤ 2 → REJECTED.
+        DEFERRED is never returned.
 
-        **Validates: Requirements 1.4, 2.1, 2.2, 2.3**
+        **Validates: Requirements 2.1, 2.2, 2.3**
         """
         from src.dream_cycle.consensus import tally_consensus
         evaluator_verdicts = _build_evaluator_verdicts(verdicts)
@@ -71,85 +73,169 @@ class TestConsensusTallyProperty:
 
         accept_count = sum(1 for v in verdicts if v == "ACCEPT")
 
-        assert result in ("ACCEPTED", "DEFERRED", "REJECTED")
+        # Binary output only — no DEFERRED
+        assert result in ("ACCEPTED", "REJECTED")
+        assert result != "DEFERRED"
 
-        if accept_count == 3:
+        if accept_count >= 3:
             assert result == "ACCEPTED"
-        elif accept_count == 2:
-            assert result == "DEFERRED"
         else:
             assert result == "REJECTED"
 
 
 # ---------------------------------------------------------------------------
-# Explicit tests for all 8 combinations of 3 binary verdicts
+# Property 2: Tally Input Validation
+# **Validates: Requirements 2.4, 2.5**
+# ---------------------------------------------------------------------------
+
+class TestTallyInputValidationProperty:
+    """Property-based tests for tally_consensus input validation."""
+
+    @given(n=st.integers(min_value=0, max_value=3))
+    @settings(max_examples=100, deadline=None)
+    def test_too_few_verdicts_raises_value_error(self, n):
+        """Lists of length 0-3 raise ValueError.
+
+        **Validates: Requirements 2.4, 2.5**
+        """
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts = [
+            EvaluatorVerdict(role="skeptic", verdict="ACCEPT", reasoning="r")
+            for _ in range(n)
+        ]
+        with pytest.raises(ValueError, match=f"Expected 4 verdicts, got {n}"):
+            tally_consensus(verdicts)
+
+    @given(n=st.integers(min_value=5, max_value=20))
+    @settings(max_examples=100, deadline=None)
+    def test_too_many_verdicts_raises_value_error(self, n):
+        """Lists of length 5+ raise ValueError.
+
+        **Validates: Requirements 2.4, 2.5**
+        """
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts = [
+            EvaluatorVerdict(role="skeptic", verdict="ACCEPT", reasoning="r")
+            for _ in range(n)
+        ]
+        with pytest.raises(ValueError, match=f"Expected 4 verdicts, got {n}"):
+            tally_consensus(verdicts)
+
+
+# ---------------------------------------------------------------------------
+# Explicit tests for all 16 combinations of 4 binary verdicts
 # ---------------------------------------------------------------------------
 
 class TestConsensusTallyExplicit:
-    """Explicit tests covering all 8 combinations of 3 binary verdicts."""
+    """Explicit tests covering all 16 combinations of 4 binary verdicts."""
 
-    def test_3_accept(self):
-        """AAA → ACCEPTED. **Validates: Requirements 2.1**"""
+    # --- 4/4 ACCEPT → ACCEPTED ---
+    def test_4_accept(self):
+        """AAAA → ACCEPTED. **Validates: Requirements 2.1**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "ACCEPT"])
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "ACCEPT", "ACCEPT"])
         assert tally_consensus(verdicts) == "ACCEPTED"
 
-    def test_2_accept_reject_last(self):
-        """AAR → DEFERRED. **Validates: Requirements 2.2**"""
+    # --- 3/4 ACCEPT → ACCEPTED ---
+    def test_3_accept_reject_last(self):
+        """AAAR → ACCEPTED. **Validates: Requirements 2.1**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "REJECT"])
-        assert tally_consensus(verdicts) == "DEFERRED"
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "ACCEPT", "REJECT"])
+        assert tally_consensus(verdicts) == "ACCEPTED"
 
-    def test_2_accept_reject_middle(self):
-        """ARA → DEFERRED. **Validates: Requirements 2.2**"""
+    def test_3_accept_reject_third(self):
+        """AARA → ACCEPTED. **Validates: Requirements 2.1**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["ACCEPT", "REJECT", "ACCEPT"])
-        assert tally_consensus(verdicts) == "DEFERRED"
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "REJECT", "ACCEPT"])
+        assert tally_consensus(verdicts) == "ACCEPTED"
 
-    def test_2_accept_reject_first(self):
-        """RAA → DEFERRED. **Validates: Requirements 2.2**"""
+    def test_3_accept_reject_second(self):
+        """ARAA → ACCEPTED. **Validates: Requirements 2.1**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["REJECT", "ACCEPT", "ACCEPT"])
-        assert tally_consensus(verdicts) == "DEFERRED"
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "REJECT", "ACCEPT", "ACCEPT"])
+        assert tally_consensus(verdicts) == "ACCEPTED"
 
+    def test_3_accept_reject_first(self):
+        """RAAA → ACCEPTED. **Validates: Requirements 2.1**"""
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts = _build_evaluator_verdicts(["REJECT", "ACCEPT", "ACCEPT", "ACCEPT"])
+        assert tally_consensus(verdicts) == "ACCEPTED"
+
+    # --- 2/4 ACCEPT → REJECTED ---
+    def test_2_accept_ab(self):
+        """AARR → REJECTED. **Validates: Requirements 2.2**"""
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "REJECT", "REJECT"])
+        assert tally_consensus(verdicts) == "REJECTED"
+
+    def test_2_accept_ac(self):
+        """ARAR → REJECTED. **Validates: Requirements 2.2**"""
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "REJECT", "ACCEPT", "REJECT"])
+        assert tally_consensus(verdicts) == "REJECTED"
+
+    def test_2_accept_ad(self):
+        """ARRA → REJECTED. **Validates: Requirements 2.2**"""
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "REJECT", "REJECT", "ACCEPT"])
+        assert tally_consensus(verdicts) == "REJECTED"
+
+    def test_2_accept_bc(self):
+        """RAAR → REJECTED. **Validates: Requirements 2.2**"""
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts = _build_evaluator_verdicts(["REJECT", "ACCEPT", "ACCEPT", "REJECT"])
+        assert tally_consensus(verdicts) == "REJECTED"
+
+    def test_2_accept_bd(self):
+        """RARA → REJECTED. **Validates: Requirements 2.2**"""
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts = _build_evaluator_verdicts(["REJECT", "ACCEPT", "REJECT", "ACCEPT"])
+        assert tally_consensus(verdicts) == "REJECTED"
+
+    def test_2_accept_cd(self):
+        """RRAA → REJECTED. **Validates: Requirements 2.2**"""
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts = _build_evaluator_verdicts(["REJECT", "REJECT", "ACCEPT", "ACCEPT"])
+        assert tally_consensus(verdicts) == "REJECTED"
+
+    # --- 1/4 ACCEPT → REJECTED ---
     def test_1_accept_first(self):
-        """ARR → REJECTED. **Validates: Requirements 2.3**"""
+        """ARRR → REJECTED. **Validates: Requirements 2.2**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["ACCEPT", "REJECT", "REJECT"])
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "REJECT", "REJECT", "REJECT"])
         assert tally_consensus(verdicts) == "REJECTED"
 
-    def test_1_accept_middle(self):
-        """RAR → REJECTED. **Validates: Requirements 2.3**"""
+    def test_1_accept_second(self):
+        """RARR → REJECTED. **Validates: Requirements 2.2**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["REJECT", "ACCEPT", "REJECT"])
+        verdicts = _build_evaluator_verdicts(["REJECT", "ACCEPT", "REJECT", "REJECT"])
         assert tally_consensus(verdicts) == "REJECTED"
 
-    def test_1_accept_last(self):
-        """RRA → REJECTED. **Validates: Requirements 2.3**"""
+    def test_1_accept_third(self):
+        """RRAR → REJECTED. **Validates: Requirements 2.2**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["REJECT", "REJECT", "ACCEPT"])
+        verdicts = _build_evaluator_verdicts(["REJECT", "REJECT", "ACCEPT", "REJECT"])
         assert tally_consensus(verdicts) == "REJECTED"
 
+    def test_1_accept_fourth(self):
+        """RRRA → REJECTED. **Validates: Requirements 2.2**"""
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts = _build_evaluator_verdicts(["REJECT", "REJECT", "REJECT", "ACCEPT"])
+        assert tally_consensus(verdicts) == "REJECTED"
+
+    # --- 0/4 ACCEPT → REJECTED ---
     def test_0_accept(self):
-        """RRR → REJECTED. **Validates: Requirements 2.3**"""
+        """RRRR → REJECTED. **Validates: Requirements 2.2**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["REJECT", "REJECT", "REJECT"])
+        verdicts = _build_evaluator_verdicts(["REJECT", "REJECT", "REJECT", "REJECT"])
         assert tally_consensus(verdicts) == "REJECTED"
 
-
-# ---------------------------------------------------------------------------
-# Helper: create orchestrator (reuse from above)
-# ---------------------------------------------------------------------------
-
-# _make_orchestrator is already defined above
 
 
 # ---------------------------------------------------------------------------
 # Property 2: Deduplication Guarantee
 # **Validates: Requirements 7.2, 7.3, 7.4**
 # ---------------------------------------------------------------------------
-
-from hypothesis import given, settings, strategies as st
 
 
 class TestDeduplicationGuaranteeProperty:
@@ -280,8 +366,7 @@ class TestDeduplicationExplicit:
 
 # ---------------------------------------------------------------------------
 # Standalone tally_consensus function tests (no orchestrator needed)
-# **Validates: Requirements 2.4, 2.5**
-# **Feature: dream-cycle-decomposition, Property 1: Consensus tally mapping is preserved after extraction**
+# **Validates: Requirements 2.1, 2.2, 2.4, 2.5**
 # ---------------------------------------------------------------------------
 
 class TestStandaloneTallyConsensus:
@@ -292,26 +377,39 @@ class TestStandaloneTallyConsensus:
         from src.dream_cycle.consensus import tally_consensus as fn
         assert callable(fn)
 
-    def test_3_accept_returns_accepted(self):
-        """3 ACCEPT → ACCEPTED. **Validates: Requirements 2.5**"""
+    def test_4_accept_returns_accepted(self):
+        """4 ACCEPT → ACCEPTED. **Validates: Requirements 2.1**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "ACCEPT"])
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "ACCEPT", "ACCEPT"])
         assert tally_consensus(verdicts) == "ACCEPTED"
 
-    def test_2_accept_returns_deferred(self):
-        """2 ACCEPT → DEFERRED. **Validates: Requirements 2.5**"""
+    def test_3_accept_returns_accepted(self):
+        """3 ACCEPT → ACCEPTED. **Validates: Requirements 2.1**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "REJECT"])
-        assert tally_consensus(verdicts) == "DEFERRED"
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "ACCEPT", "REJECT"])
+        assert tally_consensus(verdicts) == "ACCEPTED"
+
+    def test_2_accept_returns_rejected(self):
+        """2 ACCEPT → REJECTED. **Validates: Requirements 2.2**"""
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "REJECT", "REJECT"])
+        assert tally_consensus(verdicts) == "REJECTED"
 
     def test_1_accept_returns_rejected(self):
-        """1 ACCEPT → REJECTED. **Validates: Requirements 2.5**"""
+        """1 ACCEPT → REJECTED. **Validates: Requirements 2.2**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["ACCEPT", "REJECT", "REJECT"])
+        verdicts = _build_evaluator_verdicts(["ACCEPT", "REJECT", "REJECT", "REJECT"])
         assert tally_consensus(verdicts) == "REJECTED"
 
     def test_0_accept_returns_rejected(self):
-        """0 ACCEPT → REJECTED. **Validates: Requirements 2.5**"""
+        """0 ACCEPT → REJECTED. **Validates: Requirements 2.2**"""
         from src.dream_cycle.consensus import tally_consensus
-        verdicts = _build_evaluator_verdicts(["REJECT", "REJECT", "REJECT"])
+        verdicts = _build_evaluator_verdicts(["REJECT", "REJECT", "REJECT", "REJECT"])
         assert tally_consensus(verdicts) == "REJECTED"
+
+    def test_wrong_length_raises_value_error(self):
+        """Non-4 length → ValueError. **Validates: Requirements 2.4, 2.5**"""
+        from src.dream_cycle.consensus import tally_consensus
+        verdicts_3 = _build_evaluator_verdicts(["ACCEPT", "ACCEPT", "ACCEPT"])
+        with pytest.raises(ValueError, match="Expected 4 verdicts, got 3"):
+            tally_consensus(verdicts_3)

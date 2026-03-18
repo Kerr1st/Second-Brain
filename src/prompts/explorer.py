@@ -4,7 +4,7 @@ The Explorer autonomously decides what regions of the memory space to examine
 and assembles curated "memory slices" of 10-20 memories for the Thinker.
 """
 
-# All 11 named exploration strategies
+# All 10 named exploration strategies
 ALL_STRATEGIES = """\
 ## Your exploration strategies (use at least 3 per cycle, vary across cycles):
 
@@ -50,16 +50,7 @@ ALL_STRATEGIES = """\
     user has partially forgotten. Cross-reference against recent activity (last
     7 days). If relevant to current work, assemble into a slice. (Bjork 1992:
     high storage strength + low retrieval strength = strongest reinforcement
-    on re-retrieval.)
-
-11. DEFERRED EVIDENCE GATHERING — Check dream_cycle_candidates for DEFERRED
-    insights from the previous cycle. For each, read the dissenting evaluator's
-    objection. Assemble a new slice specifically designed to address that
-    objection. If the Skeptic said "only 2 memories support this," search for
-    additional corroborating memories. If the User Advocate said "not relevant
-    to current work," check whether recent activity has shifted to make it
-    relevant now. (Only activates when deferred candidates exist from the
-    previous cycle.)"""
+    on re-retrieval.)"""
 
 # Session-start mode: restricted to strategies 6, 8, 10 only
 SESSION_START_STRATEGIES = """\

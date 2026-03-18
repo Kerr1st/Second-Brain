@@ -226,22 +226,11 @@ class DreamCycleOrchestrator:
                 aborted_early=True,
             )
 
-        # Step 5: Get deferred candidates from previous cycle (if any)
-        previous_run_id = dream_cycle_db.get_previous_run_id(run_type)
-        deferred = (
-            dream_cycle_db.get_deferred_candidates(previous_run_id)
-            if previous_run_id
-            else []
-        )
-        logger.info(
-            "Deferred candidates from previous run: %d", len(deferred)
-        )
-
         # Step 6: Invoke Thinker for each slice, collect candidates
         all_candidates: list[CandidateInsight] = []
         for s in slices:
             try:
-                candidates = self.invoke_thinker(s, deferred)
+                candidates = self.invoke_thinker(s)
             except Exception:
                 logger.error(
                     "Thinker failed for slice '%s', skipping", s.name, exc_info=True
@@ -259,19 +248,18 @@ class DreamCycleOrchestrator:
         logger.info("Total candidates from Thinker: %d", len(all_candidates))
 
         accepted: list[CandidateInsight] = []
-        deferred_new: list[CandidateInsight] = []
         rejected: list[CandidateInsight] = []
 
-        # Step 7: Consensus Panel for each candidate
+        # Step 7: Consensus Panel — invoke 4 evaluators per candidate
         for candidate in all_candidates:
             verdict_a = self._invoke_evaluator_safe(candidate, "skeptic")
             verdict_b = self._invoke_evaluator_safe(candidate, "advocate")
             verdict_c = self._invoke_evaluator_safe(candidate, "epistemologist")
+            verdict_d = self._invoke_evaluator_safe(candidate, "methodologist")
 
-            evaluator_verdicts = [verdict_a, verdict_b, verdict_c]
+            evaluator_verdicts = [verdict_a, verdict_b, verdict_c, verdict_d]
             final = tally_consensus(evaluator_verdicts)
 
-            # Build verdicts dict for store_candidate
             verdicts_dict = {
                 "evaluator_a_verdict": verdict_a.verdict,
                 "evaluator_a_reasoning": verdict_a.reasoning,
@@ -279,6 +267,8 @@ class DreamCycleOrchestrator:
                 "evaluator_b_reasoning": verdict_b.reasoning,
                 "evaluator_c_verdict": verdict_c.verdict,
                 "evaluator_c_reasoning": verdict_c.reasoning,
+                "evaluator_d_verdict": verdict_d.verdict,
+                "evaluator_d_reasoning": verdict_d.reasoning,
             }
 
             candidate_dict = asdict(candidate)
@@ -299,26 +289,7 @@ class DreamCycleOrchestrator:
                     run_id, candidate_dict, verdicts_dict, "ACCEPTED", memory_id
                 )
                 accepted.append(candidate)
-
-            elif final == "DEFERRED":
-                # Two-strike rule: if already deferred once, reject instead
-                if self._is_second_deferral(candidate, deferred):
-                    candidate_id = dream_cycle_db.store_candidate(
-                        run_id, candidate_dict, verdicts_dict, "REJECTED"
-                    )
-                    dream_cycle_db.mark_deferred_twice_rejected(candidate_id)
-                    rejected.append(candidate)
-                    logger.info(
-                        "Two-strike rule: candidate '%s' deferred twice, now REJECTED",
-                        candidate.title,
-                    )
-                else:
-                    dream_cycle_db.store_candidate(
-                        run_id, candidate_dict, verdicts_dict, "DEFERRED"
-                    )
-                    deferred_new.append(candidate)
-
-            else:  # REJECTED
+            else:  # REJECTED — no DEFERRED branch
                 dream_cycle_db.store_candidate(
                     run_id, candidate_dict, verdicts_dict, "REJECTED"
                 )
@@ -330,14 +301,14 @@ class DreamCycleOrchestrator:
 
         # Step 8: Generate digest and complete run
         completed_at = datetime.now(timezone.utc)
-        digest = generate_digest(run_id, accepted, deferred_new, rejected)
+        digest = generate_digest(run_id, accepted, rejected)
 
         dream_cycle_db.complete_run(
             run_id,
             stats={
                 "candidates_generated": len(all_candidates),
                 "candidates_accepted": len(accepted),
-                "candidates_deferred": len(deferred_new),
+                "candidates_deferred": 0,
                 "candidates_rejected": len(rejected),
             },
             digest=digest,
@@ -352,7 +323,7 @@ class DreamCycleOrchestrator:
             completed_at=completed_at,
             candidates_generated=len(all_candidates),
             candidates_accepted=len(accepted),
-            candidates_deferred=len(deferred_new),
+            candidates_deferred=0,
             candidates_rejected=len(rejected),
             digest_path=digest,
             aborted_early=False,
@@ -367,7 +338,7 @@ class DreamCycleOrchestrator:
 
         Args:
             candidate: The CandidateInsight to evaluate.
-            role: One of 'skeptic', 'advocate', 'epistemologist'.
+            role: One of 'skeptic', 'advocate', 'epistemologist', 'methodologist'.
 
         Returns:
             EvaluatorVerdict — real verdict on success, default REJECT on failure.
@@ -384,32 +355,6 @@ class DreamCycleOrchestrator:
                 verdict="REJECT",
                 reasoning="Evaluator crashed or timed out",
             )
-
-    def _is_second_deferral(self, candidate: CandidateInsight, deferred_from_previous: list[dict]) -> bool:
-        """Check if a candidate was already deferred in the previous cycle.
-
-        Compares the candidate's title against the titles of deferred candidates
-        from the previous run. A title match indicates this is the second
-        consecutive deferral, triggering the two-strike rule (Requirement 10.4).
-
-        Args:
-            candidate: The current candidate that received a DEFERRED verdict.
-            deferred_from_previous: Deferred candidates from the previous cycle,
-                each a dict with candidate_json containing the original candidate data.
-
-        Returns:
-            True if the candidate title matches a previously deferred candidate.
-        """
-        for prev in deferred_from_previous:
-            prev_json = prev.get("candidate_json") or {}
-            if isinstance(prev_json, str):
-                try:
-                    prev_json = json.loads(prev_json)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-            if prev_json.get("title") == candidate.title:
-                return True
-        return False
 
 
 
@@ -492,18 +437,15 @@ class DreamCycleOrchestrator:
         return slices
 
     def invoke_thinker(
-        self, slice: MemorySlice, deferred: list[dict]
+        self, slice: MemorySlice,
     ) -> list[CandidateInsight]:
-        """Invoke Thinker agent with a memory slice + deferred candidates.
+        """Invoke Thinker agent with a memory slice.
 
-        Builds a JSON user message containing the memory slice data and any
-        deferred candidates with their dissenting evaluator's objection, then
-        invokes the Thinker via AgentInvoker with MCP config.
+        Builds a JSON user message containing the memory slice data,
+        then invokes the Thinker via AgentInvoker with MCP config.
 
         Args:
             slice: A MemorySlice assembled by the Explorer.
-            deferred: Deferred candidates from the previous cycle, each a dict
-                with candidate_json and evaluator verdict/reasoning fields.
 
         Returns:
             List of CandidateInsight objects (may be empty).
@@ -519,50 +461,14 @@ class DreamCycleOrchestrator:
             },
         }
 
-        # Add deferred candidates with dissenting objections
-        if deferred:
-            deferred_entries = []
-            for d in deferred:
-                candidate_json = d.get("candidate_json") or {}
-                # If candidate_json is a string, parse it
-                if isinstance(candidate_json, str):
-                    try:
-                        candidate_json = json.loads(candidate_json)
-                    except (json.JSONDecodeError, ValueError):
-                        candidate_json = {}
-
-                # Find the dissenting evaluator (the one who voted REJECT)
-                dissenting_objection = ""
-                evaluator_roles = {
-                    "evaluator_a": "Skeptic",
-                    "evaluator_b": "User Advocate",
-                    "evaluator_c": "Epistemologist",
-                }
-                for key_prefix, role_name in evaluator_roles.items():
-                    verdict = d.get(f"{key_prefix}_verdict", "")
-                    reasoning = d.get(f"{key_prefix}_reasoning", "")
-                    if verdict == "REJECT" and reasoning:
-                        dissenting_objection = (
-                            f"{role_name}: {reasoning}"
-                        )
-                        break
-
-                deferred_entries.append({
-                    "candidate": candidate_json,
-                    "dissenting_objection": dissenting_objection,
-                })
-
-            payload["deferred_candidates"] = deferred_entries
-
         user_message = json.dumps(payload)
 
         # Get the static Thinker prompt
         prompt = get_thinker_prompt()
 
         logger.info(
-            "Invoking Thinker agent (slice=%s, deferred=%d)",
+            "Invoking Thinker agent (slice=%s)",
             slice.name,
-            len(deferred),
         )
         result = self.invoker.invoke(
             system_prompt=prompt,
@@ -615,7 +521,7 @@ class DreamCycleOrchestrator:
     def invoke_evaluator(
         self, candidate: CandidateInsight, role: str
     ) -> EvaluatorVerdict:
-        """Invoke a single evaluator (skeptic/advocate/epistemologist).
+        """Invoke a single evaluator (skeptic/advocate/epistemologist/methodologist).
 
         Builds the evaluator prompt via template, invokes via AgentInvoker
         (no MCP config for evaluators), and parses the output into an
@@ -623,7 +529,7 @@ class DreamCycleOrchestrator:
 
         Args:
             candidate: The CandidateInsight to evaluate.
-            role: One of 'skeptic', 'advocate', 'epistemologist'.
+            role: One of 'skeptic', 'advocate', 'epistemologist', 'methodologist'.
 
         Returns:
             EvaluatorVerdict with role, verdict, and reasoning.

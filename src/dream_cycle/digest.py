@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 def generate_digest(
     run_id: str,
     accepted: list[CandidateInsight],
-    deferred: list[CandidateInsight],
     rejected: list[CandidateInsight],
 ) -> str:
     """Generate a static markdown digest of the dream cycle run.
@@ -28,15 +27,14 @@ def generate_digest(
 
     Args:
         run_id: The dream cycle run UUID.
-        accepted: Candidates that passed 3/3 consensus.
-        deferred: Candidates that received 2/3 consensus.
-        rejected: Candidates that were rejected.
+        accepted: Candidates that passed BFT consensus (≥3/4 ACCEPT).
+        rejected: Candidates that were rejected (≤2/4 ACCEPT).
 
     Returns:
         The file path of the written digest markdown file.
     """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    total = len(accepted) + len(deferred) + len(rejected)
+    total = len(accepted) + len(rejected)
 
     # Query evaluator verdicts for accepted candidates from the DB
     verdicts_by_title: dict[str, dict] = {}
@@ -73,7 +71,6 @@ def generate_digest(
     lines.append("")
     lines.append(f"- Candidates generated: {total}")
     lines.append(f"- Accepted: {len(accepted)}")
-    lines.append(f"- Deferred: {len(deferred)}")
     lines.append(f"- Rejected: {len(rejected)}")
     lines.append("")
 
@@ -133,11 +130,27 @@ def generate_digest(
                 if v:
                     lines.append("**Evaluator reasoning**:")
                     lines.append("")
-                    for role in ("skeptic", "advocate", "epistemologist"):
+                    for role in ("skeptic", "advocate", "epistemologist", "methodologist"):
                         rv = v.get(role, {})
                         verdict = rv.get("verdict", "N/A")
                         reasoning = rv.get("reasoning", "")
                         lines.append(f"- **{role.capitalize()}** ({verdict}): {reasoning}")
+                    lines.append("")
+
+                    # Acceptance annotation
+                    accept_count = sum(
+                        1 for role in ("skeptic", "advocate", "epistemologist", "methodologist")
+                        if v.get(role, {}).get("verdict") == "ACCEPT"
+                    )
+                    if accept_count == 4:
+                        lines.append("**Accepted (4/4 — unanimous)**")
+                    elif accept_count == 3:
+                        dissenter = next(
+                            role for role in ("skeptic", "advocate", "epistemologist", "methodologist")
+                            if v.get(role, {}).get("verdict") != "ACCEPT"
+                        )
+                        dissent_reasoning = v.get(dissenter, {}).get("reasoning", "")
+                        lines.append(f"**Accepted (3/4) — {dissenter.capitalize()} dissented: {dissent_reasoning}**")
                     lines.append("")
 
                 lines.append("---")

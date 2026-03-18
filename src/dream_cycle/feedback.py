@@ -25,12 +25,20 @@ def build_feedback_injection() -> str:
         Formatted feedback string, or empty string if no rejections exist.
     """
     rejections = dream_cycle_db.get_recent_rejections(n_cycles=3)
+    accepted_dissents = dream_cycle_db.get_accepted_dissents(n_cycles=3)
     user_rejections = dream_cycle_db.get_user_rejections(n_cycles=3)
 
-    if not rejections and not user_rejections:
+    if not rejections and not accepted_dissents and not user_rejections:
         return ""
 
     parts: list[str] = []
+
+    evaluator_roles = {
+        "evaluator_a": "Skeptic",
+        "evaluator_b": "User Advocate",
+        "evaluator_c": "Epistemologist",
+        "evaluator_d": "Methodologist",
+    }
 
     # Part 1: Evaluator rejections grouped by cycle
     if rejections:
@@ -42,12 +50,6 @@ def build_feedback_injection() -> str:
                 cycles[rid] = []
             cycles[rid].append(row)
 
-        evaluator_roles = {
-            "evaluator_a": "Skeptic",
-            "evaluator_b": "User Advocate",
-            "evaluator_c": "Epistemologist",
-        }
-
         sections: list[str] = []
         for _run_id, rows in cycles.items():
             # Use completed_at from the first row (same for all rows in a cycle)
@@ -58,10 +60,9 @@ def build_feedback_injection() -> str:
                 cycle_date = str(completed_at)
 
             rejected_count = sum(1 for r in rows if r["final_verdict"] == "REJECTED")
-            deferred_count = sum(1 for r in rows if r["final_verdict"] == "DEFERRED")
 
             lines: list[str] = [
-                f"Cycle {cycle_date}: {rejected_count} rejected, {deferred_count} deferred"
+                f"Cycle {cycle_date}: {rejected_count} rejected"
             ]
 
             for row in rows:
@@ -77,7 +78,28 @@ def build_feedback_injection() -> str:
 
         parts.append("\n\n".join(sections))
 
-    # Part 2: User rejections
+    # Part 2: Dissenting concerns on accepted insights
+    if accepted_dissents:
+        dissent_lines: list[str] = ["## Dissenting concerns on accepted insights"]
+        for row in accepted_dissents:
+            for key_prefix, role_name in evaluator_roles.items():
+                verdict = row.get(f"{key_prefix}_verdict", "")
+                reasoning = row.get(f"{key_prefix}_reasoning", "")
+                if verdict == "REJECT" and reasoning:
+                    candidate_json = row.get("candidate_json") or {}
+                    if isinstance(candidate_json, str):
+                        try:
+                            candidate_json = json.loads(candidate_json)
+                        except (json.JSONDecodeError, ValueError):
+                            candidate_json = {}
+                    title = candidate_json.get("title", "Unknown")
+                    dissent_lines.append(
+                        f'- {role_name} dissented on accepted "{title}": "{reasoning}"'
+                    )
+        if len(dissent_lines) > 1:
+            parts.append("\n".join(dissent_lines))
+
+    # Part 3: User rejections
     if user_rejections:
         user_lines: list[str] = ["## User rejections"]
         for ur in user_rejections:

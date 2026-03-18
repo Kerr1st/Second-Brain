@@ -228,12 +228,12 @@ class TestEvaluatorIndependenceProperty:
 
         orch.invoker.invoke = mock_invoke
 
-        # Invoke all 3 evaluators
-        roles = ["skeptic", "advocate", "epistemologist"]
+        # Invoke all 4 evaluators
+        roles = ["skeptic", "advocate", "epistemologist", "methodologist"]
         for role in roles:
             orch.invoke_evaluator(candidate, role)
 
-        assert len(captured_calls) == 3
+        assert len(captured_calls) == 4
 
         # Collect all verdicts/reasoning that could leak
         other_verdicts = ["ACCEPT", "REJECT"]
@@ -299,10 +299,10 @@ class TestEvaluatorIndependenceExplicit:
             strategy_that_found_it="pattern_emergence",
         )
 
-        for role in ["skeptic", "advocate", "epistemologist"]:
+        for role in ["skeptic", "advocate", "epistemologist", "methodologist"]:
             orch.invoke_evaluator(candidate, role)
 
-        # All 3 evaluator invocations should have mcp_config=None
+        # All 4 evaluator invocations should have mcp_config=None
         assert all(cfg is None for cfg in captured_mcp_configs), (
             f"Evaluators received MCP configs: {captured_mcp_configs}"
         )
@@ -333,13 +333,13 @@ class TestEvaluatorIndependenceExplicit:
             strategy_that_found_it="temporal_juxtaposition",
         )
 
-        roles = ["skeptic", "advocate", "epistemologist"]
+        roles = ["skeptic", "advocate", "epistemologist", "methodologist"]
         for role in roles:
             orch.invoke_evaluator(candidate, role)
 
         # Each prompt should be distinct (different role criteria)
         prompts = list(captured_prompts.values())
-        assert len(set(prompts)) == 3, "All 3 evaluator prompts should be distinct"
+        assert len(set(prompts)) == 4, "All 4 evaluator prompts should be distinct"
 
 
 
@@ -624,598 +624,11 @@ class TestCreateStorageCorrectnessExplicit:
 
 
 # ---------------------------------------------------------------------------
-# Two-Strike Rule: _is_second_deferral and deferred handling in run()
-# **Validates: Requirements 10.1, 10.2, 10.3, 10.4, 10.5**
+# Two-Strike Rule tests REMOVED — _is_second_deferral and DEFERRED handling
+# removed as part of Byzantine Consensus Panel (binary BFT model).
+# See Requirements 6.1, 6.2.
 # ---------------------------------------------------------------------------
 
-class TestIsSecondDeferral:
-    """Unit tests for _is_second_deferral helper method."""
-
-    def test_matching_title_returns_true(self):
-        """A candidate whose title matches a previously deferred candidate
-        is identified as a second deferral.
-
-        **Validates: Requirement 10.4**
-        """
-        orch = _make_orchestrator()
-
-        candidate = CandidateInsight(
-            title="Recurring Pattern in DB Migrations",
-            type="insight",
-            operation="CREATE",
-            content="Some content",
-            source_memories=[],
-            relationships=[],
-            strategy_that_found_it="pattern_emergence",
-        )
-
-        deferred_from_previous = [
-            {
-                "id": "prev-candidate-1",
-                "candidate_json": {"title": "Recurring Pattern in DB Migrations", "content": "old content"},
-                "evaluator_a_verdict": "ACCEPT",
-                "evaluator_a_reasoning": "good",
-                "evaluator_b_verdict": "ACCEPT",
-                "evaluator_b_reasoning": "useful",
-                "evaluator_c_verdict": "REJECT",
-                "evaluator_c_reasoning": "not novel enough",
-            },
-        ]
-
-        assert orch._is_second_deferral(candidate, deferred_from_previous) is True
-
-    def test_no_matching_title_returns_false(self):
-        """A candidate with a new title is not a second deferral.
-
-        **Validates: Requirement 10.5**
-        """
-        orch = _make_orchestrator()
-
-        candidate = CandidateInsight(
-            title="Brand New Insight",
-            type="insight",
-            operation="CREATE",
-            content="Fresh content",
-            source_memories=[],
-            relationships=[],
-            strategy_that_found_it="cross_project_collision",
-        )
-
-        deferred_from_previous = [
-            {
-                "id": "prev-candidate-1",
-                "candidate_json": {"title": "Different Insight", "content": "other content"},
-            },
-        ]
-
-        assert orch._is_second_deferral(candidate, deferred_from_previous) is False
-
-    def test_empty_deferred_list_returns_false(self):
-        """When no previous deferrals exist, nothing is a second deferral.
-
-        **Validates: Requirement 10.5**
-        """
-        orch = _make_orchestrator()
-
-        candidate = CandidateInsight(
-            title="Any Insight",
-            type="insight",
-            operation="CREATE",
-            content="Content",
-            source_memories=[],
-            relationships=[],
-            strategy_that_found_it="orphan_archaeology",
-        )
-
-        assert orch._is_second_deferral(candidate, []) is False
-
-    def test_candidate_json_as_string(self):
-        """Handles candidate_json stored as a JSON string (not dict).
-
-        **Validates: Requirement 10.4**
-        """
-        orch = _make_orchestrator()
-
-        candidate = CandidateInsight(
-            title="Stringified Match",
-            type="insight",
-            operation="CREATE",
-            content="Content",
-            source_memories=[],
-            relationships=[],
-            strategy_that_found_it="temporal_juxtaposition",
-        )
-
-        deferred_from_previous = [
-            {
-                "id": "prev-1",
-                "candidate_json": json.dumps({"title": "Stringified Match", "content": "old"}),
-            },
-        ]
-
-        assert orch._is_second_deferral(candidate, deferred_from_previous) is True
-
-    def test_invalid_json_string_skipped(self):
-        """Malformed candidate_json strings are skipped gracefully.
-
-        **Validates: Requirement 10.4**
-        """
-        orch = _make_orchestrator()
-
-        candidate = CandidateInsight(
-            title="Target",
-            type="insight",
-            operation="CREATE",
-            content="Content",
-            source_memories=[],
-            relationships=[],
-            strategy_that_found_it="pattern_emergence",
-        )
-
-        deferred_from_previous = [
-            {"id": "prev-1", "candidate_json": "not valid json {{{"},
-            {"id": "prev-2", "candidate_json": {"title": "Target", "content": "match"}},
-        ]
-
-        # Should still find the match in the second entry
-        assert orch._is_second_deferral(candidate, deferred_from_previous) is True
-
-
-class TestTwoStrikeRuleInRun:
-    """Integration tests for the two-strike rule in the orchestrator's run method."""
-
-    def _make_slice(self):
-        return MemorySlice(
-            name="Test Slice",
-            strategy="pattern_emergence",
-            memory_ids=["m1", "m2"],
-            memory_titles=["Memory 1", "Memory 2"],
-            hypothesis="Test hypothesis",
-        )
-
-    def test_second_deferral_marked_rejected_with_flag(self):
-        """A candidate deferred in the previous cycle that gets DEFERRED again
-        is stored as REJECTED with deferred_twice_rejected=TRUE.
-
-        **Validates: Requirements 10.4, 18.4**
-        """
-        orch = _make_orchestrator()
-        test_slice = self._make_slice()
-
-        # The candidate that will be produced by the Thinker
-        candidate = CandidateInsight(
-            title="Previously Deferred Insight",
-            type="insight",
-            operation="CREATE",
-            content="Re-evaluated content",
-            source_memories=["m1"],
-            relationships=[],
-            strategy_that_found_it="deferred_evidence_gathering",
-        )
-
-        # Deferred candidates from the previous cycle
-        deferred_from_prev = [
-            {
-                "id": "prev-cand-id",
-                "candidate_json": {"title": "Previously Deferred Insight", "content": "original"},
-                "evaluator_a_verdict": "ACCEPT",
-                "evaluator_a_reasoning": "good",
-                "evaluator_b_verdict": "ACCEPT",
-                "evaluator_b_reasoning": "useful",
-                "evaluator_c_verdict": "REJECT",
-                "evaluator_c_reasoning": "not novel",
-            },
-        ]
-
-        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
-             patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
-             patch.object(orch, "invoke_thinker", return_value=[candidate]), \
-             patch.object(orch, "invoke_evaluator") as mock_eval, \
-             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
-             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
-
-            mock_db.create_run.return_value = "run-id"
-            mock_db.get_memory_stats.return_value = {
-                "total_count": 100, "recent_activity": 5,
-                "date_range": {"min": None, "max": None},
-                "type_distribution": {},
-            }
-            mock_db.get_deferred_candidates.return_value = deferred_from_prev
-            mock_db.store_candidate.return_value = "new-cand-id"
-
-            # Return 2/3 ACCEPT → DEFERRED
-            mock_eval.side_effect = [
-                EvaluatorVerdict(role="skeptic", verdict="ACCEPT", reasoning="ok"),
-                EvaluatorVerdict(role="advocate", verdict="ACCEPT", reasoning="useful"),
-                EvaluatorVerdict(role="epistemologist", verdict="REJECT", reasoning="still not novel"),
-            ]
-
-            # Need get_previous_run_id to return a run
-            mock_db.get_previous_run_id.return_value = "prev-run-id"
-            result = orch.run(run_type="scheduled")
-
-            # Candidate should be counted as rejected, not deferred
-            assert result.candidates_rejected == 1
-            assert result.candidates_deferred == 0
-
-            # store_candidate called with "REJECTED"
-            store_call = mock_db.store_candidate.call_args
-            assert store_call[0][3] == "REJECTED"
-
-            # mark_deferred_twice_rejected called with the new candidate ID
-            mock_db.mark_deferred_twice_rejected.assert_called_once_with("new-cand-id")
-
-    def test_first_deferral_stored_normally(self):
-        """A candidate deferred for the first time is stored as DEFERRED
-        without triggering the two-strike rule.
-
-        **Validates: Requirements 10.1, 10.5**
-        """
-        orch = _make_orchestrator()
-        test_slice = self._make_slice()
-
-        candidate = CandidateInsight(
-            title="Fresh Candidate",
-            type="insight",
-            operation="CREATE",
-            content="New content",
-            source_memories=["m1"],
-            relationships=[],
-            strategy_that_found_it="pattern_emergence",
-        )
-
-        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
-             patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
-             patch.object(orch, "invoke_thinker", return_value=[candidate]), \
-             patch.object(orch, "invoke_evaluator") as mock_eval, \
-             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
-             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
-
-            mock_db.create_run.return_value = "run-id"
-            mock_db.get_memory_stats.return_value = {
-                "total_count": 100, "recent_activity": 5,
-                "date_range": {"min": None, "max": None},
-                "type_distribution": {},
-            }
-            mock_db.get_deferred_candidates.return_value = []  # No previous deferrals
-            mock_db.store_candidate.return_value = "cand-id"
-
-            # 2/3 ACCEPT → DEFERRED
-            mock_eval.side_effect = [
-                EvaluatorVerdict(role="skeptic", verdict="ACCEPT", reasoning="ok"),
-                EvaluatorVerdict(role="advocate", verdict="REJECT", reasoning="not relevant"),
-                EvaluatorVerdict(role="epistemologist", verdict="ACCEPT", reasoning="novel"),
-            ]
-
-            mock_db.get_previous_run_id.return_value = "prev-run-id"
-            result = orch.run(run_type="scheduled")
-
-            # Should be deferred, not rejected
-            assert result.candidates_deferred == 1
-            assert result.candidates_rejected == 0
-
-            # store_candidate called with "DEFERRED"
-            store_call = mock_db.store_candidate.call_args
-            assert store_call[0][3] == "DEFERRED"
-
-            # mark_deferred_twice_rejected should NOT be called
-            mock_db.mark_deferred_twice_rejected.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Property 4: Two-Strike Expiration
-# **Validates: Requirements 10.4, 18.4**
-# ---------------------------------------------------------------------------
-
-class TestTwoStrikeExpirationProperty:
-    """Property-based tests for two-strike expiration rule.
-
-    For any candidate that was DEFERRED in cycle N, if it fails consensus
-    again in cycle N+1, the Orchestrator marks it as REJECTED with
-    deferred_twice_rejected = TRUE. No candidate survives more than 2
-    consecutive deferrals.
-    """
-
-    @given(
-        title=st.text(
-            min_size=1,
-            max_size=80,
-            alphabet=st.characters(whitelist_categories=("L", "N", "Z")),
-        ),
-    )
-    @settings(max_examples=25)
-    def test_second_deferral_detected_for_any_title(self, title):
-        """For any candidate title, _is_second_deferral returns True when
-        the title matches a previously deferred candidate.
-
-        **Validates: Requirements 10.4, 18.4**
-        """
-        orch = _make_orchestrator()
-
-        candidate = CandidateInsight(
-            title=title,
-            type="insight",
-            operation="CREATE",
-            content="Some content",
-            source_memories=[],
-            relationships=[],
-            strategy_that_found_it="pattern_emergence",
-        )
-
-        deferred_from_previous = [
-            {
-                "id": "prev-cand-1",
-                "candidate_json": {"title": title, "content": "old content"},
-            },
-        ]
-
-        assert orch._is_second_deferral(candidate, deferred_from_previous) is True
-
-    @given(
-        title=st.text(
-            min_size=1,
-            max_size=80,
-            alphabet=st.characters(whitelist_categories=("L", "N", "Z")),
-        ),
-    )
-    @settings(max_examples=25)
-    def test_non_matching_title_not_detected_as_second_deferral(self, title):
-        """For any candidate title, _is_second_deferral returns False when
-        no previously deferred candidate has a matching title.
-
-        **Validates: Requirements 10.4, 18.4**
-        """
-        orch = _make_orchestrator()
-
-        candidate = CandidateInsight(
-            title=title,
-            type="insight",
-            operation="CREATE",
-            content="Some content",
-            source_memories=[],
-            relationships=[],
-            strategy_that_found_it="cross_project_collision",
-        )
-
-        # Use a title that is guaranteed to differ by appending a sentinel
-        different_title = title + "__SENTINEL_NEVER_MATCH__"
-        deferred_from_previous = [
-            {
-                "id": "prev-cand-1",
-                "candidate_json": {"title": different_title, "content": "old content"},
-            },
-        ]
-
-        assert orch._is_second_deferral(candidate, deferred_from_previous) is False
-
-    @given(
-        title=st.text(
-            min_size=1,
-            max_size=80,
-            alphabet=st.characters(whitelist_categories=("L", "N", "Z")),
-        ),
-    )
-    @settings(max_examples=20)
-    def test_two_strike_marks_rejected_with_flag_for_any_title(self, title):
-        """For any candidate title deferred in cycle N that gets DEFERRED
-        again in cycle N+1, verify it is stored as REJECTED and
-        mark_deferred_twice_rejected is called.
-
-        **Validates: Requirements 10.4, 18.4**
-        """
-        orch = _make_orchestrator()
-
-        test_slice = MemorySlice(
-            name="Test Slice",
-            strategy="pattern_emergence",
-            memory_ids=["m1"],
-            memory_titles=["Memory 1"],
-            hypothesis="Test hypothesis",
-        )
-
-        candidate = CandidateInsight(
-            title=title,
-            type="insight",
-            operation="CREATE",
-            content="Re-evaluated content for " + title,
-            source_memories=["m1"],
-            relationships=[],
-            strategy_that_found_it="deferred_evidence_gathering",
-        )
-
-        deferred_from_prev = [
-            {
-                "id": "prev-cand-id",
-                "candidate_json": {"title": title, "content": "original"},
-                "evaluator_a_verdict": "ACCEPT",
-                "evaluator_a_reasoning": "good",
-                "evaluator_b_verdict": "ACCEPT",
-                "evaluator_b_reasoning": "useful",
-                "evaluator_c_verdict": "REJECT",
-                "evaluator_c_reasoning": "not novel",
-            },
-        ]
-
-        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
-             patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
-             patch.object(orch, "invoke_thinker", return_value=[candidate]), \
-             patch.object(orch, "invoke_evaluator") as mock_eval, \
-             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
-             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
-
-            mock_db.create_run.return_value = "run-id"
-            mock_db.get_memory_stats.return_value = {
-                "total_count": 100, "recent_activity": 5,
-                "date_range": {"min": None, "max": None},
-                "type_distribution": {},
-            }
-            mock_db.get_deferred_candidates.return_value = deferred_from_prev
-            mock_db.store_candidate.return_value = "new-cand-id"
-
-            # 2/3 ACCEPT → DEFERRED verdict
-            mock_eval.side_effect = [
-                EvaluatorVerdict(role="skeptic", verdict="ACCEPT", reasoning="ok"),
-                EvaluatorVerdict(role="advocate", verdict="ACCEPT", reasoning="useful"),
-                EvaluatorVerdict(role="epistemologist", verdict="REJECT", reasoning="still weak"),
-            ]
-
-            mock_db.get_previous_run_id.return_value = "prev-run-id"
-            result = orch.run(run_type="scheduled")
-
-            # Two-strike: candidate ends up rejected, not deferred
-            assert result.candidates_rejected == 1
-            assert result.candidates_deferred == 0
-
-            # store_candidate called with "REJECTED"
-            store_call = mock_db.store_candidate.call_args
-            assert store_call[0][3] == "REJECTED"
-
-            # mark_deferred_twice_rejected called
-            mock_db.mark_deferred_twice_rejected.assert_called_once_with("new-cand-id")
-
-
-class TestTwoStrikeExpirationExplicit:
-    """Explicit unit tests for two-strike expiration edge cases."""
-
-    def _make_slice(self):
-        return MemorySlice(
-            name="Test Slice",
-            strategy="pattern_emergence",
-            memory_ids=["m1", "m2"],
-            memory_titles=["Memory 1", "Memory 2"],
-            hypothesis="Test hypothesis",
-        )
-
-    def test_candidate_deferred_once_stored_as_deferred(self):
-        """A candidate deferred for the first time is stored as DEFERRED,
-        not rejected. The two-strike rule does not apply.
-
-        **Validates: Requirements 10.4, 18.4**
-        """
-        orch = _make_orchestrator()
-        test_slice = self._make_slice()
-
-        candidate = CandidateInsight(
-            title="First Time Deferred",
-            type="insight",
-            operation="CREATE",
-            content="Brand new candidate",
-            source_memories=["m1"],
-            relationships=[],
-            strategy_that_found_it="pattern_emergence",
-        )
-
-        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
-             patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
-             patch.object(orch, "invoke_thinker", return_value=[candidate]), \
-             patch.object(orch, "invoke_evaluator") as mock_eval, \
-             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
-             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
-
-            mock_db.create_run.return_value = "run-id"
-            mock_db.get_memory_stats.return_value = {
-                "total_count": 100, "recent_activity": 5,
-                "date_range": {"min": None, "max": None},
-                "type_distribution": {},
-            }
-            # No matching deferred candidates from previous cycle
-            mock_db.get_deferred_candidates.return_value = [
-                {
-                    "id": "prev-cand-1",
-                    "candidate_json": {"title": "Completely Different Title", "content": "other"},
-                },
-            ]
-            mock_db.store_candidate.return_value = "cand-id"
-
-            # 2/3 ACCEPT → DEFERRED
-            mock_eval.side_effect = [
-                EvaluatorVerdict(role="skeptic", verdict="ACCEPT", reasoning="ok"),
-                EvaluatorVerdict(role="advocate", verdict="ACCEPT", reasoning="useful"),
-                EvaluatorVerdict(role="epistemologist", verdict="REJECT", reasoning="not novel"),
-            ]
-
-            mock_db.get_previous_run_id.return_value = "prev-run-id"
-            result = orch.run(run_type="scheduled")
-
-            # Should be deferred, not rejected
-            assert result.candidates_deferred == 1
-            assert result.candidates_rejected == 0
-
-            # store_candidate called with "DEFERRED"
-            store_call = mock_db.store_candidate.call_args
-            assert store_call[0][3] == "DEFERRED"
-
-            # mark_deferred_twice_rejected should NOT be called
-            mock_db.mark_deferred_twice_rejected.assert_not_called()
-
-    def test_candidate_deferred_twice_stored_as_rejected_with_flag(self):
-        """A candidate deferred in cycle N that gets DEFERRED again in cycle N+1
-        is stored as REJECTED with deferred_twice_rejected=TRUE.
-
-        **Validates: Requirements 10.4, 18.4**
-        """
-        orch = _make_orchestrator()
-        test_slice = self._make_slice()
-
-        candidate = CandidateInsight(
-            title="Twice Deferred Insight",
-            type="insight",
-            operation="CREATE",
-            content="Re-evaluated content",
-            source_memories=["m1"],
-            relationships=[],
-            strategy_that_found_it="deferred_evidence_gathering",
-        )
-
-        deferred_from_prev = [
-            {
-                "id": "prev-cand-id",
-                "candidate_json": {"title": "Twice Deferred Insight", "content": "original"},
-                "evaluator_a_verdict": "ACCEPT",
-                "evaluator_a_reasoning": "good",
-                "evaluator_b_verdict": "ACCEPT",
-                "evaluator_b_reasoning": "useful",
-                "evaluator_c_verdict": "REJECT",
-                "evaluator_c_reasoning": "not novel enough",
-            },
-        ]
-
-        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
-             patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
-             patch.object(orch, "invoke_thinker", return_value=[candidate]), \
-             patch.object(orch, "invoke_evaluator") as mock_eval, \
-             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
-             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
-
-            mock_db.create_run.return_value = "run-id"
-            mock_db.get_memory_stats.return_value = {
-                "total_count": 100, "recent_activity": 5,
-                "date_range": {"min": None, "max": None},
-                "type_distribution": {},
-            }
-            mock_db.get_deferred_candidates.return_value = deferred_from_prev
-            mock_db.store_candidate.return_value = "new-cand-id"
-
-            # 2/3 ACCEPT → DEFERRED verdict again
-            mock_eval.side_effect = [
-                EvaluatorVerdict(role="skeptic", verdict="ACCEPT", reasoning="ok"),
-                EvaluatorVerdict(role="advocate", verdict="ACCEPT", reasoning="useful"),
-                EvaluatorVerdict(role="epistemologist", verdict="REJECT", reasoning="still not novel"),
-            ]
-
-            mock_db.get_previous_run_id.return_value = "prev-run-id"
-            result = orch.run(run_type="scheduled")
-
-            # Two-strike: rejected, not deferred
-            assert result.candidates_rejected == 1
-            assert result.candidates_deferred == 0
-
-            # store_candidate called with "REJECTED"
-            store_call = mock_db.store_candidate.call_args
-            assert store_call[0][3] == "REJECTED"
-
-            # mark_deferred_twice_rejected called with the candidate ID
-            mock_db.mark_deferred_twice_rejected.assert_called_once_with("new-cand-id")
 
 
 # ---------------------------------------------------------------------------
@@ -1368,8 +781,8 @@ class TestSessionStartCandidateLimiting:
 
             # Only 2 candidates should have been processed (not 3)
             assert result.candidates_generated == 2
-            # 3 evaluators per candidate × 2 candidates = 6 evaluator calls
-            assert mock_eval.call_count == 6
+            # 4 evaluators per candidate × 2 candidates = 8 evaluator calls
+            assert mock_eval.call_count == 8
 
     def test_session_start_keeps_candidates_when_2_or_fewer(self):
         """When run_type is session_start and Thinker returns ≤2 candidates,
@@ -1454,8 +867,8 @@ class TestSessionStartCandidateLimiting:
 
             # All 3 candidates should be processed
             assert result.candidates_generated == 3
-            # 3 evaluators × 3 candidates = 9 evaluator calls
-            assert mock_eval.call_count == 9
+            # 4 evaluators × 3 candidates = 12 evaluator calls
+            assert mock_eval.call_count == 12
 
 
 # ---------------------------------------------------------------------------
@@ -1492,14 +905,13 @@ class TestDigestCompletenessProperty:
 
     @given(
         accepted=st.lists(_digest_candidates, min_size=1, max_size=5),
-        deferred=st.lists(_digest_candidates, min_size=0, max_size=3),
         rejected=st.lists(_digest_candidates, min_size=0, max_size=3),
     )
     @settings(max_examples=20)
     def test_digest_contains_required_sections_and_grouping(
-        self, accepted, deferred, rejected
+        self, accepted, rejected
     ):
-        """For any set of accepted/deferred/rejected candidates, verify digest
+        """For any set of accepted/rejected candidates, verify digest
         groups by strategy, includes required sections, and shows operation type
         for UPDATE/SUPERSEDE.
 
@@ -1518,7 +930,7 @@ class TestDigestCompletenessProperty:
              patch("pathlib.Path.write_text", _patched_write_text):
             mock_digest_db.get_evaluator_verdicts_for_run.return_value = {}
             mock_digest_db.was_feedback_injected.return_value = False
-            generate_digest(run_id, accepted, deferred, rejected)
+            generate_digest(run_id, accepted, rejected)
 
         assert "text" in written_content, "Digest file should have been written"
         digest_text = written_content["text"]
@@ -1526,7 +938,6 @@ class TestDigestCompletenessProperty:
         # 1. Run Statistics section with correct counts (Req 12.5)
         assert "## Run Statistics" in digest_text
         assert f"Accepted: {len(accepted)}" in digest_text
-        assert f"Deferred: {len(deferred)}" in digest_text
         assert f"Rejected: {len(rejected)}" in digest_text
 
         # 2. Explorer Strategies Used section (Req 12.6)
@@ -1560,15 +971,6 @@ class TestDigestCompletenessExplicit:
         """
         from src.dream_cycle.digest import generate_digest
 
-        deferred_candidate = CandidateInsight(
-            title="Deferred One",
-            type="insight",
-            operation="CREATE",
-            content="Deferred content",
-            source_memories=["src-1"],
-            relationships=[],
-            strategy_that_found_it="pattern_emergence",
-        )
         rejected_candidate = CandidateInsight(
             title="Rejected One",
             type="insight",
@@ -1588,12 +990,11 @@ class TestDigestCompletenessExplicit:
              patch("pathlib.Path.write_text", _capture_write):
             mock_digest_db.get_evaluator_verdicts_for_run.return_value = {}
             mock_digest_db.was_feedback_injected.return_value = False
-            generate_digest("run-empty", [], [deferred_candidate], [rejected_candidate])
+            generate_digest("run-empty", [], [rejected_candidate])
 
         digest_text = written_content["text"]
         assert "No insights were accepted" in digest_text
         assert "Accepted: 0" in digest_text
-        assert "Deferred: 1" in digest_text
         assert "Rejected: 1" in digest_text
 
     def test_digest_update_operation_shows_operation_type(self):
@@ -1623,7 +1024,7 @@ class TestDigestCompletenessExplicit:
              patch("pathlib.Path.write_text", _capture_write):
             mock_digest_db.get_evaluator_verdicts_for_run.return_value = {}
             mock_digest_db.was_feedback_injected.return_value = False
-            generate_digest("run-update", [update_candidate], [], [])
+            generate_digest("run-update", [update_candidate], [])
 
         digest_text = written_content["text"]
         assert "**Operation**: UPDATE" in digest_text
@@ -1658,7 +1059,7 @@ class TestDigestCompletenessExplicit:
              patch("pathlib.Path.write_text", _capture_write):
             mock_digest_db.get_evaluator_verdicts_for_run.return_value = {}
             mock_digest_db.was_feedback_injected.return_value = False
-            result_path = generate_digest("run-path", [candidate], [], [])
+            result_path = generate_digest("run-path", [candidate], [])
 
         # Result path is a string pointing to logs/ directory
         assert isinstance(result_path, str)
@@ -1750,7 +1151,7 @@ class TestErrorHandling:
 
         call_count = {"n": 0}
 
-        def thinker_side_effect(s, deferred):
+        def thinker_side_effect(s):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise RuntimeError("Thinker crashed on slice A")
@@ -1786,8 +1187,8 @@ class TestErrorHandling:
             assert result.candidates_generated == 1
             assert result.candidates_accepted == 1
 
-            # Evaluators should have been called 3 times (3 evaluators × 1 candidate)
-            assert mock_eval.call_count == 3
+            # Evaluators should have been called 4 times (4 evaluators × 1 candidate)
+            assert mock_eval.call_count == 4
 
     def test_evaluator_timeout_treated_as_reject(self):
         """When an evaluator raises TimeoutError, its verdict is treated
@@ -1804,7 +1205,9 @@ class TestErrorHandling:
              patch.object(orch, "invoke_thinker", return_value=[candidate]), \
              patch.object(orch, "invoke_evaluator") as mock_eval, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
-             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
+             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
+             patch("src.dream_cycle.orchestrator.check_duplicate", return_value=None), \
+             patch("src.dream_cycle.orchestrator.store_accepted", return_value="mem-id"):
 
             mock_db.create_run.return_value = "run-eval-timeout"
             mock_db.get_memory_stats.return_value = {
@@ -1816,23 +1219,70 @@ class TestErrorHandling:
             mock_db.get_previous_run_id.return_value = None
             mock_db.store_candidate.return_value = "cand-id"
 
-            # Skeptic times out, advocate and epistemologist ACCEPT
+            # Skeptic times out, advocate, epistemologist, and methodologist ACCEPT
             mock_eval.side_effect = [
                 TimeoutError("Skeptic timed out"),
                 EvaluatorVerdict(role="advocate", verdict="ACCEPT", reasoning="useful"),
                 EvaluatorVerdict(role="epistemologist", verdict="ACCEPT", reasoning="novel"),
+                EvaluatorVerdict(role="methodologist", verdict="ACCEPT", reasoning="sound methodology"),
             ]
 
             result = orch.run(run_type="scheduled")
 
-            # 2/3 ACCEPT (timeout = REJECT) → DEFERRED
+            # 3/4 ACCEPT (timeout = REJECT) → ACCEPTED (BFT quorum met)
             assert result.candidates_generated == 1
-            assert result.candidates_deferred == 1
+            assert result.candidates_accepted == 1
+            assert result.candidates_deferred == 0
             assert result.candidates_rejected == 0
 
-            # store_candidate called with DEFERRED
+            # store_candidate called with ACCEPTED
             store_call = mock_db.store_candidate.call_args
-            assert store_call[0][3] == "DEFERRED"
+            assert store_call[0][3] == "ACCEPTED"
+
+    def test_two_evaluator_crashes_exceeds_bft_tolerance(self):
+        """When 2 evaluators crash/timeout, both become REJECT via
+        _invoke_evaluator_safe. With at most 2 ACCEPTs from the surviving
+        evaluators, the candidate is REJECTED (2 faults exceeds f=1 tolerance).
+
+        **Validates: BFT correctness under cascading failure**
+        """
+        orch = _make_orchestrator()
+        test_slice = self._make_slice()
+        candidate = self._make_candidate("Double Crash Candidate")
+
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
+             patch.object(orch, "invoke_thinker", return_value=[candidate]), \
+             patch.object(orch, "invoke_evaluator") as mock_eval, \
+             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
+             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
+
+            mock_db.create_run.return_value = "run-double-crash"
+            mock_db.get_memory_stats.return_value = {
+                "total_count": 100,
+                "recent_activity": 5,
+                "date_range": {"min": None, "max": None},
+                "type_distribution": {},
+            }
+            mock_db.store_candidate.return_value = "cand-id"
+
+            # Skeptic and methodologist crash, advocate and epistemologist ACCEPT
+            mock_eval.side_effect = [
+                TimeoutError("Skeptic timed out"),
+                EvaluatorVerdict(role="advocate", verdict="ACCEPT", reasoning="useful"),
+                EvaluatorVerdict(role="epistemologist", verdict="ACCEPT", reasoning="novel"),
+                RuntimeError("Methodologist crashed"),
+            ]
+
+            result = orch.run(run_type="scheduled")
+
+            # 2 crashes → 2 REJECT, 2 ACCEPT → ≤2/4 → REJECTED
+            assert result.candidates_generated == 1
+            assert result.candidates_accepted == 0
+            assert result.candidates_rejected == 1
+
+            store_call = mock_db.store_candidate.call_args
+            assert store_call[0][3] == "REJECTED"
 
     def test_supersede_target_missing_downgrades_to_create_with_warning(self):
         """When a SUPERSEDE target memory does not exist, the operation
@@ -1924,6 +1374,7 @@ class TestBuildFeedbackInjectionUserRejections:
         with patch("src.dream_cycle.feedback.dream_cycle_db") as mock_db:
             mock_db.get_recent_rejections.return_value = mock_rejections
             mock_db.get_user_rejections.return_value = mock_user_rejections
+            mock_db.get_accepted_dissents.return_value = []
 
             result = build_feedback_injection()
 
@@ -1945,6 +1396,7 @@ class TestBuildFeedbackInjectionUserRejections:
         with patch("src.dream_cycle.feedback.dream_cycle_db") as mock_db:
             mock_db.get_recent_rejections.return_value = []
             mock_db.get_user_rejections.return_value = mock_user_rejections
+            mock_db.get_accepted_dissents.return_value = []
 
             result = build_feedback_injection()
 
@@ -1958,6 +1410,7 @@ class TestBuildFeedbackInjectionUserRejections:
         with patch("src.dream_cycle.feedback.dream_cycle_db") as mock_db:
             mock_db.get_recent_rejections.return_value = []
             mock_db.get_user_rejections.return_value = []
+            mock_db.get_accepted_dissents.return_value = []
 
             result = build_feedback_injection()
 
@@ -1976,6 +1429,7 @@ class TestBuildFeedbackInjectionUserRejections:
         with patch("src.dream_cycle.feedback.dream_cycle_db") as mock_db:
             mock_db.get_recent_rejections.return_value = []
             mock_db.get_user_rejections.return_value = mock_user_rejections
+            mock_db.get_accepted_dissents.return_value = []
 
             result = build_feedback_injection()
 
@@ -1995,6 +1449,7 @@ class TestBuildFeedbackInjectionUserRejections:
         with patch("src.dream_cycle.feedback.dream_cycle_db") as mock_db:
             mock_db.get_recent_rejections.return_value = []
             mock_db.get_user_rejections.return_value = mock_user_rejections
+            mock_db.get_accepted_dissents.return_value = []
 
             result = build_feedback_injection()
 
@@ -2013,6 +1468,7 @@ class TestBuildFeedbackInjectionUserRejections:
         with patch("src.dream_cycle.feedback.dream_cycle_db") as mock_db:
             mock_db.get_recent_rejections.return_value = []
             mock_db.get_user_rejections.return_value = mock_user_rejections
+            mock_db.get_accepted_dissents.return_value = []
 
             result = build_feedback_injection()
 
@@ -2143,6 +1599,7 @@ _run_candidate_entry = st.fixed_dictionaries({
         _verdict_outcomes,  # skeptic
         _verdict_outcomes,  # advocate
         _verdict_outcomes,  # epistemologist
+        _verdict_outcomes,  # methodologist
     ),
 })
 
@@ -2152,7 +1609,7 @@ class TestRunRecordCompletenessProperty:
 
     For any completed run, verify completed_at is non-null, candidate counts
     sum correctly (generated = accepted + deferred + rejected), and every
-    candidate has all 3 evaluator verdicts stored.
+    candidate has all 4 evaluator verdicts stored.
     """
 
     @given(
@@ -2167,7 +1624,7 @@ class TestRunRecordCompletenessProperty:
         candidates, verify:
         1. completed_at is not None
         2. candidates_generated == candidates_accepted + candidates_deferred + candidates_rejected
-        3. store_candidate was called for every candidate with all 3 evaluator verdicts
+        3. store_candidate was called for every candidate with all 4 evaluator verdicts
 
         **Validates: Requirements 1.5, 1.6, 2.5**
         """
@@ -2202,7 +1659,7 @@ class TestRunRecordCompletenessProperty:
         # Build evaluator side effects for the effective (post-truncation) entries
         eval_side_effects = []
         for entry in effective_entries:
-            skeptic_v, advocate_v, epistemologist_v = entry["verdicts"]
+            skeptic_v, advocate_v, epistemologist_v, methodologist_v = entry["verdicts"]
             eval_side_effects.append(
                 EvaluatorVerdict(role="skeptic", verdict=skeptic_v, reasoning=f"skeptic says {skeptic_v}")
             )
@@ -2211,6 +1668,9 @@ class TestRunRecordCompletenessProperty:
             )
             eval_side_effects.append(
                 EvaluatorVerdict(role="epistemologist", verdict=epistemologist_v, reasoning=f"epistemologist says {epistemologist_v}")
+            )
+            eval_side_effects.append(
+                EvaluatorVerdict(role="methodologist", verdict=methodologist_v, reasoning=f"methodologist says {methodologist_v}")
             )
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
@@ -2260,7 +1720,7 @@ class TestRunRecordCompletenessProperty:
             f"expected {expected_count}"
         )
 
-        # 4. Every store_candidate call has all 3 evaluator verdicts
+        # 4. Every store_candidate call has all 4 evaluator verdicts
         for i, sc_call in enumerate(mock_db.store_candidate.call_args_list):
             verdicts_dict = sc_call[0][2]  # third positional arg is verdicts
             assert verdicts_dict.get("evaluator_a_verdict") is not None, (
@@ -2280,6 +1740,12 @@ class TestRunRecordCompletenessProperty:
             )
             assert verdicts_dict.get("evaluator_c_reasoning") is not None, (
                 f"Candidate {i}: evaluator_c_reasoning missing"
+            )
+            assert verdicts_dict.get("evaluator_d_verdict") is not None, (
+                f"Candidate {i}: evaluator_d_verdict missing"
+            )
+            assert verdicts_dict.get("evaluator_d_reasoning") is not None, (
+                f"Candidate {i}: evaluator_d_reasoning missing"
             )
 
 
@@ -2314,11 +1780,11 @@ class TestRunRecordCompletenessExplicit:
             for i in range(3)
         ]
 
-        # All 3/3 ACCEPT for each candidate
+        # All 4/4 ACCEPT for each candidate
         eval_returns = [
             EvaluatorVerdict(role=r, verdict="ACCEPT", reasoning="good")
             for _ in range(3)
-            for r in ["skeptic", "advocate", "epistemologist"]
+            for r in ["skeptic", "advocate", "epistemologist", "methodologist"]
         ]
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
@@ -2353,7 +1819,7 @@ class TestRunRecordCompletenessExplicit:
         assert mock_db.store_candidate.call_count == 3
 
     def test_mixed_verdicts_run_counts_match(self):
-        """A run with mixed verdicts (1 accepted, 1 deferred, 1 rejected)
+        """A run with mixed verdicts (1 accepted, 2 rejected)
         has correct counts.
 
         **Validates: Requirements 1.5, 1.6, 2.5**
@@ -2381,22 +1847,25 @@ class TestRunRecordCompletenessExplicit:
             for i in range(3)
         ]
 
-        # Candidate 0: 3/3 ACCEPT → ACCEPTED
-        # Candidate 1: 2/3 ACCEPT → DEFERRED
-        # Candidate 2: 1/3 ACCEPT → REJECTED
+        # Candidate 0: 4/4 ACCEPT → ACCEPTED
+        # Candidate 1: 2/4 ACCEPT → REJECTED (binary BFT: ≤2/4 = REJECTED)
+        # Candidate 2: 1/4 ACCEPT → REJECTED
         eval_returns = [
             # Candidate 0
             EvaluatorVerdict(role="skeptic", verdict="ACCEPT", reasoning="good"),
             EvaluatorVerdict(role="advocate", verdict="ACCEPT", reasoning="useful"),
             EvaluatorVerdict(role="epistemologist", verdict="ACCEPT", reasoning="novel"),
+            EvaluatorVerdict(role="methodologist", verdict="ACCEPT", reasoning="sound"),
             # Candidate 1
             EvaluatorVerdict(role="skeptic", verdict="ACCEPT", reasoning="ok"),
             EvaluatorVerdict(role="advocate", verdict="ACCEPT", reasoning="relevant"),
             EvaluatorVerdict(role="epistemologist", verdict="REJECT", reasoning="not novel"),
+            EvaluatorVerdict(role="methodologist", verdict="REJECT", reasoning="weak methodology"),
             # Candidate 2
             EvaluatorVerdict(role="skeptic", verdict="REJECT", reasoning="weak"),
             EvaluatorVerdict(role="advocate", verdict="REJECT", reasoning="irrelevant"),
             EvaluatorVerdict(role="epistemologist", verdict="ACCEPT", reasoning="interesting"),
+            EvaluatorVerdict(role="methodologist", verdict="REJECT", reasoning="not reproducible"),
         ]
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
@@ -2423,21 +1892,22 @@ class TestRunRecordCompletenessExplicit:
         assert result.completed_at is not None
         assert result.candidates_generated == 3
         assert result.candidates_accepted == 1
-        assert result.candidates_deferred == 1
-        assert result.candidates_rejected == 1
+        assert result.candidates_deferred == 0
+        assert result.candidates_rejected == 2
         assert result.candidates_generated == (
             result.candidates_accepted + result.candidates_deferred + result.candidates_rejected
         )
         # All 3 candidates stored
         assert mock_db.store_candidate.call_count == 3
 
-        # Verify each store_candidate call has all 3 verdicts
+        # Verify each store_candidate call has all 4 verdicts
         for sc_call in mock_db.store_candidate.call_args_list:
             verdicts_dict = sc_call[0][2]
             for key in [
                 "evaluator_a_verdict", "evaluator_a_reasoning",
                 "evaluator_b_verdict", "evaluator_b_reasoning",
                 "evaluator_c_verdict", "evaluator_c_reasoning",
+                "evaluator_d_verdict", "evaluator_d_reasoning",
             ]:
                 assert verdicts_dict.get(key) is not None, f"Missing {key}"
 
@@ -2747,10 +2217,10 @@ class TestInvokeEvaluatorSafeRejectOnFailure:
     """Property-based tests verifying _invoke_evaluator_safe returns REJECT
     when invoke_evaluator raises TimeoutError or RuntimeError."""
 
-    evaluator_roles = st.sampled_from(["skeptic", "advocate", "epistemologist"])
+    evaluator_roles = st.sampled_from(["skeptic", "advocate", "epistemologist", "methodologist"])
     error_types = st.sampled_from([TimeoutError, RuntimeError])
 
-    @given(candidate=create_candidates, role=st.sampled_from(["skeptic", "advocate", "epistemologist"]), error_cls=st.sampled_from([TimeoutError, RuntimeError]))
+    @given(candidate=create_candidates, role=st.sampled_from(["skeptic", "advocate", "epistemologist", "methodologist"]), error_cls=st.sampled_from([TimeoutError, RuntimeError]))
     @settings(max_examples=100)
     def test_returns_reject_verdict_on_failure(self, candidate, role, error_cls):
         """For any CandidateInsight and evaluator role, when invoke_evaluator()
@@ -2798,7 +2268,6 @@ class TestFinalOrchestratorMethodSet:
             "invoke_thinker",
             "invoke_evaluator",
             "_invoke_evaluator_safe",
-            "_is_second_deferral",
         }
 
         actual_methods = {
