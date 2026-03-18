@@ -7,7 +7,8 @@
 > Design document for the Second Brain's proactive learning capability.
 > Grounded in cognitive science (Stickgold 2005, Walker 2009, Dunlosky 2013,
 > Roediger & Karpicke 2006, McClelland 1995/2016, Bjork 1992, Bartlett 1932,
-> Park 2023, Shinn 2023) and multi-agent consensus research (Luo et al. 2025
+> Park 2023, Shinn 2023), Byzantine fault tolerance (Lamport 1982, Castro &
+> Liskov 1999 PBFT), and multi-agent consensus research (Luo et al. 2025
 > WBFT, Yao et al. 2025 Roundtable Policy v2, Letta sleep-time compute,
 > Google Always-On Memory Agent 2026).
 >
@@ -150,11 +151,166 @@ ALTER TABLE memory_relationships ADD COLUMN expired_at TIMESTAMPTZ;
 
 ---
 
-## Architectural Decision: Unanimous Consensus (3/3) Is Permanent
+## Byzantine Consensus Panel — Design Rationale
 
-**Status: DECIDED** (promoted from Open Question #2)
+### The Problem
 
-The 3/3 unanimous threshold is the correct choice permanently, not just for v1.
+The Dream Cycle's original consensus panel used 3 evaluators (Skeptic, User
+Advocate, Epistemologist) with a 3/3 unanimity threshold. The architecture was
+named "Four-Agent Byzantine Consensus Pipeline" and referenced Lamport's 1982
+Byzantine Generals Problem, but the implementation did not satisfy Byzantine
+fault tolerance. The core issue: LLM evaluators can hallucinate — producing
+verdicts that look valid but are grounded in fabricated reasoning. A
+hallucinating evaluator is functionally equivalent to a Byzantine fault.
+
+### Research Foundation
+
+Three papers ground this design:
+
+**Lamport, Shostak, and Pease (1982)** — "The Byzantine Generals Problem"
+(ACM TOPLAS). The foundational result: tolerating f faulty nodes requires 3f+1
+total nodes. With oral (unsigned) messages, consensus is impossible if ≥1/3 of
+participants are faulty. The original 3-evaluator panel could tolerate f=0
+faults (since 3f+1=1 for f=0, and 3f+1=4 for f=1). A single hallucinating
+evaluator could corrupt the consensus.
+
+**Castro and Liskov (1999)** — "Practical Byzantine Fault Tolerance" (OSDI).
+Formalized the BFT quorum at 2f+1 out of 3f+1 nodes. The key property: any
+two quorums of size 2f+1 overlap in at least f+1 nodes, guaranteeing at least
+one honest node in the intersection. With f=1, the BFT quorum is 3 out of 4.
+This is the mathematically proven safe threshold for acceptance.
+
+**Shinn et al. (2023)** — "Reflexion: Language Agents with Verbal
+Self-Reflection." Demonstrated that feeding specific verbal feedback from
+failed attempts back to an agent produces significant improvement (80% → 91%
+on HumanEval). The dream cycle's original DEFERRED mechanism was inspired by
+this — passing the dissenter's objection to the Thinker for revision. Our
+analysis concluded that while the Reflexion pattern is valuable, it requires
+a trustworthy trigger signal, and the 2/4 threshold under BFT is not
+trustworthy (see "Why DEFERRED Was Removed" below).
+
+### Design Evolution
+
+The design went through three stages during the specification process:
+
+**Stage 1: Naive BFT (4 evaluators, 3/4 supermajority)**
+
+Initial proposal: add a 4th evaluator (Methodologist), change threshold to
+3/4 = ACCEPTED, 2/4 = DEFERRED, ≤1/4 = REJECTED. This satisfied the Lamport
+3f+1 bound but set DEFERRED at 2/4 (50% agreement) — lower than the old 2/3
+(67%). Analysis revealed this was problematic.
+
+**Stage 2: BFT-correct thresholds (4/4 ACCEPTED, 3/4 DEFERRED)**
+
+Revised proposal: 4/4 = ACCEPTED, 3/4 = DEFERRED, ≤2/4 = REJECTED. The
+rationale for rejecting 2/4 as DEFERRED:
+
+With 4 evaluators and f=1, there are 3 loyal evaluators and 1 potential
+traitor. A 2/4 ACCEPT result means either:
+- (a) 2 loyal + 0 traitor accepted, 1 loyal + 1 traitor rejected — genuine
+  2-1 split among loyal evaluators
+- (b) 1 loyal + 1 traitor accepted, 2 loyal + 0 traitor rejected — only 1
+  genuine supporter
+
+Cases (a) and (b) are indistinguishable. BFT requires designing for the worst
+case. In case (b), deferring wastes a full cycle on a candidate with only 1
+real supporter. Therefore 2/4 = REJECTED.
+
+This stage preserved DEFERRED at 3/4 (one dissenter) with the two-strike rule.
+But it introduced a new problem: requiring 4/4 for ACCEPTED meant the system
+tolerated 0 faults for acceptance — the same as the old 3/3 model, just with
+an extra evaluator call. This undermined the reason for adding the 4th
+evaluator.
+
+**Stage 3: Pure BFT binary consensus (final design)**
+
+The PBFT quorum of 2f+1 = 3 out of 3f+1 = 4 is the mathematically proven
+safe threshold. Setting ACCEPTED at 3/4 (not 4/4) means the system actually
+uses the fault tolerance it was designed for. This eliminated the "narrow miss"
+state entirely, leading to the removal of DEFERRED.
+
+### Why DEFERRED Was Removed
+
+The DEFERRED state served two purposes in the original design:
+1. Give narrow misses a second chance via Thinker revision with the dissenter's
+   objection (Reflexion pattern)
+2. The two-strike rule catches persistent disagreements
+
+Both purposes depend on a trustworthy "close but not quite" signal. With the
+new BFT model:
+- 3/4 ACCEPT is the BFT quorum → ACCEPTED (no "close but not quite" — it
+  passed)
+- 2/4 ACCEPT is ambiguous under BFT → REJECTED (can't trust it was close)
+
+There is no threshold between ACCEPTED and REJECTED where DEFERRED would have
+a trustworthy trigger. The Reflexion pattern is valuable, but it needs a
+reliable signal that the candidate was genuinely close to good. Under BFT
+worst-case analysis, 2/4 doesn't provide that signal.
+
+### Final Architecture: Binary BFT Consensus
+
+| Accepts | Result | Rationale |
+|---------|--------|-----------|
+| ≥3/4 | ACCEPTED | BFT quorum met (2f+1 = 3 out of 3f+1 = 4) |
+| ≤2/4 | REJECTED | Insufficient consensus under worst-case BFT |
+
+No DEFERRED state. Binary consensus.
+
+### The Four Evaluators
+
+Each evaluator assesses candidates from an orthogonal perspective:
+
+| Role | Perspective | Key Criteria |
+|------|------------|-------------|
+| Skeptic (A) | Factual grounding | Accuracy, non-obviousness, logical validity, actionability |
+| User Advocate (B) | User value | Relevance, timing, signal-to-noise, depth |
+| Epistemologist (C) | Knowledge quality | Evidence sufficiency, falsifiability, novelty, durability, retrievability |
+| Methodologist (D) | Reasoning rigor | Internal consistency, source independence, reasoning structure, reproducibility |
+
+The Methodologist was chosen as the 4th evaluator because it covers a gap the
+other three don't: whether the reasoning process itself is sound. The Skeptic
+checks if claims are factually grounded, the Epistemologist checks if the
+knowledge claim is valid, but neither checks whether the cited sources are
+actually independent or whether the reasoning chain is traceable. The
+Methodologist catches the case where the Thinker cites a memory and its chunk
+as two independent sources, or where the conclusion requires unstated
+assumptions not present in the evidence.
+
+### Signal Preservation Without Re-evaluation
+
+Removing DEFERRED eliminates the re-evaluation machinery but preserves the
+learning signal through two lightweight mechanisms:
+
+1. **Digest dissent annotation:** When an insight is accepted with 3/4 (one
+   dissenter), the digest shows: "Accepted (3/4) — [Role] dissented:
+   [reasoning]". This surfaces the concern for human review without blocking
+   acceptance.
+
+2. **Feedback injection of accepted dissents:** A new section in the Explorer's
+   feedback injection — "Dissenting concerns on accepted insights" — surfaces
+   patterns from accepted-but-not-unanimous candidates. If the Methodologist
+   keeps flagging source independence issues on accepted insights, that signal
+   flows into the Explorer's next run, influencing what memory slices it
+   assembles. This is a closed feedback loop that drives systemic improvement
+   without per-candidate re-evaluation.
+
+This approach is actually more valuable than DEFERRED's per-candidate revision.
+DEFERRED said "re-evaluate this specific candidate." The feedback injection
+approach says "learn from this pattern across all candidates." The latter
+addresses systemic issues, not just individual cases.
+
+### What Was Removed
+
+| Component | Location | Status |
+|-----------|----------|--------|
+| tally_consensus DEFERRED branch | consensus.py | Removed — binary ACCEPTED/REJECTED |
+| _is_second_deferral() | orchestrator.py | Removed — no deferred candidates |
+| Deferred candidate handling in invoke_thinker() | orchestrator.py | Removed |
+| get_deferred_candidates() | dream_cycle_db.py | Deprecated — no longer called |
+| mark_deferred_twice_rejected() | dream_cycle_db.py | Deprecated — no longer called |
+| Two-strike rule | orchestrator.py | Removed — no deferred state |
+| "Deferred evidence gathering" Explorer strategy | prompts/explorer.py | Removed |
+| candidates_deferred tracking | DreamCycleResult, dream_cycle_runs | Always 0 — field kept for schema compatibility |
 
 **Why not weighted voting (WBFT model):**
 The WBFT paper (Luo et al. 2025) addresses adversarial environments with
@@ -166,15 +322,14 @@ scores are systematically miscalibrated: 72.9% average initial confidence vs.
 of debates, both sides simultaneously claimed ≥75% probability of victory.
 Weighted voting requires calibrated confidence scores. LLMs don't produce them.
 
-The 3/3 unanimous threshold sidesteps calibration entirely. It asks "accept or
-reject?" — binary verdicts with reasoning, not numerical confidence. Simple,
-interpretable, conservative. If too strict, improve the evaluator prompts.
+The binary BFT model sidesteps calibration entirely. It asks "accept or
+reject?" — binary verdicts with reasoning, not numerical confidence.
 
 **Why not debate protocol between evaluators:**
 Independent evaluation for all execution modes. The debate literature shows
 quality improvements but risks convergence — all evaluators anchoring on the
 first one's reasoning. With independent evaluation, we get genuinely diverse
-perspectives. The 3/3 threshold already provides a high quality bar.
+perspectives.
 
 ---
 
@@ -186,21 +341,24 @@ perspectives. The 3/3 threshold already provides a high quality bar.
 │                                                             │
 │  ┌──────────┐    ┌──────────┐    ┌─────────────────────┐   │
 │  │ EXPLORER │───▶│ THINKER  │───▶│   CONSENSUS PANEL   │   │
-│  │ (Agent 1)│    │ (Agent 2)│    │                     │   │
-│  │          │    │          │    │  Evaluator A ──┐    │   │
-│  │ Decides  │    │ Finds    │    │  Evaluator B ──┼─▶? │   │
-│  │ what to  │    │ patterns,│    │  Evaluator C ──┘    │   │
-│  │ look at  │    │ insights │    │                     │   │
-│  └──────────┘    └──────────┘    │  3 of 3 = ACCEPT   │   │
+│  │ (Agent 1)│    │ (Agent 2)│    │   (BFT: 3f+1 = 4)  │   │
+│  │          │    │          │    │                     │   │
+│  │ Decides  │    │ Finds    │    │  Evaluator A ──┐    │   │
+│  │ what to  │    │ patterns,│    │  Evaluator B ──┼─▶? │   │
+│  │ look at  │    │ insights │    │  Evaluator C ──┤    │   │
+│  └──────────┘    └──────────┘    │  Evaluator D ──┘    │   │
+│       │                          │                     │   │
+│       │                          │  ≥3/4 = ACCEPT      │   │
+│       │                          │  ≤2/4 = REJECT      │   │
 │       │                          └─────────┬───────────┘   │
 │       │                                    │               │
 │       │  ┌─────────────────┐       ┌───────▼───────┐      │
 │       └──│ FEEDBACK LOOP   │       │   ACCEPTED    │      │
-│          │ (rejection      │       │   INSIGHTS    │      │
-│          │  summaries from │       │               │      │
-│          │  last 3 cycles) │       │ → memory_create│      │
-│          └─────────────────┘       │ → memory_relate│      │
-│                                    │ → user digest  │      │
+│          │ (rejections +   │       │   INSIGHTS    │      │
+│          │  accepted       │       │               │      │
+│          │  dissents from  │       │ → memory_create│      │
+│          │  last 3 cycles) │       │ → memory_relate│      │
+│          └─────────────────┘       │ → user digest  │      │
 │                                    └───────────────┘      │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -257,8 +415,8 @@ Example injection:
 ```
 ## Lessons from recent cycles (last 3 runs)
 
-Cycle 2026-03-09: 2 accepted, 3 rejected, 1 deferred
-- Skeptic rejected 2/3 for INSUFFICIENT EVIDENCE: "The claimed pattern of
+Cycle 2026-03-09: 2 accepted, 3 rejected
+- Skeptic rejected 2 of 3 candidates for INSUFFICIENT EVIDENCE: "The claimed pattern of
   'preferring self-hosted solutions' is based on only 2 memories — one from
   the Second Brain project and one from a chat about Docker. Two instances
   from related contexts is not a pattern."
@@ -330,16 +488,6 @@ questions that were asked months ago and now have answers elsewhere in the syste
     7 days). If relevant to current work, assemble into a slice. (Bjork 1992:
     high storage strength + low retrieval strength = strongest reinforcement
     on re-retrieval.)
-
-11. DEFERRED EVIDENCE GATHERING — Check dream_cycle_candidates for DEFERRED
-    insights from the previous cycle. For each, read the dissenting evaluator's
-    objection. Assemble a new slice specifically designed to address that
-    objection. If the Skeptic said "only 2 memories support this," search for
-    additional corroborating memories. If the User Advocate said "not relevant
-    to current work," check whether recent activity has shifted to make it
-    relevant now. (Only activates when deferred candidates exist from the
-    previous cycle. See "Resolved: Deferred Insight Re-evaluation" for the
-    full mechanism.)
 
 When assembling slices, pay attention to temporal validity of knowledge. A memory
 that was later superseded is different from one that's still active. Check for
@@ -496,12 +644,12 @@ generator into a knowledge evolution engine.
 
 ---
 
-## Agents 3a, 3b, 3c: The Consensus Panel
+## Agents 3a, 3b, 3c, 3d: The Consensus Panel
 
 ### Role
 
-Three independent evaluators each assess every candidate insight. An insight
-is accepted only if all three agree (3/3 unanimous). Evaluators never see each
+Four independent evaluators each assess every candidate insight. An insight
+is accepted if 3 or more agree (≥3/4 BFT quorum). Evaluators never see each
 other's reasoning — fully independent evaluation to avoid convergence.
 
 ### Evaluator A: The Skeptic
@@ -622,16 +770,14 @@ ACCEPT or REJECT. Provide reasoning before your verdict.
 
 ```
 For each candidate insight from the Thinker:
-  1. Send to all three Evaluators independently (no shared context)
+  1. Send to all four Evaluators independently (no shared context)
   2. Collect verdicts: ACCEPT or REJECT with reasoning
   3. Count accepts:
-     - 3/3 ACCEPT → ACCEPTED. Create/update memory, create relationships,
-       add to digest.
-     - 2/3 ACCEPT → DEFERRED. Log with dissenting objection preserved.
-       Re-enters next cycle's Thinker queue with the objection as context.
-       (See "Resolved: Deferred Insight Re-evaluation" below for the full
-       mechanism including Explorer evidence gathering and 2-strike expiration.)
-     - 1/3 or 0/3 → REJECTED. Log rejection reasons for Explorer feedback.
+     - ≥3/4 ACCEPT → ACCEPTED. Create/update memory, create relationships,
+       add to digest. If 3/4 (one dissenter), annotate digest with dissent.
+     - ≤2/4 ACCEPT → REJECTED. Log rejection reasons for Explorer feedback.
+  (Binary consensus — no DEFERRED state. See "Byzantine Consensus Panel —
+  Design Rationale" above for the full BFT analysis.)
 ```
 
 ---
@@ -681,7 +827,7 @@ quality gating create friction and erode user trust rapidly.
   synthesis check against recent activity), and 10 (desirable difficulty) only.
   Scoped Explorer, not skipped Panel.
 - Thinker: 1-2 candidates max
-- Panel: Full 3/3 consensus
+- Panel: Full ≥3/4 BFT consensus
 - Output: Brief "here's what I noticed" if anything passes, silence if not.
   Silence is golden — it is better to surface nothing than something mediocre.
 
@@ -710,9 +856,10 @@ Each digest includes:
   and why, with link to the original memory
 - "Reject" action on each insight: marks as `user_rejected` with reason prompt,
   feeds back into Panel calibration. Does NOT delete the memory.
-- Run statistics: candidates generated / accepted / deferred / rejected
+- Run statistics: candidates generated / accepted / rejected
 - Explorer strategies used this cycle
 - Feedback loop summary: what the Explorer learned from last cycle's rejections
+  and dissenting concerns on accepted insights
 
 **v1 delivery: static markdown file.** The dream cycle runs via Kiro headless
 as a scheduled job. The digest is written to `logs/dream-cycle-digest-{date}.md`.
@@ -761,23 +908,23 @@ table and JSON files.
 ### Weekly Dream Cycle
 - Explorer: 1 Kiro session (may use 5-10 tool calls internally)
 - Thinker: 1 session per memory slice (3-5 slices = 3-5 sessions)
-- Panel: 1 session per candidate × 3 evaluators (3-10 candidates × 3 = 9-30 sessions)
-- Typical: 13-24 Kiro sessions (1 Explorer + 3-5 Thinker + 9-18 Panel).
+- Panel: 1 session per candidate × 4 evaluators (3-10 candidates × 4 = 12-40 sessions)
+- Typical: 16-30 Kiro sessions (1 Explorer + 3-5 Thinker + 12-24 Panel).
   The wide range depends on how many slices yield candidates.
 - Circuit breaker: Explorer empty slices → abort, 1 session total
 
 ### Session-Start Briefing
 - Scoped Explorer: 1 session
 - Thinker: 1 session (1-2 candidates)
-- Panel: 3-6 sessions (1-2 candidates × 3 evaluators)
-- Typical: 5-8 Kiro sessions, at most once per 24 hours
+- Panel: 4-8 sessions (1-2 candidates × 4 evaluators)
+- Typical: 6-11 Kiro sessions, at most once per 24 hours
 - Frequency cap prevents unnecessary runs
 
 ### Post-Learn Reflection
 - Scoped Explorer: 1 session
 - Thinker: 1-2 sessions
-- Panel: 3-6 sessions
-- Typical: 5-9 Kiro sessions
+- Panel: 4-8 sessions
+- Typical: 6-11 Kiro sessions
 - Batched to session end, not per memory_learn call
 
 ---
@@ -794,7 +941,7 @@ CREATE TABLE dream_cycle_runs (
     explorer_feedback_injected TEXT,  -- the "Lessons from recent cycles" text
     candidates_generated INTEGER,
     candidates_accepted INTEGER,
-    candidates_deferred INTEGER,
+    candidates_deferred INTEGER,     -- legacy, always 0 (DEFERRED state removed)
     candidates_rejected INTEGER,
     digest TEXT                       -- human-readable summary
 );
@@ -812,11 +959,13 @@ CREATE TABLE dream_cycle_candidates (
     evaluator_b_reasoning TEXT,
     evaluator_c_verdict TEXT,
     evaluator_c_reasoning TEXT,
-    final_verdict TEXT,               -- ACCEPTED, DEFERRED, REJECTED
+    evaluator_d_verdict TEXT,         -- Methodologist (BFT 4th evaluator)
+    evaluator_d_reasoning TEXT,
+    final_verdict TEXT,               -- ACCEPTED or REJECTED (binary BFT consensus)
     created_memory_id UUID REFERENCES memories(id),
     user_rejected_at TIMESTAMPTZ,    -- if user rejects post-hoc
     user_rejection_reason TEXT,
-    deferred_twice_rejected BOOLEAN DEFAULT FALSE,  -- observability: Tier 1 metric
+    deferred_twice_rejected BOOLEAN DEFAULT FALSE,  -- legacy, always FALSE
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -837,7 +986,8 @@ ALTER TABLE memory_relationships ADD COLUMN expired_at TIMESTAMPTZ;
 | Connecting new knowledge to existing | Dunlosky 2013 (elaborative interrogation) |
 | Multi-agent consensus reduces hallucination | Yao et al. 2025 v2 (Roundtable Policy) |
 | Diverse evaluation perspectives | Yao et al. 2025 v2 (diverse agents > homogeneous) |
-| 3/3 unanimous over weighted voting | Prasad & Nguyen 2025 (LLM confidence miscalibration) |
+| Binary BFT consensus (≥3/4) over unanimity | Lamport 1982, Castro & Liskov 1999 (PBFT quorum 2f+1) |
+| Binary verdicts over weighted voting | Prasad & Nguyen 2025 (LLM confidence miscalibration) |
 | Temporal juxtaposition strategy | Howard & Kahana 2002 (temporal context model) |
 | Cross-project collision strategy | Tulving & Thomson 1973 (encoding specificity) |
 | Depth framework for insight quality | Craik & Lockhart 1972 (levels of processing) |
@@ -884,57 +1034,35 @@ is a v2 optimization if cadence increases.
 
 ---
 
-## Resolved: Deferred Insight Re-evaluation
+## Resolved: Why DEFERRED Was Removed
 
-**Status: DECIDED** (Leitner spaced repetition principle)
+**Status: DECIDED** (supersedes original "Deferred Insight Re-evaluation" decision)
 
-Deferred insights (2/3 accept) get both mechanisms: Thinker retry with the
-dissenting objection AND a dedicated Explorer strategy for evidence gathering.
+The DEFERRED state was removed when the consensus panel was upgraded from 3
+evaluators to 4 with binary BFT consensus. See "Byzantine Consensus Panel —
+Design Rationale" above for the full three-stage design evolution.
 
-New Explorer strategy:
-```
-11. DEFERRED EVIDENCE GATHERING — Check dream_cycle_candidates for DEFERRED
-    insights from the previous cycle. For each, read the dissenting evaluator's
-    objection. Assemble a new slice specifically designed to address that
-    objection. If the Skeptic said "only 2 memories support this," search for
-    additional corroborating memories. If the User Advocate said "not relevant
-    to current work," check whether recent activity has shifted to make it
-    relevant now.
-```
+**Summary:** With 4 evaluators and the BFT quorum at 3/4, there is no
+threshold between ACCEPTED and REJECTED where DEFERRED would have a
+trustworthy trigger. The Reflexion pattern (Shinn 2023) that DEFERRED enabled
+requires a reliable signal that the candidate was genuinely close to good.
+Under BFT worst-case analysis, 2/4 doesn't provide that signal — the
+hallucinator may be one of the 2 accepts, meaning only 1 loyal evaluator
+actually supports the insight.
 
-The Thinker receives both the original deferred candidate (with objection) AND
-the new evidence slice. This gives it the best chance of either strengthening
-the insight or recognizing the objection was valid.
+**What replaced it:** Two lightweight signal preservation mechanisms:
+1. Digest dissent annotation for non-unanimous accepts
+2. Feedback injection of accepted dissent patterns
 
-**Expiration:** Reject after 2 consecutive failures. A deferred insight that
-fails consensus a second time is marked REJECTED. However, there is no permanent
-blocklist — if the Explorer independently assembles a slice covering the same
-territory in a future cycle, the Thinker can rediscover the insight naturally.
-This prevents zombie queue growth while avoiding premature closure on insights
-that were ahead of their evidence.
+These provide the same learning loop without re-evaluation machinery, and
+address systemic issues (patterns across candidates) rather than individual
+cases.
 
-This design is grounded in two sources:
-- Leitner spaced repetition: failed cards stay in Box 1 for continued review,
-  not discarded. Removal is only by explicit learner action.
-- CLS theory (McClelland 1995/2016): the hippocampus doesn't discard episodes
-  that failed to integrate on first replay — it keeps them for future attempts.
-  Premature discarding is the "catastrophic interference" CLS warns against.
-
-The design is self-correcting: if the insight was genuinely bad, the feedback
-loop (rejection reasons injected into Explorer prompt) steers away from the
-patterns that produced it. If the insight was ahead of its evidence, new
-memories arriving over time change the landscape enough that the Explorer's
-strategies naturally surface the territory again.
-
-**Observability:** When a deferred insight is rejected on its second attempt,
-log with `deferred_twice_rejected: true` in `dream_cycle_candidates`. This is
-not a blocklist — the Explorer never queries it. It's Tier 1 metrics data. If
-a high rate of deferred-twice-rejected insights later get independently
-rediscovered and accepted, that signals the 2-strike rule is too aggressive
-and should be relaxed to 3 strikes.
-
-**Cost:** 1 Explorer strategy + 1 Thinker call per deferred insight per cycle.
-With the 3/3 threshold, deferrals should be rare (1-2 per cycle). Marginal cost.
+**Legacy:** The `get_deferred_candidates()` and `mark_deferred_twice_rejected()`
+functions are retained in `dream_cycle_db.py` for backward compatibility but
+are no longer called by the orchestrator. The `deferred_twice_rejected` column
+and `candidates_deferred` field remain in the schema but are always
+FALSE/0 respectively.
 
 ---
 
@@ -970,10 +1098,10 @@ AND (last_briefing_at < now() - interval '24 hours')
 Three tiers of metrics, measured at different timescales.
 
 ### Tier 1: Process Metrics (per cycle, fully automated)
-- Acceptance rate: accepted / (accepted + rejected + deferred)
+- Acceptance rate: accepted / (accepted + rejected)
 - Acceptance rate trend over time (Explorer learning from feedback)
-- Deferred-to-accepted conversion rate (do deferred insights pass on retry?)
-- Explorer strategy diversity (are all 11 strategies being used?)
+- Non-unanimous acceptance rate: fraction of accepted insights with 3/4 (not 4/4)
+- Explorer strategy diversity (are all 10 strategies being used?)
 - Cost efficiency: accepted insights per Kiro credit
 
 ### Tier 2: User Engagement Metrics (per digest, semi-automated)
@@ -1060,20 +1188,21 @@ not determine presentation order.
 [19] Engram — Dream Cycle consolidation (https://openengram.ai) — product reference, not peer-reviewed
 [20] Memvid — Persistent Second Brain (https://memvid.com/blog/creating-a-persistent-second-brain-for-autonomous-ai-agents)
 [21] Lilian Weng 2023 — LLM Powered Autonomous Agents (https://lilianweng.github.io/posts/2023-06-23-agent/)
-[22] Lamport 1982 — The Byzantine Generals Problem
-[23] Cognee Architecture — (https://topoteretes.com/blog/fundamentals/how-cognee-builds-ai-memory)
-[24] Cognee Memify Pipeline — (https://topoteretes.com/blog/cognee-news/product-update-memify)
-[25] Mem0 arxiv paper — (https://arxiv.org/abs/2504.19413)
-[26] Mem0 & Mem0-Graph breakdown — (https://memo.d.foundation/research/breakdown/mem0)
-[27] Zep/Graphiti arxiv paper — (https://arxiv.org/abs/2501.13956)
-[28] Zep bi-temporal approach — (https://blog.getzep.com/beyond-static-knowledge-graphs/)
-[29] Letta/MemGPT research — (https://rywalker.com/research/letta)
-[30] Letta Sleeptime Agents — (https://forum.letta.com/t/sleeptime-agents-for-memory-consolidation-best-practices-guide/154)
-[31] Prasad & Nguyen 2025 — When Two LLMs Debate, Both Think They'll Win (https://arxiv.org/abs/2505.19184)
-[32] Letta Sleeptime Agents Forum — (https://docs.letta.com/guides/agents/architectures/sleeptime/)
-[33] Letta Evals — Evaluating Agents that Learn (https://www.letta.com/blog/letta-evals)
-[34] MemoryArena — Stanford 2025 (https://arxiv.org/abs/2602.16313)
-[35] TAME — Trustworthy Test-Time Evolution of Agent Memory (https://arxiv.org/abs/2602.03224)
-[36] Calibration Gap between Model and Human Confidence (https://arxiv.org/abs/2401.13835)
-[37] Carnegie Mellon HCI 2022/2023 — Notification recovery latency and attention residue
-[38] Ebbinghaus 1885 / Leitner 1972 — Spaced repetition and forgetting curve
+[22] Lamport, Shostak, and Pease 1982 — The Byzantine Generals Problem (https://dl.acm.org/doi/10.1145/357172.357176)
+[23] Castro and Liskov 1999 — Practical Byzantine Fault Tolerance (https://pmg.csail.mit.edu/papers/osdi99.pdf)
+[24] Cognee Architecture — (https://topoteretes.com/blog/fundamentals/how-cognee-builds-ai-memory)
+[25] Cognee Memify Pipeline — (https://topoteretes.com/blog/cognee-news/product-update-memify)
+[26] Mem0 arxiv paper — (https://arxiv.org/abs/2504.19413)
+[27] Mem0 & Mem0-Graph breakdown — (https://memo.d.foundation/research/breakdown/mem0)
+[28] Zep/Graphiti arxiv paper — (https://arxiv.org/abs/2501.13956)
+[29] Zep bi-temporal approach — (https://blog.getzep.com/beyond-static-knowledge-graphs/)
+[30] Letta/MemGPT research — (https://rywalker.com/research/letta)
+[31] Letta Sleeptime Agents — (https://forum.letta.com/t/sleeptime-agents-for-memory-consolidation-best-practices-guide/154)
+[32] Prasad & Nguyen 2025 — When Two LLMs Debate, Both Think They'll Win (https://arxiv.org/abs/2505.19184)
+[33] Letta Sleeptime Agents Forum — (https://docs.letta.com/guides/agents/architectures/sleeptime/)
+[34] Letta Evals — Evaluating Agents that Learn (https://www.letta.com/blog/letta-evals)
+[35] MemoryArena — Stanford 2025 (https://arxiv.org/abs/2602.16313)
+[36] TAME — Trustworthy Test-Time Evolution of Agent Memory (https://arxiv.org/abs/2602.03224)
+[37] Calibration Gap between Model and Human Confidence (https://arxiv.org/abs/2401.13835)
+[38] Carnegie Mellon HCI 2022/2023 — Notification recovery latency and attention residue
+[39] Ebbinghaus 1885 / Leitner 1972 — Spaced repetition and forgetting curve
