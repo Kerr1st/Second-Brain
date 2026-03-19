@@ -222,7 +222,7 @@ class TestInvokeTimeout:
 
         **Validates: Requirements 13.2, 13.5**
         """
-        exc = subprocess.TimeoutExpired(cmd=["kiro"], timeout=60)
+        exc = subprocess.TimeoutExpired(cmd=["kiro-cli", "chat"], timeout=60)
         exc.stderr = "process exceeded time limit"
         mock_run.side_effect = exc
 

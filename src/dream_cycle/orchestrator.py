@@ -32,6 +32,15 @@ from src.dream_cycle.feedback import build_feedback_injection
 
 logger = logging.getLogger(__name__)
 
+# Stats dict for aborted/failed runs — all counts zero.
+# candidates_deferred is always 0 (DEFERRED state removed, BFT binary consensus).
+_ZERO_STATS = {
+    "candidates_generated": 0,
+    "candidates_accepted": 0,
+    "candidates_deferred": 0,
+    "candidates_rejected": 0,
+}
+
 
 class DreamCycleOrchestrator:
     """Coordinates the four-agent dream cycle pipeline."""
@@ -145,12 +154,7 @@ class DreamCycleOrchestrator:
             try:
                 dream_cycle_db.complete_run(
                     run_id,
-                    stats={
-                        "candidates_generated": 0,
-                        "candidates_accepted": 0,
-                        "candidates_deferred": 0,
-                        "candidates_rejected": 0,
-                    },
+                    stats=_ZERO_STATS,
                     digest="",
                 )
             except Exception:
@@ -198,16 +202,7 @@ class DreamCycleOrchestrator:
         except (TimeoutError, RuntimeError):
             logger.error("Explorer agent crashed or timed out (run_id=%s)", run_id)
             completed_at = datetime.now(timezone.utc)
-            dream_cycle_db.complete_run(
-                run_id,
-                stats={
-                    "candidates_generated": 0,
-                    "candidates_accepted": 0,
-                    "candidates_deferred": 0,
-                    "candidates_rejected": 0,
-                },
-                digest="",
-            )
+            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
             return DreamCycleResult(
                 run_id=run_id,
                 run_type=run_type,
@@ -226,16 +221,7 @@ class DreamCycleOrchestrator:
         if not slices:
             logger.warning("Circuit breaker: Explorer returned 0 slices, aborting early")
             completed_at = datetime.now(timezone.utc)
-            dream_cycle_db.complete_run(
-                run_id,
-                stats={
-                    "candidates_generated": 0,
-                    "candidates_accepted": 0,
-                    "candidates_deferred": 0,
-                    "candidates_rejected": 0,
-                },
-                digest="",
-            )
+            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
             return DreamCycleResult(
                 run_id=run_id,
                 run_type=run_type,

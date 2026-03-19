@@ -32,11 +32,13 @@ docker/          PostgreSQL + pgvector setup
 migrations/      Numbered SQL migrations + runner script
 src/             Core library (MCP server, DB, embeddings, ingestion, parsers)
   dream_cycle/   Four-agent pipeline (orchestrator, consensus, storage, digest, feedback)
+  dream_cycle_db.py  Dream-cycle-specific DB operations (runs, candidates, metrics)
+  agent_invoker.py   kiro-cli chat subprocess abstraction
   prompts/       Agent prompt templates
   parsers/       Chat and content parsers
 scripts/         Scheduled jobs (chat extraction, Crawlee ingestion, backup)
 scheduling/      macOS launchd plists
-tests/           157 tests (property-based, unit, integration)
+tests/           242+ tests (property-based, unit, integration)
 staging/         Transient data between pipeline phases (gitignored)
 docs/            Architecture specs and runbooks
 .kiro/specs/     Spec-driven development artifacts

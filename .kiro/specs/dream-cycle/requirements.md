@@ -1,5 +1,12 @@
 # Requirements Document
 
+> **Note**: This spec has been partially superseded by the Byzantine Consensus Panel
+> spec (`.kiro/specs/byzantine-consensus-panel/`). Key changes: the consensus panel
+> was upgraded from 3 to 4 evaluators with binary BFT consensus (≥3/4 ACCEPTED,
+> ≤2/4 REJECTED). The DEFERRED state, two-strike rule, and Explorer Strategy #11
+> (deferred evidence gathering) were removed. Requirements 2, 3, 10, and 11 below
+> reflect the original design; see the BFT spec for the current implementation.
+
 ## Introduction
 
 The Dream Cycle adds autonomous, proactive learning to the Second Brain personal knowledge management system. A four-agent pipeline (Explorer → Thinker → Consensus Panel of 3 evaluators) runs during downtime to examine the 74K+ memory space, discover hidden connections, surface contradictions, name implicit principles, and store consensus-gated insights as new semantic memories. This implements Speed 3 of the Three-Speed Enrichment architecture and replaces V2 Task 8 (Consolidation Pipeline) with a research-grounded multi-agent approach.

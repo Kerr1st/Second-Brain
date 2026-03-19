@@ -38,7 +38,8 @@ def complete_run(run_id: str, stats: dict, digest: str,
     """Update run with completion time, stats, and digest text.
 
     stats keys: candidates_generated, candidates_accepted,
-                candidates_deferred, candidates_rejected
+                candidates_deferred (always 0 — legacy field, DEFERRED removed),
+                candidates_rejected
     """
     conn = get_connection()
     try:

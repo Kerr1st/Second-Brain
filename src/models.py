@@ -19,7 +19,7 @@ class DreamCycleResult:
     completed_at: datetime
     candidates_generated: int
     candidates_accepted: int
-    candidates_deferred: int
+    candidates_deferred: int  # Always 0 — DEFERRED state removed (BFT binary consensus)
     candidates_rejected: int
     digest_path: str | None = None  # path to markdown digest file
     aborted_early: bool = False  # True if circuit breaker fired (empty slices)

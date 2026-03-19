@@ -1,5 +1,11 @@
 # Design Document: Dream Cycle — Multi-Agent Autonomous Learning
 
+> **Note**: This spec has been partially superseded by the Byzantine Consensus Panel
+> spec (`.kiro/specs/byzantine-consensus-panel/`). The consensus panel was upgraded
+> from 3 to 4 evaluators with binary BFT consensus. The `generate_digest()` signature
+> changed (deferred parameter removed). The `_is_second_deferral()` method was removed.
+> See the BFT spec for the current implementation.
+
 ## Overview
 
 The Dream Cycle adds autonomous, proactive learning to the Second Brain personal knowledge management system. Currently, the system's 74K+ memories in PostgreSQL + pgvector sit inert between interactions — learning only happens when the user explicitly triggers `memory_learn`. The Dream Cycle changes this: during downtime, a four-agent pipeline (Explorer → Thinker → Consensus Panel of 3 evaluators) examines the memory space, discovers hidden connections, surfaces contradictions, names implicit principles, and stores accepted insights as new semantic memories.

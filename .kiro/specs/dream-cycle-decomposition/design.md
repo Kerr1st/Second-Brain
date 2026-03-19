@@ -1,5 +1,8 @@
 # Design Document: Dream Cycle Decomposition
 
+> **Note**: The `_is_second_deferral()` method listed in this spec was subsequently
+> removed by the Byzantine Consensus Panel spec (binary BFT consensus, no DEFERRED state).
+
 ## Overview
 
 This design describes the structural decomposition of the monolithic `src/dream_cycle.py` (43KB, 13 methods in `DreamCycleOrchestrator`) into a `src/dream_cycle/` Python package with focused, single-responsibility modules. The refactor is purely structural — no behavioral changes. The existing `src/dream_cycle_db.py` stays as-is but receives 3 new query functions extracted from the orchestrator.

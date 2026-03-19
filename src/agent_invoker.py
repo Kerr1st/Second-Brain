@@ -18,6 +18,8 @@ import logging
 import os
 import re
 import subprocess
+import sys
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +31,7 @@ DEFAULT_MODEL = "claude-opus-4.6-1m"
 # to query memories via memory_search, memory_read, etc.
 _SECOND_BRAIN_MCP = {
     "second-brain": {
-        "command": "python",
+        "command": sys.executable,
         "args": ["-m", "src.mcp_server"],
         "cwd": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     }
@@ -70,7 +72,7 @@ class AgentInvoker:
             RuntimeError: If the subprocess exits with a non-zero code.
         """
         # Build agent config
-        agent_name = f"dream_cycle_{os.getpid()}"
+        agent_name = f"dream_cycle_{uuid.uuid4().hex[:8]}"
         needs_tools = mcp_config is not None
         agent_config = {
             "name": agent_name,
