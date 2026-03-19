@@ -128,7 +128,22 @@ class AgentInvoker:
                 )
 
             raw = result.stdout
-            parsed = self.parse_json_output(raw)
+            logger.debug("Agent raw output length: %d chars", len(raw))
+
+            # Save raw output for debugging (especially useful for first runs)
+            raw_debug_path = os.path.join("/tmp", f"kiro_agent_{agent_name}_raw.txt")
+            try:
+                with open(raw_debug_path, "w", encoding="utf-8") as f:
+                    f.write(raw)
+                logger.debug("Raw output saved to %s", raw_debug_path)
+            except OSError:
+                pass
+
+            try:
+                parsed = self.parse_json_output(raw)
+            except ValueError:
+                logger.error("Failed to parse JSON from agent output (%d chars). Raw saved to %s", len(raw), raw_debug_path)
+                raise
 
             return {"output": parsed, "raw": raw}
 
@@ -139,11 +154,15 @@ class AgentInvoker:
             except OSError:
                 pass
 
-    @staticmethod
-    def parse_json_output(raw: str) -> dict | list:
+    # Regex to strip ANSI escape sequences from kiro-cli terminal output
+    _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+    @classmethod
+    def parse_json_output(cls, raw: str) -> dict | list:
         """Extract JSON from agent output.
 
         Handles:
+        - ANSI escape codes (stripped first)
         - Bare JSON objects/arrays
         - JSON wrapped in markdown code fences (```json ... ```)
         - JSON with surrounding non-JSON text (kiro-cli adds credit/timing lines)
@@ -154,6 +173,9 @@ class AgentInvoker:
         Raises:
             ValueError: If no valid JSON found in the output.
         """
+        # 0. Strip ANSI escape codes — kiro-cli outputs colored terminal text
+        raw = cls._ANSI_RE.sub("", raw)
+
         # 1. Try direct parse
         stripped = raw.strip()
         try:
