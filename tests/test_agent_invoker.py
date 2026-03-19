@@ -259,11 +259,12 @@ class TestInvokeCrash:
 
 
 class TestMcpConfigPassed:
-    """Test MCP config passed to Explorer/Thinker (mcp_config provided)."""
+    """Test tool access granted to Explorer/Thinker (mcp_config provided)."""
 
     @patch("src.agent_invoker.subprocess.run")
-    def test_mcp_config_adds_flag_to_command(self, mock_run):
-        """When mcp_config is provided, --mcp-config flag appears in the command.
+    def test_mcp_config_adds_trust_all_tools_to_command(self, mock_run):
+        """When mcp_config is provided, --trust-all-tools appears in the command
+        and the agent config includes mcpServers.
 
         **Validates: Requirements 13.4**
         """
@@ -277,22 +278,21 @@ class TestMcpConfigPassed:
         invoker.invoke(
             system_prompt="You are the Explorer.",
             user_message="explore",
-            mcp_config="/path/to/mcp.json",
+            mcp_config="second-brain",
         )
 
         args, kwargs = mock_run.call_args
         cmd = args[0]
-        assert "--mcp-config" in cmd
-        mcp_idx = cmd.index("--mcp-config")
-        assert cmd[mcp_idx + 1] == "/path/to/mcp.json"
+        assert "--trust-all-tools" in cmd
+        assert "--agent" in cmd
 
 
 class TestMcpConfigNotPassed:
-    """Test MCP config NOT passed to evaluators (mcp_config=None)."""
+    """Test tool access denied to evaluators (mcp_config=None)."""
 
     @patch("src.agent_invoker.subprocess.run")
-    def test_no_mcp_config_omits_flag_from_command(self, mock_run):
-        """When mcp_config is None, --mcp-config flag must NOT appear in the command.
+    def test_no_mcp_config_omits_trust_all_tools_from_command(self, mock_run):
+        """When mcp_config is None, --trust-all-tools must NOT appear in the command.
 
         **Validates: Requirements 13.4**
         """
@@ -311,4 +311,4 @@ class TestMcpConfigNotPassed:
 
         args, kwargs = mock_run.call_args
         cmd = args[0]
-        assert "--mcp-config" not in cmd
+        assert "--trust-all-tools" not in cmd
