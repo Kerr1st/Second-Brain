@@ -124,16 +124,16 @@ def list_memories(type=None, status=None, source_type=None, limit=50, offset=0):
 def search_similar(embedding, limit=10, type=None, status=None):
     """Find memories most similar to the given embedding vector."""
     conditions = ["embedding IS NOT NULL"]
-    params = [str(embedding)]
+    filter_params = []
     if type:
         conditions.append("type = %s")
-        params.append(type)
+        filter_params.append(type)
     if status:
         conditions.append("status = %s")
-        params.append(status)
+        filter_params.append(status)
 
     where = "WHERE " + " AND ".join(conditions)
-    params.append(limit)
+    embedding_str = str(embedding)
 
     conn = get_connection()
     try:
@@ -143,7 +143,7 @@ def search_similar(embedding, limit=10, type=None, status=None):
                 FROM memories {where}
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
-            """, (params[0], params[0], *params[1:]))
+            """, (embedding_str, *filter_params, embedding_str, limit))
             return cur.fetchall()
     finally:
         conn.close()
