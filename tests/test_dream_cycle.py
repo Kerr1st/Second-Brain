@@ -2263,6 +2263,7 @@ class TestFinalOrchestratorMethodSet:
         expected_methods = {
             "run",
             "_run_pipeline",
+            "_aborted_result",
             "invoke_explorer",
             "invoke_thinker",
             "invoke_evaluator",

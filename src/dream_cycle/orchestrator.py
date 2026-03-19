@@ -71,6 +71,26 @@ class DreamCycleOrchestrator:
         except Exception:
             logger.warning("Failed to capture fixture %s", name, exc_info=True)
 
+    def _aborted_result(
+        self,
+        run_id: str,
+        run_type: str,
+        started_at: datetime,
+    ) -> DreamCycleResult:
+        """Build a DreamCycleResult for aborted/failed runs (all counts zero)."""
+        return DreamCycleResult(
+            run_id=run_id,
+            run_type=run_type,
+            started_at=started_at,
+            completed_at=datetime.now(timezone.utc),
+            candidates_generated=0,
+            candidates_accepted=0,
+            candidates_deferred=0,
+            candidates_rejected=0,
+            digest_path=None,
+            aborted_early=True,
+        )
+
     def run(self, run_type: str, scope: dict | None = None, capture_dir: str | None = None) -> DreamCycleResult:
         """Execute a full dream cycle pipeline.
 
@@ -90,38 +110,14 @@ class DreamCycleOrchestrator:
         # Session-start frequency cap: check before creating a run record
         if run_type == "session_start" and not dream_cycle_db.should_run_briefing():
             logger.info("Session-start briefing skipped: frequency cap not met")
-            completed_at = datetime.now(timezone.utc)
-            return DreamCycleResult(
-                run_id="",
-                run_type=run_type,
-                started_at=started_at,
-                completed_at=completed_at,
-                candidates_generated=0,
-                candidates_accepted=0,
-                candidates_deferred=0,
-                candidates_rejected=0,
-                digest_path=None,
-                aborted_early=True,
-            )
+            return self._aborted_result("", run_type, started_at)
 
         # Step 1: Create run record
         try:
             run_id = dream_cycle_db.create_run(run_type)
         except psycopg2.OperationalError:
             logger.error("Database unreachable when creating run record")
-            completed_at = datetime.now(timezone.utc)
-            return DreamCycleResult(
-                run_id="",
-                run_type=run_type,
-                started_at=started_at,
-                completed_at=completed_at,
-                candidates_generated=0,
-                candidates_accepted=0,
-                candidates_deferred=0,
-                candidates_rejected=0,
-                digest_path=None,
-                aborted_early=True,
-            )
+            return self._aborted_result("", run_type, started_at)
         logger.info("Created run record: %s", run_id)
 
         # Top-level try/except around the entire pipeline to catch unexpected
@@ -133,19 +129,7 @@ class DreamCycleOrchestrator:
             logger.error(
                 "Database unreachable during pipeline execution (run_id=%s)", run_id
             )
-            completed_at = datetime.now(timezone.utc)
-            return DreamCycleResult(
-                run_id=run_id,
-                run_type=run_type,
-                started_at=started_at,
-                completed_at=completed_at,
-                candidates_generated=0,
-                candidates_accepted=0,
-                candidates_deferred=0,
-                candidates_rejected=0,
-                digest_path=None,
-                aborted_early=True,
-            )
+            return self._aborted_result(run_id, run_type, started_at)
         except Exception:
             logger.exception(
                 "Unexpected error during pipeline execution (run_id=%s)", run_id
@@ -159,18 +143,7 @@ class DreamCycleOrchestrator:
                 )
             except Exception:
                 logger.error("Failed to complete run record after unexpected error")
-            return DreamCycleResult(
-                run_id=run_id,
-                run_type=run_type,
-                started_at=started_at,
-                completed_at=completed_at,
-                candidates_generated=0,
-                candidates_accepted=0,
-                candidates_deferred=0,
-                candidates_rejected=0,
-                digest_path=None,
-                aborted_early=True,
-            )
+            return self._aborted_result(run_id, run_type, started_at)
 
     def _run_pipeline(
         self,
@@ -201,39 +174,15 @@ class DreamCycleOrchestrator:
             slices = self.invoke_explorer(feedback, run_type, scope)
         except (TimeoutError, RuntimeError):
             logger.error("Explorer agent crashed or timed out (run_id=%s)", run_id)
-            completed_at = datetime.now(timezone.utc)
             dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
-            return DreamCycleResult(
-                run_id=run_id,
-                run_type=run_type,
-                started_at=started_at,
-                completed_at=completed_at,
-                candidates_generated=0,
-                candidates_accepted=0,
-                candidates_deferred=0,
-                candidates_rejected=0,
-                digest_path=None,
-                aborted_early=True,
-            )
+            return self._aborted_result(run_id, run_type, started_at)
         logger.info("Explorer returned %d slices", len(slices))
 
         # Circuit breaker: empty slices → abort early
         if not slices:
             logger.warning("Circuit breaker: Explorer returned 0 slices, aborting early")
-            completed_at = datetime.now(timezone.utc)
             dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
-            return DreamCycleResult(
-                run_id=run_id,
-                run_type=run_type,
-                started_at=started_at,
-                completed_at=completed_at,
-                candidates_generated=0,
-                candidates_accepted=0,
-                candidates_deferred=0,
-                candidates_rejected=0,
-                digest_path=None,
-                aborted_early=True,
-            )
+            return self._aborted_result(run_id, run_type, started_at)
 
         # Step 6: Invoke Thinker for each slice, collect candidates
         all_candidates: list[CandidateInsight] = []

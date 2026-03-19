@@ -11,6 +11,27 @@ from src.models import CandidateInsight
 logger = logging.getLogger(__name__)
 
 
+def _create_dream_cycle_memory(candidate: CandidateInsight) -> str:
+    """Create a new dream-cycle memory with standard tags and metadata.
+
+    Shared by CREATE and SUPERSEDE-downgrade-to-CREATE paths.
+    """
+    embedding = generate_embedding(candidate.content)
+    return create_memory(
+        type=candidate.type,
+        title=candidate.title,
+        content=candidate.content,
+        embedding=embedding,
+        tags=["dream-cycle", candidate.schema_operation],
+        metadata={
+            "dream_cycle": True,
+            "strategy": candidate.strategy_that_found_it,
+            "source_memories": candidate.source_memories,
+            "confidence": candidate.confidence,
+        },
+    )
+
+
 def store_accepted(candidate: CandidateInsight) -> str:
     """Create memory + relationships for an accepted insight.
 
@@ -33,47 +54,16 @@ def store_accepted(candidate: CandidateInsight) -> str:
         memory_id = candidate.target_memory_id
 
     elif candidate.operation == "SUPERSEDE":
-        # Check if target exists and is active
         target = get_memory(candidate.target_memory_id)
         if target is None or target.get("status") == "superseded":
             logger.warning(
                 "SUPERSEDE target %s does not exist or is already superseded, downgrading to CREATE",
                 candidate.target_memory_id,
             )
-            # Downgrade to CREATE
-            embedding = generate_embedding(candidate.content)
-            memory_id = create_memory(
-                type=candidate.type,
-                title=candidate.title,
-                content=candidate.content,
-                embedding=embedding,
-                tags=["dream-cycle", candidate.schema_operation],
-                metadata={
-                    "dream_cycle": True,
-                    "strategy": candidate.strategy_that_found_it,
-                    "source_memories": candidate.source_memories,
-                    "confidence": candidate.confidence,
-                },
-            )
+            memory_id = _create_dream_cycle_memory(candidate)
         else:
-            # Create new memory
-            embedding = generate_embedding(candidate.content)
-            memory_id = create_memory(
-                type=candidate.type,
-                title=candidate.title,
-                content=candidate.content,
-                embedding=embedding,
-                tags=["dream-cycle", candidate.schema_operation],
-                metadata={
-                    "dream_cycle": True,
-                    "strategy": candidate.strategy_that_found_it,
-                    "source_memories": candidate.source_memories,
-                    "confidence": candidate.confidence,
-                },
-            )
-            # Mark old memory as superseded
+            memory_id = _create_dream_cycle_memory(candidate)
             update_memory(candidate.target_memory_id, status="superseded")
-            # Create superseded_by relationship
             create_relationship(
                 candidate.target_memory_id,
                 memory_id,
@@ -83,20 +73,7 @@ def store_accepted(candidate: CandidateInsight) -> str:
 
     else:
         # CREATE (default)
-        embedding = generate_embedding(candidate.content)
-        memory_id = create_memory(
-            type=candidate.type,
-            title=candidate.title,
-            content=candidate.content,
-            embedding=embedding,
-            tags=["dream-cycle", candidate.schema_operation],
-            metadata={
-                "dream_cycle": True,
-                "strategy": candidate.strategy_that_found_it,
-                "source_memories": candidate.source_memories,
-                "confidence": candidate.confidence,
-            },
-        )
+        memory_id = _create_dream_cycle_memory(candidate)
 
     # Create all proposed relationships
     for rel in candidate.relationships:
