@@ -17,10 +17,16 @@ mkdir -p "$FAILED_DIR" logs
 
 log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOGFILE"; }
 
-# Pre-flight: check PostgreSQL is reachable
+# Pre-flight: ensure PostgreSQL is reachable, starting Docker container if needed
 if ! docker exec second-brain-db pg_isready -U memory_bank > /dev/null 2>&1; then
-  log "ABORT: PostgreSQL is not reachable. Is Docker running?"
-  exit 1
+  log "PostgreSQL not reachable — starting container..."
+  docker start second-brain-db > /dev/null 2>&1
+  sleep 5
+  if ! docker exec second-brain-db pg_isready -U memory_bank > /dev/null 2>&1; then
+    log "ABORT: PostgreSQL still not reachable after starting container."
+    exit 1
+  fi
+  log "Container started successfully."
 fi
 
 log "=== Phase 2: Staged Chat Ingestion ==="

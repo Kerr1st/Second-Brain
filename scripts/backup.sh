@@ -19,6 +19,11 @@ log() { echo "[$(date '+%H:%M:%S')] $1"; }
 MISSING=""
 command -v gpg &>/dev/null || MISSING="$MISSING gpg"
 command -v rclone &>/dev/null || MISSING="$MISSING rclone"
+# Start container if not running
+if ! docker exec "$CONTAINER" pg_isready -U "$DB_USER" &>/dev/null; then
+  docker start "$CONTAINER" &>/dev/null
+  sleep 5
+fi
 docker exec "$CONTAINER" pg_isready -U "$DB_USER" &>/dev/null || MISSING="$MISSING docker/postgresql"
 [ -f "$KEY_FILE" ] || MISSING="$MISSING encryption-key"
 
