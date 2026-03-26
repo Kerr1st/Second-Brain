@@ -21,6 +21,7 @@ command -v gpg &>/dev/null || MISSING="$MISSING gpg"
 command -v rclone &>/dev/null || MISSING="$MISSING rclone"
 # Start container if not running
 if ! docker exec "$CONTAINER" pg_isready -U "$DB_USER" &>/dev/null; then
+  log "PostgreSQL not reachable — starting container..."
   docker start "$CONTAINER" &>/dev/null
   sleep 5
 fi
