@@ -2,6 +2,10 @@
 
 Generated 2026-03-16. Dependency-driven ordering.
 
+> **Status:** Tasks 0–7 complete. Task 8 superseded by the Dream Cycle pipeline.
+> Task 9 (Doc Sync) completed 2026-03-26. See `.kiro/specs/retrieval-quality/`
+> for the spec that drove Tasks 0–7 implementation.
+
 ## Guiding Principles
 
 - Every task that touches `db.py`, `mcp_server.py`, or `ingest.py` gets tests
@@ -51,7 +55,7 @@ on classification existing (to cluster by `mem_class`).
 
 ---
 
-## Task 0: Test Infrastructure
+## Task 0: Test Infrastructure ✅
 
 **Why:** Every subsequent task modifies core search/ranking behavior against
 74K live memories. Without regression tests, we can't verify V2 changes
@@ -93,7 +97,7 @@ no Bedrock calls during tests (embeddings mocked).
 
 ---
 
-## Task 1: Schema Migration
+## Task 1: Schema Migration ✅
 
 **Why:** Tasks 2–7 all need at least one of these columns. Doing them in
 one migration avoids multiple ALTER TABLE passes on a 74K-row table.
@@ -130,7 +134,7 @@ one migration avoids multiple ALTER TABLE passes on a 74K-row table.
 
 ---
 
-## Task 2: Spaced Retrieval
+## Task 2: Spaced Retrieval ✅
 
 **Why:** Prevents popularity bias. A memory retrieved 50 times in one
 session shouldn't permanently outrank one retrieved weekly for a year.
@@ -170,7 +174,7 @@ applies spacing bonus, tests pass, existing search tests still pass.
 
 ---
 
-## Task 3: Memory Classification
+## Task 3: Memory Classification ✅
 
 **Why:** Semantic memories (principles, decisions) should outrank episodic
 memories (raw chat logs) in search results. This is the biggest retrieval
@@ -225,7 +229,7 @@ all tests pass.
 
 ---
 
-## Task 4: Depth Scoring
+## Task 4: Depth Scoring ✅
 
 **Why:** Upgrades binary depth enforcement (warn/don't-warn) to a numeric
 signal in reranking. A deep explanation of WHY should rank above a shallow
@@ -273,7 +277,7 @@ regex, all tests pass.
 
 ---
 
-## Task 5: Project Scoping
+## Task 5: Project Scoping ✅
 
 **Why:** Prevents cross-project pollution. A React convention from Project A
 shouldn't override a Python decision in Project B.
@@ -313,7 +317,7 @@ filter by project, cross-project results are demoted, all tests pass.
 
 ---
 
-## Task 6: Automatic Relationship Discovery
+## Task 6: Automatic Relationship Discovery ✅
 
 **Why:** The relationship graph is currently empty (no automatic connections).
 If you worked on a problem across 5 chats in one day, retrieving one should
@@ -358,7 +362,7 @@ all tests pass.
 
 ---
 
-## Task 7: Temporal Contiguity
+## Task 7: Temporal Contiguity ✅
 
 **Why:** When you retrieve a memory, you often want the context around it —
 what else were you working on that day? This surfaces temporal neighbors
@@ -390,7 +394,7 @@ results, no duplicates, all tests pass.
 
 ---
 
-## Task 8: Consolidation Pipeline (Python parts)
+## Task 8: Consolidation Pipeline (Superseded by Dream Cycle)
 
 **Why:** Transforms 74K raw episodic memories into reusable semantic
 principles. This is the single biggest quality improvement possible —
@@ -456,7 +460,7 @@ integration is a documented follow-up.
 
 ---
 
-## Task 9: Documentation Sync
+## Task 9: Documentation Sync ✅
 
 **Why:** SESSION-CONTEXT.md, AGENTS.md, V2-ROADMAP.md, and
 DESIGN-DECISIONS.md all need to reflect the actual implementation.
@@ -496,18 +500,18 @@ state. A new agent reading SESSION-CONTEXT.md gets the correct picture.
 
 ## Summary Table
 
-| Task | Name | Modifies | New Files | Depends On |
-|------|------|----------|-----------|------------|
-| 0 | Test Infrastructure | requirements.txt | tests/conftest.py, tests/test_db.py, tests/test_mcp_server.py, pytest.ini | — |
-| 1 | Schema Migration | db.py | migrations/002_v2_columns.sql, tests/test_migrations.py | 0 |
-| 2 | Spaced Retrieval | db.py | tests/test_spaced_retrieval.py | 1 |
-| 3 | Memory Classification | db.py, ingest.py, mcp_server.py | src/classify.py, scripts/backfill_mem_class.py, tests/test_classify.py | 1 |
-| 4 | Depth Scoring | db.py, ingest.py, mcp_server.py | src/depth.py, tests/test_depth.py | 1 |
-| 5 | Project Scoping | db.py, ingest.py, mcp_server.py | tests/test_project_scoping.py | 1 |
-| 6 | Relationship Discovery | db.py, ingest.py | tests/test_relationships.py, possibly src/relationships.py | 1 |
-| 7 | Temporal Contiguity | mcp_server.py | tests/test_temporal.py | 6 |
-| 8 | Consolidation Pipeline | — | src/consolidate.py, scripts/weekly_synthesis.py, scheduling/com.second-brain.synthesis.plist, tests/test_consolidate.py | 3 |
-| 9 | Doc Sync | docs/*.md | — | all |
+| Task | Name | Status | Modifies | New Files | Depends On |
+|------|------|--------|----------|-----------|------------|
+| 0 | Test Infrastructure | ✅ | requirements.txt | tests/conftest.py, tests/test_db.py, tests/test_mcp_server.py, pytest.ini | — |
+| 1 | Schema Migration | ✅ | db.py | migrations/002_v2_columns.sql, tests/test_migrations.py | 0 |
+| 2 | Spaced Retrieval | ✅ | db.py | tests/test_spaced_retrieval.py | 1 |
+| 3 | Memory Classification | ✅ | db.py, ingest.py, mcp_server.py | src/classify.py, scripts/backfill_mem_class.py, tests/test_classify.py | 1 |
+| 4 | Depth Scoring | ✅ | db.py, ingest.py, mcp_server.py | src/depth.py, tests/test_depth.py | 1 |
+| 5 | Project Scoping | ✅ | db.py, ingest.py, mcp_server.py | tests/test_project_scoping.py | 1 |
+| 6 | Relationship Discovery | ✅ | db.py, ingest.py | tests/test_relationships.py, possibly src/relationships.py | 1 |
+| 7 | Temporal Contiguity | ✅ | mcp_server.py | tests/test_temporal.py | 6 |
+| 8 | Consolidation Pipeline | Superseded | — | — | — |
+| 9 | Doc Sync | ✅ | docs/*.md | — | all |
 
 ## Reranking Formula After All Tasks
 

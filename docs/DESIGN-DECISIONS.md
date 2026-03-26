@@ -52,14 +52,32 @@ Pure vector search (pgvector cosine distance) misses exact keyword matches. If y
 
 Implementation: PostgreSQL's built-in `tsvector/tsquery` for BM25 (no external dependencies), fused with pgvector cosine search via Reciprocal Rank Fusion (RRF). A utility reranking layer then scores results by recency (exponential decay, τ=60 days), memory type boost (ideas/insights rank higher than raw sources), token overlap, content length, and retrieval reinforcement.
 
-## Why retrieval reinforcement (access_count)
+## Why retrieval reinforcement (access_count + spaced retrieval)
 
-Every time a memory is returned by `memory_search`, its `access_count` is incremented. The reranking formula applies `0.03 * log(1 + access_count)` — a logarithmic boost so the first few retrievals matter most (diminishing returns).
+Every time a memory is returned by `memory_search`, its `access_count` is incremented and `last_accessed_at` is updated. The reranking formula applies `0.03 * log(1 + access_count) * spacing_bonus` — a logarithmic boost modulated by how long ago the memory was last accessed.
 
-This implements the testing effect (Roediger & Karpicke, 2006): retrieving information strengthens the memory trace more than re-reading it. Memories that keep proving useful naturally float to the top. Unused memories decay in relative ranking without being deleted.
+`spacing_bonus = min(1.0, days_since_last_access / 7.0)` means a re-retrieval within the same day adds almost no boost, but a retrieval a week later adds full boost. This prevents "popularity bias" where a memory retrieved many times in one session dominates rankings forever.
+
+This implements the testing effect (Roediger & Karpicke, 2006): retrieving information strengthens the memory trace more than re-reading it. The spacing bonus implements the spacing effect (Bjork, 1975): equally spaced retrieval produces superior long-term retention vs. massed retrieval.
 
 ## Why depth enforcement on memory_create
 
 When the agent writes a knowledge-type memory (idea, synthesis, insight, decision), the MCP server checks for causal depth signals ("because", "when X then Y", "the fix was") and warns if the content is shallow. Also checks for a "Questions this answers:" section.
 
 Inspired by kiro-memory's three-question framework (WHAT / WHAT HAPPENS when violated / WHY) and grounded in Craik & Lockhart's (1972) levels-of-processing research: information processed at deeper, more elaborative levels is retained and retrieved far more effectively. A bullet-point list of rules is shallow. A memory that explains WHY with a concrete failure example is deep and dramatically more retrievable.
+
+## Why 4 evaluators with binary BFT consensus (not 3 with DEFERRED)
+
+The original dream cycle used 3 evaluators with a three-state model: 3/3 ACCEPT → ACCEPTED, 2/3 → DEFERRED, else REJECTED. DEFERRED candidates re-entered the next cycle with the dissenting objection as context.
+
+This was upgraded to 4 evaluators with binary consensus based on Lamport, Shostak, and Pease (1982): tolerating f faulty (hallucinating) nodes requires 3f+1 total nodes. With f=1, the panel needs 4 evaluators. The PBFT quorum (Castro & Liskov 1999) of 2f+1 = 3 out of 4 is the acceptance threshold.
+
+The DEFERRED state was removed because with 4 evaluators, the "one dissenter" case (3/4) now meets the BFT quorum and is ACCEPTED directly. The 2/4 case is ambiguous under BFT assumptions and is REJECTED. Dissenting reasoning on 3/4 accepts is preserved via digest annotations and feedback injection.
+
+## Why search.py was extracted from db.py
+
+`db.py` had grown to 342 lines mixing three concerns: data access (CRUD), retrieval algorithms (hybrid search with RRF fusion), and business logic (reranking with scoring formulas). The extraction into `src/search.py` follows a three-layer architecture: Presentation (`mcp_server.py`), Service (`search.py`), Data Access (`db.py`). This makes the reranking formula independently testable and keeps `db.py` focused on pure CRUD operations.
+
+## Why V2 reranking weights were rebalanced
+
+The V1 formula weights summed to 1.00 (0.35 + 0.20 + 0.20 + 0.15 + 0.10). V2 added `depth_score` as a new 0.05 factor, requiring the base weights to be reduced slightly (sum from 1.00 to 0.86) to keep the total in a similar range. The boosts/penalties (type, mem_class, reinforcement, project) are additive on top. The specific weight choices were informed by the cognitive science research grounding each factor — see `docs/V2-ROADMAP.md`.

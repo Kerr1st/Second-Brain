@@ -40,7 +40,7 @@ But storage and retrieval is just the foundation. The real purpose is to create 
 │  │  decisions   │  │  PDFs        │  │  contradicts  │  │
 │  │  insights    │  │  courses     │  │  extends      │  │
 │  │  questions   │  │  AI chats    │  │  inspires     │  │
-│  │  priorities  │  │  notes       │  │  derived_from │  │
+│  │  priorities  │  │  notes       │  │  related_to   │  │
 │  └─────────────┘  └──────────────┘  └───────────────┘  │
 ├─────────────────────────────────────────────────────────┤
 │  Capture API (planned)                                  │
@@ -94,6 +94,8 @@ But storage and retrieval is just the foundation. The real purpose is to create 
 
 ## Database Schema
 
+Four migrations applied in order (`migrations/000` through `004`).
+
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -107,23 +109,66 @@ CREATE TABLE memories (
     tags TEXT[] DEFAULT '{}',
     source_url TEXT,              -- origin: YouTube URL, article URL, etc.
     source_type TEXT,             -- youtube, article, pdf, course, kiro_cli_chat, kiro_ide_chat, notes, manual
-    metadata JSONB DEFAULT '{}', -- flexible extracted metadata (people, topics, action_items, project, files)
-    status TEXT DEFAULT 'active', -- active, explored, archived, superseded
+    metadata JSONB DEFAULT '{}', -- flexible extracted metadata (depth_score, people, topics, action_items, files)
+    status TEXT DEFAULT 'active', -- active, explored, archived, superseded, user_rejected
     confidence FLOAT DEFAULT 1.0,
     parent_id UUID REFERENCES memories(id),
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now(),
     search_vector TSVECTOR,      -- auto-populated by trigger for BM25 full-text search
-    access_count INTEGER DEFAULT 0 -- retrieval reinforcement (testing effect)
+    access_count INTEGER DEFAULT 0, -- retrieval reinforcement (testing effect)
+    -- V2 columns (migration 002)
+    mem_class TEXT,               -- semantic, episodic, procedural (Tulving 1972)
+    project TEXT,                 -- project scope for encoding specificity (Tulving & Thomson 1973)
+    last_accessed_at TIMESTAMPTZ  -- last retrieval time for spaced retrieval (Roediger & Karpicke 2006)
 );
 
 CREATE TABLE memory_relationships (
     source_id UUID REFERENCES memories(id) ON DELETE CASCADE,
     target_id UUID REFERENCES memories(id) ON DELETE CASCADE,
-    relation_type TEXT NOT NULL,  -- supports, contradicts, extends, inspires, blocks, requires, derived_from
+    relation_type TEXT NOT NULL,  -- supports, contradicts, extends, inspires, blocks, requires, derived_from, related_to, superseded_by
     note TEXT,
     created_at TIMESTAMPTZ DEFAULT now(),
+    expired_at TIMESTAMPTZ,      -- temporal awareness (migration 003)
     PRIMARY KEY (source_id, target_id, relation_type)
+);
+
+-- Dream cycle tables (migration 003)
+CREATE TABLE dream_cycle_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_type TEXT NOT NULL,       -- scheduled, post_learn, session_start, user_triggered
+    started_at TIMESTAMPTZ DEFAULT now(),
+    completed_at TIMESTAMPTZ,
+    explorer_output JSONB,
+    explorer_feedback_injected TEXT,
+    candidates_generated INTEGER,
+    candidates_accepted INTEGER,
+    candidates_deferred INTEGER,
+    candidates_rejected INTEGER,
+    digest TEXT
+);
+
+CREATE TABLE dream_cycle_candidates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id UUID REFERENCES dream_cycle_runs(id),
+    candidate_json JSONB,
+    operation TEXT,               -- CREATE, UPDATE, SUPERSEDE
+    target_memory_id UUID,
+    schema_operation TEXT,        -- assimilation, accommodation
+    evaluator_a_verdict TEXT,     -- Skeptic
+    evaluator_a_reasoning TEXT,
+    evaluator_b_verdict TEXT,     -- User Advocate
+    evaluator_b_reasoning TEXT,
+    evaluator_c_verdict TEXT,     -- Epistemologist
+    evaluator_c_reasoning TEXT,
+    evaluator_d_verdict TEXT,     -- Methodologist (migration 004)
+    evaluator_d_reasoning TEXT,
+    final_verdict TEXT,           -- ACCEPTED, REJECTED
+    created_memory_id UUID REFERENCES memories(id),
+    user_rejected_at TIMESTAMPTZ,
+    user_rejection_reason TEXT,
+    deferred_twice_rejected BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE INDEX ON memories USING hnsw (embedding vector_cosine_ops);
@@ -133,17 +178,38 @@ CREATE INDEX ON memories USING gin (tags);
 CREATE INDEX ON memories USING gin (metadata);
 CREATE INDEX ON memories (created_at DESC);
 CREATE INDEX ON memories (source_type);
+CREATE INDEX ON memories (mem_class);
+CREATE INDEX ON memories (project);
+CREATE INDEX ON memories (last_accessed_at DESC);
 ```
 
 ### Search Architecture
 
-Queries use hybrid retrieval (added 2026-03-09, inspired by kiro-memory project):
+Queries use hybrid retrieval with cognitive science-grounded reranking. Implementation lives in `src/search.py` (extracted from `db.py`).
 
 1. **BM25 full-text search** — PostgreSQL `tsvector/tsquery` with GIN index. Catches exact keyword matches.
 2. **Vector cosine search** — pgvector HNSW index. Catches semantic similarity.
 3. **Reciprocal Rank Fusion (RRF)** — Merges both result sets: `score = 1/(k+rank_vec) + 1/(k+rank_bm25)`, k=60.
-4. **Utility reranking** — Re-scores by: fusion score (0.35), token overlap (0.20), title overlap (0.20), recency decay τ=60d (0.15), content length (0.10), plus type boost and `access_count` reinforcement.
-5. **Retrieval reinforcement** — `access_count` incremented on every retrieval. Boost: `0.03 * log(1 + access_count)`.
+4. **Utility reranking** — V2 formula (see below).
+5. **Retrieval reinforcement** — `access_count` incremented on every retrieval. `last_accessed_at` updated for spaced retrieval.
+6. **Temporal context** — Top search result's temporal neighbors (±24h) appended to response.
+
+#### V2 Reranking Formula
+
+```
+rerank_score = 0.30 * rrf_score
+             + 0.18 * token_overlap
+             + 0.18 * title_overlap
+             + 0.12 * recency              (exponential decay, τ=60 days)
+             + 0.08 * length_score
+             + 0.05 * depth_score           (numeric 0.0–1.0 from src/depth.py)
+             + type_boost                   (0.06 for idea/synthesis/insight/decision)
+             + mem_class_boost              (0.04 semantic, 0.02 procedural, 0.00 episodic)
+             + reinforcement                (0.03 * log1p(access_count) * spacing_bonus)
+             + project_penalty              (-0.15 if cross-project)
+```
+
+`spacing_bonus = min(1.0, days_since_last_access / 7.0)` — dampens same-session re-retrievals, rewards spaced retrieval (Roediger & Karpicke 2006).
 
 See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale behind these choices.
 
@@ -173,6 +239,8 @@ See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale behind these 
 | `blocks` | This memory is a blocker for the target |
 | `requires` | This memory depends on the target |
 | `derived_from` | This memory was synthesized from the target source |
+| `related_to` | Auto-discovered semantic or temporal neighbor (created at ingest time) |
+| `superseded_by` | This memory was replaced by the target (dream cycle SUPERSEDE operation) |
 
 ## Crawlee Integration
 
@@ -284,85 +352,95 @@ All jobs use `scripts/job_wrapper.sh` which sends macOS notification on failure.
 | Time | Job | Script | Status |
 |---|---|---|---|
 | Sat 1:00 AM | Bookmark scrape | scrape_bookmarks.py | Working |
-| Daily 1:30 AM | YouTube scrape | youtube_scrape.sh | Stubbed |
+| Daily 1:30 AM | YouTube scrape | youtube_scrape.sh | Failing (`yt-dlp` not installed) |
 | Daily 2:00 AM | Backup | backup.sh | Working |
 | Daily 2:30 AM | Chat extraction | chat_extract.py | Working |
-| Daily 3:00 AM | Staged ingestion | ingest_staged.sh | Stubbed |
+| Daily 3:00 AM | Staged ingestion | ingest_staged.sh | Failing (Docker not running at 3AM) |
 | Sun 3:00 AM | Backup verify | verify_backup.sh | Working |
 | Sun 4:00 AM | Dream cycle | dream_cycle_scheduled.sh | Working |
 
 ## Current Status
 
-Docker running. PostgreSQL + pgvector operational. Full pipeline tested end-to-end. MCP server built and tested.
+All core features implemented and operational. 74K+ memories in PostgreSQL. Dream cycle has run once live, producing 4 insights and 2 syntheses. 243 tests passing (property-based, unit, integration). Daily scheduled jobs running (backup, chat extraction, bookmarks). MCP server exposes 8 tools to AI agents.
 
 ## Next Steps
 
-1. Run dream cycle migration (`migrations/migrate.sh`) to create dream cycle tables
-2. First live dream cycle run to test end-to-end with real data
-3. V2 Tasks 0-9 (see `docs/V2-TASKS.md`): test infrastructure, schema migration, spaced retrieval, memory classification, depth scoring, project scoping, relationship discovery, temporal contiguity, doc sync
+1. Install `yt-dlp` (`brew install yt-dlp`) to unblock YouTube scrape job
+2. Ensure Docker is running at 3AM or adjust ingest schedule to unblock staged ingestion
+3. Run a second live dream cycle to validate BFT consensus panel with real data
+4. Capture API — multi-channel input (Slack, mobile, browser, email)
+5. Memory migration — import from Claude, ChatGPT, Notion
+6. Metadata extraction on ingest — auto-extract people, topics, action items
 
 ## Project Status
 
+### Infrastructure
 - [x] Architecture design
-- [x] Schema design
+- [x] Schema design (4 migrations: 000-004)
 - [x] Disaster recovery runbook
-- [x] Repo structure and module stubs (`src/`, `scripts/`, `docker/`, `scheduling/`)
+- [x] Repo structure (`src/`, `scripts/`, `docker/`, `scheduling/`, `tests/`, `migrations/`)
 - [x] Database migrations system (`migrations/migrate.sh`, numbered SQL files)
-- [x] Hybrid chat extraction spec (`docs/HYBRID-CHAT-EXTRACTION.md`)
-- [x] Error handling, logging, and monitoring design (staging/failed/, logs/, status JSON)
-- [x] Crawlee unified knowledge store (web pages now write to knowledge/index.md alongside YouTube)
 - [x] PostgreSQL + pgvector Docker setup
-- [x] Database schema creation (via `migrations/migrate.sh`)
-- [x] `src/db.py` — PostgreSQL connection, CRUD, semantic search, hybrid retrieval, reranking, relationships
-- [x] `src/embeddings.py` — Bedrock Titan v2 embedding generation (1024-dim, truncation, batch)
-- [x] `src/ingest.py` — shared ingestion pipeline (parse header → chunk by section → embed → store)
-- [x] `src/mcp_server.py` — MCP server (8 tools: create, search, read, update, relate, list, graph, learn)
-- [x] `src/parsers/crawlee.py` — Crawlee knowledge store parser — 290 sources (1 YouTube + 289 web pages)
-- [x] `src/parsers/cli_chat.py` — Kiro CLI chat parser (Phase 1) — 68/97 pass (70%)
-- [x] `src/parsers/ide_chat.py` — Kiro IDE chat parser (Phase 1) — 5,493/12,447 pass (44%)
-- [x] `scripts/chat_extract.py` — daily Phase 1 chat extraction — 5,561 total, backfill complete
-- [x] `scripts/ingest_staged.sh` — Phase 2 wrapper (Kiro headless + Opus 4.6-1m)
-- [x] `scripts/crawlee_ingest.py` — daily Crawlee ingestion
-- [x] `scripts/ingest_chats.py` — batch chat ingestion (5,561 chats → 74,013 memories)
-- [x] `scripts/scrape_bookmarks.py` — Chrome bookmarks scraper (cookie auth for internal, Crawlee batch for public)
-- [x] `scripts/youtube_scrape.sh` — nightly YouTube playlist/history scrape
+- [x] Encryption key generated and stored locally
+- [x] Backup scheduling (7 launchd plists in `scheduling/`, all installed)
 - [x] `scripts/backup.sh` — daily encrypted backup to Google Drive + S3
 - [x] `scripts/verify_backup.sh` — weekly backup verification (both clouds)
 - [x] `scripts/job_wrapper.sh` — macOS notification on job failure
-- [x] Encryption key generated and stored locally
-- [x] Backup scheduling (launchd plists — 6 plists in scheduling/, all installed)
-- [x] Weekly verification scheduling (included in launchd plists above)
+
+### Core Library (`src/`)
+- [x] `src/db.py` — PostgreSQL connection, memory CRUD, semantic search, relationships, dedup helpers
+- [x] `src/search.py` — hybrid search (BM25 + vector + RRF), V2 reranking, retrieval reinforcement
+- [x] `src/embeddings.py` — Bedrock Titan v2 embedding generation (1024-dim)
+- [x] `src/ingest.py` — ingestion pipeline (parse → classify → chunk → embed → store → discover relationships)
+- [x] `src/classify.py` — deterministic memory classifier (semantic/episodic/procedural)
+- [x] `src/depth.py` — numeric depth scorer (0.0–1.0)
+- [x] `src/mcp_server.py` — MCP server (8 tools: create, search, read, update, relate, list, graph, learn)
+- [x] `src/models.py` — data models (DreamCycleResult, MemorySlice, CandidateInsight, EvaluatorVerdict)
+- [x] `src/agent_invoker.py` — subprocess-based agent invocation with JSON parsing
+- [x] `src/parsers/` — chat and content parsers (crawlee, cli_chat, ide_chat)
+- [x] `src/prompts/` — agent prompt templates (explorer, thinker, panel with 4 evaluator roles)
+
+### Dream Cycle (`src/dream_cycle/`)
+- [x] `orchestrator.py` — four-agent pipeline coordination (Explorer → Thinker → 4-evaluator Consensus Panel)
+- [x] `consensus.py` — binary BFT consensus tally (≥3/4 ACCEPTED, ≤2/4 REJECTED)
+- [x] `storage.py` — memory storage operations (CREATE, UPDATE, SUPERSEDE) with deduplication
+- [x] `digest.py` — markdown digest generation with dissent annotations
+- [x] `feedback.py` — feedback injection from recent rejections and accepted dissents
+- [x] `src/dream_cycle_db.py` — dream cycle database operations (18 functions)
+
+### Ingestion & Capture
+- [x] `scripts/chat_extract.py` — daily Phase 1 chat extraction (5,561 chats backfilled)
+- [x] `scripts/ingest_staged.sh` — Phase 2 wrapper (Kiro headless + Opus 4.6-1m)
+- [x] `scripts/crawlee_ingest.py` — Crawlee content ingestion
+- [x] `scripts/ingest_chats.py` — batch chat ingestion (5,561 chats → 74K+ memories)
+- [x] `scripts/scrape_bookmarks.py` — Chrome bookmarks scraper
+- [x] `scripts/youtube_scrape.sh` — YouTube playlist/history scrape
+- [x] Hybrid chat extraction spec (`docs/HYBRID-CHAT-EXTRACTION.md`)
 - [ ] Capture API (multi-channel: Slack, mobile, browser, email)
 - [ ] Metadata extraction on ingest (people, topics, action items)
-- [x] Hybrid retrieval (BM25 + vector + RRF reranking) — see Search Architecture
-- [x] Retrieval reinforcement (access_count with logarithmic boost)
-- [x] Depth enforcement on memory_create (causal depth check + quality warnings)
-- [x] `src/dream_cycle/` — Dream cycle four-agent pipeline (Explorer → Thinker → Consensus Panel), decomposed into orchestrator, consensus, storage, digest, feedback modules
-- [x] `src/dream_cycle_db.py` — Dream cycle database operations (18 functions)
-- [x] `src/agent_invoker.py` — Subprocess-based agent invocation with JSON parsing
-- [x] `src/models.py` — Data models (DreamCycleResult, MemorySlice, CandidateInsight, EvaluatorVerdict)
-- [x] `src/prompts/` — Agent prompt templates (explorer, thinker, panel)
-- [x] `scripts/dream_cycle_run.py` — CLI entry point for dream cycle
+
+### Testing
+- [x] `tests/` — 243 tests (property-based with Hypothesis, unit, integration)
+- [x] Test database fixture (isolated `memory_bank_test` DB)
+- [x] Embedding mock (deterministic, no Bedrock calls)
 - [x] `scripts/golden_queries.py` — Tier 3 metrics (MRR, hit rates)
-- [x] `tests/` — 157 tests (property-based + unit + integration)
-- [x] `migrations/003_dream_cycle.sql` — Dream cycle tables + indexes
-- [ ] Memory migration (Claude, ChatGPT, Notion imports)
-- [ ] Weekly synthesis review (scheduled digest)
-- [ ] Evaluation framework (4-layer: retrieval accuracy with ground truth cases, integration tests, consolidation quality, cold vs warm agent output comparison)
 
-### V2 — Cognitive Science Enhancements (see `docs/V2-ROADMAP.md` for research grounding)
+### V2 — Cognitive Science Enhancements
 
-- [x] `memory_learn` MCP tool — elaborative interrogation (Dunlosky 2013), connect new knowledge to existing
-- [ ] Memory classification — auto-classify semantic/episodic/procedural (Tulving 1972), boost semantic in reranking
-- [x] Dream cycle pipeline — replaced consolidation with four-agent autonomous learning (Explorer → Thinker → 3-evaluator Consensus Panel). See `docs/DREAM-CYCLE-DESIGN.md`
+All Layer 1 retrieval improvements implemented. See `docs/V2-ROADMAP.md` for research grounding.
+
+- [x] Memory classification — auto-classify semantic/episodic/procedural (Tulving 1972), boost semantic in reranking
+- [x] Spaced retrieval reinforcement — `last_accessed_at` tracking, spacing bonus modulates reinforcement (Roediger & Karpicke 2006)
+- [x] Project scoping — `project` column, cross-project penalty in reranking (Tulving & Thomson 1973)
+- [x] Depth scoring — numeric 0.0–1.0 in metadata, reranking factor (Craik & Lockhart 1972)
+- [x] Temporal contiguity — surface temporal neighbors of top results (Howard & Kahana 2002)
+- [x] Automatic relationship discovery — semantic + temporal neighbors linked at ingest time
+- [x] `memory_learn` MCP tool — elaborative interrogation (Dunlosky 2013)
+- [x] Dream cycle pipeline — four-agent autonomous learning with 4-evaluator binary BFT consensus (Lamport 1982)
 - [x] Dream cycle module decomposition — `src/dream_cycle/` package with 6 focused modules
-- [ ] Spaced retrieval reinforcement — track `last_accessed_at`, weight spaced retrievals over massed (Roediger & Karpicke 2006)
-- [ ] Project scoping — `project` column, cross-project penalty in reranking (Tulving & Thomson 1973)
-- [ ] Depth scoring — numeric 0.0–1.0 score stored in metadata, used as reranking factor (Craik & Lockhart 1972)
-- [ ] Temporal contiguity — surface temporal neighbors of top results (Howard & Kahana 2002)
-- [ ] "Questions this answers" convention — index for BM25 boost on abstract queries
-- [ ] Backup scripts (rclone + GPG)
-- [x] Backup scheduling (launchd plists — 4 plists in scheduling/, ready to symlink)
-- [x] Weekly verification scheduling (included in launchd plists above)
-- [ ] Encryption key setup (Google + AWS)
-- [ ] Integration testing
+- [x] Data layer decomposition — `src/search.py` extracted from `src/db.py`
+- [ ] "Questions this answers" BM25 indexing — convention exists, dedicated index not yet built
+
+### Future Work
+- [ ] Memory migration (Claude, ChatGPT, Notion imports)
+- [ ] Evaluation framework (retrieval accuracy, consolidation quality, cold vs warm comparison)

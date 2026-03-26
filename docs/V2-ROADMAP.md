@@ -1,12 +1,15 @@
 # Second Brain V2 Roadmap — Cognitive Science-Grounded Enhancements
 
+> **Status:** Items 1–7 implemented. See `.kiro/specs/retrieval-quality/` for the
+> implementation spec and `docs/V2-TASKS.md` for the task-level breakdown.
+
 Based on research from Tulving (1972), Squire (1992), Roediger & Karpicke (2006),
 Howard & Kahana (2002), Craik & Lockhart (1972), Tulving & Thomson (1973),
 Dunlosky et al. (2013), Stickgold (2005), Walker (2009).
 
 Inspired by the kiro-memory project (`~/KiromemoryMCP/mainline/`).
 
-## 1. Memory Classification (Tulving 1972, Squire 1992)
+## 1. Memory Classification ✅ (Tulving 1972, Squire 1992)
 
 **Research:** Human long-term memory has three systems — semantic (principles,
 knowledge), episodic (events, what happened when), and procedural (how-to steps).
@@ -22,7 +25,7 @@ this: idea/synthesis/insight/decision → semantic, source → episodic, etc.
 "always use idempotent migrations" should outrank a raw session log that happens
 to mention migrations.
 
-## 2. Spaced Retrieval Reinforcement (Roediger & Karpicke 2006)
+## 2. Spaced Retrieval Reinforcement ✅ (Roediger & Karpicke 2006)
 
 **Research:** Equally spaced retrieval produces superior long-term retention vs.
 massed retrieval. The first few retrievals matter most (diminishing returns).
@@ -39,7 +42,7 @@ retrieval a week later adds full boost.
 **Why it matters:** Prevents "popularity bias" where a memory retrieved many
 times in one session dominates rankings forever.
 
-## 3. Temporal Contiguity (Howard & Kahana 2002)
+## 3. Temporal Contiguity ✅ (Howard & Kahana 2002)
 
 **Research:** Memories encoded close in time are associated. Retrieving memory A
 makes memories created around the same time as A more accessible. The temporal
@@ -54,7 +57,7 @@ as "related context" alongside the main results. Could be a simple SQL query:
 one day, retrieving one of those chats should surface the others — they share
 temporal context even if their content is different.
 
-## 4. Encoding Specificity / Project Scoping (Tulving & Thomson 1973)
+## 4. Encoding Specificity / Project Scoping ✅ (Tulving & Thomson 1973)
 
 **Research:** Memory retrieval is most effective when the retrieval context matches
 the encoding context. A decision made in Project A may be irrelevant or harmful
@@ -69,7 +72,7 @@ a warning: "From a different project — use as reference only."
 results from unrelated projects will pollute results. Project scoping prevents
 a React convention from overriding a Python decision.
 
-## 5. Depth Scoring (Craik & Lockhart 1972)
+## 5. Depth Scoring ✅ (Craik & Lockhart 1972)
 
 **Research:** Information processed at deeper levels (semantic, elaborative) is
 retained and retrieved far more effectively. Shallow encoding (bullet lists)
@@ -86,7 +89,7 @@ factor — deeper memories rank higher.
 note should rank below a deep explanation of WHY PostgreSQL was chosen, what
 the tradeoffs were, and what happens if you switch.
 
-## 6. memory_learn Tool (Dunlosky 2013 — Elaborative Interrogation)
+## 6. memory_learn Tool ✅ (Dunlosky 2013 — Elaborative Interrogation)
 
 **Research:** Rated moderate-to-high utility in Dunlosky's meta-analysis of 10
 learning techniques. The mechanism: generating explanations for WHY a fact is
@@ -104,7 +107,11 @@ about X because...").
 the agent integrates information — building a web of connected knowledge that
 produces richer retrieval paths.
 
-## 7. Consolidation Pipeline (Stickgold 2005, Walker 2009)
+## 7. Consolidation Pipeline ✅ → Dream Cycle (Stickgold 2005, Walker 2009)
+
+> **Note:** This item was superseded by the Dream Cycle pipeline — a four-agent
+> autonomous learning system (Explorer → Thinker → 4-evaluator BFT Consensus Panel)
+> that runs weekly. See `docs/DREAM-CYCLE-DESIGN.md` and `.kiro/specs/dream-cycle/`.
 
 **Research:** During sleep, the hippocampus replays episodic experiences and
 gradually transfers abstracted knowledge to neocortical long-term storage.
@@ -123,7 +130,7 @@ kiro-memory's `consolidate_knowledge.py` is a good reference implementation.
 the agent has to re-derive patterns from raw transcripts every time. With
 consolidation, patterns are pre-extracted into searchable semantic memories.
 
-## 8. "Questions This Answers" Convention
+## 8. "Questions This Answers" Convention (Partially Done)
 
 **Research:** Elaborative interrogation works because it creates multiple retrieval
 paths to the same knowledge. If a memory only has a title and content, it can
@@ -138,13 +145,13 @@ if this is missing. Could also index these questions separately for BM25 boost.
 **Why it matters:** Abstract queries like "how should I structure a PRFAQ" need
 to match memories that don't contain those exact words but answer that question.
 
-## Priority Order
+## Priority Order (Original) — All Implemented
 
-1. **memory_learn tool** — highest impact, enables knowledge integration
-2. **Memory classification + semantic boost** — biggest retrieval quality win
-3. **Consolidation pipeline** — transforms raw data into usable knowledge
-4. **Spaced retrieval** — prevents popularity bias
-5. **Project scoping** — becomes critical as data grows
-6. **Depth scoring** — refinement of existing depth enforcement
-7. **Temporal contiguity** — nice-to-have context enrichment
-8. **Questions convention** — process improvement, no code needed
+1. ✅ **memory_learn tool** — highest impact, enables knowledge integration
+2. ✅ **Memory classification + semantic boost** — biggest retrieval quality win
+3. ✅ **Consolidation pipeline** → Dream Cycle — transforms raw data into usable knowledge
+4. ✅ **Spaced retrieval** — prevents popularity bias
+5. ✅ **Project scoping** — becomes critical as data grows
+6. ✅ **Depth scoring** — refinement of existing depth enforcement
+7. ✅ **Temporal contiguity** — context enrichment in search results
+8. 🔲 **Questions convention** — convention enforced via depth scoring, dedicated BM25 index not yet built

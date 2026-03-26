@@ -38,7 +38,7 @@ src/             Core library (MCP server, DB, embeddings, ingestion, parsers)
   parsers/       Chat and content parsers
 scripts/         Scheduled jobs (chat extraction, Crawlee ingestion, backup)
 scheduling/      macOS launchd plists
-tests/           242+ tests (property-based, unit, integration)
+tests/           243 tests (property-based, unit, integration)
 staging/         Transient data between pipeline phases (gitignored)
 docs/            Architecture specs and runbooks
 .kiro/specs/     Spec-driven development artifacts
