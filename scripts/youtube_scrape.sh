@@ -2,10 +2,8 @@
 # Nightly YouTube watch history scrape via Crawlee.
 # Runs at 1:30 AM via launchd, before the chat extraction pipeline.
 #
-# Two modes:
-#   1. Playlist mode (default): scrapes a curated "Second Brain Queue" playlist
-#   2. History mode (--history): scrapes full YouTube watch history via browser cookies
-#
+# Scrapes YouTube watch history via browser cookies, filtering to videos
+# ≥5 minutes (likely watched to completion, not shorts/clips).
 # Crawlee writes transcripts to knowledge/sources/ with metadata headers
 # and registers them in knowledge/index.md. The Second Brain ingestion
 # pipeline picks them up from there.
@@ -14,7 +12,7 @@ set -uo pipefail
 
 CRAWLEE_DIR="/Users/kerrfir/Work/Tools/Crawlee"
 LOGFILE="/Users/kerrfir/second-brain/logs/youtube-$(date +%Y%m%d).log"
-MODE="${1:-playlist}"
+MIN_DURATION=300  # 5 minutes in seconds
 
 mkdir -p "$(dirname "$LOGFILE")"
 log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOGFILE"; }
@@ -27,37 +25,54 @@ fi
 
 cd "$CRAWLEE_DIR"
 
-if [ "$MODE" = "history" ]; then
-  # Full watch history via browser cookies
-  # Note: requires Chrome to have an active YouTube session
-  log "=== YouTube Watch History Scrape ==="
-  PLAYLIST_URL="https://www.youtube.com/playlist?list=HL"
-  node -e "
-    import('./youtube.js').then(yt => {
-      yt.extractPlaylist('$PLAYLIST_URL', {
-        output: '$CRAWLEE_DIR/knowledge',
-        lang: 'en',
-        ytDlpArgs: ['--cookies-from-browser', 'chrome']
-      });
-    });
-  " >> "$LOGFILE" 2>&1
-else
-  # Curated playlist mode — set YOUTUBE_PLAYLIST_URL in environment or here
-  PLAYLIST_URL="${YOUTUBE_PLAYLIST_URL:-}"
-  if [ -z "$PLAYLIST_URL" ]; then
-    log "SKIP: No YOUTUBE_PLAYLIST_URL set. Create a playlist and set the env var."
-    exit 0
-  fi
-  log "=== YouTube Playlist Scrape: $PLAYLIST_URL ==="
-  node -e "
-    import('./youtube.js').then(yt => {
-      yt.extractPlaylist('$PLAYLIST_URL', {
-        output: '$CRAWLEE_DIR/knowledge',
-        lang: 'en'
-      });
-    });
-  " >> "$LOGFILE" 2>&1
+log "=== YouTube Watch History Scrape (min ${MIN_DURATION}s) ==="
+
+# Get watch history video URLs, filtering to ≥ MIN_DURATION.
+# --no-flat-playlist fetches metadata so --match-filter can check duration.
+VIDEOS=$(yt-dlp --print url --match-filter "duration>=${MIN_DURATION}" \
+  --cookies-from-browser chrome --no-download \
+  "https://www.youtube.com/playlist?list=HL" 2>>"$LOGFILE") || true
+
+if [ -z "$VIDEOS" ]; then
+  log "No videos matched filter. Done."
+  exit 0
 fi
 
-EXIT_CODE=$?
-log "=== Done (exit code $EXIT_CODE) ==="
+PROCESSED=0
+SKIPPED=0
+FAILED=0
+
+while IFS= read -r VIDEO_URL; do
+  [ -z "$VIDEO_URL" ] && continue
+
+  log "Processing: $VIDEO_URL"
+  node --input-type=module -e "
+    const yt = await import('./youtube.js');
+    const ks = await import('./knowledge-store.js');
+    const md = yt.extractTranscript('$VIDEO_URL', { lang: 'en' });
+    if (md.includes('No transcript available')) {
+      process.stderr.write('No subtitles\\n');
+      process.exit(2);
+    }
+    ks.ensureKnowledgeStore('$CRAWLEE_DIR/knowledge');
+    const title = (md.match(/^# (.+)$/m) || [])[1] || 'Untitled';
+    const videoId = (md.match(/^Video ID: (.+)$/m) || [])[1]?.trim() || '';
+    const filename = yt.youtubeFilename(title, videoId);
+    ks.writeSource('$CRAWLEE_DIR/knowledge', filename, md);
+    const date = new Date().toISOString().split('T')[0];
+    const entry = { title, url: '$VIDEO_URL', type: 'youtube-transcript', filename: filename.replace('.md', ''), date };
+    ks.updateIndex('$CRAWLEE_DIR/knowledge', entry);
+    ks.updateTypeIndex('$CRAWLEE_DIR/knowledge', 'youtube-transcript', entry);
+  " >> "$LOGFILE" 2>&1
+
+  EXIT_CODE=$?
+  if [ $EXIT_CODE -eq 0 ]; then
+    PROCESSED=$((PROCESSED + 1))
+  elif [ $EXIT_CODE -eq 2 ]; then
+    SKIPPED=$((SKIPPED + 1))
+  else
+    FAILED=$((FAILED + 1))
+  fi
+done <<< "$VIDEOS"
+
+log "=== Done: processed=$PROCESSED skipped=$SKIPPED failed=$FAILED ==="
