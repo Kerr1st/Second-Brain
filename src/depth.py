@@ -64,6 +64,62 @@ _CONNECTION_RE = re.compile(
 )
 
 
+def extract_questions(content: str) -> tuple[str, str]:
+    """Extract the 'Questions this answers:' section from content.
+
+    Mirrors the PL/pgSQL ``extract_questions_text()`` parser exactly:
+
+    * Case-insensitive header match for ``Questions this answers:``
+    * Inline queries after the colon on the header line are extracted
+    * Subsequent lines starting with ``- `` or ``* `` are collected as
+      question lines (list marker stripped)
+    * Collection stops at an empty line or a line not starting with
+      ``- `` / ``* ``
+    * The header line is kept in *remaining_content*
+    * Question list lines are removed from *remaining_content*
+
+    Returns ``(questions_text, remaining_content)`` where
+    *questions_text* is the space-joined question lines.  When no header
+    is found, returns ``('', content)``.
+    """
+    lines = content.split("\n")
+    header_found = False
+    in_questions = False
+    q_lines: list[str] = []
+    r_lines: list[str] = []
+
+    for line in lines:
+        if not header_found and line.lower().startswith("questions this answers:"):
+            header_found = True
+            in_questions = True
+
+            # Keep header line in remaining_content
+            r_lines.append(line)
+
+            # Extract inline query after the colon
+            colon_pos = line.find(":")
+            if colon_pos >= 0 and colon_pos < len(line) - 1:
+                inline_text = line[colon_pos + 1:].strip()
+                if inline_text:
+                    q_lines.append(inline_text)
+
+        elif in_questions:
+            if line.startswith("- "):
+                q_lines.append(line[2:])
+            elif line.startswith("* "):
+                q_lines.append(line[2:])
+            else:
+                # Empty line or non-list content terminates questions section
+                in_questions = False
+                r_lines.append(line)
+        else:
+            r_lines.append(line)
+
+    questions_text = " ".join(q_lines)
+    remaining_content = "\n".join(r_lines)
+    return (questions_text, remaining_content)
+
+
 def compute_depth_score(content: str) -> float:
     """Compute a numeric depth score in [0.0, 1.0].
 
