@@ -80,4 +80,90 @@ The DEFERRED state was removed because with 4 evaluators, the "one dissenter" ca
 
 ## Why V2 reranking weights were rebalanced
 
-The V1 formula weights summed to 1.00 (0.35 + 0.20 + 0.20 + 0.15 + 0.10). V2 added `depth_score` as a new 0.05 factor, requiring the base weights to be reduced slightly (sum from 1.00 to 0.86) to keep the total in a similar range. The boosts/penalties (type, mem_class, reinforcement, project) are additive on top. The specific weight choices were informed by the cognitive science research grounding each factor — see `docs/V2-ROADMAP.md`.
+The V1 formula weights summed to 1.00 (0.35 + 0.20 + 0.20 + 0.15 + 0.10). V2 added `depth_score` as a new 0.05 factor, requiring the base weights to be reduced slightly (sum from 1.00 to 0.86) to keep the total in a similar range. The boosts/penalties (type, mem_class, reinforcement, project) are additive on top. The specific weight choices were informed by the cognitive science research grounding each factor (see "Research Grounding for V2 Reranking Signals" below).
+
+## Research Grounding for V2 Reranking Signals
+
+Each V2 reranking signal is grounded in cognitive science research. Consolidated from the original V2 roadmap (Tulving 1972, Squire 1992, Roediger & Karpicke 2006, Howard & Kahana 2002, Craik & Lockhart 1972, Tulving & Thomson 1973, Dunlosky et al. 2013, Stickgold 2005, Walker 2009).
+
+| Signal | Research | Why it matters |
+|---|---|---|
+| `mem_class` boost (semantic > procedural > episodic) | Tulving 1972, Squire 1992 — human long-term memory has three systems with different retrieval utility | A principle about idempotent migrations should outrank a raw session log that mentions migrations |
+| Spaced retrieval (`spacing_bonus`) | Roediger & Karpicke 2006 (testing effect), Bjork 1975 (spacing effect) | Prevents popularity bias where a memory retrieved many times in one session dominates forever |
+| Temporal contiguity (related context) | Howard & Kahana 2002 (temporal context model) | Memories encoded close in time are associated; retrieving one should surface temporal neighbors |
+| Project scoping (`project` penalty) | Tulving & Thomson 1973 (encoding specificity) | Retrieval is most effective when retrieval context matches encoding context; cross-project results pollute |
+| `depth_score` | Craik & Lockhart 1972 (levels of processing) | Deep encoding (causal explanations with examples) produces dramatically more retrievable memory traces |
+| `memory_learn` tool | Dunlosky 2013 (elaborative interrogation) | Generating explanations for WHY creates richer retrieval paths; connecting to existing knowledge is one of the most effective learning strategies |
+| Dream cycle consolidation | Stickgold 2005, Walker 2009 (sleep consolidation) | During sleep, the hippocampus replays episodic experiences and extracts hidden rules; agents with "learned context" need less reasoning at query time |
+| Question-aware search (tsvector Weight A) | Dunlosky 2013 (elaborative interrogation) | "Questions this answers:" creates multiple retrieval paths to the same knowledge, matching how people actually search |
+
+## Why three-speed enrichment (not uniform LLM enrichment)
+
+Every serious memory product (Mem0, Cognee, Zep) runs LLM enrichment at ingest time. Our system has three speeds because volume and value differ:
+
+- **Speed 1: Interactive `memory_create`** — Low volume (5-10 per session), high value. Gets full LLM enrichment: classification, depth scoring, contradiction check, relationship discovery.
+- **Speed 2: Batch ingestion** — High volume (hundreds per batch), cost-prohibitive for LLM per item. Gets deterministic enrichment only: classify, depth score, project tag.
+- **Speed 3: Dream cycle** — Weekly deep LLM enrichment re-examines everything, including batch-ingested memories that only got deterministic enrichment. The "slow path" that catches what the fast paths missed.
+
+## Why memory lifecycle states (active → superseded → consolidated → archived)
+
+Memories have lifecycle states with moderate (not heavy) demotion for superseded memories. Bjork's storage strength vs. retrieval strength (1992) shows that memories with high storage strength but low retrieval strength are the most valuable candidates for re-engagement. Heavy demotion would make them invisible to the Explorer's desirable difficulty strategy.
+
+CLS theory (McClelland 1995/2016) says the hippocampus retains episodes even after neocortical integration, for future replay. Consolidated memories remain searchable but don't compete with their distilled semantic successors. Zep invalidates but never deletes. User rejection is stored as meta-cognitive information (Bartlett's schema theory), not deletion.
+
+## Why the dream cycle uses a four-agent pipeline
+
+The dream cycle implements Stickgold (2005) and Walker (2009): background processing during idle time that replays episodic experiences, extracts hidden rules, and finds connections between unrelated memories. Letta's sleep-time compute research (2025) operationalized this for AI.
+
+The pipeline is Explorer → Thinker → 4-evaluator BFT Consensus Panel. Each agent runs as a separate `kiro-cli chat --no-interactive` invocation for context isolation and failure isolation. See `.kiro/specs/dream-cycle/` for implementation details and `.kiro/specs/byzantine-consensus-panel/` for the consensus design.
+
+## Product landscape convergence
+
+Every serious memory system has converged on five operations:
+
+| Operation | Cognee | Mem0 | Zep | Letta | Google | Ours |
+|---|---|---|---|---|---|---|
+| Ingest | add+cognify | Extraction | Episode ingest | Message proc | IngestAgent | ingest_content |
+| Enrich | cognify | Entity extract | Entity+rel | Core self-edit | IngestAgent | Three-speed |
+| Consolidate | memify | ADD/UPDATE/DELETE | Contradiction detect | Archival promote | ConsolidateAgent | Dream cycle |
+| Retrieve | search | Relevance | Temporal+semantic | Recall+archival | QueryAgent | hybrid_search+rerank |
+| Reinforce | Usage-weighted | Implicit | Temporal recency | Self-editing | Consolidated | access_count+spacing |
+
+## Dream cycle research grounding
+
+| Design Element | Research Basis |
+|---|---|
+| Background processing during idle time | Stickgold 2005, Walker 2009 |
+| Novel recombination of memories | Stickgold 2005 (hippocampal replay) |
+| Multi-agent consensus reduces hallucination | Yao et al. 2025 v2 (Roundtable Policy) |
+| Binary BFT consensus (≥3/4) over unanimity | Lamport 1982, Castro & Liskov 1999 |
+| Binary verdicts over weighted voting | Prasad & Nguyen 2025 (LLM confidence miscalibration) |
+| Reflection as first-class operation | Park 2023 (Generative Agents), Shinn 2023 (Reflexion) |
+| Two-system learning (fast + slow) | McClelland et al. 1995/2016 (CLS theory) |
+| Desirable difficulty surfacing | Bjork 1992 (storage vs retrieval strength) |
+| No confidence-based digest ordering | Prasad & Nguyen 2025 (72.9% avg confidence vs 50% rational baseline) |
+
+## References
+
+[1] Tulving 1972 — Episodic and Semantic Memory
+[2] Squire 1992 — Memory and the Hippocampus
+[3] Craik & Lockhart 1972 — Levels of Processing Framework
+[4] Roediger & Karpicke 2006 — Test-Enhanced Learning
+[5] Howard & Kahana 2002 — Temporal Context Model
+[6] Tulving & Thomson 1973 — Encoding Specificity Principle
+[7] Dunlosky et al. 2013 — Improving Students' Learning with Effective Learning Techniques
+[8] Bjork 1975/1992 — Spacing Effect / Storage vs Retrieval Strength
+[9] Stickgold 2005 — Sleep-dependent memory consolidation
+[10] Walker 2009 — Sleep-Dependent Memory Processing
+[11] McClelland et al. 1995/2016 — Complementary Learning Systems
+[12] Bartlett 1932 — Schema Theory / Reconstructive Memory
+[13] Shinn et al. 2023 — Reflexion: Verbal Reinforcement Learning
+[14] Park et al. 2023 — Generative Agents: Interactive Simulacra of Human Behavior
+[15] Lamport, Shostak, and Pease 1982 — The Byzantine Generals Problem
+[16] Castro and Liskov 1999 — Practical Byzantine Fault Tolerance
+[17] Yao et al. 2025 v2 — Confidence-Weighted-Consensus Aggregation
+[18] Prasad & Nguyen 2025 — When Two LLMs Debate, Both Think They'll Win
+[19] Letta 2025 — Sleep-time Compute
+[20] Mem0 — arxiv 2504.19413
+[21] Zep/Graphiti — arxiv 2501.13956
+[22] Cognee — memify pipeline (topoteretes.com)

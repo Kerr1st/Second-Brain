@@ -18,10 +18,7 @@ pip install -r requirements.txt
 ## Documentation
 
 - [docs/AGENTS.md](docs/AGENTS.md) — Architecture, schema, and project status
-- [docs/DREAM-CYCLE-DESIGN.md](docs/DREAM-CYCLE-DESIGN.md) — Dream cycle multi-agent learning pipeline
-- [docs/V2-TASKS.md](docs/V2-TASKS.md) — V2 implementation task list
-- [docs/DESIGN-DECISIONS.md](docs/DESIGN-DECISIONS.md) — Why key architectural choices were made
-- [docs/V2-ROADMAP.md](docs/V2-ROADMAP.md) — Cognitive science-grounded enhancements roadmap
+- [docs/DESIGN-DECISIONS.md](docs/DESIGN-DECISIONS.md) — Why key architectural choices were made (includes research grounding)
 - [docs/HYBRID-CHAT-EXTRACTION.md](docs/HYBRID-CHAT-EXTRACTION.md) — Chat ingestion pipeline spec
 - [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) — Backup and recovery procedures
 

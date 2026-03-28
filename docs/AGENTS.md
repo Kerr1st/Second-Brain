@@ -94,7 +94,7 @@ But storage and retrieval is just the foundation. The real purpose is to create 
 
 ## Database Schema
 
-Four migrations applied in order (`migrations/000` through `004`).
+Six migrations applied in order (`migrations/000` through `005`).
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -115,7 +115,7 @@ CREATE TABLE memories (
     parent_id UUID REFERENCES memories(id),
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now(),
-    search_vector TSVECTOR,      -- auto-populated by trigger for BM25 full-text search
+    search_vector TSVECTOR,      -- auto-populated by weighted trigger: title+questions=A, content=B (migration 005)
     access_count INTEGER DEFAULT 0, -- retrieval reinforcement (testing effect)
     -- V2 columns (migration 002)
     mem_class TEXT,               -- semantic, episodic, procedural (Tulving 1972)
@@ -376,7 +376,7 @@ All core features implemented and operational. 74K+ memories in PostgreSQL. Drea
 
 ### Infrastructure
 - [x] Architecture design
-- [x] Schema design (4 migrations: 000-004)
+- [x] Schema design (6 migrations: 000-005)
 - [x] Disaster recovery runbook
 - [x] Repo structure (`src/`, `scripts/`, `docker/`, `scheduling/`, `tests/`, `migrations/`)
 - [x] Database migrations system (`migrations/migrate.sh`, numbered SQL files)
@@ -427,7 +427,7 @@ All core features implemented and operational. 74K+ memories in PostgreSQL. Drea
 
 ### V2 — Cognitive Science Enhancements
 
-All Layer 1 retrieval improvements implemented. See `docs/V2-ROADMAP.md` for research grounding.
+All Layer 1 retrieval improvements implemented. See `docs/DESIGN-DECISIONS.md` for research grounding.
 
 - [x] Memory classification — auto-classify semantic/episodic/procedural (Tulving 1972), boost semantic in reranking
 - [x] Spaced retrieval reinforcement — `last_accessed_at` tracking, spacing bonus modulates reinforcement (Roediger & Karpicke 2006)

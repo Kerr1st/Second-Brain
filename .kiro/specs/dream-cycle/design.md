@@ -4,13 +4,14 @@
 > spec (`.kiro/specs/byzantine-consensus-panel/`). The consensus panel was upgraded
 > from 3 to 4 evaluators with binary BFT consensus. The `generate_digest()` signature
 > changed (deferred parameter removed). The `_is_second_deferral()` method was removed.
+> Sequence diagrams and evaluator counts below reflect the original 3-evaluator design.
 > See the BFT spec for the current implementation.
 
 ## Overview
 
 The Dream Cycle adds autonomous, proactive learning to the Second Brain personal knowledge management system. Currently, the system's 74K+ memories in PostgreSQL + pgvector sit inert between interactions — learning only happens when the user explicitly triggers `memory_learn`. The Dream Cycle changes this: during downtime, a four-agent pipeline (Explorer → Thinker → Consensus Panel of 3 evaluators) examines the memory space, discovers hidden connections, surfaces contradictions, names implicit principles, and stores accepted insights as new semantic memories.
 
-This design formalizes the architecture described in `docs/DREAM-CYCLE-DESIGN.md` (the source of truth for prompts, architectural decisions, and research grounding). It specifies the module structure, function signatures, data flow, schema changes, and integration points needed to implement the Dream Cycle as a production feature within the existing Second Brain codebase.
+This design formalizes the architecture described in `docs/DESIGN-DECISIONS.md` (research grounding and architectural decisions). It specifies the module structure, function signatures, data flow, schema changes, and integration points needed to implement the Dream Cycle as a production feature within the existing Second Brain codebase.
 
 The Dream Cycle implements the "Speed 3" tier of the Three-Speed Enrichment architecture: full deep LLM enrichment via weekly background processing. It complements the deterministic enrichment in V2 Tasks 3-6 (Speed 1 & 2) and replaces/extends V2 Task 8 (Consolidation Pipeline) with a more sophisticated multi-agent approach grounded in cognitive science (Stickgold 2005, Walker 2009) and multi-agent consensus research (Yao et al. 2025, Luo et al. 2025).
 
