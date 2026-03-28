@@ -167,6 +167,8 @@ def ingest_content(content, source_type, source_url=None, project=None):
     mem_class = classify_memory("source", body)
     depth_score = compute_depth_score(body)
     meta["depth_score"] = depth_score
+    # Parent record has no embedding — intentional. Vector search finds chunks,
+    # not full documents. Parent serves as the grouping record for chunk hierarchy.
     parent_id = create_memory(
         type="source",
         title=title,
