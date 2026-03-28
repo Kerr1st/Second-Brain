@@ -95,13 +95,6 @@ Include a schema_note explaining the classification.
 Every candidate MUST include 3-5 natural-language queries that this insight \
 answers. These become golden queries for retrieval quality benchmarking.
 
-## Deferred candidates
-
-When deferred candidates from the previous cycle are provided, re-evaluate \
-them with the dissenting objection as additional context. You may strengthen \
-the insight with new evidence, revise it to address the objection, or \
-acknowledge the objection was valid and drop the candidate.
-
 ## Output format
 
 Return a JSON array of 0-3 CandidateInsight objects per memory slice:

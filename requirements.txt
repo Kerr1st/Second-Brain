@@ -1,7 +1,7 @@
-psycopg2-binary
-boto3
-mcp
-browser-cookie3
-requests
-hypothesis
-pytest
+psycopg2-binary==2.9.11
+boto3==1.42.69
+mcp==1.26.0
+browser-cookie3==0.20.1
+requests==2.32.5
+hypothesis==6.151.9
+pytest==9.0.2

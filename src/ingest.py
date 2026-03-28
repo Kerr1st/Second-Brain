@@ -6,6 +6,7 @@ normalized to markdown with metadata headers before reaching this module.
 Pipeline: parse metadata header → chunk by section → embed → store.
 """
 
+import logging
 import re
 from src.db import (
     create_memory,
@@ -18,6 +19,8 @@ from src.db import (
 from src.embeddings import generate_embedding
 from src.classify import classify_memory
 from src.depth import compute_depth_score
+
+logger = logging.getLogger(__name__)
 
 
 def parse_metadata_header(content):
@@ -161,7 +164,7 @@ def ingest_content(content, source_type, source_url=None, project=None):
         return None
 
     # Store parent record (full content, no embedding)
-    mem_class = classify_memory("source", source_type, body)
+    mem_class = classify_memory("source", body)
     depth_score = compute_depth_score(body)
     meta["depth_score"] = depth_score
     parent_id = create_memory(
@@ -182,7 +185,7 @@ def ingest_content(content, source_type, source_url=None, project=None):
     chunks = chunk_by_section(body)
     for i, chunk_text in enumerate(chunks):
         embedding = generate_embedding(chunk_text)
-        chunk_mem_class = classify_memory("source", source_type, chunk_text)
+        chunk_mem_class = classify_memory("source", chunk_text)
         create_memory(
             type="source",
             title=f"{title} (chunk {i+1}/{len(chunks)})",
@@ -224,6 +227,7 @@ def ingest_batch(items, source_type):
             else:
                 stats["skipped"] += 1
         except Exception as e:
+            logger.error("Failed to ingest %s: %s", source_url, e, exc_info=True)
             stats["failed"] += 1
 
     return stats

@@ -232,7 +232,6 @@ class TestEvaluatorIndependence:
 class TestNoDeferredInPipeline:
     """Property 6: For any execution of the consensus pipeline, the final
     verdict for every candidate is either ACCEPTED or REJECTED, never DEFERRED.
-    The candidates_deferred count in DreamCycleResult is always 0.
 
     **Validates: Requirements 2.3, 6.1, 6.5**
     """
@@ -243,7 +242,7 @@ class TestNoDeferredInPipeline:
     @settings(max_examples=100, deadline=None)
     def test_no_deferred_verdicts_and_zero_deferred_count(self, verdicts):
         """For any set of candidates with various verdict combinations,
-        no DEFERRED final verdicts appear and candidates_deferred == 0.
+        no DEFERRED final verdicts appear.
 
         **Validates: Requirements 2.3, 6.1, 6.5**
         """
@@ -320,11 +319,3 @@ class TestNoDeferredInPipeline:
                 assert v in ("ACCEPTED", "REJECTED"), (
                     f"Unexpected verdict: {v}"
                 )
-
-            # candidates_deferred is always 0
-            assert result.candidates_deferred == 0
-
-            # Verify the orchestrator does not call deferred-related DB methods
-            mock_db.get_deferred_candidates.assert_not_called()
-            mock_db.get_previous_run_id.assert_not_called()
-            mock_db.mark_deferred_twice_rejected.assert_not_called()

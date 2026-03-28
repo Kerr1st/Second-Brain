@@ -80,7 +80,6 @@ def main() -> int:
     print(f"Run type:   {result.run_type}")
     print(f"Generated:  {result.candidates_generated}")
     print(f"Accepted:   {result.candidates_accepted}")
-    print(f"Deferred:   {result.candidates_deferred}")
     print(f"Rejected:   {result.candidates_rejected}")
     if result.digest_path:
         print(f"Digest:     {result.digest_path}")

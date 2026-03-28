@@ -181,7 +181,6 @@ class TestCircuitBreakerExplicit:
             assert result.run_id == "run-123"
             assert result.aborted_early is True
             assert result.candidates_accepted == 0
-            assert result.candidates_deferred == 0
             assert result.candidates_rejected == 0
 
             mock_db.complete_run.assert_called_once_with(
@@ -189,7 +188,6 @@ class TestCircuitBreakerExplicit:
                 stats={
                     "candidates_generated": 0,
                     "candidates_accepted": 0,
-                    "candidates_deferred": 0,
                     "candidates_rejected": 0,
                 },
                 digest="",
@@ -667,7 +665,6 @@ class TestSessionStartFrequencyCap:
             assert result.run_id == ""
             assert result.candidates_generated == 0
             assert result.candidates_accepted == 0
-            assert result.candidates_deferred == 0
             assert result.candidates_rejected == 0
 
             # No run record should be created
@@ -1136,7 +1133,6 @@ class TestErrorHandling:
             assert result.aborted_early is True
             assert result.candidates_generated == 0
             assert result.candidates_accepted == 0
-            assert result.candidates_deferred == 0
             assert result.candidates_rejected == 0
 
             # Thinker and evaluators should never be called
@@ -1243,7 +1239,6 @@ class TestErrorHandling:
             # 3/4 ACCEPT (timeout = REJECT) → ACCEPTED (BFT quorum met)
             assert result.candidates_generated == 1
             assert result.candidates_accepted == 1
-            assert result.candidates_deferred == 0
             assert result.candidates_rejected == 0
 
             # store_candidate called with ACCEPTED
@@ -1633,10 +1628,10 @@ class TestRunRecordCompletenessProperty:
     def test_completed_run_has_correct_counts_and_all_verdicts(
         self, run_type, candidate_entries
     ):
-        """For any completed run with a mix of accepted/deferred/rejected
+        """For any completed run with a mix of accepted/rejected
         candidates, verify:
         1. completed_at is not None
-        2. candidates_generated == candidates_accepted + candidates_deferred + candidates_rejected
+        2. candidates_generated == candidates_accepted + candidates_rejected
         3. store_candidate was called for every candidate with all 4 evaluator verdicts
 
         **Validates: Requirements 1.5, 1.6, 2.5**
@@ -1718,12 +1713,12 @@ class TestRunRecordCompletenessProperty:
             "completed_at must be non-null for a completed run"
         )
 
-        # 2. candidates_generated == accepted + deferred + rejected
+        # 2. candidates_generated == accepted + rejected
         assert result.candidates_generated == (
-            result.candidates_accepted + result.candidates_deferred + result.candidates_rejected
+            result.candidates_accepted + result.candidates_rejected
         ), (
             f"Count mismatch: generated={result.candidates_generated} != "
-            f"accepted({result.candidates_accepted}) + deferred({result.candidates_deferred}) "
+            f"accepted({result.candidates_accepted}) "
             f"+ rejected({result.candidates_rejected})"
         )
 
@@ -1824,10 +1819,9 @@ class TestRunRecordCompletenessExplicit:
         assert result.completed_at is not None
         assert result.candidates_generated == 3
         assert result.candidates_accepted == 3
-        assert result.candidates_deferred == 0
         assert result.candidates_rejected == 0
         assert result.candidates_generated == (
-            result.candidates_accepted + result.candidates_deferred + result.candidates_rejected
+            result.candidates_accepted + result.candidates_rejected
         )
         assert mock_db.store_candidate.call_count == 3
 
@@ -1905,10 +1899,9 @@ class TestRunRecordCompletenessExplicit:
         assert result.completed_at is not None
         assert result.candidates_generated == 3
         assert result.candidates_accepted == 1
-        assert result.candidates_deferred == 0
         assert result.candidates_rejected == 2
         assert result.candidates_generated == (
-            result.candidates_accepted + result.candidates_deferred + result.candidates_rejected
+            result.candidates_accepted + result.candidates_rejected
         )
         # All 3 candidates stored
         assert mock_db.store_candidate.call_count == 3

@@ -37,9 +37,7 @@ def complete_run(run_id: str, stats: dict, digest: str,
                  explorer_feedback_injected: str | None = None) -> None:
     """Update run with completion time, stats, and digest text.
 
-    stats keys: candidates_generated, candidates_accepted,
-                candidates_deferred (always 0 — legacy field, DEFERRED removed),
-                candidates_rejected
+    stats keys: candidates_generated, candidates_accepted, candidates_rejected
     """
     conn = get_connection()
     try:
@@ -50,7 +48,7 @@ def complete_run(run_id: str, stats: dict, digest: str,
                 SET completed_at = now(),
                     candidates_generated = %s,
                     candidates_accepted = %s,
-                    candidates_deferred = %s,
+                    candidates_deferred = 0,
                     candidates_rejected = %s,
                     digest = %s,
                     explorer_output = %s,
@@ -60,7 +58,6 @@ def complete_run(run_id: str, stats: dict, digest: str,
                 (
                     stats.get("candidates_generated", 0),
                     stats.get("candidates_accepted", 0),
-                    stats.get("candidates_deferred", 0),
                     stats.get("candidates_rejected", 0),
                     digest,
                     explorer_output,
@@ -272,45 +269,6 @@ def get_accepted_dissents(n_cycles: int = 3) -> list[dict]:
         conn.close()
 
 
-def get_deferred_candidates(previous_run_id: str) -> list[dict]:
-    """Get all DEFERRED candidates from a specific run for re-evaluation.
-
-    .. deprecated::
-        No longer called by the orchestrator. The DEFERRED state has been
-        removed in favour of binary BFT consensus (≥3/4 ACCEPTED, ≤2/4 REJECTED).
-        Retained for backward compatibility only.
-
-    Returns list of dicts with: id, candidate_json, evaluator_a_verdict,
-    evaluator_a_reasoning, evaluator_b_verdict, evaluator_b_reasoning,
-    evaluator_c_verdict, evaluator_c_reasoning.
-
-    Used for re-evaluation in the next cycle with dissenting objection context.
-    """
-    conn = get_connection()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT
-                    id,
-                    candidate_json,
-                    evaluator_a_verdict,
-                    evaluator_a_reasoning,
-                    evaluator_b_verdict,
-                    evaluator_b_reasoning,
-                    evaluator_c_verdict,
-                    evaluator_c_reasoning
-                FROM dream_cycle_candidates
-                WHERE run_id = %s
-                  AND final_verdict = 'DEFERRED'
-                """,
-                (previous_run_id,),
-            )
-            return cur.fetchall()
-    finally:
-        conn.close()
-
-
 def get_last_briefing_time() -> datetime | None:
     """Get the most recent session_start run's completed_at timestamp.
 
@@ -485,37 +443,6 @@ def mark_user_rejected(candidate_id: str, reason: str) -> None:
     finally:
         conn.close()
 
-def mark_deferred_twice_rejected(candidate_id: str) -> None:
-    """Mark a candidate as rejected due to two consecutive deferrals.
-
-    .. deprecated::
-        No longer called by the orchestrator. The DEFERRED state and two-strike
-        rule have been removed in favour of binary BFT consensus
-        (≥3/4 ACCEPTED, ≤2/4 REJECTED). Retained for backward compatibility only.
-
-    Updates the deferred_twice_rejected flag to TRUE on the
-    dream_cycle_candidates record. Called when a candidate that was
-    DEFERRED in the previous cycle gets DEFERRED again in the current cycle,
-    triggering the two-strike rule (Requirement 10.4).
-    """
-    conn = get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE dream_cycle_candidates
-                SET deferred_twice_rejected = TRUE
-                WHERE id = %s
-                """,
-                (candidate_id,),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-
-
 def get_golden_queries() -> list[dict]:
     """Extract 'Questions this answers' from accepted dream cycle insights.
 
@@ -620,7 +547,7 @@ def get_tier1_metrics(n_cycles: int = 10) -> dict:
             cur.execute(
                 """
                 SELECT id, candidates_generated, candidates_accepted,
-                       candidates_deferred, candidates_rejected
+                       candidates_rejected
                 FROM dream_cycle_runs
                 WHERE completed_at IS NOT NULL
                 ORDER BY completed_at DESC

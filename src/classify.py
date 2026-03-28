@@ -24,7 +24,7 @@ PROCEDURAL_MARKERS = re.compile(
 )
 
 
-def classify_memory(type: str, source_type: str | None, content: str) -> str:
+def classify_memory(type: str, content: str) -> str:
     """Deterministic classification of a memory.
 
     Rules (evaluated in priority order):

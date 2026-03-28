@@ -3,8 +3,7 @@
 Feature: retrieval-quality, Property 4: Classifier Correctness
 
 Validates that classify_memory() returns the correct classification
-according to the priority rules for any combination of type, source_type,
-and content.
+according to the priority rules for any combination of type and content.
 """
 
 import re
@@ -25,8 +24,6 @@ all_types = st.one_of(
     st.just("source"),
     non_semantic_types,
 )
-
-source_types = st.one_of(st.none(), st.text(min_size=0, max_size=30))
 
 # Content that definitely contains procedural markers
 procedural_content = st.one_of(
@@ -50,14 +47,13 @@ safe_content = st.from_regex(r"[a-z ]{0,80}", fullmatch=True).filter(
 
 @given(
     mem_type=all_types,
-    source_type=source_types,
     content=st.one_of(procedural_content, safe_content),
 )
 @settings(max_examples=100)
-def test_classifier_correctness(mem_type, source_type, content):
+def test_classifier_correctness(mem_type, content):
     """Feature: retrieval-quality, Property 4: Classifier Correctness
 
-    For any (type, source_type, content), classify_memory returns the correct
+    For any (type, content), classify_memory returns the correct
     class per priority rules:
       1. Content with procedural markers → "procedural" (regardless of type)
       2. type in SEMANTIC_TYPES → "semantic"
@@ -66,7 +62,7 @@ def test_classifier_correctness(mem_type, source_type, content):
 
     **Validates: Requirements 4.1, 4.2, 4.3, 4.4**
     """
-    result = classify_memory(mem_type, source_type, content)
+    result = classify_memory(mem_type, content)
 
     # Independently compute expected classification using the same priority rules
     has_procedural = bool(PROCEDURAL_MARKERS.search(content))
@@ -81,6 +77,6 @@ def test_classifier_correctness(mem_type, source_type, content):
         expected = "episodic"
 
     assert result == expected, (
-        f"classify_memory({mem_type!r}, {source_type!r}, {content!r}) "
+        f"classify_memory({mem_type!r}, {content!r}) "
         f"returned {result!r}, expected {expected!r}"
     )

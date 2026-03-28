@@ -33,11 +33,9 @@ from src.dream_cycle.feedback import build_feedback_injection
 logger = logging.getLogger(__name__)
 
 # Stats dict for aborted/failed runs — all counts zero.
-# candidates_deferred is always 0 (DEFERRED state removed, BFT binary consensus).
 _ZERO_STATS = {
     "candidates_generated": 0,
     "candidates_accepted": 0,
-    "candidates_deferred": 0,
     "candidates_rejected": 0,
 }
 
@@ -85,7 +83,6 @@ class DreamCycleOrchestrator:
             completed_at=datetime.now(timezone.utc),
             candidates_generated=0,
             candidates_accepted=0,
-            candidates_deferred=0,
             candidates_rejected=0,
             digest_path=None,
             aborted_early=True,
@@ -171,7 +168,7 @@ class DreamCycleOrchestrator:
 
         # Step 4: Invoke Explorer (with crash/timeout handling)
         try:
-            slices = self.invoke_explorer(feedback, run_type, scope)
+            slices = self.invoke_explorer(feedback, run_type, scope, stats)
         except (TimeoutError, RuntimeError):
             logger.error("Explorer agent crashed or timed out (run_id=%s)", run_id)
             dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
@@ -266,7 +263,6 @@ class DreamCycleOrchestrator:
             stats={
                 "candidates_generated": len(all_candidates),
                 "candidates_accepted": len(accepted),
-                "candidates_deferred": 0,
                 "candidates_rejected": len(rejected),
             },
             digest=digest,
@@ -281,7 +277,6 @@ class DreamCycleOrchestrator:
             completed_at=completed_at,
             candidates_generated=len(all_candidates),
             candidates_accepted=len(accepted),
-            candidates_deferred=0,
             candidates_rejected=len(rejected),
             digest_path=digest,
             aborted_early=False,
@@ -317,7 +312,8 @@ class DreamCycleOrchestrator:
 
 
     def invoke_explorer(
-        self, feedback: str, run_type: str, scope: dict | None = None
+        self, feedback: str, run_type: str, scope: dict | None = None,
+        stats: dict | None = None,
     ) -> list[MemorySlice]:
         """Invoke Explorer agent and parse memory slices.
 
@@ -328,11 +324,13 @@ class DreamCycleOrchestrator:
             feedback: Formatted feedback injection text (may be empty).
             run_type: One of scheduled, post_learn, session_start, user_triggered.
             scope: Optional scoping dict for non-scheduled runs.
+            stats: Optional pre-fetched memory stats (avoids redundant DB call).
 
         Returns:
             List of MemorySlice objects (may be empty for circuit breaker).
         """
-        stats = dream_cycle_db.get_memory_stats()
+        if stats is None:
+            stats = dream_cycle_db.get_memory_stats()
         date_range = stats["date_range"]
 
         # Build human-readable date range string

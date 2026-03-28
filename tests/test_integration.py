@@ -164,7 +164,7 @@ class TestFullPipelineIntegration:
         # Track explorer invocations
         explorer_calls = []
 
-        def mock_invoke_explorer(feedback, run_type, scope=None):
+        def mock_invoke_explorer(feedback, run_type, scope=None, stats=None):
             explorer_calls.append({"feedback": feedback, "run_type": run_type, "scope": scope})
             return [SLICE_1, SLICE_2]
 
@@ -225,7 +225,6 @@ class TestFullPipelineIntegration:
 
         assert result.candidates_generated == 2
         assert result.candidates_accepted == 1
-        assert result.candidates_deferred == 0
         assert result.candidates_rejected == 1
         assert result.aborted_early is False
 
@@ -246,7 +245,6 @@ class TestFullPipelineIntegration:
         stats = complete_kwargs["stats"]
         assert stats["candidates_generated"] == 2
         assert stats["candidates_accepted"] == 1
-        assert stats["candidates_deferred"] == 0
         assert stats["candidates_rejected"] == 1
 
     def test_feedback_injection_built(self):

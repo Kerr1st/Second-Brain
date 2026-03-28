@@ -13,6 +13,7 @@ See docs/HYBRID-CHAT-EXTRACTION.md for stripping rules and filter thresholds.
 import json
 import glob
 import os
+import re
 from datetime import datetime, timezone
 
 # Chat source directories (macOS)
@@ -86,7 +87,6 @@ def strip_messages(chat_messages):
 
         # Strip embedded IDE context blocks from human messages
         if role == "human":
-            import re
             content = re.sub(r'<EnvironmentContext>.*?</EnvironmentContext>', '', content, flags=re.DOTALL)
             content = re.sub(r'<implicit-rules>.*?</implicit-rules>', '', content, flags=re.DOTALL)
             content = re.sub(r'<implicitInstruction>.*?</implicitInstruction>', '', content, flags=re.DOTALL)

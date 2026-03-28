@@ -19,7 +19,7 @@ def _create_dream_cycle_memory(candidate: CandidateInsight) -> str:
     Shared by CREATE and SUPERSEDE-downgrade-to-CREATE paths.
     """
     embedding = generate_embedding(candidate.content)
-    mem_class = classify_memory(candidate.type, None, candidate.content)
+    mem_class = classify_memory(candidate.type, candidate.content)
     depth_score = compute_depth_score(candidate.content)
     return create_memory(
         type=candidate.type,
@@ -68,7 +68,7 @@ def store_accepted(candidate: CandidateInsight) -> str:
             embedding=generate_embedding(candidate.content),
             mem_class=classify_memory(
                 existing.get("type", "idea") if existing else "idea",
-                existing.get("source_type") if existing else None,
+                candidate.content,
                 candidate.content,
             ),
             metadata=merged_metadata,

@@ -18,7 +18,6 @@ from src.dream_cycle_db import (
     store_candidate,
     get_recent_rejections,
     get_user_rejections,
-    get_deferred_candidates,
     get_accepted_dissents,
     get_tier1_metrics,
     should_run_briefing,
@@ -83,7 +82,6 @@ class TestCompleteRun(unittest.TestCase):
         stats = {
             "candidates_generated": 8,
             "candidates_accepted": 3,
-            "candidates_deferred": 2,
             "candidates_rejected": 3,
         }
         digest = "# Dream Cycle Digest"
@@ -95,7 +93,7 @@ class TestCompleteRun(unittest.TestCase):
         params = mock_cur.execute.call_args[0][1]
         self.assertIn("UPDATE dream_cycle_runs", sql_arg)
         self.assertIn("completed_at", sql_arg)
-        self.assertEqual(params, (8, 3, 2, 3, digest, None, None, run_id))
+        self.assertEqual(params, (8, 3, 3, digest, None, None, run_id))
         mock_conn.commit.assert_called_once()
         mock_conn.close.assert_called_once()
 
@@ -112,7 +110,7 @@ class TestCompleteRun(unittest.TestCase):
 
         params = mock_cur.execute.call_args[0][1]
         # All stats default to 0
-        self.assertEqual(params, (0, 0, 0, 0, "empty digest", None, None, run_id))
+        self.assertEqual(params, (0, 0, 0, "empty digest", None, None, run_id))
 
 
 class TestStoreCandidate(unittest.TestCase):
@@ -282,56 +280,6 @@ class TestGetRecentRejections(unittest.TestCase):
         mock_get_conn.return_value = mock_conn
 
         result = get_recent_rejections()
-
-        self.assertEqual(result, [])
-
-
-class TestGetDeferredCandidates(unittest.TestCase):
-    """Test get_deferred_candidates filters by run_id and DEFERRED status."""
-
-    @patch("src.dream_cycle_db.get_connection")
-    def test_returns_deferred_for_run(self, mock_get_conn):
-        run_id = str(uuid4())
-        expected_rows = [
-            {
-                "id": uuid4(),
-                "candidate_json": {"title": "Deferred insight"},
-                "evaluator_a_verdict": "ACCEPT",
-                "evaluator_a_reasoning": "Good",
-                "evaluator_b_verdict": "ACCEPT",
-                "evaluator_b_reasoning": "Relevant",
-                "evaluator_c_verdict": "REJECT",
-                "evaluator_c_reasoning": "Needs more evidence",
-            }
-        ]
-
-        mock_conn = MagicMock()
-        mock_cur = MagicMock()
-        mock_cur.fetchall.return_value = expected_rows
-        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
-
-        result = get_deferred_candidates(run_id)
-
-        self.assertEqual(result, expected_rows)
-        sql_arg = mock_cur.execute.call_args[0][0]
-        params = mock_cur.execute.call_args[0][1]
-        self.assertIn("DEFERRED", sql_arg)
-        self.assertIn("run_id = %s", sql_arg)
-        self.assertEqual(params, (run_id,))
-        mock_conn.close.assert_called_once()
-
-    @patch("src.dream_cycle_db.get_connection")
-    def test_returns_empty_when_no_deferred(self, mock_get_conn):
-        mock_conn = MagicMock()
-        mock_cur = MagicMock()
-        mock_cur.fetchall.return_value = []
-        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
-
-        result = get_deferred_candidates(str(uuid4()))
 
         self.assertEqual(result, [])
 
@@ -1008,7 +956,7 @@ class TestGetTier1MetricsNonUnanimousRate(unittest.TestCase):
         mock_cur.fetchall.side_effect = [
             # Runs: 1 run with 4 generated, 3 accepted, 1 rejected
             [{"id": run_id, "candidates_generated": 4, "candidates_accepted": 3,
-              "candidates_deferred": 0, "candidates_rejected": 1}],
+              "candidates_rejected": 1}],
             # Strategy diversity
             [],
         ]

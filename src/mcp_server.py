@@ -36,7 +36,7 @@ def memory_create(
     Include 'Questions this answers:' with 3-5 natural-language queries.
     """
     embedding = generate_embedding(content)
-    mem_class = classify_memory(type, source_type, content)
+    mem_class = classify_memory(type, content)
     depth_score = compute_depth_score(content)
     if metadata is None:
         metadata = {}
@@ -137,6 +137,15 @@ def memory_update(
     }.items() if v is not None}
     if "content" in fields:
         fields["embedding"] = generate_embedding(fields["content"])
+        existing = get_memory(memory_id)
+        existing_metadata = (existing.get("metadata") or {}) if existing else {}
+        if isinstance(existing_metadata, str):
+            import json as _json
+            existing_metadata = _json.loads(existing_metadata)
+        mem_type = fields.get("type") or (existing.get("type") if existing else "idea")
+        fields["mem_class"] = classify_memory(mem_type, fields["content"])
+        existing_metadata["depth_score"] = compute_depth_score(fields["content"])
+        fields["metadata"] = existing_metadata
     update_memory(memory_id, **fields)
     return f"Updated memory {memory_id}"
 
