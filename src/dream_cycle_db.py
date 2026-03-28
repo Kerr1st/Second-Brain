@@ -443,7 +443,7 @@ def get_golden_queries() -> list[dict]:
                 candidate_json = json.loads(candidate_json)
 
             content = candidate_json.get("content", "")
-            queries = _extract_golden_queries(content)
+            queries = extract_golden_queries(content)
 
             if queries:
                 results.append(
@@ -457,7 +457,7 @@ def get_golden_queries() -> list[dict]:
         return results
 
 
-def _extract_golden_queries(content: str) -> list[str]:
+def extract_golden_queries(content: str) -> list[str]:
     """Parse 'Questions this answers:' section from insight content.
 
     Looks for a line starting with 'Questions this answers:' and extracts

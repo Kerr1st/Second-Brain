@@ -23,6 +23,9 @@ docker/data/
 # OS
 .DS_Store
 
+# Evaluation results (local, timestamped — query sets are committed)
+evaluations/results/
+
 # Secrets
 .backup-key
 .env

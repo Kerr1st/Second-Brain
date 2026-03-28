@@ -167,6 +167,18 @@ def rerank(results, query_text, query_project=None):
         mem_project = r.get("project")
         project_penalty = -0.15 if (query_project and mem_project and mem_project != query_project) else 0.0
 
+        # Store intermediate signals for evaluation/ablation (underscore-prefixed)
+        r["_overlap"] = overlap
+        r["_title_overlap"] = title_overlap
+        r["_recency"] = recency
+        r["_length_score"] = length_score
+        r["_depth_score"] = depth_score
+        r["_type_boost"] = type_boost
+        r["_mem_class_boost"] = mem_class_boost
+        r["_reinforcement"] = reinforcement
+        r["_spacing_bonus"] = spacing_bonus
+        r["_project_penalty"] = project_penalty
+
         r["rerank_score"] = (
             0.30 * r.get("rrf_score", 0)
             + 0.18 * overlap
