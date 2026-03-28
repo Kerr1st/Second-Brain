@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.second-brain.capture-api</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/kerrfir/second-brain/scripts/capture_api.sh</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/kerrfir/Library/Logs/second-brain/capture-api-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kerrfir/Library/Logs/second-brain/capture-api-stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CAPTURE_API_TOKEN</key>
+        <string>REPLACE_WITH_ACTUAL_TOKEN</string>
+    </dict>
+</dict>
+</plist>
