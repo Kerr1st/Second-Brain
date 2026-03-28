@@ -19,6 +19,7 @@ from src.db import (
 from src.embeddings import generate_embedding
 from src.classify import classify_memory
 from src.depth import compute_depth_score
+from src.project import normalize_project_tag
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,10 @@ def ingest_content(content, source_type, source_url=None, project=None):
     meta, body = parse_metadata_header(content)
     title = meta.get("title", "Untitled")
 
+    # Resolve project: explicit param > header > None
+    resolved_project = project if project is not None else meta.get("project")
+    resolved_project = normalize_project_tag(resolved_project)
+
     if not body.strip():
         return None
 
@@ -177,7 +182,7 @@ def ingest_content(content, source_type, source_url=None, project=None):
         source_type=source_type,
         metadata=meta,
         mem_class=mem_class,
-        project=project,
+        project=resolved_project,
     )
 
     # Relationship discovery for parent memories
@@ -198,7 +203,7 @@ def ingest_content(content, source_type, source_url=None, project=None):
             metadata={**meta, "chunk_index": i, "total_chunks": len(chunks)},
             parent_id=parent_id,
             mem_class=chunk_mem_class,
-            project=project,
+            project=resolved_project,
         )
 
     return parent_id

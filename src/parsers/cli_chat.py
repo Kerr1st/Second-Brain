@@ -13,6 +13,8 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 
+from src.project import normalize_project_tag
+
 CLI_DB_PATH = os.path.expanduser("~/Library/Application Support/kiro-cli/data.sqlite3")
 
 # Minimum thresholds (same as IDE parser)
@@ -108,7 +110,7 @@ def passes_content_filter(messages):
     return False
 
 
-def format_as_markdown(conversation_id, messages, timestamp_ms):
+def format_as_markdown(conversation_id, messages, timestamp_ms, project=None):
     """Format cleaned messages as markdown with metadata header."""
     date_str = datetime.fromtimestamp(
         timestamp_ms / 1000, tz=timezone.utc
@@ -120,10 +122,16 @@ def format_as_markdown(conversation_id, messages, timestamp_ms):
         "Source-Type: kiro_cli_chat",
         f"Source-ID: {conversation_id}",
         f"Date: {date_str}",
+    ]
+
+    if project is not None:
+        lines.append(f"Project: {project}")
+
+    lines.extend([
         "",
         "---",
         "",
-    ]
+    ])
 
     for role, content in messages:
         label = "**User:**" if role == "human" else "**Assistant:**"
@@ -133,7 +141,7 @@ def format_as_markdown(conversation_id, messages, timestamp_ms):
 
 
 def parse_conversation(conversation_id, value_json, created_at):
-    """Parse a single CLI conversation. Returns (conv_id, markdown) or None if filtered out."""
+    """Parse a single CLI conversation. Returns (conv_id, markdown, project) or None if filtered out."""
     try:
         data = json.loads(value_json)
     except json.JSONDecodeError:
@@ -151,12 +159,13 @@ def parse_conversation(conversation_id, value_json, created_at):
     if not passes_content_filter(messages):
         return None
 
-    markdown = format_as_markdown(conversation_id, messages, created_at)
-    return conversation_id, markdown
+    project = normalize_project_tag(conversation_id)
+    markdown = format_as_markdown(conversation_id, messages, created_at, project=project)
+    return conversation_id, markdown, project
 
 
 def parse_all(already_processed=None):
-    """Parse all CLI conversations, applying filters. Yields (conv_id, markdown) tuples."""
+    """Parse all CLI conversations, applying filters. Yields (conv_id, markdown, project) tuples."""
     already_processed = already_processed or set()
 
     for conversation_id, value_json, created_at in get_conversations():

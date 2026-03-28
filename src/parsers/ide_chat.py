@@ -16,6 +16,8 @@ import os
 import re
 from datetime import datetime, timezone
 
+from src.project import normalize_project_tag
+
 # Chat source directories (macOS)
 IDE_CHAT_DIRS = [
     os.path.expanduser("~/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent"),
@@ -49,7 +51,8 @@ def extract_project_context(data):
             paths = ctx.get("expandedPaths", [])
             if paths:
                 # Use the first expanded path to infer project context
-                project = paths[0].split("/")[0] if "/" in paths[0] else None
+                raw_project = paths[0].split("/")[0]
+                project = normalize_project_tag(raw_project)
 
     return {
         "model": metadata.get("modelId", ""),

@@ -12,6 +12,7 @@ from src.search import hybrid_search, rerank, increment_access_count
 from src.embeddings import generate_embedding
 from src.classify import classify_memory
 from src.depth import compute_depth_score
+from src.project import normalize_project_tag
 
 mcp = FastMCP("Second Brain")
 
@@ -38,6 +39,7 @@ def memory_create(
     embedding = generate_embedding(content)
     mem_class = classify_memory(type, content)
     depth_score = compute_depth_score(content)
+    project = normalize_project_tag(project)
     if metadata is None:
         metadata = {}
     metadata["depth_score"] = depth_score
@@ -66,6 +68,7 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
     (BM25 + vector embeddings + RRF) with utility reranking (recency, type boost,
     token overlap, retrieval reinforcement)."""
     embedding = generate_embedding(query)
+    project = normalize_project_tag(project)
     results = hybrid_search(query, embedding, limit=limit, type=type, project=project)
     results = rerank(results, query, query_project=project)
 
