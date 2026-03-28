@@ -352,12 +352,12 @@ All jobs use `scripts/job_wrapper.sh` which sends macOS notification on failure.
 | Time | Job | Script | Status |
 |---|---|---|---|
 | Sat 1:00 AM | Bookmark scrape | scrape_bookmarks.py | Working |
-| Daily 1:30 AM | YouTube scrape | youtube_scrape.sh | Failing (`yt-dlp` not installed) |
+| Daily 1:30 AM | YouTube scrape | youtube_scrape.sh | Working |
 | Daily 2:00 AM | Backup | backup.sh | Working |
 | Daily 2:30 AM | Chat extraction | chat_extract.py | Working |
-| Daily 3:00 AM | Staged ingestion | ingest_staged.sh | Failing (Docker not running at 3AM) |
+| Daily 3:00 AM | Staged ingestion | ingest_staged.sh | Working |
 | Sun 3:00 AM | Backup verify | verify_backup.sh | Working |
-| Sun 4:00 AM | Dream cycle | dream_cycle_scheduled.sh | Working |
+| Sun 4:00 AM | Dream cycle | dream_cycle_scheduled.sh | Not loaded (plist exists but not installed in launchd) |
 
 ## Current Status
 
