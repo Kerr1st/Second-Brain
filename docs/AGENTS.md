@@ -361,7 +361,7 @@ All jobs use `scripts/job_wrapper.sh` which sends macOS notification on failure.
 
 ## Current Status
 
-All core features implemented and operational. 74K+ memories in PostgreSQL. Dream cycle has run once live, producing 4 insights and 2 syntheses. 243 tests passing (property-based, unit, integration). Daily scheduled jobs running (backup, chat extraction, bookmarks). MCP server exposes 8 tools to AI agents.
+All core features implemented and operational. 74K+ memories in PostgreSQL. Dream cycle has completed one live run (March 19, 2026 — manually triggered, producing 6 candidates, all accepted). The weekly scheduled job (Sunday 4AM) is defined but not yet loaded in launchd. Daily scheduled jobs running (backup, chat extraction, bookmarks). MCP server exposes 8 tools to AI agents.
 
 ## Next Steps
 
