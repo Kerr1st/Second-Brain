@@ -365,7 +365,9 @@ class TestSupersedeConsistencyProperty:
              patch("src.dream_cycle.storage.create_memory", return_value=new_memory_id) as mock_create, \
              patch("src.dream_cycle.storage.update_memory") as mock_update, \
              patch("src.dream_cycle.storage.get_memory") as mock_get, \
-             patch("src.dream_cycle.storage.create_relationship") as mock_rel:
+             patch("src.dream_cycle.storage.create_relationship") as mock_rel, \
+             patch("src.dream_cycle.storage.classify_memory", return_value="semantic"), \
+             patch("src.dream_cycle.storage.compute_depth_score", return_value=0.5):
 
             # Simulate target memory exists and is active
             mock_get.return_value = {
@@ -437,7 +439,9 @@ class TestSupersedeConsistencyExplicit:
              patch("src.dream_cycle.storage.create_memory", return_value="created-id") as mock_create, \
              patch("src.dream_cycle.storage.update_memory") as mock_update, \
              patch("src.dream_cycle.storage.get_memory", return_value=None), \
-             patch("src.dream_cycle.storage.create_relationship") as mock_rel:
+             patch("src.dream_cycle.storage.create_relationship") as mock_rel, \
+             patch("src.dream_cycle.storage.classify_memory", return_value="semantic"), \
+             patch("src.dream_cycle.storage.compute_depth_score", return_value=0.5):
 
             result_id = store_accepted(candidate)
 
@@ -473,7 +477,9 @@ class TestSupersedeConsistencyExplicit:
              patch("src.dream_cycle.storage.create_memory", return_value="new-id") as mock_create, \
              patch("src.dream_cycle.storage.update_memory") as mock_update, \
              patch("src.dream_cycle.storage.get_memory", return_value={"id": "already-superseded-uuid", "status": "superseded"}), \
-             patch("src.dream_cycle.storage.create_relationship") as mock_rel:
+             patch("src.dream_cycle.storage.create_relationship") as mock_rel, \
+             patch("src.dream_cycle.storage.classify_memory", return_value="semantic"), \
+             patch("src.dream_cycle.storage.compute_depth_score", return_value=0.5):
 
             result_id = store_accepted(candidate)
 
@@ -509,7 +515,9 @@ class TestCreateStorageCorrectnessProperty:
 
         with patch("src.dream_cycle.storage.generate_embedding", return_value=fake_embedding) as mock_embed, \
              patch("src.dream_cycle.storage.create_memory", return_value=created_id) as mock_create, \
-             patch("src.dream_cycle.storage.create_relationship") as mock_rel:
+             patch("src.dream_cycle.storage.create_relationship") as mock_rel, \
+             patch("src.dream_cycle.storage.classify_memory", return_value="semantic"), \
+             patch("src.dream_cycle.storage.compute_depth_score", return_value=0.5):
 
             result_id = store_accepted(candidate)
 
@@ -575,7 +583,9 @@ class TestCreateStorageCorrectnessExplicit:
 
         with patch("src.dream_cycle.storage.generate_embedding", return_value=[0.1] * 1024), \
              patch("src.dream_cycle.storage.create_memory", return_value="mem-1") as mock_create, \
-             patch("src.dream_cycle.storage.create_relationship") as mock_rel:
+             patch("src.dream_cycle.storage.create_relationship") as mock_rel, \
+             patch("src.dream_cycle.storage.classify_memory", return_value="semantic"), \
+             patch("src.dream_cycle.storage.compute_depth_score", return_value=0.5):
 
             result_id = store_accepted(candidate)
 
@@ -608,7 +618,9 @@ class TestCreateStorageCorrectnessExplicit:
 
         with patch("src.dream_cycle.storage.generate_embedding", return_value=[0.2] * 1024), \
              patch("src.dream_cycle.storage.create_memory", return_value="mem-2") as mock_create, \
-             patch("src.dream_cycle.storage.create_relationship") as mock_rel:
+             patch("src.dream_cycle.storage.create_relationship") as mock_rel, \
+             patch("src.dream_cycle.storage.classify_memory", return_value="semantic"), \
+             patch("src.dream_cycle.storage.compute_depth_score", return_value=0.5):
 
             result_id = store_accepted(candidate)
 
@@ -1308,6 +1320,8 @@ class TestErrorHandling:
              patch("src.dream_cycle.storage.update_memory") as mock_update, \
              patch("src.dream_cycle.storage.get_memory", return_value=None), \
              patch("src.dream_cycle.storage.create_relationship") as mock_rel, \
+             patch("src.dream_cycle.storage.classify_memory", return_value="semantic"), \
+             patch("src.dream_cycle.storage.compute_depth_score", return_value=0.5), \
              patch("src.dream_cycle.storage.logger") as mock_logger:
 
             result_id = store_accepted(candidate)
@@ -1962,19 +1976,25 @@ class TestStoreAcceptedBehavioralEquivalence:
 
         with patch("src.dream_cycle.storage.generate_embedding", return_value=fake_embedding) as mock_embed, \
              patch("src.dream_cycle.storage.create_memory", return_value=created_id) as mock_create, \
-             patch("src.dream_cycle.storage.create_relationship") as mock_rel:
+             patch("src.dream_cycle.storage.create_relationship") as mock_rel, \
+             patch("src.dream_cycle.storage.classify_memory", return_value="semantic") as mock_classify, \
+             patch("src.dream_cycle.storage.compute_depth_score", return_value=0.5) as mock_depth:
 
             result = store_accepted(candidate)
 
             assert result == created_id
             mock_embed.assert_called_once_with(candidate.content)
+            mock_classify.assert_called_once()
+            mock_depth.assert_called_once_with(candidate.content)
             mock_create.assert_called_once()
 
             kw = mock_create.call_args[1]
             assert "dream-cycle" in kw["tags"]
             assert candidate.schema_operation in kw["tags"]
             assert kw["embedding"] == fake_embedding
+            assert kw["mem_class"] == "semantic"
             assert kw["metadata"]["dream_cycle"] is True
+            assert kw["metadata"]["depth_score"] == 0.5
             assert kw["metadata"]["strategy"] == candidate.strategy_that_found_it
             assert kw["metadata"]["source_memories"] == candidate.source_memories
             assert kw["metadata"]["confidence"] == candidate.confidence
@@ -2027,17 +2047,28 @@ class TestStoreAcceptedBehavioralEquivalence:
 
         with patch("src.dream_cycle.storage.generate_embedding", return_value=fake_embedding) as mock_embed, \
              patch("src.dream_cycle.storage.update_memory") as mock_update, \
-             patch("src.dream_cycle.storage.create_relationship") as mock_rel:
+             patch("src.dream_cycle.storage.create_relationship") as mock_rel, \
+             patch("src.dream_cycle.storage.get_memory", return_value={"type": "idea", "source_type": None, "metadata": {"existing_key": "preserved"}}) as mock_get, \
+             patch("src.dream_cycle.storage.classify_memory", return_value="semantic") as mock_classify, \
+             patch("src.dream_cycle.storage.compute_depth_score", return_value=0.5) as mock_depth:
 
             result = store_accepted(candidate)
 
             assert result == candidate.target_memory_id
             mock_embed.assert_called_once_with(candidate.content)
+            mock_get.assert_called_once_with(candidate.target_memory_id)
+            mock_classify.assert_called_once()
+            mock_depth.assert_called_once_with(candidate.content)
             mock_update.assert_called_once()
             update_args = mock_update.call_args
             assert update_args[0][0] == candidate.target_memory_id
             assert update_args[1]["content"] == candidate.content
             assert update_args[1]["embedding"] == fake_embedding
+            # Verify metadata was merged, not overwritten
+            assert update_args[1]["metadata"]["existing_key"] == "preserved"
+            assert "last_dream_cycle_update" in update_args[1]["metadata"]
+            assert update_args[1]["metadata"]["depth_score"] == 0.5
+            assert update_args[1]["mem_class"] == "semantic"
 
             assert mock_rel.call_count == len(candidate.relationships)
             for i, rel in enumerate(candidate.relationships):
@@ -2062,7 +2093,9 @@ class TestStoreAcceptedBehavioralEquivalence:
              patch("src.dream_cycle.storage.create_memory", return_value=new_id) as mock_create, \
              patch("src.dream_cycle.storage.update_memory") as mock_update, \
              patch("src.dream_cycle.storage.get_memory", return_value={"id": candidate.target_memory_id, "status": "active"}) as mock_get, \
-             patch("src.dream_cycle.storage.create_relationship") as mock_rel:
+             patch("src.dream_cycle.storage.create_relationship") as mock_rel, \
+             patch("src.dream_cycle.storage.classify_memory", return_value="semantic"), \
+             patch("src.dream_cycle.storage.compute_depth_score", return_value=0.5):
 
             result = store_accepted(candidate)
 
@@ -2253,7 +2286,7 @@ class TestFinalOrchestratorMethodSet:
     def test_method_set_is_exactly_coordination_methods(self):
         """The set of non-dunder methods on DreamCycleOrchestrator must be exactly:
         run, _run_pipeline, invoke_explorer, invoke_thinker, invoke_evaluator,
-        _invoke_evaluator_safe, _is_second_deferral.
+        _invoke_evaluator_safe, _capture.
 
         **Feature: dream-cycle-decomposition, Property 5: Final orchestrator method set contains only coordination methods**
         **Validates: Requirements 7.1**

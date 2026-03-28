@@ -4,7 +4,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from src.classify import classify_memory
 from src.db import create_memory, create_relationship, get_memory, search_similar, update_memory
+from src.depth import compute_depth_score
 from src.embeddings import generate_embedding
 from src.models import CandidateInsight
 
@@ -17,17 +19,21 @@ def _create_dream_cycle_memory(candidate: CandidateInsight) -> str:
     Shared by CREATE and SUPERSEDE-downgrade-to-CREATE paths.
     """
     embedding = generate_embedding(candidate.content)
+    mem_class = classify_memory(candidate.type, None, candidate.content)
+    depth_score = compute_depth_score(candidate.content)
     return create_memory(
         type=candidate.type,
         title=candidate.title,
         content=candidate.content,
         embedding=embedding,
         tags=["dream-cycle", candidate.schema_operation],
+        mem_class=mem_class,
         metadata={
             "dream_cycle": True,
             "strategy": candidate.strategy_that_found_it,
             "source_memories": candidate.source_memories,
             "confidence": candidate.confidence,
+            "depth_score": depth_score,
         },
     )
 
@@ -45,11 +51,27 @@ def store_accepted(candidate: CandidateInsight) -> str:
         The memory ID (string) of the created or updated memory.
     """
     if candidate.operation == "UPDATE":
+        # Merge new metadata into existing to avoid overwriting depth_score, etc.
+        existing = get_memory(candidate.target_memory_id)
+        existing_metadata = existing.get("metadata", {}) if existing else {}
+        if isinstance(existing_metadata, str):
+            import json
+            existing_metadata = json.loads(existing_metadata)
+        merged_metadata = {
+            **existing_metadata,
+            "last_dream_cycle_update": datetime.now(timezone.utc).isoformat(),
+            "depth_score": compute_depth_score(candidate.content),
+        }
         update_memory(
             candidate.target_memory_id,
             content=candidate.content,
             embedding=generate_embedding(candidate.content),
-            metadata={"last_dream_cycle_update": datetime.now(timezone.utc).isoformat()},
+            mem_class=classify_memory(
+                existing.get("type", "idea") if existing else "idea",
+                existing.get("source_type") if existing else None,
+                candidate.content,
+            ),
+            metadata=merged_metadata,
         )
         memory_id = candidate.target_memory_id
 

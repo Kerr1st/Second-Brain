@@ -5,6 +5,19 @@
 
 set -uo pipefail
 
+# launchd uses a minimal PATH — ensure Homebrew binaries are available
+export PATH="/opt/homebrew/bin:$PATH"
+
+# Ensure Docker Desktop is running (needed for PostgreSQL container)
+if ! docker info &>/dev/null; then
+  open -a Docker
+  # Wait up to 30s for daemon to be ready
+  for i in $(seq 1 30); do
+    docker info &>/dev/null && break
+    sleep 1
+  done
+fi
+
 SCRIPT="$1"
 JOB_NAME="${2:-$(basename "$SCRIPT")}"
 LOGFILE="/Users/kerrfir/second-brain/logs/${JOB_NAME}-$(date +%Y%m%d).log"

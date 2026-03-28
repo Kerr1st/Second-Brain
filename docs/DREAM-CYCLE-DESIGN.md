@@ -896,7 +896,7 @@ Three mechanisms:
 
 Measured in Kiro credits (the actual cost unit), not LLM calls or sessions.
 
-**Execution model:** Each agent runs as a separate `kiro --no-interactive`
+**Execution model:** Each agent runs as a separate `kiro-cli chat --no-interactive`
 invocation — separate process, separate auth, separate context window. This
 is required because: (a) the evaluators must not share context with each other
 or with the Thinker, (b) each agent has a different system prompt, and (c)
