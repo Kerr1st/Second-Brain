@@ -414,11 +414,11 @@ All core features implemented and operational. 74K+ memories in PostgreSQL. Drea
 - [x] `scripts/scrape_bookmarks.py` — Chrome bookmarks scraper
 - [x] `scripts/youtube_scrape.sh` — YouTube playlist/history scrape
 - [x] Hybrid chat extraction spec (`docs/HYBRID-CHAT-EXTRACTION.md`)
-- [ ] Capture API (multi-channel: Slack, mobile, browser, email)
+- [x] Capture API (multi-channel: Slack, mobile, browser, email)
 - [ ] Metadata extraction on ingest (people, topics, action items)
 
 ### Testing
-- [x] `tests/` — 243 tests (property-based with Hypothesis, unit, integration)
+- [x] `tests/` — 459 tests (property-based with Hypothesis, unit, integration)
 - [x] Test database fixture (isolated `memory_bank_test` DB)
 - [x] Embedding mock (deterministic, no Bedrock calls)
 - [x] `scripts/golden_queries.py` — Tier 3 metrics (MRR, hit rates)
@@ -440,5 +440,32 @@ All Layer 1 retrieval improvements implemented. See `docs/DESIGN-DECISIONS.md` f
 - [x] "Questions this answers" BM25 indexing — weighted tsvector trigger (migration 005): title+questions=Weight A, content=Weight B
 
 ### Future Work
-- [ ] Memory migration (Claude, ChatGPT, Notion imports)
-- [ ] Evaluation framework (retrieval accuracy, consolidation quality, cold vs warm comparison)
+- [x] Memory migration (Claude, ChatGPT, Notion imports)
+- [x] Evaluation framework (retrieval accuracy, consolidation quality, cold vs warm comparison)
+- [ ] Metadata extraction on ingest (people, topics, action items)
+- [ ] Tune 0.75 semantic neighbor similarity threshold (needs live data)
+
+### Next: Passive Digital Footprint Capture
+
+Goal: remove friction from gathering knowledge the user is already producing daily.
+
+**Priority 1 — Local data, no auth, launchd-schedulable:**
+- [ ] Calendar sync — Apple Calendar / Google Calendar API, scrape meetings (title, attendees, notes, time patterns)
+- [ ] Git commit history — `git log` across local repos, commit messages + diffs as knowledge artifacts
+- [ ] Terminal history — frequent commands reveal workflows and tools
+
+**Priority 2 — API-based, needs auth setup:**
+- [ ] Slack auto-forward — upgrade capture API endpoint to a real Slack app with event subscriptions (starred/reacted messages)
+- [ ] Email auto-ingest — mail rules that auto-forward tagged emails to the capture API
+- [ ] Code reviews — PR descriptions and review comments (GitHub API)
+
+**Priority 3 — Cloud integrations:**
+- [ ] Meeting transcripts — Zoom/Teams/Meet transcription exports
+- [ ] Documents authored — Google Docs, Confluence, internal wikis
+- [ ] Saved articles/highlights — Pocket, Instapaper, Kindle highlights, Readwise
+- [ ] RSS/newsletter subscriptions
+
+**Priority 4 — Ambient signals:**
+- [ ] Screenshots/whiteboard photos — OCR + ingest
+- [ ] Voice memos — transcribe + ingest
+- [ ] Browser history — pages actually visited (not just bookmarked)
