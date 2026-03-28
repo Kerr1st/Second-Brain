@@ -45,7 +45,7 @@ def normalize_project_tag(raw: str | None) -> str | None:
     if not parts:
         return None
 
-    tag = parts[-1]
+    tag = parts[-1].strip()
 
     # Rule 5 again – final component could be empty after split
     if not tag:

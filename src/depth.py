@@ -99,7 +99,7 @@ def extract_questions(content: str) -> tuple[str, str]:
             # Extract inline query after the colon
             colon_pos = line.find(":")
             if colon_pos >= 0 and colon_pos < len(line) - 1:
-                inline_text = line[colon_pos + 1:].strip()
+                inline_text = line[colon_pos + 1:].strip(" \t\r\n")
                 if inline_text:
                     q_lines.append(inline_text)
 
