@@ -192,12 +192,9 @@ class TestTemporalContextInvariants:
                 # (c) No duplicates with main results
                 assert entry["id"] not in main_ids
         finally:
-            conn = _db.get_connection()
-            try:
+            with _db.get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM memory_relationships")
                     cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
                     cur.execute("DELETE FROM memories")
                 conn.commit()
-            finally:
-                conn.close()

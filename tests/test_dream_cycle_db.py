@@ -39,13 +39,13 @@ class TestCreateRun(unittest.TestCase):
         mock_cur.fetchone.return_value = (expected_id,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = create_run("scheduled")
 
         self.assertEqual(result, str(expected_id))
         mock_conn.commit.assert_called_once()
-        mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
     def test_create_run_executes_correct_sql(self, mock_get_conn):
@@ -55,7 +55,8 @@ class TestCreateRun(unittest.TestCase):
         mock_cur.fetchone.return_value = (expected_id,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         create_run("post_learn")
 
@@ -76,7 +77,8 @@ class TestCompleteRun(unittest.TestCase):
         mock_cur = MagicMock()
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         run_id = str(uuid4())
         stats = {
@@ -95,7 +97,6 @@ class TestCompleteRun(unittest.TestCase):
         self.assertIn("completed_at", sql_arg)
         self.assertEqual(params, (8, 3, 3, digest, None, None, run_id))
         mock_conn.commit.assert_called_once()
-        mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
     def test_complete_run_defaults_missing_stats_to_zero(self, mock_get_conn):
@@ -103,7 +104,8 @@ class TestCompleteRun(unittest.TestCase):
         mock_cur = MagicMock()
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         run_id = str(uuid4())
         complete_run(run_id, {}, "empty digest")
@@ -144,7 +146,8 @@ class TestStoreCandidate(unittest.TestCase):
         mock_cur.fetchone.return_value = (candidate_id,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         run_id = str(uuid4())
         memory_id = str(uuid4())
@@ -171,7 +174,8 @@ class TestStoreCandidate(unittest.TestCase):
         mock_cur.fetchone.return_value = (candidate_id,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         run_id = str(uuid4())
         candidate = self._make_candidate()
@@ -191,7 +195,8 @@ class TestStoreCandidate(unittest.TestCase):
         mock_cur.fetchone.return_value = (candidate_id,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         run_id = str(uuid4())
         candidate = self._make_candidate()
@@ -211,7 +216,8 @@ class TestStoreCandidate(unittest.TestCase):
         mock_cur.fetchone.return_value = (candidate_id,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         target_id = str(uuid4())
         candidate = self._make_candidate(
@@ -259,7 +265,8 @@ class TestGetRecentRejections(unittest.TestCase):
         mock_cur.fetchall.return_value = expected_rows
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_recent_rejections(n_cycles=3)
 
@@ -268,7 +275,6 @@ class TestGetRecentRejections(unittest.TestCase):
         params = mock_cur.execute.call_args[0][1]
         self.assertIn("REJECTED", sql_arg)
         self.assertEqual(params, (3,))
-        mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
     def test_returns_empty_when_no_cycles(self, mock_get_conn):
@@ -277,7 +283,8 @@ class TestGetRecentRejections(unittest.TestCase):
         mock_cur.fetchall.return_value = []
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_recent_rejections()
 
@@ -322,12 +329,12 @@ class TestShouldRunBriefing(unittest.TestCase):
         mock_cur.fetchone.return_value = (True,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = should_run_briefing()
 
         self.assertTrue(result)
-        mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
     @patch("src.dream_cycle_db.get_last_briefing_time")
@@ -341,7 +348,8 @@ class TestShouldRunBriefing(unittest.TestCase):
         mock_cur.fetchone.side_effect = [(False,), (True,)]
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = should_run_briefing()
 
@@ -359,7 +367,8 @@ class TestShouldRunBriefing(unittest.TestCase):
         mock_cur.fetchone.side_effect = [(False,), (False,)]
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = should_run_briefing()
 
@@ -381,7 +390,8 @@ class TestMarkUserRejected(unittest.TestCase):
         mock_cur.fetchone.return_value = (memory_id,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         mark_user_rejected(candidate_id, reason)
 
@@ -405,7 +415,6 @@ class TestMarkUserRejected(unittest.TestCase):
 
         # Single commit = single transaction
         mock_conn.commit.assert_called_once()
-        mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
     def test_no_memory_update_when_no_created_memory(self, mock_get_conn):
@@ -417,7 +426,8 @@ class TestMarkUserRejected(unittest.TestCase):
         mock_cur.fetchone.return_value = (None,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         mark_user_rejected(candidate_id, "Bad insight")
 
@@ -435,7 +445,8 @@ class TestMarkUserRejected(unittest.TestCase):
         mock_cur.fetchone.return_value = None
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         mark_user_rejected(candidate_id, "Bad insight")
 
@@ -463,7 +474,8 @@ class TestGetUserRejections(unittest.TestCase):
         mock_cur.fetchall.return_value = expected_rows
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_user_rejections(n_cycles=3)
 
@@ -473,7 +485,6 @@ class TestGetUserRejections(unittest.TestCase):
         self.assertIn("user_rejected_at IS NOT NULL", sql_arg)
         self.assertIn("ACCEPTED", sql_arg)
         self.assertEqual(params, (3,))
-        mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
     def test_returns_empty_when_no_user_rejections(self, mock_get_conn):
@@ -482,7 +493,8 @@ class TestGetUserRejections(unittest.TestCase):
         mock_cur.fetchall.return_value = []
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_user_rejections()
 
@@ -508,7 +520,8 @@ class TestGetEvaluatorVerdictsForRun(unittest.TestCase):
         ]
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_evaluator_verdicts_for_run(run_id)
 
@@ -517,7 +530,6 @@ class TestGetEvaluatorVerdictsForRun(unittest.TestCase):
         self.assertEqual(result["Insight A"]["advocate"], {"verdict": "ACCEPT", "reasoning": "User relevant"})
         self.assertEqual(result["Insight A"]["epistemologist"], {"verdict": "ACCEPT", "reasoning": "Epistemically sound"})
         self.assertEqual(result["Insight A"]["methodologist"], {"verdict": "ACCEPT", "reasoning": "Methodologically rigorous"})
-        mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
     def test_returns_empty_dict_when_no_accepted(self, mock_get_conn):
@@ -526,7 +538,8 @@ class TestGetEvaluatorVerdictsForRun(unittest.TestCase):
         mock_cur.fetchall.return_value = []
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_evaluator_verdicts_for_run(str(uuid4()))
 
@@ -548,7 +561,8 @@ class TestGetEvaluatorVerdictsForRun(unittest.TestCase):
         ]
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_evaluator_verdicts_for_run(str(uuid4()))
 
@@ -565,7 +579,8 @@ class TestGetEvaluatorVerdictsForRun(unittest.TestCase):
         ]
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_evaluator_verdicts_for_run(str(uuid4()))
 
@@ -582,7 +597,8 @@ class TestGetEvaluatorVerdictsForRun(unittest.TestCase):
         ]
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_evaluator_verdicts_for_run(str(uuid4()))
 
@@ -601,12 +617,12 @@ class TestWasFeedbackInjected(unittest.TestCase):
         mock_cur.fetchone.return_value = ("Some feedback text",)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = was_feedback_injected(str(uuid4()))
 
         self.assertTrue(result)
-        mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
     def test_returns_false_when_feedback_empty(self, mock_get_conn):
@@ -615,7 +631,8 @@ class TestWasFeedbackInjected(unittest.TestCase):
         mock_cur.fetchone.return_value = ("",)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = was_feedback_injected(str(uuid4()))
 
@@ -628,7 +645,8 @@ class TestWasFeedbackInjected(unittest.TestCase):
         mock_cur.fetchone.return_value = (None,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = was_feedback_injected(str(uuid4()))
 
@@ -641,7 +659,8 @@ class TestWasFeedbackInjected(unittest.TestCase):
         mock_cur.fetchone.return_value = None
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = was_feedback_injected(str(uuid4()))
 
@@ -659,7 +678,8 @@ class TestGetPreviousRunId(unittest.TestCase):
         mock_cur.fetchone.return_value = (expected_id,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_previous_run_id("scheduled")
 
@@ -671,7 +691,6 @@ class TestGetPreviousRunId(unittest.TestCase):
         self.assertIn("ORDER BY completed_at DESC", sql_arg)
         self.assertIn("LIMIT 1", sql_arg)
         self.assertEqual(params, ("scheduled",))
-        mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
     def test_returns_none_when_no_completed_run(self, mock_get_conn):
@@ -680,12 +699,12 @@ class TestGetPreviousRunId(unittest.TestCase):
         mock_cur.fetchone.return_value = None
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_previous_run_id("post_learn")
 
         self.assertIsNone(result)
-        mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
     def test_queries_correct_run_type(self, mock_get_conn):
@@ -694,7 +713,8 @@ class TestGetPreviousRunId(unittest.TestCase):
         mock_cur.fetchone.return_value = None
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         get_previous_run_id("user_triggered")
 
@@ -723,7 +743,8 @@ class TestDreamCycleDbQueryProperties(unittest.TestCase):
         mock_cur.fetchone.return_value = (expected_id,) if has_result else None
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_previous_run_id(run_type)
 
@@ -735,7 +756,6 @@ class TestDreamCycleDbQueryProperties(unittest.TestCase):
 
         params = mock_cur.execute.call_args[0][1]
         self.assertEqual(params, (run_type,))
-        mock_conn.close.assert_called()
 
     @given(
         feedback_value=st.one_of(
@@ -757,13 +777,13 @@ class TestDreamCycleDbQueryProperties(unittest.TestCase):
             mock_cur.fetchone.return_value = None
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = was_feedback_injected(str(uuid4()))
 
         expected = bool(row_exists and feedback_value)
         self.assertEqual(result, expected)
-        mock_conn.close.assert_called()
 
     @given(
         num_candidates=st.integers(min_value=0, max_value=5),
@@ -790,7 +810,8 @@ class TestDreamCycleDbQueryProperties(unittest.TestCase):
         mock_cur.fetchall.return_value = rows
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_evaluator_verdicts_for_run(str(uuid4()))
 
@@ -802,7 +823,6 @@ class TestDreamCycleDbQueryProperties(unittest.TestCase):
                 self.assertIn(role, entry)
                 self.assertIn("verdict", entry[role])
                 self.assertIn("reasoning", entry[role])
-        mock_conn.close.assert_called()
 
 
 
@@ -834,7 +854,8 @@ class TestStoreCandidatePersistsEvaluatorD(unittest.TestCase):
         mock_cur.fetchone.return_value = (candidate_id,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         run_id = str(uuid4())
         candidate = {
@@ -904,7 +925,8 @@ class TestGetAcceptedDissents(unittest.TestCase):
         mock_cur.fetchall.return_value = expected_rows
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_accepted_dissents(n_cycles=3)
 
@@ -918,7 +940,6 @@ class TestGetAcceptedDissents(unittest.TestCase):
         self.assertIn("evaluator_c_verdict = 'REJECT'", sql_arg)
         self.assertIn("evaluator_d_verdict = 'REJECT'", sql_arg)
         self.assertEqual(params, (3,))
-        mock_conn.close.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
     def test_returns_empty_when_no_dissents(self, mock_get_conn):
@@ -928,12 +949,12 @@ class TestGetAcceptedDissents(unittest.TestCase):
         mock_cur.fetchall.return_value = []
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_accepted_dissents()
 
         self.assertEqual(result, [])
-        mock_conn.close.assert_called_once()
 
 
 class TestGetTier1MetricsNonUnanimousRate(unittest.TestCase):
@@ -946,7 +967,8 @@ class TestGetTier1MetricsNonUnanimousRate(unittest.TestCase):
         mock_cur = MagicMock()
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         run_id = uuid4()
 
@@ -981,7 +1003,8 @@ class TestGetTier1MetricsNonUnanimousRate(unittest.TestCase):
         mock_cur.fetchall.return_value = []
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         result = get_tier1_metrics(n_cycles=5)
 

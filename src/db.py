@@ -7,8 +7,11 @@ ranking, and retrieval reinforcement have been extracted to src/search.py.
 
 import os
 import json
+from contextlib import contextmanager
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import SimpleConnectionPool
 
 DB_CONFIG = {
     "host": os.environ.get("DB_HOST", "localhost"),
@@ -18,19 +21,44 @@ DB_CONFIG = {
     "password": os.environ.get("DB_PASSWORD", "memory_bank"),
 }
 
+_pool: SimpleConnectionPool | None = None
 
+
+@contextmanager
 def get_connection():
-    """Get a database connection."""
-    return psycopg2.connect(**DB_CONFIG)
+    """Check out a connection from the pool (lazily initialized)."""
+    global _pool
+    if _pool is None:
+        _pool = SimpleConnectionPool(
+            int(os.environ.get("DB_POOL_MIN", "1")),
+            int(os.environ.get("DB_POOL_MAX", "5")),
+            **DB_CONFIG,
+        )
+    conn = _pool.getconn()
+    try:
+        yield conn
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        _pool.putconn(conn)
+
+
+def close_pool():
+    """Close all connections in the pool and reset to uninitialized state."""
+    global _pool
+    if _pool is not None:
+        _pool.closeall()
+        _pool = None
 
 
 def is_reachable():
     """Check if the database is reachable. Returns True/False."""
     try:
-        conn = get_connection()
-        conn.close()
+        with get_connection() as conn:
+            pass
         return True
-    except psycopg2.OperationalError:
+    except Exception:
         return False
 
 
@@ -40,8 +68,7 @@ def create_memory(type, title, content, embedding=None, tags=None, source_url=No
                    source_type=None, metadata=None, status="active", confidence=1.0,
                    parent_id=None, summary=None, mem_class=None, project=None):
     """Insert a new memory. Returns the UUID."""
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO memories (type, title, content, summary, embedding, tags,
@@ -55,19 +82,14 @@ def create_memory(type, title, content, embedding=None, tags=None, source_url=No
             memory_id = cur.fetchone()[0]
         conn.commit()
         return str(memory_id)
-    finally:
-        conn.close()
 
 
 def get_memory(memory_id):
     """Fetch a single memory by ID. Returns dict or None."""
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM memories WHERE id = %s", (memory_id,))
             return cur.fetchone()
-    finally:
-        conn.close()
 
 
 ALLOWED_UPDATE_FIELDS = {
@@ -84,13 +106,10 @@ def update_memory(memory_id, **fields):
         return
     set_clause = ", ".join(f"{k} = %s" for k in fields)
     values = list(fields.values()) + [memory_id]
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(f"UPDATE memories SET {set_clause}, updated_at = now() WHERE id = %s", values)
         conn.commit()
-    finally:
-        conn.close()
 
 
 def list_memories(type=None, status=None, source_type=None, limit=50, offset=0):
@@ -110,13 +129,10 @@ def list_memories(type=None, status=None, source_type=None, limit=50, offset=0):
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     params.extend([limit, offset])
 
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(f"SELECT * FROM memories {where} ORDER BY created_at DESC LIMIT %s OFFSET %s", params)
             return cur.fetchall()
-    finally:
-        conn.close()
 
 
 # --- Semantic Search ---
@@ -135,8 +151,7 @@ def search_similar(embedding, limit=10, type=None, status=None):
     where = "WHERE " + " AND ".join(conditions)
     embedding_str = str(embedding)
 
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(f"""
                 SELECT *, 1 - (embedding <=> %s::vector) AS similarity
@@ -145,16 +160,13 @@ def search_similar(embedding, limit=10, type=None, status=None):
                 LIMIT %s
             """, (embedding_str, *filter_params, embedding_str, limit))
             return cur.fetchall()
-    finally:
-        conn.close()
 
 
 # --- Relationships ---
 
 def create_relationship(source_id, target_id, relation_type, note=None):
     """Create a relationship between two memories."""
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO memory_relationships (source_id, target_id, relation_type, note)
@@ -162,14 +174,11 @@ def create_relationship(source_id, target_id, relation_type, note=None):
                 ON CONFLICT (source_id, target_id, relation_type) DO UPDATE SET note = EXCLUDED.note
             """, (source_id, target_id, relation_type, note))
         conn.commit()
-    finally:
-        conn.close()
 
 
 def get_relationships(memory_id):
     """Get all relationships for a memory (both directions)."""
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT r.*, m.title, m.type
@@ -178,24 +187,19 @@ def get_relationships(memory_id):
                 WHERE r.source_id = %s OR r.target_id = %s
             """, (memory_id, memory_id, memory_id))
             return cur.fetchall()
-    finally:
-        conn.close()
 
 
 # --- Deduplication helpers ---
 
 def get_processed_source_urls(source_type=None):
     """Get set of source_urls already in the database. Used for deduplication."""
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             if source_type:
                 cur.execute("SELECT source_url FROM memories WHERE source_type = %s AND source_url IS NOT NULL", (source_type,))
             else:
                 cur.execute("SELECT source_url FROM memories WHERE source_url IS NOT NULL")
             return {row[0] for row in cur.fetchall()}
-    finally:
-        conn.close()
 
 def find_temporal_neighbors(memory_id: str, created_at, limit: int = 3) -> list[dict]:
     """Find memories created within ±24 hours of the given timestamp.
@@ -203,8 +207,7 @@ def find_temporal_neighbors(memory_id: str, created_at, limit: int = 3) -> list[
     Excludes the specified memory_id. Returns list of dicts with
     id, title, type, created_at fields.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, title, type, created_at
@@ -224,8 +227,6 @@ def find_temporal_neighbors(memory_id: str, created_at, limit: int = 3) -> list[
             }
             for row in rows
         ]
-    finally:
-        conn.close()
 
 
 

@@ -16,6 +16,7 @@ import psycopg2
 import pytest
 
 import src.db as db
+from src.db import close_pool
 
 
 # ---------------------------------------------------------------------------
@@ -98,32 +99,30 @@ def test_db():
         "password": os.environ.get("DB_PASSWORD", "memory_bank"),
     })
 
+    # Invalidate any pool created with old config
+    close_pool()
+
     # Apply all migrations
-    conn = db.get_connection()
-    try:
+    with db.get_connection() as conn:
         _apply_migrations(conn)
-    finally:
-        conn.close()
 
     yield db.DB_CONFIG
 
     # Restore original config
     db.DB_CONFIG.update(original_config)
+    close_pool()
 
 
 @pytest.fixture()
 def clean_tables(test_db):
     """Function-scoped fixture: truncate memories and memory_relationships between tests."""
     yield
-    conn = db.get_connection()
-    try:
+    with db.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM memory_relationships")
             cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
             cur.execute("DELETE FROM memories")
         conn.commit()
-    finally:
-        conn.close()
 
 
 # ---------------------------------------------------------------------------

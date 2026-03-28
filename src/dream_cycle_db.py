@@ -14,8 +14,7 @@ from src.db import get_connection
 
 def create_run(run_type: str) -> str:
     """Insert a new dream_cycle_runs record. Returns run UUID."""
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -28,8 +27,6 @@ def create_run(run_type: str) -> str:
             run_id = cur.fetchone()[0]
         conn.commit()
         return str(run_id)
-    finally:
-        conn.close()
 
 
 def complete_run(run_id: str, stats: dict, digest: str,
@@ -39,8 +36,7 @@ def complete_run(run_id: str, stats: dict, digest: str,
 
     stats keys: candidates_generated, candidates_accepted, candidates_rejected
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -66,8 +62,6 @@ def complete_run(run_id: str, stats: dict, digest: str,
                 ),
             )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def store_candidate(
@@ -88,8 +82,7 @@ def store_candidate(
     final_verdict: ACCEPTED or REJECTED.
     created_memory_id: UUID of the memory created for ACCEPTED candidates.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -126,8 +119,6 @@ def store_candidate(
             candidate_id = cur.fetchone()[0]
         conn.commit()
         return str(candidate_id)
-    finally:
-        conn.close()
 
 
 def get_recent_rejections(n_cycles: int = 3) -> list[dict]:
@@ -140,8 +131,7 @@ def get_recent_rejections(n_cycles: int = 3) -> list[dict]:
 
     Used for feedback injection into the Explorer prompt.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -174,8 +164,6 @@ def get_recent_rejections(n_cycles: int = 3) -> list[dict]:
                 (n_cycles,),
             )
             return cur.fetchall()
-    finally:
-        conn.close()
 
 def get_user_rejections(n_cycles: int = 3) -> list[dict]:
     """Query user-rejected candidates from the last N completed cycles.
@@ -191,8 +179,7 @@ def get_user_rejections(n_cycles: int = 3) -> list[dict]:
     evaluator rejections.
     Requirements: 14.5, 15.1, 15.4.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -216,8 +203,6 @@ def get_user_rejections(n_cycles: int = 3) -> list[dict]:
                 (n_cycles,),
             )
             return cur.fetchall()
-    finally:
-        conn.close()
 
 
 
@@ -229,8 +214,7 @@ def get_accepted_dissents(n_cycles: int = 3) -> list[dict]:
     to surface dissenting concerns on accepted insights.
     Requirements: 8.1.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -265,8 +249,6 @@ def get_accepted_dissents(n_cycles: int = 3) -> list[dict]:
                 (n_cycles,),
             )
             return cur.fetchall()
-    finally:
-        conn.close()
 
 
 def get_last_briefing_time() -> datetime | None:
@@ -275,8 +257,7 @@ def get_last_briefing_time() -> datetime | None:
     Returns None if no session_start runs exist.
     Used for 24-hour frequency cap (Requirement 11.5).
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -290,8 +271,6 @@ def get_last_briefing_time() -> datetime | None:
             )
             row = cur.fetchone()
             return row[0] if row else None
-    finally:
-        conn.close()
 
 
 def should_run_briefing() -> bool:
@@ -316,8 +295,7 @@ def should_run_briefing() -> bool:
         return False
 
     # Condition (b): new memories OR a dream cycle ran since last session
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             # Check for new memories since last briefing
             cur.execute(
@@ -347,8 +325,6 @@ def should_run_briefing() -> bool:
             dream_cycle_ran = cur.fetchone()[0]
 
             return dream_cycle_ran
-    finally:
-        conn.close()
 
 
 def get_memory_stats() -> dict:
@@ -360,8 +336,7 @@ def get_memory_stats() -> dict:
       - type_distribution: dict of type -> count
       - recent_activity: count of memories created in last 7 days
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             # Total count and date range
             cur.execute(
@@ -401,8 +376,6 @@ def get_memory_stats() -> dict:
             "type_distribution": type_distribution,
             "recent_activity": recent_activity,
         }
-    finally:
-        conn.close()
 
 
 def mark_user_rejected(candidate_id: str, reason: str) -> None:
@@ -413,8 +386,7 @@ def mark_user_rejected(candidate_id: str, reason: str) -> None:
     Both updates happen in a single transaction.
     Requirements: 14.5, 15.4.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             # Update the candidate record
             cur.execute(
@@ -440,8 +412,6 @@ def mark_user_rejected(candidate_id: str, reason: str) -> None:
                     (row[0],),
                 )
         conn.commit()
-    finally:
-        conn.close()
 
 def get_golden_queries() -> list[dict]:
     """Extract 'Questions this answers' from accepted dream cycle insights.
@@ -454,8 +424,7 @@ def get_golden_queries() -> list[dict]:
     Returns list of dicts with: candidate_id, memory_id, queries (list[str]).
     Used for Tier 3 metrics (Requirement 18.3).
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -486,8 +455,6 @@ def get_golden_queries() -> list[dict]:
                 )
 
         return results
-    finally:
-        conn.close()
 
 
 def _extract_golden_queries(content: str) -> list[str]:
@@ -540,8 +507,7 @@ def get_tier1_metrics(n_cycles: int = 10) -> dict:
     All derivable via SQL aggregates on dream_cycle_runs and dream_cycle_candidates.
     Requirements: 18.1.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Get the last n_cycles completed runs
             cur.execute(
@@ -580,8 +546,7 @@ def get_tier1_metrics(n_cycles: int = 10) -> dict:
                 acc = r["candidates_accepted"] or 0
                 acceptance_rate_trend.append(acc / gen if gen > 0 else 0.0)
 
-            # Non-unanimous acceptance rate: accepted candidates with 3/4 (not 4/4)
-            # verdict, indicating at least one evaluator dissented.
+            # Non-unanimous acceptance rate
             cur.execute(
                 """
                 SELECT
@@ -603,7 +568,7 @@ def get_tier1_metrics(n_cycles: int = 10) -> dict:
             non_unanimous = row["non_unanimous"]
             non_unanimous_acceptance_rate = non_unanimous / t_accepted if t_accepted > 0 else 0.0
 
-            # Strategy diversity: distinct strategies from candidate_json->>'strategy_that_found_it'
+            # Strategy diversity
             cur.execute(
                 """
                 SELECT count(DISTINCT candidate_json->>'strategy_that_found_it') AS diversity
@@ -615,15 +580,11 @@ def get_tier1_metrics(n_cycles: int = 10) -> dict:
             )
             strategy_diversity = cur.fetchone()["diversity"]
 
-            # Cost efficiency: candidates_accepted / estimated agent invocations
-            # Each run has ~1 Explorer + N Thinker (one per slice) + 3*M Evaluator calls
-            # where N = number of slices, M = candidates_generated
-            # We estimate N from candidates_generated (roughly 1-3 candidates per slice,
-            # so slices ≈ ceil(candidates_generated / 2))
+            # Cost efficiency
             total_invocations = 0
             for r in runs:
                 gen = r["candidates_generated"] or 0
-                estimated_slices = max(1, -(-gen // 2))  # ceil division
+                estimated_slices = max(1, -(-gen // 2))
                 explorer_calls = 1
                 thinker_calls = estimated_slices
                 evaluator_calls = 4 * gen
@@ -638,8 +599,6 @@ def get_tier1_metrics(n_cycles: int = 10) -> dict:
             "strategy_diversity": strategy_diversity,
             "cost_efficiency": cost_efficiency,
         }
-    finally:
-        conn.close()
 
 
 def get_tier2_metrics(n_cycles: int = 10) -> dict:
@@ -652,8 +611,7 @@ def get_tier2_metrics(n_cycles: int = 10) -> dict:
 
     Requirements: 18.2.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Get the last n_cycles completed run IDs
             cur.execute(
@@ -675,7 +633,7 @@ def get_tier2_metrics(n_cycles: int = 10) -> dict:
                     "insight_citation_rate": 0.0,
                 }
 
-            # User rejection rate: rejected / total accepted across these runs
+            # User rejection rate
             cur.execute(
                 """
                 SELECT
@@ -691,7 +649,7 @@ def get_tier2_metrics(n_cycles: int = 10) -> dict:
             total_rejected = row["total_rejected"]
             user_rejection_rate = total_rejected / total_accepted if total_accepted > 0 else 0.0
 
-            # Rejection reason clusters: group by user_rejection_reason
+            # Rejection reason clusters
             cur.execute(
                 """
                 SELECT user_rejection_reason, count(*) AS cnt
@@ -708,7 +666,7 @@ def get_tier2_metrics(n_cycles: int = 10) -> dict:
                 r["user_rejection_reason"]: r["cnt"] for r in cur.fetchall()
             }
 
-            # Insight citation rate: average access_count on memories tagged 'dream-cycle'
+            # Insight citation rate
             cur.execute(
                 """
                 SELECT coalesce(avg(access_count), 0) AS avg_access
@@ -723,8 +681,6 @@ def get_tier2_metrics(n_cycles: int = 10) -> dict:
             "rejection_reason_clusters": rejection_reason_clusters,
             "insight_citation_rate": insight_citation_rate,
         }
-    finally:
-        conn.close()
 
 
 def get_evaluator_verdicts_for_run(run_id: str) -> dict[str, dict]:
@@ -740,8 +696,7 @@ def get_evaluator_verdicts_for_run(run_id: str) -> dict[str, dict]:
         'skeptic', 'advocate', 'epistemologist', 'methodologist', each containing
         {"verdict": str, "reasoning": str}.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -771,8 +726,6 @@ def get_evaluator_verdicts_for_run(run_id: str) -> dict[str, dict]:
                     "methodologist": {"verdict": row[7], "reasoning": row[8]},
                 }
             return verdicts_by_title
-    finally:
-        conn.close()
 
 
 def was_feedback_injected(run_id: str) -> bool:
@@ -786,8 +739,7 @@ def was_feedback_injected(run_id: str) -> bool:
     Returns:
         True if explorer_feedback_injected is non-empty for this run.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT explorer_feedback_injected FROM dream_cycle_runs WHERE id = %s",
@@ -795,8 +747,6 @@ def was_feedback_injected(run_id: str) -> bool:
             )
             row = cur.fetchone()
             return bool(row and row[0])
-    finally:
-        conn.close()
 
 
 def get_previous_run_id(run_type: str) -> str | None:
@@ -810,8 +760,7 @@ def get_previous_run_id(run_type: str) -> str | None:
     Returns:
         The run UUID as string, or None if no previous completed run exists.
     """
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -825,5 +774,3 @@ def get_previous_run_id(run_type: str) -> str | None:
             )
             row = cur.fetchone()
             return str(row[0]) if row else None
-    finally:
-        conn.close()

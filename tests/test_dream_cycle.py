@@ -1523,7 +1523,8 @@ class TestUserRejectionPreservesMemoryProperty:
         mock_cur.fetchone.return_value = (memory_id,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         mark_user_rejected(candidate_id, reason)
 
@@ -1549,7 +1550,6 @@ class TestUserRejectionPreservesMemoryProperty:
         # Single commit = single transaction (atomicity)
         mock_conn.commit.assert_called_once()
         # Connection always closed
-        mock_conn.close.assert_called_once()
 
     @given(
         candidate_id=st.uuids().map(str),
@@ -1574,7 +1574,8 @@ class TestUserRejectionPreservesMemoryProperty:
         mock_cur.fetchone.return_value = (None,)
         mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
         mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        mock_get_conn.return_value = mock_conn
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
 
         mark_user_rejected(candidate_id, reason)
 
@@ -1590,7 +1591,6 @@ class TestUserRejectionPreservesMemoryProperty:
 
         # Still commits (transaction completes)
         mock_conn.commit.assert_called_once()
-        mock_conn.close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ import math
 import re
 from datetime import datetime, timezone
 
+from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 
 from src.db import get_connection
@@ -27,42 +28,43 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
     k = 60  # RRF constant
     prefetch = limit * 4  # fetch more candidates for fusion
 
-    conditions = ["embedding IS NOT NULL"]
+    conditions = [sql.SQL("embedding IS NOT NULL")]
     params_base = []
     if type:
-        conditions.append("type = %s")
+        conditions.append(sql.SQL("type = %s"))
         params_base.append(type)
     if status:
-        conditions.append("status = %s")
+        conditions.append(sql.SQL("status = %s"))
         params_base.append(status)
     if project:
-        conditions.append("(project = %s OR project IS NULL)")
+        conditions.append(sql.SQL("(project = %s OR project IS NULL)"))
         params_base.append(project)
-    where = "WHERE " + " AND ".join(conditions)
+    where = sql.SQL("WHERE ") + sql.SQL(" AND ").join(conditions)
 
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Vector search
             emb_str = str(query_embedding)
             vec_params = [emb_str] + params_base + [emb_str, prefetch]
-            cur.execute(f"""
-                SELECT id, 1 - (embedding <=> %s::vector) AS similarity
-                FROM memories {where}
-                ORDER BY embedding <=> %s::vector LIMIT %s
-            """, vec_params)
+            vec_query = sql.SQL(
+                "SELECT id, 1 - (embedding <=> %s::vector) AS similarity"
+                " FROM memories {where}"
+                " ORDER BY embedding <=> %s::vector LIMIT %s"
+            ).format(where=where)
+            cur.execute(vec_query, vec_params)
             vec_results = {str(r["id"]): i + 1 for i, r in enumerate(cur.fetchall())}
 
             # Full-text search
             ts_query = " | ".join(re.sub(r"[^\w\s]", "", query_text).split())
             if ts_query.strip():
                 fts_params = [ts_query] + params_base + [prefetch]
-                fts_where = where + " AND search_vector IS NOT NULL"
-                cur.execute(f"""
-                    SELECT id, ts_rank(search_vector, to_tsquery('english', %s)) AS rank
-                    FROM memories {fts_where}
-                    ORDER BY rank DESC LIMIT %s
-                """, fts_params)
+                fts_where = where + sql.SQL(" AND search_vector IS NOT NULL")
+                fts_query = sql.SQL(
+                    "SELECT id, ts_rank(search_vector, to_tsquery('english', %s)) AS rank"
+                    " FROM memories {where}"
+                    " ORDER BY rank DESC LIMIT %s"
+                ).format(where=fts_where)
+                cur.execute(fts_query, fts_params)
                 fts_results = {str(r["id"]): i + 1 for i, r in enumerate(cur.fetchall())}
             else:
                 fts_results = {}
@@ -90,8 +92,6 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
             row["rrf_score"] = rrf_map.get(str(row["id"]), 0)
         rows.sort(key=lambda r: r["rrf_score"], reverse=True)
         return rows
-    finally:
-        conn.close()
 
 
 def compute_spacing_bonus(last_accessed_at, now=None):
@@ -188,13 +188,10 @@ def increment_access_count(memory_ids):
     """Bump access_count for retrieved memories (retrieval reinforcement)."""
     if not memory_ids:
         return
-    conn = get_connection()
-    try:
+    with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE memories SET access_count = coalesce(access_count, 0) + 1, last_accessed_at = now() WHERE id = ANY(%s::uuid[])",
                 (memory_ids,)
             )
         conn.commit()
-    finally:
-        conn.close()
