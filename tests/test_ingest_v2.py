@@ -21,15 +21,12 @@ from tests.conftest import _deterministic_embedding
 # ---------------------------------------------------------------------------
 
 def _truncate_tables():
-    conn = db.get_connection()
-    try:
+    with db.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM memory_relationships")
             cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
             cur.execute("DELETE FROM memories")
         conn.commit()
-    finally:
-        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -95,16 +92,13 @@ class TestRelationshipDiscoveryCaps:
                 )
                 # Shift created_at to be within ±24h of parent
                 offset_hours = (i % 24) - 12  # range: -12 to +11
-                conn = db.get_connection()
-                try:
+                with db.get_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
                             "UPDATE memories SET created_at = %s WHERE id = %s",
                             (now + timedelta(hours=offset_hours), mem_id),
                         )
                     conn.commit()
-                finally:
-                    conn.close()
 
             # Mock generate_embedding to return deterministic embedding
             with patch("src.ingest.generate_embedding", side_effect=_deterministic_embedding):
@@ -183,16 +177,13 @@ class TestChunksSkipRelationshipDiscovery:
                 assert call_args[0][0] == parent_id  # first positional arg is parent_id
 
             # Verify chunk records (parent_id IS NOT NULL) have no relationships
-            conn = db.get_connection()
-            try:
+            with db.get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT id FROM memories WHERE parent_id = %s",
                         (parent_id,),
                     )
                     chunk_ids = [str(row[0]) for row in cur.fetchall()]
-            finally:
-                conn.close()
 
             for chunk_id in chunk_ids:
                 rels = db.get_relationships(chunk_id)
@@ -251,16 +242,13 @@ class TestFindTemporalNeighborsCorrectness:
                 content="Reference memory for temporal neighbor test",
             )
             # Set its created_at to `now`
-            conn = db.get_connection()
-            try:
+            with db.get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "UPDATE memories SET created_at = %s WHERE id = %s",
                         (now, ref_id),
                     )
                 conn.commit()
-            finally:
-                conn.close()
 
             # Create near neighbors (within ±24h)
             for i, hours in enumerate(offset_hours[:num_neighbors]):
@@ -270,16 +258,13 @@ class TestFindTemporalNeighborsCorrectness:
                     content=f"Near neighbor content {i}",
                 )
                 ts = now + timedelta(hours=hours)
-                conn = db.get_connection()
-                try:
+                with db.get_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
                             "UPDATE memories SET created_at = %s WHERE id = %s",
                             (ts, mem_id),
                         )
                     conn.commit()
-                finally:
-                    conn.close()
 
             # Create far memories (outside ±24h)
             for i in range(num_far):
@@ -290,16 +275,13 @@ class TestFindTemporalNeighborsCorrectness:
                 )
                 far_offset = 48 + (i * 24)  # 48h, 72h, 96h, ...
                 ts = now + timedelta(hours=far_offset)
-                conn = db.get_connection()
-                try:
+                with db.get_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
                             "UPDATE memories SET created_at = %s WHERE id = %s",
                             (ts, mem_id),
                         )
                     conn.commit()
-                finally:
-                    conn.close()
 
             # Call find_temporal_neighbors
             results = db.find_temporal_neighbors(ref_id, now, limit=10)

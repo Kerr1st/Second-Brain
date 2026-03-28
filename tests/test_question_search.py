@@ -309,8 +309,7 @@ class TestEdgeCases:
 
     def test_no_questions_section(self, test_db, clean_tables):
         """Content with no questions section → weight A on title only, weight B on full content."""
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             mid = _insert_memory_sql(conn, "Alpha Beta", "gamma delta epsilon")
             sv = _sv_text(conn, mid)
             # Title words should have weight A, body words weight B
@@ -321,14 +320,11 @@ class TestEdgeCases:
             assert "A" in alpha_token, f"Expected 'alpha' to have weight A: {alpha_token}"
             gamma_token = _get_token_weight(sv, "gamma")
             assert "B" in gamma_token, f"Expected 'gamma' to have weight B: {gamma_token}"
-        finally:
-            conn.close()
 
     def test_empty_questions_section(self, test_db, clean_tables):
         """Header line present but no bullet items after it → questions_text is empty."""
         content = "Some intro.\nQuestions this answers:\n\nMore body text."
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             mid = _insert_memory_sql(conn, "EmptyQ Title", content)
             sv = _sv_text(conn, mid)
             # Title should be weight A, body content weight B
@@ -339,8 +335,6 @@ class TestEdgeCases:
             assert "A" in emptyq_token, f"Expected 'emptyq' to have weight A: {emptyq_token}"
             intro_token = _get_token_weight(sv, "intro")
             assert "B" in intro_token, f"Expected 'intro' to have weight B: {intro_token}"
-        finally:
-            conn.close()
 
     def test_multiple_questions_headers(self, test_db, clean_tables):
         """Only the first 'Questions this answers:' header is extracted."""
@@ -353,8 +347,7 @@ class TestEdgeCases:
             "Questions this answers:\n"
             "- Second question beta\n"
         )
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             mid = _insert_memory_sql(conn, "MultiQ Title", content)
             sv = _sv_text(conn, mid)
             # "alpha" from first questions section should be weight A
@@ -370,21 +363,16 @@ class TestEdgeCases:
                     assert "A" in token, f"Expected 'alpha' to have weight A: {token}"
                 if "'beta'" in token:
                     assert "B" in token, f"Expected 'beta' to have weight B: {token}"
-        finally:
-            conn.close()
 
     def test_null_content(self, test_db, clean_tables):
         """Memory with empty content gets proper search_vector (title only, weight A)."""
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             mid = _insert_memory_sql(conn, "NullContent Title", "")
             sv = _sv_text(conn, mid)
             # Should have weight A from title
             assert _has_weight(sv, "A"), f"Expected weight A in search_vector: {sv}"
             nullcont_token = _get_token_weight(sv, "nullcont")
             assert "A" in nullcont_token, f"Expected 'nullcont' to have weight A: {nullcont_token}"
-        finally:
-            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -408,8 +396,7 @@ class TestTriggerWeightedInsert:
             "\n"
             "More body text."
         )
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             mid = _insert_memory_sql(conn, "DB Config Guide", content)
             sv = _sv_text(conn, mid)
 
@@ -425,8 +412,6 @@ class TestTriggerWeightedInsert:
             assert "A" in connect_token, f"'connection' should be weight A: {connect_token}"
             bodi_token = _get_token_weight(sv, "bodi")
             assert "B" in bodi_token, f"'body' should be weight B: {bodi_token}"
-        finally:
-            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -459,8 +444,7 @@ class TestTsRankQuestionsHigher:
             "\n"
             "More details about kubernetes deployment patterns."
         )
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             mid_a = _insert_memory_sql(conn, "Infra Guide A", content_a)
             mid_b = _insert_memory_sql(conn, "Infra Guide B", content_b)
 
@@ -483,8 +467,6 @@ class TestTsRankQuestionsHigher:
                 f"Expected higher rank for questions match. "
                 f"Scores: A={float(rows[0][1])}, B={float(rows[1][1])}"
             )
-        finally:
-            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -508,8 +490,7 @@ class TestBackfillCorrection:
             "Additional security notes."
         )
         title = "Security FAQ"
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             # Step 1: Insert (trigger creates weighted vector)
             mid = _insert_memory_sql(conn, title, content)
             sv_original = _sv_text(conn, mid)
@@ -549,8 +530,6 @@ class TestBackfillCorrection:
                 f"  Original:   {sv_original}\n"
                 f"  Backfilled: {sv_backfilled}"
             )
-        finally:
-            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -566,8 +545,7 @@ class TestMigrationIdempotent:
     def test_apply_migration_twice(self, test_db, clean_tables):
         """Execute migration 005 SQL twice — second run should produce no errors."""
         migration_sql = _read_migration_005()
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             # First application (already applied by test_db fixture, but run again)
             with conn.cursor() as cur:
                 cur.execute(migration_sql)
@@ -577,8 +555,6 @@ class TestMigrationIdempotent:
             with conn.cursor() as cur:
                 cur.execute(migration_sql)
             conn.commit()
-        finally:
-            conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -693,8 +669,7 @@ class TestCrossImplementationEquivalence:
         py_questions, py_remaining = extract_questions(content)
 
         # PL/pgSQL result
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT questions_text, remaining_content FROM extract_questions_text(%s)",
@@ -703,8 +678,6 @@ class TestCrossImplementationEquivalence:
                 row = cur.fetchone()
                 pg_questions = row[0]
                 pg_remaining = row[1]
-        finally:
-            conn.close()
 
         assert py_questions == pg_questions, (
             f"questions_text mismatch:\n"
@@ -740,8 +713,7 @@ class TestBackfillTriggerConsistency:
         backfill UPDATE SQL.
         """
         title, content = pair
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             # Step 1: Insert via trigger → capture search_vector
             mid = _insert_memory_sql(conn, title, content)
             sv_trigger = _sv_text(conn, mid)
@@ -781,10 +753,3 @@ class TestBackfillTriggerConsistency:
                 conn.commit()
             except psycopg2.Error:
                 conn.rollback()
-        except psycopg2.Error:
-            # Roll back on any DB error (e.g. deadlock from concurrent tests)
-            # so the connection is reusable for the next Hypothesis example.
-            conn.rollback()
-            raise
-        finally:
-            conn.close()

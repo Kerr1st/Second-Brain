@@ -72,15 +72,12 @@ class TestCreateAndGetRelationship:
 
 def _truncate_tables():
     """Inline cleanup helper for Hypothesis tests that can't use function-scoped fixtures."""
-    conn = db.get_connection()
-    try:
+    with db.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM memory_relationships")
             cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
             cur.execute("DELETE FROM memories")
         conn.commit()
-    finally:
-        conn.close()
 
 
 class TestCreateMemoryV2FieldsRoundTrip:
