@@ -78,7 +78,7 @@ def main():
     # Process CLI chats
     log.info("Processing CLI chats...")
     try:
-        for conv_id, markdown in parse_cli_chats(already_processed=already_staged):
+        for conv_id, markdown, project in parse_cli_chats(already_processed=already_staged):
             cli_passed += 1
             if not dry_run:
                 short_id = conv_id[:12]

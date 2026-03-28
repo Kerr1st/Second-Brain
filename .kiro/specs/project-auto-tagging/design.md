@@ -74,7 +74,8 @@ def normalize_project_tag(raw: str | None) -> str | None:
     3. Extract final path component (split on / and \\)
     4. Empty string after normalization → None
     5. Dot-prefixed (e.g. .kiro, .git) → None
-    6. If original path has < 3 components → None (home dir / root)
+    6. If original path is absolute (starts with /) and has < 3 components → None (home dir / root)
+       This rule does NOT apply to relative paths or bare names (e.g. "RetailStore").
     
     Returns normalized tag or None.
     """
@@ -139,10 +140,11 @@ One-time migration script. Phases:
 6. Then `UPDATE memories SET project = %s WHERE parent_id = %s` for all children.
 
 **Phase B: CLI Chat Backfill**
-1. Read CLI SQLite DB `conversations_v2` table. Build mapping: `conversation_id` → `normalize_project_tag(conversation_id)`.
-2. Query all memories with `source_type = 'kiro_cli_chat'` and `parent_id IS NULL`.
-3. For each parent, extract the conversation identifier from `source_url` (staging filename like `cli_5951158f-1d5.md`). Match against the SQLite mapping by reading the conversation data to find the staging filename pattern.
-4. If matched, update parent and children.
+1. Query all memories with `source_type = 'kiro_cli_chat'` and `parent_id IS NULL` (parents only).
+2. For each parent, read `metadata->>'source_id'` which contains the full `conversation_id` (workspace path).
+3. Apply `normalize_project_tag()` to the workspace path to derive the project name.
+4. If `source_id` is missing from metadata, fall back to reading the CLI SQLite DB `conversations_v2` table to find the conversation_id.
+5. If matched, update parent and children.
 
 **Phase C: Skip non-chat memories**
 - Memories with `source_type` not in `('kiro_ide_chat', 'kiro_cli_chat')` are left as NULL.
@@ -185,8 +187,8 @@ normalize_project_tag("  ")                                    → None
 normalize_project_tag("RetailStore")                           → "retailstore"
 normalize_project_tag("  RetailStore  ")                       → "retailstore"
 normalize_project_tag("/Users/kerrfir/Projects/RetailStore")   → "retailstore"
-normalize_project_tag("/Users/kerrfir")                        → None  (< 3 components)
-normalize_project_tag("/")                                     → None  (< 3 components)
+normalize_project_tag("/Users/kerrfir")                        → None  (absolute, < 3 components)
+normalize_project_tag("/")                                     → None  (absolute, < 3 components)
 normalize_project_tag(".kiro")                                 → None  (dot-prefix)
 normalize_project_tag(".git")                                  → None  (dot-prefix)
 normalize_project_tag("path/to/.vscode")                       → None  (dot-prefix)
@@ -206,7 +208,7 @@ normalize_project_tag("Projects/RetailStore")                  → "retailstore"
 
 ### Property 2: Normalization excludes dot-prefixed and short paths
 
-*For any* string that, after extracting the final path component, starts with a dot character, `normalize_project_tag` returns `None`. *For any* absolute path with fewer than 3 components (e.g., `/Users/kerrfir`, `/`), `normalize_project_tag` returns `None`.
+*For any* string that, after extracting the final path component, starts with a dot character, `normalize_project_tag` returns `None`. *For any* absolute path (starting with `/`) with fewer than 3 components (e.g., `/Users/kerrfir`, `/`), `normalize_project_tag` returns `None`. Relative paths and bare directory names (e.g., `RetailStore`) are not subject to this rule.
 
 **Validates: Requirements 8.5, 8.6**
 

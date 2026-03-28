@@ -47,7 +47,7 @@ This feature closes the loop: derive project tags at parse/ingest time, flow the
 1. THE CLI_Chat_Parser SHALL extract the Project_Tag from the `conversation_id` field, which is the workspace directory path (e.g., `/Users/kerrfir/AmplifyG2 Workshops/RetailStore`).
 2. THE CLI_Chat_Parser SHALL use the leaf directory name of the `conversation_id` path as the Project_Tag (e.g., `retailstore` from `/Users/kerrfir/AmplifyG2 Workshops/RetailStore`).
 3. WHEN the `conversation_id` does not contain a valid directory path (e.g., is empty or a non-path identifier), THE CLI_Chat_Parser SHALL set the Project_Tag to NULL.
-4. WHEN the `conversation_id` path has fewer than 3 path components (i.e., is a home directory like `/Users/kerrfir` or root `/`), THE CLI_Chat_Parser SHALL set the Project_Tag to NULL.
+4. WHEN the `conversation_id` path (which is always an absolute path) has fewer than 3 path components (i.e., is a home directory like `/Users/kerrfir` or root `/`), THE CLI_Chat_Parser SHALL set the Project_Tag to NULL.
 5. THE CLI_Chat_Parser SHALL include a `Project:` header line in the formatted markdown output WHEN the Project_Tag is not NULL.
 6. THE CLI_Chat_Parser SHALL return the Project_Tag in the result tuple alongside the conversation_id and markdown.
 
@@ -76,7 +76,7 @@ This feature closes the loop: derive project tags at parse/ingest time, flow the
 
 **User Story:** As an AI agent user, I want the `memory_create` MCP tool to continue accepting and storing the project parameter, so that interactively created memories are correctly scoped.
 
-**Note:** This requirement documents existing behavior. `memory_create` already accepts and stores the `project` parameter. No implementation changes needed.
+**Note:** This requirement documents existing behavior. `memory_create` already accepts and stores the `project` parameter. No implementation changes needed for passthrough. However, Requirement 8.9 adds normalization to this tool.
 
 #### Acceptance Criteria
 
@@ -105,8 +105,8 @@ This feature closes the loop: derive project tags at parse/ingest time, flow the
 
 **CLI Chat Backfill (752 memories):**
 
-6. THE Backfill_Script SHALL read the CLI SQLite database (`conversations_v2` table) to build a mapping of `conversation_id` (workspace path) → project name using the same leaf-directory extraction as the CLI_Chat_Parser.
-7. THE Backfill_Script SHALL match CLI memories to conversations by parsing the conversation identifier from the memory's `source_url` staging filename.
+6. THE Backfill_Script SHALL read the `metadata->>'source_id'` field from each CLI memory record, which contains the full `conversation_id` (workspace path), and apply `normalize_project_tag()` to derive the project name. THE Backfill_Script MAY fall back to reading the CLI SQLite database (`conversations_v2` table) for any memories missing the `source_id` metadata field.
+7. THE Backfill_Script SHALL match CLI memories to conversations by reading the `metadata->>'source_id'` field from the memory record, which contains the full `conversation_id` (workspace path) written by the CLI parser's `Source-ID:` header.
 8. WHEN a match is found and the workspace path yields a valid project name, THE Backfill_Script SHALL update the memory's `project` column.
 
 **General:**
@@ -137,7 +137,7 @@ This feature closes the loop: derive project tags at parse/ingest time, flow the
 3. WHEN a Project_Tag contains path separators (`/` or `\`), THE parser extracting the tag SHALL use only the final path component as the Project_Tag.
 4. WHEN a Project_Tag is an empty string after normalization, THE parser SHALL treat it as NULL.
 5. WHEN a Project_Tag starts with a dot (e.g., `.kiro`, `.git`, `.vscode`), THE parser SHALL treat it as NULL (dot-prefixed directories are configuration, not projects).
-6. WHEN the workspace path has fewer than 3 path components (i.e., is a home directory like `/Users/kerrfir` or root `/`), THE parser SHALL treat the Project_Tag as NULL.
+6. WHEN the workspace path is an absolute path (starts with `/`) AND has fewer than 3 path components (i.e., is a home directory like `/Users/kerrfir` or root `/`), THE parser SHALL treat the Project_Tag as NULL. This rule does NOT apply to relative paths or bare directory names (e.g., `RetailStore` from IDE fileTree extraction), which are valid project tags.
 7. THE Backfill_Script SHALL apply the same normalization and exclusion rules (AC 1-6) when deriving project tags from historical data.
 8. WHEN the `memory_search` MCP tool receives a `project` parameter, THE MCP_Server SHALL normalize it using the same rules (lowercase, strip whitespace) before passing to `hybrid_search` and `rerank`.
 9. WHEN the `memory_create` MCP tool receives a `project` parameter, THE MCP_Server SHALL normalize it using the same rules (lowercase, strip whitespace) before passing to `create_memory`.
