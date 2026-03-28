@@ -65,3 +65,6 @@ cat > logs/last_ingest_status.json << EOF
   "failed_files": $(ls staging/failed/*.md 2>/dev/null | wc -l | tr -d ' ')
 }
 EOF
+
+# Purge ingested files older than 7 days
+find staging/ingested/ -type f -mtime +7 -delete 2>/dev/null

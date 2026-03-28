@@ -35,4 +35,7 @@ else
   echo "[$(date '+%H:%M:%S')] OK" >> "$LOGFILE"
 fi
 
+# Prune logs older than 30 days
+find /Users/kerrfir/second-brain/logs/ -type f -name "*.log" -mtime +30 -delete 2>/dev/null
+
 exit $EXIT_CODE
