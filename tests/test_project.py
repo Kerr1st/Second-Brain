@@ -408,8 +408,7 @@ class TestBackfillEdgeCases:
     def test_ide_chat_file_missing_falls_back_to_content_header(self, test_db, clean_tables):
         """When .chat file is missing, backfill uses Project: header from content."""
         content = "# Chat: test\n\nProject: retailstore\n\n---\n\nSome content."
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             parent_id = _insert_raw(
                 conn, "kiro_ide_chat", source_url="ide_missing_chat.md", content=content,
             )
@@ -422,14 +421,11 @@ class TestBackfillEdgeCases:
 
             assert _read_project(conn, parent_id) == "retailstore"
             assert stats["updated"] == 1
-        finally:
-            conn.close()
 
     def test_ide_neither_chat_file_nor_header_stays_null(self, test_db, clean_tables):
         """When neither .chat file nor Project: header exists, project stays NULL."""
         content = "# Chat: test\n\n---\n\nContent without project header."
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             parent_id = _insert_raw(
                 conn, "kiro_ide_chat", source_url="ide_no_project.md", content=content,
             )
@@ -442,14 +438,11 @@ class TestBackfillEdgeCases:
 
             assert _read_project(conn, parent_id) is None
             assert stats["left_null"] == 1
-        finally:
-            conn.close()
 
     def test_parent_child_consistency_after_backfill(self, test_db, clean_tables):
         """After backfill, parent and children share the same project tag."""
         content = "# Chat: test\n\nProject: myapp\n\n---\n\nParent content."
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             parent_id = _insert_raw(
                 conn, "kiro_ide_chat", source_url="ide_parent_child.md", content=content,
             )
@@ -473,14 +466,11 @@ class TestBackfillEdgeCases:
             assert parent_project == "myapp"
             assert child1_project == "myapp"
             assert child2_project == "myapp"
-        finally:
-            conn.close()
 
     def test_cli_backfill_uses_metadata_source_id(self, test_db, clean_tables):
         """CLI backfill reads workspace path from metadata source_id."""
         metadata = {"source_id": "/Users/dev/Projects/RetailStore"}
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             parent_id = _insert_raw(
                 conn, "kiro_cli_chat", metadata=metadata,
             )
@@ -495,14 +485,11 @@ class TestBackfillEdgeCases:
 
             assert _read_project(conn, parent_id) == "retailstore"
             assert _read_project(conn, child_id) == "retailstore"
-        finally:
-            conn.close()
 
     def test_cli_backfill_missing_source_id_stays_null(self, test_db, clean_tables):
         """CLI memory without source_id in metadata stays NULL."""
         metadata = {"some_other_key": "value"}
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             parent_id = _insert_raw(
                 conn, "kiro_cli_chat", metadata=metadata,
             )
@@ -515,14 +502,11 @@ class TestBackfillEdgeCases:
 
             assert _read_project(conn, parent_id) is None
             assert stats["left_null"] == 1
-        finally:
-            conn.close()
 
     def test_cli_backfill_home_dir_excluded(self, test_db, clean_tables):
         """CLI memory with home dir workspace path gets excluded (< 3 components)."""
         metadata = {"source_id": "/Users/dev"}
-        conn = db.get_connection()
-        try:
+        with db.get_connection() as conn:
             parent_id = _insert_raw(
                 conn, "kiro_cli_chat", metadata=metadata,
             )
@@ -534,5 +518,3 @@ class TestBackfillEdgeCases:
 
             assert _read_project(conn, parent_id) is None
             assert stats["excluded"] == 1
-        finally:
-            conn.close()
