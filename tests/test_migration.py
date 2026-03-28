@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.migration_utils import (
+from scripts.migrate.migration_utils import (
     MIN_CONTENT_CHARS,
     MIN_PARAGRAPH_WORDS,
     MIN_USER_MESSAGES,
@@ -22,9 +22,9 @@ from scripts.migration_utils import (
     passes_chat_filter,
     passes_page_filter,
 )
-from scripts.migrate_claude import parse_claude_export, _extract_text
-from scripts.migrate_chatgpt import linearize_mapping, parse_chatgpt_export
-from scripts.migrate_notion import (
+from scripts.migrate.migrate_claude import parse_claude_export, _extract_text
+from scripts.migrate.migrate_chatgpt import linearize_mapping, parse_chatgpt_export
+from scripts.migrate.migrate_notion import (
     strip_notion_id,
     strip_notion_artifacts,
     find_title_column,
@@ -190,24 +190,24 @@ class TestRunMigrationValidation:
     def test_raises_on_missing_directory(self, tmp_path):
         fake_path = str(tmp_path / "nonexistent")
         with pytest.raises(MigrationError, match="does not exist"):
-            from scripts.migration_utils import run_migration
+            from scripts.migrate.migration_utils import run_migration
             run_migration("test", fake_path, lambda p: iter([]), "test_type")
 
     def test_raises_on_missing_expected_file(self, tmp_path):
         with pytest.raises(MigrationError, match="not found"):
-            from scripts.migration_utils import run_migration
+            from scripts.migrate.migration_utils import run_migration
             run_migration("test", str(tmp_path), lambda p: iter([]), "test_type",
                           expected_file="conversations.json")
 
     def test_accepts_valid_directory(self, tmp_path, monkeypatch):
         """Dry-run with empty parse_fn should succeed without DB."""
-        from scripts.migration_utils import run_migration
+        from scripts.migrate.migration_utils import run_migration
         run_migration("test", str(tmp_path), lambda p: iter([]), "test_type",
                       dry_run=True)
 
     def test_accepts_valid_expected_file(self, tmp_path, monkeypatch):
         (tmp_path / "conversations.json").write_text("[]")
-        from scripts.migration_utils import run_migration
+        from scripts.migrate.migration_utils import run_migration
         run_migration("test", str(tmp_path), lambda p: iter([]), "test_type",
                       expected_file="conversations.json", dry_run=True)
 
@@ -220,7 +220,7 @@ class TestRunMigrationDryRun:
             yield ("url://1", "# T\n\n---\n\nbody")
             yield ("url://2", "# T\n\n---\n\nbody")
 
-        from scripts.migration_utils import run_migration
+        from scripts.migrate.migration_utils import run_migration
         run_migration("test", str(tmp_path), fake_parse, "test_type", dry_run=True)
         captured = capsys.readouterr()
         assert "Processed:        2" in captured.out
@@ -230,7 +230,7 @@ class TestRunMigrationDryRun:
             for i in range(10):
                 yield (f"url://{i}", "# T\n\n---\n\nbody")
 
-        from scripts.migration_utils import run_migration
+        from scripts.migrate.migration_utils import run_migration
         run_migration("test", str(tmp_path), fake_parse, "test_type",
                       dry_run=True, limit=3)
         captured = capsys.readouterr()
@@ -777,7 +777,7 @@ class TestClaudeIntegrationRoundTrip:
 
         _write_claude_export(tmp_path, [_make_claude_conversation(uuid="int-test-1")])
 
-        from scripts.migration_utils import run_migration
+        from scripts.migrate.migration_utils import run_migration
         from src.db import get_processed_source_urls, list_memories
 
         # First run — should ingest
@@ -809,7 +809,7 @@ class TestChatgptIntegrationRoundTrip:
 
         _write_chatgpt_export(tmp_path, [_make_chatgpt_conversation(conv_id="int-test-2")])
 
-        from scripts.migration_utils import run_migration
+        from scripts.migrate.migration_utils import run_migration
         from src.db import get_processed_source_urls, list_memories
 
         run_migration("ChatGPT", str(tmp_path), parse_chatgpt_export, "chatgpt_chat",
@@ -837,7 +837,7 @@ class TestNotionIntegrationRoundTrip:
 
         (tmp_path / "Test Page.md").write_text("x" * 300)
 
-        from scripts.migration_utils import run_migration
+        from scripts.migrate.migration_utils import run_migration
         from src.db import get_processed_source_urls, list_memories
 
         run_migration("Notion", str(tmp_path), parse_notion_export, "notion_page")

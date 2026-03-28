@@ -125,7 +125,7 @@ rclone sync s3:your-kb-bucket/ "$BACKUP_DIR/kb-sources/"
 
 echo "Copying config files..."
 mkdir -p "$BACKUP_DIR/config"
-cp ~/second-brain/docker/docker-compose.yml "$BACKUP_DIR/config/" 2>/dev/null || true
+cp ~/second-brain/docker-compose.yml "$BACKUP_DIR/config/" 2>/dev/null || true
 cp ~/second-brain/migrations/001_initial_schema.sql "$BACKUP_DIR/config/" 2>/dev/null || true
 cp ~/second-brain/memory-backup.sh "$BACKUP_DIR/config/" 2>/dev/null || true
 cp ~/second-brain/verify-backup.sh "$BACKUP_DIR/config/" 2>/dev/null || true
@@ -181,7 +181,7 @@ rclone copy gdrive:memory-bank-backups/ /tmp/restore/ --include "*.dump.gpg" --m
 cp -r ~/second-brain/kiro-skills/ ~/.kiro/skills/
 
 # 5. Restore Layer 2 (PostgreSQL memory bank)
-docker compose -f ~/second-brain/docker/docker-compose.yml up -d
+docker compose -f ~/second-brain/docker-compose.yml up -d
 sleep 5  # wait for PostgreSQL to start
 psql -h localhost -U memory_bank -d memory_bank -f ~/second-brain/migrations/001_initial_schema.sql
 
@@ -230,7 +230,7 @@ aws s3 cp s3://memory-bank-backups/ /tmp/restore/ --recursive --exclude "*" --in
 cp -r ~/second-brain/kiro-skills/ ~/.kiro/skills/
 
 # 5. Restore Layer 2 (PostgreSQL memory bank)
-docker compose -f ~/second-brain/docker/docker-compose.yml up -d
+docker compose -f ~/second-brain/docker-compose.yml up -d
 sleep 5
 psql -h localhost -U memory_bank -d memory_bank -f ~/second-brain/migrations/001_initial_schema.sql
 
@@ -281,7 +281,7 @@ LATEST=$(ls -t /tmp/restore/*.json.gpg | head -1)
 gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key "$LATEST" > /tmp/memories.json
 
 # Start fresh database, apply schema, import JSON
-docker compose -f ~/second-brain/docker/docker-compose.yml up -d
+docker compose -f ~/second-brain/docker-compose.yml up -d
 psql -h localhost -U memory_bank -d memory_bank -f ~/second-brain/migrations/001_initial_schema.sql
 
 # Import (embeddings will need to be regenerated)

@@ -5,7 +5,7 @@ Reads conversations.json from an unzipped Claude export directory,
 filters and formats conversations as markdown, and ingests via the
 existing pipeline.
 
-Usage: python scripts/migrate_claude.py <export_path> [--dry-run] [--limit N]
+Usage: python scripts/migrate/migrate_claude.py <export_path> [--dry-run] [--limit N]
 """
 
 import argparse
@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.migration_utils import (
+from scripts.migrate.migration_utils import (
     format_chat_as_markdown,
     passes_chat_filter,
     run_migration,

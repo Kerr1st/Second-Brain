@@ -7,7 +7,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/kerrfir/second-brain/scripts/capture_api.sh</string>
+        <string>/Users/kerrfir/second-brain/scripts/jobs/capture_api.sh</string>
     </array>
     <key>KeepAlive</key>
     <true/>

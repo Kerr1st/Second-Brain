@@ -5,8 +5,8 @@ Measures each V2 signal's contribution to retrieval quality by comparing
 baseline MRR against MRR with that signal zeroed.
 
 Usage:
-    python scripts/eval_ablation.py
-    python scripts/eval_ablation.py --limit 10
+    python scripts/eval/eval_ablation.py
+    python scripts/eval/eval_ablation.py --limit 10
 """
 
 import argparse
@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.eval_common import (
+from scripts.eval.eval_common import (
     ABLATION_CONDITIONS,
     compute_metrics,
     generate_and_cache_embeddings,

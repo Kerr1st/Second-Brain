@@ -14,7 +14,7 @@ from hypothesis import strategies as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.eval_common import compute_metrics, rerank_with_overrides, PRODUCTION_WEIGHTS
+from scripts.eval.eval_common import compute_metrics, rerank_with_overrides, PRODUCTION_WEIGHTS
 
 
 # --- Strategies ---

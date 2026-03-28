@@ -5,8 +5,8 @@ For each accepted insight with source_memories in candidate_json, runs the
 insight's golden queries and compares the insight's rank against its sources.
 
 Usage:
-    python scripts/eval_consolidation.py
-    python scripts/eval_consolidation.py --limit 5
+    python scripts/eval/eval_consolidation.py
+    python scripts/eval/eval_consolidation.py --limit 5
 """
 
 import argparse
@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from psycopg2.extras import RealDictCursor
 
-from scripts.eval_common import (
+from scripts.eval.eval_common import (
     generate_and_cache_embeddings,
     write_results,
 )

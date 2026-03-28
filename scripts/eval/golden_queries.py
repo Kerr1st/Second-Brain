@@ -10,8 +10,8 @@ that claims to answer certain questions, those questions should actually
 retrieve that insight.
 
 Usage:
-    python scripts/golden_queries.py
-    python scripts/golden_queries.py --limit 5
+    python scripts/eval/golden_queries.py
+    python scripts/eval/golden_queries.py --limit 5
 
 Requirements: 18.3
 """

@@ -347,7 +347,7 @@ Encryption key stored in: local file + Google Secret Manager + AWS Secrets Manag
 
 ## Scheduled Jobs
 
-All jobs use `scripts/job_wrapper.sh` which sends macOS notification on failure.
+All jobs use `scripts/jobs/job_wrapper.sh` which sends macOS notification on failure.
 
 | Time | Job | Script | Status |
 |---|---|---|---|
@@ -381,9 +381,9 @@ All core features implemented and operational. 74K+ memories in PostgreSQL. Drea
 - [x] PostgreSQL + pgvector Docker setup
 - [x] Encryption key generated and stored locally
 - [x] Backup scheduling (7 launchd plists in `scheduling/`, all installed)
-- [x] `scripts/backup.sh` — daily encrypted backup to Google Drive + S3
-- [x] `scripts/verify_backup.sh` — weekly backup verification (both clouds)
-- [x] `scripts/job_wrapper.sh` — macOS notification on job failure
+- [x] `scripts/jobs/backup.sh` — daily encrypted backup to Google Drive + S3
+- [x] `scripts/jobs/verify_backup.sh` — weekly backup verification (both clouds)
+- [x] `scripts/jobs/job_wrapper.sh` — macOS notification on job failure
 
 ### Core Library (`src/`)
 - [x] `src/db.py` — PostgreSQL connection, memory CRUD, semantic search, relationships, dedup helpers
@@ -408,11 +408,11 @@ All core features implemented and operational. 74K+ memories in PostgreSQL. Drea
 
 ### Ingestion & Capture
 - [x] `scripts/chat_extract.py` — daily Phase 1 chat extraction (5,561 chats backfilled)
-- [x] `scripts/ingest_staged.sh` — Phase 2 wrapper (Kiro headless + Opus 4.6-1m)
+- [x] `scripts/jobs/ingest_staged.sh` — Phase 2 wrapper (Kiro headless + Opus 4.6-1m)
 - [x] `scripts/crawlee_ingest.py` — Crawlee content ingestion
 - [x] `scripts/ingest_chats.py` — batch chat ingestion (5,561 chats → 74K+ memories)
 - [x] `scripts/scrape_bookmarks.py` — Chrome bookmarks scraper
-- [x] `scripts/youtube_scrape.sh` — YouTube playlist/history scrape
+- [x] `scripts/jobs/youtube_scrape.sh` — YouTube playlist/history scrape
 - [x] Hybrid chat extraction spec (`docs/HYBRID-CHAT-EXTRACTION.md`)
 - [x] Capture API (multi-channel: Slack, mobile, browser, email)
 - [ ] Metadata extraction on ingest (people, topics, action items)
@@ -421,7 +421,7 @@ All core features implemented and operational. 74K+ memories in PostgreSQL. Drea
 - [x] `tests/` — 459 tests (property-based with Hypothesis, unit, integration)
 - [x] Test database fixture (isolated `memory_bank_test` DB)
 - [x] Embedding mock (deterministic, no Bedrock calls)
-- [x] `scripts/golden_queries.py` — Tier 3 metrics (MRR, hit rates)
+- [x] `scripts/eval/golden_queries.py` — Tier 3 metrics (MRR, hit rates)
 
 ### V2 — Cognitive Science Enhancements
 

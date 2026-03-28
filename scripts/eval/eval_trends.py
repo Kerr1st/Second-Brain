@@ -4,9 +4,9 @@
 Reads past evaluation result files and outputs chronological metric summaries.
 
 Usage:
-    python scripts/eval_trends.py --type curated
-    python scripts/eval_trends.py --type cold_warm
-    python scripts/eval_trends.py --type ablation
+    python scripts/eval/eval_trends.py --type curated
+    python scripts/eval/eval_trends.py --type cold_warm
+    python scripts/eval/eval_trends.py --type ablation
 """
 
 import argparse

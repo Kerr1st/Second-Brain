@@ -6,8 +6,8 @@ signals neutralized ("cold") — to quantify the value added by mem_class,
 depth_score, spacing_bonus, and project penalty.
 
 Usage:
-    python scripts/eval_cold_warm.py
-    python scripts/eval_cold_warm.py --limit 10
+    python scripts/eval/eval_cold_warm.py
+    python scripts/eval/eval_cold_warm.py --limit 10
 """
 
 import argparse
@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.eval_common import (
+from scripts.eval.eval_common import (
     COLD_OVERRIDES,
     compute_metrics,
     generate_and_cache_embeddings,

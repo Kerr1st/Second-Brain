@@ -2,9 +2,9 @@
 """Curated query benchmark — evaluate retrieval quality on hand-crafted query sets.
 
 Usage:
-    python scripts/eval_curated.py
-    python scripts/eval_curated.py --limit 10
-    python scripts/eval_curated.py --query-set evaluations/query_sets/seed.json
+    python scripts/eval/eval_curated.py
+    python scripts/eval/eval_curated.py --limit 10
+    python scripts/eval/eval_curated.py --query-set evaluations/query_sets/seed.json
 """
 
 import argparse
@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.eval_common import (
+from scripts.eval.eval_common import (
     compute_metrics,
     generate_and_cache_embeddings,
     load_query_sets,

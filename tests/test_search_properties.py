@@ -256,7 +256,7 @@ class TestImportTopology:
 
     def test_golden_queries_imports_from_search_module(self):
         """golden_queries.py imports hybrid_search, rerank from src.search."""
-        source = pathlib.Path("scripts/golden_queries.py").read_text()
+        source = pathlib.Path("scripts/eval/golden_queries.py").read_text()
         assert "from src.search import" in source, (
             "golden_queries.py should import from src.search"
         )

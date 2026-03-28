@@ -5,7 +5,7 @@ Recursively reads markdown and CSV files from a Notion export directory,
 strips Notion-specific artifacts, filters and formats content, and
 ingests via the existing pipeline.
 
-Usage: python scripts/migrate_notion.py <export_path> [--dry-run] [--limit N]
+Usage: python scripts/migrate/migrate_notion.py <export_path> [--dry-run] [--limit N]
 """
 
 import argparse
@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.migration_utils import (
+from scripts.migrate.migration_utils import (
     format_markdown_header,
     passes_page_filter,
     run_migration,

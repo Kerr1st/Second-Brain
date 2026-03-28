@@ -164,7 +164,7 @@ The launchd job at 3:00 AM runs a wrapper that loops through staging:
 
 ```bash
 #!/bin/bash
-# scripts/ingest_staged.sh — Phase 2 wrapper
+# scripts/jobs/ingest_staged.sh — Phase 2 wrapper
 cd ~/second-brain
 
 LOGFILE="logs/ingest-$(date +%Y%m%d).log"

@@ -60,7 +60,7 @@ rsync -a --delete ~/Work/Tools/Crawlee/knowledge/sources/ "$BACKUP_DIR/kb-source
 # --- Config files ---
 log "Copying config..."
 mkdir -p "$BACKUP_DIR/config"
-cp docker/docker-compose.yml "$BACKUP_DIR/config/" 2>/dev/null || true
+cp docker-compose.yml "$BACKUP_DIR/config/" 2>/dev/null || true
 cp migrations/*.sql "$BACKUP_DIR/config/" 2>/dev/null || true
 cp docs/DISASTER-RECOVERY.md "$BACKUP_DIR/config/" 2>/dev/null || true
 cp -r ~/.kiro/skills/ "$BACKUP_DIR/config/kiro-skills/" 2>/dev/null || true

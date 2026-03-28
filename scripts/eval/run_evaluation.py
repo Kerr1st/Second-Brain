@@ -6,10 +6,10 @@ Trends is excluded from the default sequence (it reads past results, not the DB)
 and is available via --tier trends only.
 
 Usage:
-    python scripts/run_evaluation.py                    # all tiers
-    python scripts/run_evaluation.py --tier curated     # single tier
-    python scripts/run_evaluation.py --dry-run          # preview only
-    python scripts/run_evaluation.py --limit 5          # limit queries per tier
+    python scripts/eval/run_evaluation.py                    # all tiers
+    python scripts/eval/run_evaluation.py --tier curated     # single tier
+    python scripts/eval/run_evaluation.py --dry-run          # preview only
+    python scripts/eval/run_evaluation.py --limit 5          # limit queries per tier
 """
 
 import argparse
@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.eval_common import write_results
+from scripts.eval.eval_common import write_results
 
 logger = logging.getLogger(__name__)
 
@@ -30,34 +30,34 @@ ALL_TIERS = DEFAULT_TIERS + ["trends"]
 
 
 def _run_golden(limit):
-    from scripts.golden_queries import evaluate_golden_queries, print_summary
+    from scripts.eval.golden_queries import evaluate_golden_queries, print_summary
     summary = evaluate_golden_queries(limit=limit)
     print_summary(summary)
     return summary
 
 
 def _run_curated(limit):
-    from scripts.eval_curated import run_curated_eval
+    from scripts.eval.eval_curated import run_curated_eval
     return run_curated_eval(limit=limit)
 
 
 def _run_cold_warm(limit):
-    from scripts.eval_cold_warm import run_cold_warm_eval
+    from scripts.eval.eval_cold_warm import run_cold_warm_eval
     return run_cold_warm_eval(limit=limit)
 
 
 def _run_ablation(limit):
-    from scripts.eval_ablation import run_ablation_eval
+    from scripts.eval.eval_ablation import run_ablation_eval
     return run_ablation_eval(limit=limit)
 
 
 def _run_consolidation(limit):
-    from scripts.eval_consolidation import run_consolidation_eval
+    from scripts.eval.eval_consolidation import run_consolidation_eval
     return run_consolidation_eval(limit=limit)
 
 
 def _run_trends(_limit):
-    from scripts.eval_trends import run_trends
+    from scripts.eval.eval_trends import run_trends
     # Run trends for all types
     for t in ["curated", "cold_warm", "ablation", "consolidation"]:
         run_trends(t)
