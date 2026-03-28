@@ -365,12 +365,10 @@ All core features implemented and operational. 74K+ memories in PostgreSQL. Drea
 
 ## Next Steps
 
-1. Install `yt-dlp` (`brew install yt-dlp`) to unblock YouTube scrape job
-2. Ensure Docker is running at 3AM or adjust ingest schedule to unblock staged ingestion
-3. Run a second live dream cycle to validate BFT consensus panel with real data
-4. Capture API — multi-channel input (Slack, mobile, browser, email)
-5. Memory migration — import from Claude, ChatGPT, Notion
-6. Metadata extraction on ingest — auto-extract people, topics, action items
+1. Load dream cycle launchd job and validate BFT consensus panel with scheduled runs
+2. Capture API — multi-channel input (Slack, mobile, browser, email)
+3. Memory migration — import from Claude, ChatGPT, Notion
+4. Metadata extraction on ingest — auto-extract people, topics, action items
 
 ## Project Status
 
@@ -439,7 +437,7 @@ All Layer 1 retrieval improvements implemented. See `docs/DESIGN-DECISIONS.md` f
 - [x] Dream cycle pipeline — four-agent autonomous learning with 4-evaluator binary BFT consensus (Lamport 1982)
 - [x] Dream cycle module decomposition — `src/dream_cycle/` package with 6 focused modules
 - [x] Data layer decomposition — `src/search.py` extracted from `src/db.py`
-- [ ] "Questions this answers" BM25 indexing — convention exists, dedicated index not yet built
+- [x] "Questions this answers" BM25 indexing — weighted tsvector trigger (migration 005): title+questions=Weight A, content=Weight B
 
 ### Future Work
 - [ ] Memory migration (Claude, ChatGPT, Notion imports)
