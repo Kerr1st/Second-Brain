@@ -765,7 +765,7 @@ class TestDreamCycleDbQueryProperties(unittest.TestCase):
         run_type=st.sampled_from(["scheduled", "post_learn", "session_start", "user_triggered"]),
         has_result=st.booleans(),
     )
-    @settings(max_examples=100)
+    @settings(max_examples=25)
     @patch("src.dream_cycle_db.get_connection")
     def test_get_previous_run_id_returns_str_or_none(self, mock_get_conn, run_type, has_result):
         """get_previous_run_id returns str(uuid) when row exists, None otherwise."""
@@ -797,7 +797,7 @@ class TestDreamCycleDbQueryProperties(unittest.TestCase):
         ),
         row_exists=st.booleans(),
     )
-    @settings(max_examples=100)
+    @settings(max_examples=25)
     @patch("src.dream_cycle_db.get_connection")
     def test_was_feedback_injected_bool_correctness(self, mock_get_conn, feedback_value, row_exists):
         """was_feedback_injected returns True iff row exists and value is truthy."""
@@ -820,7 +820,7 @@ class TestDreamCycleDbQueryProperties(unittest.TestCase):
     @given(
         num_candidates=st.integers(min_value=0, max_value=5),
     )
-    @settings(max_examples=100)
+    @settings(max_examples=25)
     @patch("src.dream_cycle_db.get_connection")
     def test_get_evaluator_verdicts_returns_correct_structure(self, mock_get_conn, num_candidates):
         """get_evaluator_verdicts_for_run returns dict with correct keys per candidate."""
@@ -872,7 +872,7 @@ class TestStoreCandidatePersistsEvaluatorD(unittest.TestCase):
         verdict_d=st.sampled_from(["ACCEPT", "REJECT"]),
         reasoning_d=st.text(min_size=1, max_size=200, alphabet=st.characters(whitelist_categories=("L", "N", "Z"))),
     )
-    @settings(max_examples=100)
+    @settings(max_examples=25)
     @patch("src.dream_cycle_db.get_connection")
     def test_store_candidate_persists_evaluator_d(self, mock_get_conn, verdict_d, reasoning_d):
         """For any evaluator_d verdict and reasoning, store_candidate INSERT

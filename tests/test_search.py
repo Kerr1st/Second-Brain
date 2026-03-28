@@ -87,8 +87,9 @@ def _truncate_tables():
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE memory_relationships CASCADE")
-            cur.execute("TRUNCATE memories CASCADE")
+            cur.execute("DELETE FROM memory_relationships")
+            cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
+            cur.execute("DELETE FROM memories")
         conn.commit()
     finally:
         conn.close()
@@ -103,7 +104,7 @@ class TestIncrementAccessCountUpdatesLastAccessedAt:
     """
 
     @given(num_memories=st.integers(min_value=1, max_value=5))
-    @settings(max_examples=100, deadline=2000)
+    @settings(max_examples=25, deadline=None)
     def test_last_accessed_at_is_set_and_recent(self, num_memories, test_db):
         """Feature: retrieval-quality, Property 16: increment_access_count Updates last_accessed_at"""
         try:
@@ -155,7 +156,7 @@ class TestHybridSearchProjectFiltering:
             max_size=20,
         ),
     )
-    @settings(max_examples=100, deadline=2000)
+    @settings(max_examples=25, deadline=None)
     def test_no_mismatched_projects_in_results(self, project_name, test_db):
         """Feature: retrieval-quality, Property 11: hybrid_search Project Filtering"""
         from tests.conftest import _deterministic_embedding

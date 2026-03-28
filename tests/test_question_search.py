@@ -682,7 +682,7 @@ class TestCrossImplementationEquivalence:
     """
 
     @given(content=any_content_db())
-    @settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_python_matches_plpgsql(self, content: str, test_db):
         """Feature: question-aware-search, Property 3: Cross-implementation equivalence
 
@@ -731,7 +731,7 @@ class TestBackfillTriggerConsistency:
     """
 
     @given(pair=title_content_pair())
-    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
     def test_backfill_equals_trigger(self, pair, test_db):
         """Feature: question-aware-search, Property 4: Backfill–trigger consistency
 

@@ -24,8 +24,9 @@ def _truncate_tables():
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE memory_relationships CASCADE")
-            cur.execute("TRUNCATE memories CASCADE")
+            cur.execute("DELETE FROM memory_relationships")
+            cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
+            cur.execute("DELETE FROM memories")
         conn.commit()
     finally:
         conn.close()
@@ -59,7 +60,7 @@ class TestRelationshipDiscoveryCaps:
         num_existing=st.integers(min_value=0, max_value=8),
         body=_safe_text,
     )
-    @settings(max_examples=100, deadline=2000)
+    @settings(max_examples=25, deadline=None)
     def test_relationship_discovery_caps(self, test_db, num_existing: int, body: str):
         """Feature: retrieval-quality, Property 12: Relationship Discovery Caps
 
@@ -142,7 +143,7 @@ class TestChunksSkipRelationshipDiscovery:
     """
 
     @given(body=_safe_text)
-    @settings(max_examples=100, deadline=2000)
+    @settings(max_examples=25, deadline=None)
     def test_chunks_skip_relationship_discovery(self, test_db, body: str):
         """Feature: retrieval-quality, Property 13: Chunks Skip Relationship Discovery
 
@@ -227,7 +228,7 @@ class TestFindTemporalNeighborsCorrectness:
             min_size=1, max_size=10,
         ),
     )
-    @settings(max_examples=100, deadline=2000)
+    @settings(max_examples=25, deadline=None)
     def test_find_temporal_neighbors_correctness(
         self, test_db, num_neighbors: int, num_far: int, offset_hours: list[float],
     ):

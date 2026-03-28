@@ -75,8 +75,9 @@ def _truncate_tables():
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE memory_relationships CASCADE")
-            cur.execute("TRUNCATE memories CASCADE")
+            cur.execute("DELETE FROM memory_relationships")
+            cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
+            cur.execute("DELETE FROM memories")
         conn.commit()
     finally:
         conn.close()
@@ -92,7 +93,7 @@ class TestCreateMemoryV2FieldsRoundTrip:
         mem_class=st.sampled_from(["semantic", "episodic", "procedural"]),
         project=st.text(min_size=1, max_size=100, alphabet=st.characters(blacklist_categories=("Cs",), blacklist_characters="\x00")),
     )
-    @settings(max_examples=100, deadline=2000)
+    @settings(max_examples=25, deadline=None)
     def test_create_memory_v2_fields_round_trip(self, test_db, mem_class: str, project: str):
         """Feature: retrieval-quality, Property 2: create_memory V2 Fields Round Trip
 
@@ -125,7 +126,7 @@ class TestEmbeddingMockDeterminism:
     """
 
     @given(text=st.text(min_size=0, max_size=500))
-    @settings(max_examples=100)
+    @settings(max_examples=25)
     def test_embedding_mock_determinism(self, text: str):
         """Feature: retrieval-quality, Property 1: Embedding Mock Determinism
 

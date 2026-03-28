@@ -118,8 +118,9 @@ def clean_tables(test_db):
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("TRUNCATE memory_relationships CASCADE")
-            cur.execute("TRUNCATE memories CASCADE")
+            cur.execute("DELETE FROM memory_relationships")
+            cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
+            cur.execute("DELETE FROM memories")
         conn.commit()
     finally:
         conn.close()

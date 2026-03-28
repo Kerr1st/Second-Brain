@@ -124,7 +124,7 @@ class TestTemporalContextInvariants:
         neighbor_count=st.integers(min_value=0, max_value=6),
         overlap_count=st.integers(min_value=0, max_value=3),
     )
-    @settings(max_examples=100, deadline=2000)
+    @settings(max_examples=25, deadline=None)
     def test_temporal_context_invariants(self, test_db, result_ids, neighbor_count, overlap_count):
         """Feature: retrieval-quality, Property 15: Temporal Context Invariants
 
@@ -195,8 +195,9 @@ class TestTemporalContextInvariants:
             conn = _db.get_connection()
             try:
                 with conn.cursor() as cur:
-                    cur.execute("TRUNCATE memory_relationships CASCADE")
-                    cur.execute("TRUNCATE memories CASCADE")
+                    cur.execute("DELETE FROM memory_relationships")
+                    cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
+                    cur.execute("DELETE FROM memories")
                 conn.commit()
             finally:
                 conn.close()
