@@ -774,3 +774,65 @@ def get_previous_run_id(run_type: str) -> str | None:
             )
             row = cur.fetchone()
             return str(row[0]) if row else None
+
+
+def get_strategy_usage(n_cycles: int = 10) -> dict[str, int]:
+    """Count strategy usage across the last N completed dream cycles.
+
+    Extracts 'strategy_that_found_it' from candidate_json JSONB for all
+    candidates in recent completed runs. Returns dict of strategy_name -> count.
+
+    Used for UCB1 exploration bonus (Auer et al. 2002) to pressure the
+    Explorer toward underused strategies.
+    """
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT candidate_json->>'strategy_that_found_it' AS strategy,
+                       count(*) AS cnt
+                FROM dream_cycle_candidates c
+                JOIN dream_cycle_runs r ON r.id = c.run_id
+                WHERE r.completed_at IS NOT NULL
+                  AND candidate_json->>'strategy_that_found_it' IS NOT NULL
+                  AND r.id IN (
+                      SELECT id FROM dream_cycle_runs
+                      WHERE completed_at IS NOT NULL
+                      ORDER BY completed_at DESC
+                      LIMIT %s
+                  )
+                GROUP BY candidate_json->>'strategy_that_found_it'
+                ORDER BY cnt DESC
+                """,
+                (n_cycles,),
+            )
+            return {row["strategy"]: row["cnt"] for row in cur.fetchall()}
+
+
+def expire_stale_relationships(days_threshold: int = 90) -> int:
+    """Set expired_at on relationships where neither endpoint was accessed recently.
+
+    A relationship is considered stale if both source and target memories have
+    last_accessed_at older than days_threshold (or NULL) and the relationship
+    itself has no expired_at set yet.
+
+    Returns the number of relationships expired.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE memory_relationships mr
+                SET expired_at = now()
+                WHERE mr.expired_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM memories m
+                      WHERE m.id IN (mr.source_id, mr.target_id)
+                        AND m.last_accessed_at > now() - make_interval(days => %s)
+                  )
+                """,
+                (days_threshold,),
+            )
+            count = cur.rowcount
+        conn.commit()
+        return count

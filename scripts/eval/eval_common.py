@@ -40,6 +40,7 @@ PRODUCTION_WEIGHTS = {
     "rrf": 0.30,
     "overlap": 0.18,
     "title_overlap": 0.18,
+    "context_overlap": 0.10,
     "recency": 0.12,
     "length": 0.08,
     "depth": 0.05,
@@ -47,6 +48,8 @@ PRODUCTION_WEIGHTS = {
     "mem_class_boost": 1.0,       # multiplier on raw _mem_class_boost (0.0/0.02/0.04)
     "reinforcement_coeff": 0.03,
     "project_penalty": 1.0,       # multiplier on raw _project_penalty (0.0 or -0.15)
+    "superseded_penalty": 1.0,    # multiplier on raw _superseded_penalty (0.0 or -0.20)
+    "staleness_penalty": 1.0,     # multiplier on raw _staleness_penalty (0.0 to -0.05)
 }
 
 # Cold mode: neutralize V2 signals, preserve V1 reinforcement.
@@ -69,6 +72,9 @@ ABLATION_CONDITIONS = {
     "minus_project":        {"project_penalty": 0.0},
     "minus_type_boost":     {"type_boost": 0.0},
     "minus_reinforcement":  {"reinforcement_coeff": 0.0},
+    "minus_superseded":     {"superseded_penalty": 0.0},
+    "minus_context":        {"context_overlap": 0.0},
+    "minus_staleness":      {"staleness_penalty": 0.0},
 }
 
 # ---------------------------------------------------------------------------
@@ -184,12 +190,15 @@ def rerank_with_overrides(results: list[dict], overrides: dict) -> list[dict]:
         rrf = r.get("rrf_score", 0)
         overlap = r.get("_overlap", 0)
         title_overlap = r.get("_title_overlap", 0)
+        context_overlap = r.get("_context_overlap", 0)
         recency = r.get("_recency", 0)
         length_score = r.get("_length_score", 0)
         depth_score = r.get("_depth_score", 0)
         type_boost = r.get("_type_boost", 0)
         mem_class_boost = r.get("_mem_class_boost", 0)
         project_penalty = r.get("_project_penalty", 0)
+        superseded_penalty = r.get("_superseded_penalty", 0)
+        staleness_penalty = r.get("_staleness_penalty", 0)
         spacing_bonus = r.get("_spacing_bonus", 1.0)
         access_count = r.get("access_count") or 0
 
@@ -203,6 +212,7 @@ def rerank_with_overrides(results: list[dict], overrides: dict) -> list[dict]:
             w["rrf"] * rrf
             + w["overlap"] * overlap
             + w["title_overlap"] * title_overlap
+            + w["context_overlap"] * context_overlap
             + w["recency"] * recency
             + w["length"] * length_score
             + w["depth"] * depth_score
@@ -210,6 +220,8 @@ def rerank_with_overrides(results: list[dict], overrides: dict) -> list[dict]:
             + w["mem_class_boost"] * mem_class_boost
             + reinforcement
             + w["project_penalty"] * project_penalty
+            + w["superseded_penalty"] * superseded_penalty
+            + w["staleness_penalty"] * staleness_penalty
         )
 
     results.sort(key=lambda r: r["rerank_score"], reverse=True)

@@ -167,3 +167,61 @@ Every serious memory system has converged on five operations:
 [20] Mem0 — arxiv 2504.19413
 [21] Zep/Graphiti — arxiv 2501.13956
 [22] Cognee — memify pipeline (topoteretes.com)
+
+## Why power-law decay instead of exponential (recency signal)
+
+Added 2026-03-28. Replaced `exp(-days/60)` with `(1 + days/S)^(-b)`.
+
+The original exponential decay (τ=60 days) was a reasonable approximation but doesn't match how human memory actually decays. Ebbinghaus (1885) and Murre & Dros (2015, replication) showed that forgetting follows a power law, not an exponential. The key difference: exponential decay drops too fast initially and too slow later. Power-law decay has a long tail — old memories don't vanish, they just become harder to retrieve.
+
+The stability parameter S is derived from `access_count`: `S = 30 + 10 * log1p(access_count)`. This connects the spacing effect (Bjork 1975) directly to the forgetting curve — memories that have been retrieved more often decay more slowly because each retrieval strengthens the trace. A memory retrieved 10 times has S ≈ 54 days; a never-retrieved memory has S = 30 days.
+
+## Why active forgetting (staleness penalty)
+
+Added 2026-03-28. Anderson & Neely (1996): interference theory.
+
+Memories with `access_count = 0` and `created_at` older than 90 days receive a mild penalty that scales with age: `-0.05 * min(1.0, (days_unretrieved - 90) / 180)`. Maximum penalty is -0.05 at 270+ days.
+
+The reasoning: if a memory was never useful enough to retrieve in 90 days, it's likely noise. The penalty is deliberately mild — it doesn't delete anything, just deprioritizes. This implements the "use it or lose it" principle from interference theory: unretrieved memories should fade in relevance, not persist at full strength forever.
+
+## Why encoding context (contextual reinstatement)
+
+Added 2026-03-28. Godden & Baddeley (1975): context-dependent memory.
+
+The `encoding_context` column captures what the user was working on when a memory was created — "debugging auth flow", "reading about CLS theory", "planning dream cycle architecture". At search time, token overlap between the query and the encoding context is a reranking signal (weight 0.10).
+
+This is one of the most replicated findings in cognitive psychology: retrieval is dramatically better when the retrieval context matches the encoding context. Divers who learned word lists underwater recalled them better underwater than on land, and vice versa. The same principle applies to knowledge retrieval — if you were debugging auth when you learned something, searching while debugging auth should boost that memory.
+
+## Why supersession penalty (retroactive interference)
+
+Added 2026-03-28. Anderson & Neely (1996): retroactive interference.
+
+Memories with `status = 'superseded'` receive a -0.20 reranking penalty. The `superseded_by` relationship and status field existed before this change, but nothing in the retrieval path used them. Now superseded memories are actively deprioritized in favor of their replacements.
+
+## Why UCB1 strategy diversity in the dream cycle
+
+Added 2026-03-28. Auer, Cesa-Bianchi & Fischer (2002): multi-armed bandits.
+
+The Explorer agent has 11 named strategies for assembling memory slices. Without diversity pressure, it tends to converge on the same 3-4 strategies that produce the most obvious results. UCB1 (Upper Confidence Bound) adds an exploration bonus to underused strategies: `bonus = C * sqrt(ln(N) / n_i)` where N is total strategy uses and n_i is uses of strategy i.
+
+This is injected into the Explorer prompt as a "strategy diversity pressure" section showing usage counts and exploration bonuses. Strategies never used get a ★ UNEXPLORED label. The Explorer is instructed to prioritize high-bonus strategies.
+
+## Why elaborative re-interrogation (strategy #11)
+
+Added 2026-03-28. Pressley, McDaniel, Turnure, Wood & Ahmad (1987).
+
+The original dream cycle only created new insights. Strategy #11 (ELABORATIVE RE-INTERROGATION) finds high-value existing memories that haven't been updated in 30+ days and assembles them with their newer semantic neighbors. The Thinker's job for these slices is to UPDATE existing memories with new context, not create new ones.
+
+The research shows that repeated elaborative interrogation at increasing intervals produces far stronger encoding than one-shot elaboration. The `memory_learn` tool does one-shot elaboration; this strategy adds the "repeated at intervals" component.
+
+## Why relationship decay (expired_at)
+
+Added 2026-03-28. The `expired_at` column on `memory_relationships` existed but was never set. Now, after each dream cycle run, relationships where neither endpoint has been accessed in 90+ days are marked expired. This prevents stale relationships from cluttering the knowledge graph. A "contradicts" relationship from 6 months ago between two memories nobody looks at is noise, not signal.
+
+## Why schema-type memories (two-level retrieval)
+
+Added 2026-03-28. Bartlett (1932): schema theory; Piaget: assimilation/accommodation.
+
+Schema memories (type='schema') are abstract structures that group related principles, decisions, and insights. Instead of returning a flat list of 10 individual memories, search can now surface "here's the principle, and here are the specific memories that support it."
+
+Schemas are created by the dream cycle when the Thinker identifies 3+ memories sharing an unnamed principle. They use `derived_from` relationships to link to their constituent memories. The search results include a `schema_context` field that surfaces relevant schemas alongside individual results.

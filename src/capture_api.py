@@ -61,6 +61,7 @@ class CaptureRequest(BaseModel):
     tags: list[str] | None = None
     metadata: dict | None = None
     project: str | None = None
+    encoding_context: str | None = None
 
     @field_validator("type")
     @classmethod
@@ -98,7 +99,8 @@ class EmailCaptureRequest(BaseModel):
 # --- Shared storage pipeline ---
 
 def _store_memory(title, content, type="research", source_url=None,
-                  source_type=None, tags=None, metadata=None, project=None):
+                  source_type=None, tags=None, metadata=None, project=None,
+                  encoding_context=None):
     embedding = generate_embedding(content)
     mem_class = classify_memory(type, content)
     depth_score = compute_depth_score(content)
@@ -109,6 +111,7 @@ def _store_memory(title, content, type="research", source_url=None,
         type=type, title=title, content=content, embedding=embedding,
         tags=tags, source_type=source_type, source_url=source_url,
         metadata=meta, mem_class=mem_class, project=project,
+        encoding_context=encoding_context,
     )
 
 
@@ -131,6 +134,7 @@ def capture(req: CaptureRequest):
             title=req.title, content=req.content, type=req.type,
             source_url=req.source_url, source_type=req.source_type,
             tags=req.tags, metadata=req.metadata, project=req.project,
+            encoding_context=req.encoding_context,
         )
     except Exception:
         logger.exception("Failed to store memory via /capture")

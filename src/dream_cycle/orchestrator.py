@@ -258,6 +258,14 @@ class DreamCycleOrchestrator:
         completed_at = datetime.now(timezone.utc)
         digest = generate_digest(run_id, accepted, rejected)
 
+        # Step 9: Post-run maintenance — expire stale relationships
+        try:
+            expired_count = dream_cycle_db.expire_stale_relationships(days_threshold=90)
+            if expired_count and expired_count > 0:
+                logger.info("Expired %d stale relationships (90+ days without access)", expired_count)
+        except Exception:
+            logger.debug("Relationship decay skipped (non-critical)", exc_info=True)
+
         dream_cycle_db.complete_run(
             run_id,
             stats={
@@ -348,6 +356,7 @@ class DreamCycleOrchestrator:
             feedback_injection=feedback,
             run_type=run_type,
             scope=scope,
+            strategy_usage=dream_cycle_db.get_strategy_usage(n_cycles=10),
         )
 
         user_message = (

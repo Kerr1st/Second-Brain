@@ -133,15 +133,43 @@ def rerank(results, query_text, query_project=None):
         overlap = len(query_tokens & all_tokens) / max(1, len(query_tokens))
         title_overlap = len(query_tokens & title_tokens) / max(1, len(query_tokens))
 
-        # Recency decay (τ=60 days)
+        # Encoding context overlap (Godden & Baddeley 1975: contextual reinstatement)
+        encoding_ctx = r.get("encoding_context") or ""
+        if encoding_ctx:
+            ctx_tokens = set(re.sub(r"[^\w\s]", "", encoding_ctx).lower().split())
+            context_overlap = len(query_tokens & ctx_tokens) / max(1, len(query_tokens))
+        else:
+            context_overlap = 0.0
+
+        # Access count — read early because recency and forgetting both depend on it
+        access = r.get("access_count") or 0
+
+        # Recency decay — power law (Ebbinghaus 1885; Murre & Dros 2015)
+        # R = (1 + t/S)^(-b) where S = stability, b = decay constant.
+        # Stability increases with access_count: more retrievals = slower decay.
+        # This connects the spacing effect to the forgetting curve itself.
         created = r.get("created_at")
         if created and hasattr(created, "timestamp"):
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)
             days_old = max(0, (now - created).total_seconds() / 86400)
-            recency = math.exp(-days_old / 60)
+            stability = 30.0 + 10.0 * math.log1p(access)  # base 30 days, grows with retrieval
+            decay_b = 0.8  # power-law exponent
+            recency = (1.0 + days_old / stability) ** (-decay_b)
         else:
             recency = 0.35
+
+        # Active forgetting pressure (Anderson & Neely 1996: interference theory)
+        # Memories never retrieved and older than 90 days get a mild penalty.
+        # "Use it or lose it" — unretrieved memories fade more aggressively.
+        if access == 0 and created and hasattr(created, "timestamp"):
+            days_unretrieved = max(0, (now - created).total_seconds() / 86400)
+            if days_unretrieved > 90:
+                staleness_penalty = -0.05 * min(1.0, (days_unretrieved - 90) / 180)
+            else:
+                staleness_penalty = 0.0
+        else:
+            staleness_penalty = 0.0
 
         # Content length signal (longer = more substance, capped)
         content_len = len(content_tokens)
@@ -159,7 +187,6 @@ def rerank(results, query_text, query_project=None):
         depth_score = (r.get("metadata") or {}).get("depth_score", 0.0)
 
         # Spaced retrieval reinforcement (logarithmic, modulated by spacing bonus)
-        access = r.get("access_count") or 0
         spacing_bonus = compute_spacing_bonus(r.get("last_accessed_at"), now)
         reinforcement = 0.03 * math.log1p(access) * spacing_bonus
 
@@ -167,9 +194,15 @@ def rerank(results, query_text, query_project=None):
         mem_project = r.get("project")
         project_penalty = -0.15 if (query_project and mem_project and mem_project != query_project) else 0.0
 
+        # Supersession penalty (interference theory: retroactive interference)
+        # Superseded memories should fade in favor of their replacements.
+        mem_status = r.get("status", "active")
+        superseded_penalty = -0.20 if mem_status == "superseded" else 0.0
+
         # Store intermediate signals for evaluation/ablation (underscore-prefixed)
         r["_overlap"] = overlap
         r["_title_overlap"] = title_overlap
+        r["_context_overlap"] = context_overlap
         r["_recency"] = recency
         r["_length_score"] = length_score
         r["_depth_score"] = depth_score
@@ -178,11 +211,14 @@ def rerank(results, query_text, query_project=None):
         r["_reinforcement"] = reinforcement
         r["_spacing_bonus"] = spacing_bonus
         r["_project_penalty"] = project_penalty
+        r["_superseded_penalty"] = superseded_penalty
+        r["_staleness_penalty"] = staleness_penalty
 
         r["rerank_score"] = (
             0.30 * r.get("rrf_score", 0)
             + 0.18 * overlap
             + 0.18 * title_overlap
+            + 0.10 * context_overlap
             + 0.12 * recency
             + 0.08 * length_score
             + 0.05 * depth_score
@@ -190,6 +226,8 @@ def rerank(results, query_text, query_project=None):
             + mem_class_boost
             + reinforcement
             + project_penalty
+            + superseded_penalty
+            + staleness_penalty
         )
 
     results.sort(key=lambda r: r["rerank_score"], reverse=True)

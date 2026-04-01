@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 from src.db import (
     create_memory, get_memory, update_memory, list_memories,
     create_relationship, get_relationships, find_temporal_neighbors,
+    find_schemas_for_memory, get_schema_with_constituents,
 )
 from src.search import hybrid_search, rerank, increment_access_count
 from src.embeddings import generate_embedding
@@ -27,6 +28,7 @@ def memory_create(
     source_url: str | None = None,
     metadata: dict | None = None,
     project: str | None = None,
+    encoding_context: str | None = None,
 ) -> str:
     """Create a new memory and generate its embedding.
 
@@ -35,6 +37,10 @@ def memory_create(
 
     DEPTH REQUIREMENT for ideas/insights/decisions: explain WHAT, WHAT HAPPENS when violated, and WHY.
     Include 'Questions this answers:' with 3-5 natural-language queries.
+
+    encoding_context: Optional. Describe what you were working on when creating this memory
+    (e.g., "debugging auth flow", "reading about CLS theory"). Improves future retrieval
+    by matching the cognitive context at search time (Godden & Baddeley 1975).
     """
     embedding = generate_embedding(content)
     mem_class = classify_memory(type, content)
@@ -46,7 +52,7 @@ def memory_create(
     mid = create_memory(
         type=type, title=title, content=content, embedding=embedding,
         tags=tags, source_type=source_type, source_url=source_url, metadata=metadata,
-        mem_class=mem_class, project=project,
+        mem_class=mem_class, project=project, encoding_context=encoding_context,
     )
 
     warnings = []
@@ -101,7 +107,25 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
                     })
             temporal_context = temporal_context[:3]
 
-    return {"results": formatted, "temporal_context": temporal_context}
+    # Schema context: if any top results belong to schemas, surface the schema
+    schema_context = []
+    if results:
+        seen_schemas = set()
+        for r in results[:5]:  # check top 5 results
+            schemas = find_schemas_for_memory(str(r["id"]))
+            for s in schemas:
+                sid = str(s["id"])
+                if sid not in seen_schemas:
+                    seen_schemas.add(sid)
+                    schema_context.append({
+                        "id": sid,
+                        "title": s["title"],
+                        "type": "schema",
+                        "content": (s.get("content") or "")[:300],
+                    })
+        schema_context = schema_context[:3]
+
+    return {"results": formatted, "temporal_context": temporal_context, "schema_context": schema_context}
 
 
 @mcp.tool()

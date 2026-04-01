@@ -135,7 +135,7 @@ _EXPECTED_SIGNATURES = {
     "db.create_memory": {
         "params": ["type", "title", "content", "embedding", "tags", "source_url",
                     "source_type", "metadata", "status", "confidence",
-                    "parent_id", "summary", "mem_class", "project"],
+                    "parent_id", "summary", "mem_class", "project", "encoding_context"],
     },
     "db.get_memory": {"params": ["memory_id"]},
     "db.update_memory": {"params": ["memory_id"]},  # **fields

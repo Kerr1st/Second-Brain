@@ -258,12 +258,14 @@ class TestCompleteRerankFormula:
             "content": content,
             "title": title,
             "type": mem_type,
+            "status": "active",
             "created_at": created_at,
             "access_count": access_count,
             "last_accessed_at": last_accessed_at,
             "mem_class": mem_class,
             "project": mem_project,
             "metadata": {"depth_score": depth_score},
+            "encoding_context": None,
         }
 
         # Independently compute expected score using the same logic as rerank()
@@ -275,9 +277,14 @@ class TestCompleteRerankFormula:
         expected_overlap = len(query_tokens & all_tokens) / max(1, len(query_tokens))
         expected_title_overlap = len(query_tokens & title_tokens) / max(1, len(query_tokens))
 
-        # Recency
+        # Context overlap (None encoding_context → 0.0)
+        expected_context_overlap = 0.0
+
+        # Recency — power law: R = (1 + t/S)^(-b)
         expected_days_old = max(0, (fixed_now - created_at).total_seconds() / 86400)
-        expected_recency = math.exp(-expected_days_old / 60)
+        stability = 30.0 + 10.0 * math.log1p(access_count)
+        decay_b = 0.8
+        expected_recency = (1.0 + expected_days_old / stability) ** (-decay_b)
 
         # Length score
         expected_length_score = min(1.0, len(content_tokens) / 80)
@@ -297,10 +304,24 @@ class TestCompleteRerankFormula:
         # Project penalty
         expected_project_penalty = -0.15 if (query_project and mem_project and mem_project != query_project) else 0.0
 
+        # Superseded penalty (status is "active" → 0.0)
+        expected_superseded_penalty = 0.0
+
+        # Staleness penalty (active forgetting)
+        if access_count == 0 and created_at:
+            days_unretrieved = max(0, (fixed_now - created_at).total_seconds() / 86400)
+            if days_unretrieved > 90:
+                expected_staleness_penalty = -0.05 * min(1.0, (days_unretrieved - 90) / 180)
+            else:
+                expected_staleness_penalty = 0.0
+        else:
+            expected_staleness_penalty = 0.0
+
         expected_score = (
             0.30 * rrf_score
             + 0.18 * expected_overlap
             + 0.18 * expected_title_overlap
+            + 0.10 * expected_context_overlap
             + 0.12 * expected_recency
             + 0.08 * expected_length_score
             + 0.05 * depth_score
@@ -308,6 +329,8 @@ class TestCompleteRerankFormula:
             + expected_mem_class_boost
             + expected_reinforcement
             + expected_project_penalty
+            + expected_superseded_penalty
+            + expected_staleness_penalty
         )
 
         # Patch datetime.now in src.search to return fixed_now, keeping datetime
@@ -326,7 +349,9 @@ class TestCompleteRerankFormula:
         assert abs(actual_score - expected_score) < 1e-9, (
             f"Score mismatch: got {actual_score}, expected {expected_score}\n"
             f"  rrf={rrf_score}, overlap={expected_overlap}, title_overlap={expected_title_overlap}\n"
-            f"  recency={expected_recency}, length={expected_length_score}, depth={depth_score}\n"
+            f"  context_overlap={expected_context_overlap}, recency={expected_recency}\n"
+            f"  length={expected_length_score}, depth={depth_score}\n"
             f"  type_boost={expected_type_boost}, class_boost={expected_mem_class_boost}\n"
-            f"  reinforcement={expected_reinforcement}, project_penalty={expected_project_penalty}"
+            f"  reinforcement={expected_reinforcement}, project_penalty={expected_project_penalty}\n"
+            f"  superseded_penalty={expected_superseded_penalty}, staleness_penalty={expected_staleness_penalty}"
         )

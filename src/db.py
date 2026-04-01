@@ -66,19 +66,21 @@ def is_reachable():
 
 def create_memory(type, title, content, embedding=None, tags=None, source_url=None,
                    source_type=None, metadata=None, status="active", confidence=1.0,
-                   parent_id=None, summary=None, mem_class=None, project=None):
+                   parent_id=None, summary=None, mem_class=None, project=None,
+                   encoding_context=None):
     """Insert a new memory. Returns the UUID."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO memories (type, title, content, summary, embedding, tags,
                     source_url, source_type, metadata, status, confidence, parent_id,
-                    mem_class, project)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    mem_class, project, encoding_context)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (type, title, content, summary, embedding, tags or [],
                   source_url, source_type, json.dumps(metadata or {}),
-                  status, confidence, parent_id, mem_class, project))
+                  status, confidence, parent_id, mem_class, project,
+                  encoding_context))
             memory_id = cur.fetchone()[0]
         conn.commit()
         return str(memory_id)
@@ -95,7 +97,7 @@ def get_memory(memory_id):
 ALLOWED_UPDATE_FIELDS = {
     "title", "content", "summary", "embedding", "tags", "source_url",
     "source_type", "metadata", "status", "confidence", "type",
-    "mem_class", "project", "last_accessed_at",
+    "mem_class", "project", "last_accessed_at", "encoding_context",
 }
 
 
@@ -230,3 +232,46 @@ def find_temporal_neighbors(memory_id: str, created_at, limit: int = 3) -> list[
 
 
 
+
+
+def get_schema_with_constituents(schema_id):
+    """Get a schema memory and all its constituent memories via derived_from relationships.
+
+    Returns dict with 'schema' (the schema memory) and 'constituents' (list of
+    related memories linked by derived_from).
+    """
+    schema = get_memory(schema_id)
+    if not schema or schema.get("type") != "schema":
+        return None
+
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT m.*
+                FROM memories m
+                JOIN memory_relationships r ON r.target_id = m.id
+                WHERE r.source_id = %s AND r.relation_type = 'derived_from'
+                ORDER BY m.created_at DESC
+            """, (schema_id,))
+            constituents = cur.fetchall()
+
+    return {"schema": schema, "constituents": constituents}
+
+
+def find_schemas_for_memory(memory_id):
+    """Find all schemas that include a given memory as a constituent.
+
+    Returns list of schema memory dicts.
+    """
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT m.*
+                FROM memories m
+                JOIN memory_relationships r ON r.source_id = m.id
+                WHERE r.target_id = %s
+                  AND r.relation_type = 'derived_from'
+                  AND m.type = 'schema'
+                ORDER BY m.created_at DESC
+            """, (memory_id,))
+            return cur.fetchall()
