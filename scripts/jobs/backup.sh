@@ -45,9 +45,22 @@ log "Exporting JSON fallback..."
 docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
   "COPY (SELECT row_to_json(m) FROM memories m) TO STDOUT" \
   > "$BACKUP_DIR/memories_${TIMESTAMP}.json"
+docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
+  "COPY (SELECT row_to_json(e) FROM entities e) TO STDOUT" \
+  > "$BACKUP_DIR/entities_${TIMESTAMP}.json"
+docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
+  "COPY (SELECT row_to_json(e) FROM entity_edges e) TO STDOUT" \
+  > "$BACKUP_DIR/edges_${TIMESTAMP}.json"
+docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
+  "COPY (SELECT row_to_json(me) FROM memory_entities me) TO STDOUT" \
+  > "$BACKUP_DIR/memory_entities_${TIMESTAMP}.json"
 
 log "Encrypting..."
-for f in "$BACKUP_DIR/memory_bank_${TIMESTAMP}.dump" "$BACKUP_DIR/memories_${TIMESTAMP}.json"; do
+for f in "$BACKUP_DIR/memory_bank_${TIMESTAMP}.dump" \
+         "$BACKUP_DIR/memories_${TIMESTAMP}.json" \
+         "$BACKUP_DIR/entities_${TIMESTAMP}.json" \
+         "$BACKUP_DIR/edges_${TIMESTAMP}.json" \
+         "$BACKUP_DIR/memory_entities_${TIMESTAMP}.json"; do
   gpg --symmetric --cipher-algo AES256 --batch --yes --passphrase-file "$KEY_FILE" "$f"
   rm "$f"
 done
@@ -71,10 +84,27 @@ rclone copy "$BACKUP_DIR/" gdrive:memory-bank-backups/ --include "*.gpg" 2>&1 ||
 rclone sync "$BACKUP_DIR/kb-sources/" gdrive:memory-bank-backups/kb-sources/ 2>&1 || true
 rclone sync "$BACKUP_DIR/config/" gdrive:memory-bank-backups/config/ 2>&1 || true
 
-log "Uploading to AWS S3..."
-rclone copy "$BACKUP_DIR/" s3:memory-bank-backups/ --include "*.gpg" 2>&1 || log "WARN: S3 upload failed"
-rclone sync "$BACKUP_DIR/kb-sources/" s3:memory-bank-backups/kb-sources/ 2>&1 || true
-rclone sync "$BACKUP_DIR/config/" s3:memory-bank-backups/config/ 2>&1 || true
+log "Checking AWS SSO token..."
+S3_OK=true
+if ! aws sts get-caller-identity &>/dev/null; then
+  log "SSO token expired — attempting refresh..."
+  if aws sso login --profile default &>/dev/null; then
+    log "SSO token refreshed"
+  else
+    log "WARN: SSO refresh failed — S3 upload will be skipped"
+    log "WARN: Run 'aws sso login --profile default' manually to restore S3 backups"
+    S3_OK=false
+  fi
+fi
+
+if [ "$S3_OK" = true ]; then
+  log "Uploading to AWS S3..."
+  rclone copy "$BACKUP_DIR/" s3:memory-bank-backups/ --include "*.gpg" 2>&1 || log "WARN: S3 upload failed"
+  rclone sync "$BACKUP_DIR/kb-sources/" s3:memory-bank-backups/kb-sources/ 2>&1 || true
+  rclone sync "$BACKUP_DIR/config/" s3:memory-bank-backups/config/ 2>&1 || true
+else
+  log "WARN: S3 upload SKIPPED — no valid AWS credentials"
+fi
 
 # --- Retention: 30 days cloud, 7 days local ---
 log "Cleaning old backups..."

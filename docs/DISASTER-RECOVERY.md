@@ -1,10 +1,33 @@
 # Agent Memory Architecture — Disaster Recovery Runbook
 
-> Last updated: 2026-03-03
+> Last updated: 2026-04-22
 > Backup schedule: Daily at 2:00 AM (launchd)
 > Verification schedule: Weekly, Sundays at 3:00 AM (launchd)
 > Encryption: AES-256 via GPG
+> RPO: 24 hours | RTO: ~15-30 minutes
 > Recovery principle: **Either Google OR AWS alone is sufficient to fully recover the entire system.**
+
+### Known Failure Modes
+
+| Issue | Impact | Mitigation |
+|---|---|---|
+| AWS SSO token expiry | S3 uploads fail silently | Backup script auto-refreshes via `aws sso login`; falls back to Google Drive only with WARN log |
+| Google OAuth token expiry | Google Drive uploads fail | Uses refresh token — hasn't expired in practice. Re-auth: `rclone config reconnect gdrive:` |
+| Docker not running at 2 AM | Backup aborts | Script auto-starts container; pre-flight check |
+
+### AWS SSO Recovery
+
+```bash
+# Check token status
+aws sts get-caller-identity
+
+# Refresh (opens browser)
+aws sso login --profile default
+
+# Profile: default → SSO session kiro-admin-session
+# Start URL: https://d-9066306d67.awsapps.com/start
+# Account: 048588987132, AdministratorAccess role
+```
 
 ---
 
@@ -37,13 +60,28 @@ Either column alone can rebuild the entire system from scratch.
 | Asset | Google Drive | AWS S3 | Local |
 |---|---|---|---|
 | Layer 2: PostgreSQL dump (.dump.gpg) | ✅ | ✅ | Temporary |
-| Layer 2: JSON export (.json.gpg) | ✅ | ✅ | Temporary |
+| Layer 2: JSON — memories (.json.gpg) | ✅ | ✅ | Temporary |
+| Layer 2: JSON — entities (.json.gpg) | ✅ | ✅ | Temporary |
+| Layer 2: JSON — entity_edges (.json.gpg) | ✅ | ✅ | Temporary |
+| Layer 2: JSON — memory_entities (.json.gpg) | ✅ | ✅ | Temporary |
 | Layer 3: Knowledge base source docs | ✅ | ✅ | Local copy |
 | Layer 1: Kiro skills / bootstrap | ✅ | ✅ | `~/.kiro/skills/` |
 | Config: docker-compose.yml, schema.sql | ✅ | ✅ | `~/second-brain/` |
 | Config: backup & verify scripts | ✅ | ✅ | `~/second-brain/` |
 | Config: this runbook | ✅ | ✅ | `~/second-brain/` |
 | Encryption key | ✅ Google Secret Mgr | ✅ AWS Secrets Mgr | `~/second-brain/.backup-key` |
+
+### Data Sources (upstream of Second Brain)
+
+These are NOT backed up by this script because they are independent sources of truth:
+
+| Source | Location | What it holds |
+|---|---|---|
+| Quick Desktop | `~/.quickwork/knowledge_v1.db` | 815+ memories, 2100+ entities, 4500+ edges |
+| Kiro CLI chat histories | `~/.kiro/` | All conversation sessions |
+| KB source files | `~/Work/Tools/Crawlee/knowledge/sources/` | Crawled articles, docs |
+
+If the Second Brain is lost, it can be rebuilt from these sources via the migration scripts.
 
 ## What's NOT Backed Up (by design)
 
@@ -184,6 +222,9 @@ cp -r ~/second-brain/kiro-skills/ ~/.kiro/skills/
 docker compose -f ~/second-brain/docker-compose.yml up -d
 sleep 5  # wait for PostgreSQL to start
 psql -h localhost -U memory_bank -d memory_bank -f ~/second-brain/migrations/001_initial_schema.sql
+for f in ~/second-brain/migrations/0*.sql; do
+  psql -h localhost -U memory_bank -d memory_bank -f "$f"
+done
 
 LATEST=$(ls -t /tmp/restore/*.dump.gpg | head -1)
 gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key "$LATEST" > /tmp/restore/memory_bank.dump
@@ -193,8 +234,12 @@ pg_restore -h localhost -U memory_bank -d memory_bank /tmp/restore/memory_bank.d
 #    OR wait for AWS access and re-upload to S3 → Bedrock KB
 #    The source docs are at ~/second-brain/kb-sources/
 
-# 7. Verify
+# 7. Re-import Quick Desktop knowledge graph (if not in pg_dump)
+cd ~/second-brain && .venv/bin/python scripts/migrate/migrate_quick_desktop.py --full
+
+# 8. Verify
 psql -h localhost -U memory_bank -d memory_bank -c "SELECT type, count(*) FROM memories GROUP BY type;"
+psql -h localhost -U memory_bank -d memory_bank -c "SELECT count(*) FROM entities;"
 ls ~/second-brain/kb-sources/
 ls ~/.kiro/skills/
 echo "✅ Full recovery from Google Drive complete"
@@ -232,7 +277,9 @@ cp -r ~/second-brain/kiro-skills/ ~/.kiro/skills/
 # 5. Restore Layer 2 (PostgreSQL memory bank)
 docker compose -f ~/second-brain/docker-compose.yml up -d
 sleep 5
-psql -h localhost -U memory_bank -d memory_bank -f ~/second-brain/migrations/001_initial_schema.sql
+for f in ~/second-brain/migrations/0*.sql; do
+  psql -h localhost -U memory_bank -d memory_bank -f "$f"
+done
 
 LATEST=$(ls -t /tmp/restore/*.dump.gpg | head -1)
 gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key "$LATEST" > /tmp/restore/memory_bank.dump
@@ -289,6 +336,12 @@ psql -h localhost -U memory_bank -d memory_bank -f ~/second-brain/migrations/001
 ```
 
 **Note:** JSON restore requires re-generating vector embeddings (~10 extra minutes).
+
+**Note:** If entity/edge JSON backups are missing (pre-April 2026 backups), re-import from Quick Desktop:
+```bash
+cd ~/second-brain
+.venv/bin/python scripts/migrate/migrate_quick_desktop.py --full
+```
 
 ---
 
