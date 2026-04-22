@@ -123,73 +123,15 @@ aws secretsmanager create-secret \
 
 ## Backup Script
 
-Pushes ALL layers to BOTH clouds.
+The backup script lives at `scripts/jobs/backup.sh`. It handles:
+- PostgreSQL dump (`pg_dump -Fc`)
+- JSON fallback exports (memories, entities, entity_edges, memory_entities)
+- GPG encryption (AES-256)
+- Upload to Google Drive and AWS S3
+- AWS SSO token health check with auto-refresh
+- Local retention (7 days), cloud retention (30 days)
 
-```bash
-#!/bin/bash
-# memory-backup.sh
-
-set -euo pipefail
-
-BACKUP_DIR="$HOME/second-brain/backups"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-mkdir -p "$BACKUP_DIR"
-
-echo "=== Memory Bank Backup: $TIMESTAMP ==="
-
-# --- Layer 2: PostgreSQL Memory Bank ---
-
-echo "Dumping PostgreSQL..."
-pg_dump -Fc -h localhost -U memory_bank memory_bank > "$BACKUP_DIR/memory_bank_${TIMESTAMP}.dump"
-
-echo "Exporting JSON..."
-psql -h localhost -U memory_bank memory_bank -c "COPY (
-  SELECT json_agg(row_to_json(m))
-  FROM memories m
-) TO STDOUT" > "$BACKUP_DIR/memories_${TIMESTAMP}.json"
-
-echo "Encrypting..."
-for f in "$BACKUP_DIR/memory_bank_${TIMESTAMP}.dump" "$BACKUP_DIR/memories_${TIMESTAMP}.json"; do
-  gpg --symmetric --cipher-algo AES256 --batch --passphrase-file ~/second-brain/.backup-key "$f"
-  rm "$f"
-done
-
-# --- Layer 3: Knowledge Base Source Documents ---
-
-echo "Syncing KB source docs from S3..."
-rclone sync s3:your-kb-bucket/ "$BACKUP_DIR/kb-sources/"
-
-# --- Layer 1 + Config: Skills, scripts, schema, runbook ---
-
-echo "Copying config files..."
-mkdir -p "$BACKUP_DIR/config"
-cp ~/second-brain/docker-compose.yml "$BACKUP_DIR/config/" 2>/dev/null || true
-cp ~/second-brain/migrations/001_initial_schema.sql "$BACKUP_DIR/config/" 2>/dev/null || true
-cp ~/second-brain/memory-backup.sh "$BACKUP_DIR/config/" 2>/dev/null || true
-cp ~/second-brain/verify-backup.sh "$BACKUP_DIR/config/" 2>/dev/null || true
-cp ~/second-brain/DISASTER-RECOVERY.md "$BACKUP_DIR/config/" 2>/dev/null || true
-cp -r ~/.kiro/skills/ "$BACKUP_DIR/config/kiro-skills/" 2>/dev/null || true
-
-# --- Upload to BOTH destinations ---
-
-echo "Uploading to Google Drive..."
-rclone copy "$BACKUP_DIR/" gdrive:memory-bank-backups/ --include "*.gpg"
-rclone sync "$BACKUP_DIR/kb-sources/" gdrive:memory-bank-backups/kb-sources/
-rclone sync "$BACKUP_DIR/config/" gdrive:memory-bank-backups/config/
-
-echo "Uploading to AWS S3..."
-rclone copy "$BACKUP_DIR/" s3:memory-bank-backups/ --include "*.gpg"
-rclone sync "$BACKUP_DIR/kb-sources/" s3:memory-bank-backups/kb-sources/
-rclone sync "$BACKUP_DIR/config/" s3:memory-bank-backups/config/
-
-# --- Retention: 30 days on cloud, 7 days local ---
-
-rclone delete gdrive:memory-bank-backups/ --min-age 30d --include "*.gpg"
-rclone delete s3:memory-bank-backups/ --min-age 30d --include "*.gpg"
-find "$BACKUP_DIR" -name "*.gpg" -mtime +7 -delete
-
-echo "=== Backup complete: $TIMESTAMP → Google Drive + S3 ==="
-```
+Do not duplicate the script here — see the source file for current implementation.
 
 ---
 
@@ -366,131 +308,21 @@ aws secretsmanager update-secret --secret-id memory-bank-key \
 
 ## Backup Verification (Weekly)
 
-Runs every Sunday at 3 AM. Checks BOTH destinations independently.
+Runs every Sunday at 3 AM via `scripts/jobs/verify_backup.sh`. Checks BOTH destinations independently — downloads latest dump, decrypts, validates with `pg_restore -l`.
 
-```bash
-#!/bin/bash
-# verify-backup.sh
-
-set -uo pipefail
-mkdir -p /tmp/verify ~/second-brain/logs
-
-echo "=== Backup Verification: $(date) ==="
-
-# --- Verify Google Drive ---
-echo ""
-echo "--- Google Drive ---"
-LATEST_GD=$(rclone ls gdrive:memory-bank-backups/ --include "*.dump.gpg" | sort -k2 | tail -1 | awk '{print $2}')
-if [ -n "$LATEST_GD" ]; then
-  echo "Latest: $LATEST_GD"
-  rclone copy "gdrive:memory-bank-backups/$LATEST_GD" /tmp/verify/
-  gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key \
-    "/tmp/verify/$LATEST_GD" > /tmp/verify/test_gd.dump 2>/dev/null
-  if pg_restore -l /tmp/verify/test_gd.dump > /dev/null 2>&1; then
-    TABLES=$(pg_restore -l /tmp/verify/test_gd.dump | grep "TABLE DATA" | wc -l | tr -d ' ')
-    echo "✅ Google Drive backup valid ($TABLES tables)"
-  else
-    echo "❌ GOOGLE DRIVE BACKUP CORRUPT — investigate immediately"
-  fi
-  # Check KB sources exist
-  KB_COUNT=$(rclone ls gdrive:memory-bank-backups/kb-sources/ 2>/dev/null | wc -l | tr -d ' ')
-  echo "   KB source docs: $KB_COUNT files"
-  # Check config exists
-  CFG_COUNT=$(rclone ls gdrive:memory-bank-backups/config/ 2>/dev/null | wc -l | tr -d ' ')
-  echo "   Config files: $CFG_COUNT files"
-else
-  echo "❌ NO BACKUPS FOUND ON GOOGLE DRIVE"
-fi
-
-# --- Verify S3 ---
-echo ""
-echo "--- AWS S3 ---"
-LATEST_S3=$(rclone ls s3:memory-bank-backups/ --include "*.dump.gpg" | sort -k2 | tail -1 | awk '{print $2}')
-if [ -n "$LATEST_S3" ]; then
-  echo "Latest: $LATEST_S3"
-  rclone copy "s3:memory-bank-backups/$LATEST_S3" /tmp/verify/
-  gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key \
-    "/tmp/verify/$LATEST_S3" > /tmp/verify/test_s3.dump 2>/dev/null
-  if pg_restore -l /tmp/verify/test_s3.dump > /dev/null 2>&1; then
-    TABLES=$(pg_restore -l /tmp/verify/test_s3.dump | grep "TABLE DATA" | wc -l | tr -d ' ')
-    echo "✅ S3 backup valid ($TABLES tables)"
-  else
-    echo "❌ S3 BACKUP CORRUPT — investigate immediately"
-  fi
-  KB_COUNT=$(rclone ls s3:memory-bank-backups/kb-sources/ 2>/dev/null | wc -l | tr -d ' ')
-  echo "   KB source docs: $KB_COUNT files"
-  CFG_COUNT=$(rclone ls s3:memory-bank-backups/config/ 2>/dev/null | wc -l | tr -d ' ')
-  echo "   Config files: $CFG_COUNT files"
-else
-  echo "❌ NO BACKUPS FOUND ON S3"
-fi
-
-rm -rf /tmp/verify/
-echo ""
-echo "=== Verification complete: $(date) ==="
-```
+See the script source for current implementation. Do not duplicate here.
 
 ### Launchd schedule (weekly, Sundays 3 AM)
 
-File: `~/Library/LaunchAgents/com.second-brain.verify.plist`
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.second-brain.verify</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>/Users/kerrfir/.memory-bank/verify-backup.sh</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Weekday</key>
-        <integer>0</integer>
-        <key>Hour</key>
-        <integer>3</integer>
-        <key>Minute</key>
-        <integer>0</integer>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>/Users/kerrfir/.memory-bank/logs/verify.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/kerrfir/.memory-bank/logs/verify.log</string>
-</dict>
-</plist>
-```
+File: `~/Library/LaunchAgents/com.second-brain.verify.plist` (symlinked from `scheduling/`)
+
+See `scheduling/com.second-brain.verify.plist` for current configuration.
 
 ### Launchd schedule (daily backup, 2 AM)
 
-File: `~/Library/LaunchAgents/com.second-brain.backup.plist`
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.second-brain.backup</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>/Users/kerrfir/.memory-bank/memory-backup.sh</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>2</integer>
-        <key>Minute</key>
-        <integer>0</integer>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>/Users/kerrfir/.memory-bank/logs/backup.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/kerrfir/.memory-bank/logs/backup.log</string>
-</dict>
-</plist>
-```
+File: `~/Library/LaunchAgents/com.second-brain.backup.plist` (symlinked from `scheduling/`)
+
+See `scheduling/com.second-brain.backup.plist` for current configuration. All plists are documented in [OPERATIONS.md](OPERATIONS.md).
 
 ---
 
@@ -508,7 +340,7 @@ File: `~/Library/LaunchAgents/com.second-brain.backup.plist`
 | Restore database | `pg_restore -h localhost -U memory_bank -d memory_bank --clean --if-exists <file.dump>` |
 | Restart PostgreSQL | `docker compose up -d` (from `~/second-brain/`) |
 | Re-sync Bedrock KB | `aws bedrock-agent start-ingestion-job --knowledge-base-id <id> --data-source-id <id> --region us-east-1` |
-| Verify backups | `bash ~/second-brain/verify-backup.sh` |
-| Manual backup now | `bash ~/second-brain/memory-backup.sh` |
-| Check backup logs | `cat ~/second-brain/logs/backup.log` |
+| Verify backups | `bash ~/second-brain/scripts/jobs/verify_backup.sh` |
+| Manual backup now | `bash ~/second-brain/scripts/jobs/backup.sh` |
+| Check backup logs | `cat ~/second-brain/logs/backup-$(date +%Y%m%d).log` |
 | Check verify logs | `cat ~/second-brain/logs/verify.log` |

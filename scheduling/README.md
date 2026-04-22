@@ -1,16 +1,43 @@
-# Scheduling — macOS launchd plists
-#
-# To install, symlink into ~/Library/LaunchAgents/:
-#   ln -s ~/second-brain/scheduling/com.second-brain.backup.plist ~/Library/LaunchAgents/
-#   ln -s ~/second-brain/scheduling/com.second-brain.chat-extract.plist ~/Library/LaunchAgents/
-#   ln -s ~/second-brain/scheduling/com.second-brain.ingest.plist ~/Library/LaunchAgents/
-#   ln -s ~/second-brain/scheduling/com.second-brain.verify.plist ~/Library/LaunchAgents/
-#
-# Then load:
-#   launchctl load ~/Library/LaunchAgents/com.second-brain.*.plist
-#
-# Schedule:
-#   2:00 AM  — backup (pg_dump + rclone)
-#   2:30 AM  — chat extraction (Phase 1)
-#   3:00 AM  — Crawlee + staging ingestion (Phase 2)
-#   Sunday 3:00 AM — backup verification
+# Scheduling — macOS LaunchAgents
+
+All plists live in this directory. Install by symlinking to `~/Library/LaunchAgents/`.
+
+## Jobs
+
+| Plist | Schedule | Script | Description |
+|---|---|---|---|
+| `com.second-brain.bookmarks` | Sat 1:00 AM | `scrape_bookmarks.py` | Chrome bookmarks scrape |
+| `com.second-brain.youtube` | Daily 1:30 AM | `youtube_scrape.sh` | YouTube playlist/history scrape |
+| `com.second-brain.backup` | Daily 2:00 AM | `backup.sh` | Encrypted backup to GDrive + S3 |
+| `com.second-brain.chat-extract` | Daily 2:30 AM | `chat_extract.py` | Phase 1 chat extraction |
+| `com.second-brain.ingest` | Daily 3:00 AM | `ingest_staged.sh` | Phase 2 staged ingestion |
+| `com.second-brain.qd-sync` | Every 3600s | `qd_sync.sh` | Quick Desktop incremental sync |
+| `com.second-brain.verify` | Sun 3:00 AM | `verify_backup.sh` | Backup verification (both clouds) |
+| `com.second-brain.dream-cycle` | Sun 4:00 AM | `dream_cycle_scheduled.sh` | Dream cycle pipeline |
+| `com.second-brain.capture-api` | — | `capture_api.sh` | HTTP capture endpoint |
+
+## Install / Uninstall
+
+```bash
+# Install one job
+ln -s ~/second-brain/scheduling/com.second-brain.<name>.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.second-brain.<name>.plist
+
+# Install all jobs
+for f in ~/second-brain/scheduling/*.plist; do
+  ln -sf "$f" ~/Library/LaunchAgents/
+done
+launchctl load ~/Library/LaunchAgents/com.second-brain.*.plist
+
+# Unload a job
+launchctl unload ~/Library/LaunchAgents/com.second-brain.<name>.plist
+
+# Check status (exit code 0 = last run succeeded)
+launchctl list | grep second-brain
+```
+
+## Logs
+
+All jobs write to `~/second-brain/logs/<job-name>-<YYYYMMDD>.log`.
+
+See [OPERATIONS.md](../docs/OPERATIONS.md) for monitoring details.
