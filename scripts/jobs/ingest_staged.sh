@@ -55,6 +55,14 @@ done
 
 log "=== Run complete: processed=$PROCESSED failed=$FAILED ==="
 
+# Ingest scraped web/YouTube sources from the Crawlee knowledge store
+log "=== Crawlee source ingestion ==="
+if .venv/bin/python scripts/crawlee_ingest.py >> "$LOGFILE" 2>&1; then
+  log "Crawlee ingest OK"
+else
+  log "Crawlee ingest FAILED (exit $?)"
+fi
+
 # Write status file for monitoring
 cat > logs/last_ingest_status.json << EOF
 {
@@ -68,3 +76,5 @@ EOF
 
 # Purge ingested files older than 7 days
 find staging/ingested/ -type f -mtime +7 -delete 2>/dev/null
+
+exit 0

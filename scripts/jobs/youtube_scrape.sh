@@ -1,9 +1,10 @@
 #!/bin/bash
-# Nightly YouTube watch history scrape via Crawlee.
+# Nightly YouTube liked-videos scrape via Crawlee.
 # Runs at 1:30 AM via launchd, before the chat extraction pipeline.
 #
-# Scrapes YouTube watch history via browser cookies, filtering to videos
-# ≥5 minutes (likely watched to completion, not shorts/clips).
+# Scrapes YouTube Liked videos via browser cookies, filtering to videos
+# >=5 minutes (skips shorts/clips). Watch-history (list=HL) was blocked by
+# YouTube in 2026, so Liked videos (list=LL) is the capture signal.
 # Crawlee writes transcripts to knowledge/sources/ with metadata headers
 # and registers them in knowledge/index.md. The Second Brain ingestion
 # pipeline picks them up from there.
@@ -25,13 +26,16 @@ fi
 
 cd "$CRAWLEE_DIR"
 
-log "=== YouTube Watch History Scrape (min ${MIN_DURATION}s) ==="
+log "=== YouTube Liked Videos Scrape (min ${MIN_DURATION}s) ==="
 
-# Get watch history video URLs, filtering to ≥ MIN_DURATION.
+# Get liked-videos playlist URLs, filtering to >= MIN_DURATION.
+# NOTE: YouTube blocked watch-history (list=HL, "playlist type is unviewable")
+# in 2026, so we use Liked videos (list=LL) — a higher-signal, intentional
+# capture that still works with browser cookies.
 # --no-flat-playlist fetches metadata so --match-filter can check duration.
-VIDEOS=$(yt-dlp --print url --match-filter "duration>=${MIN_DURATION}" \
+VIDEOS=$(yt-dlp --print webpage_url --match-filter "duration>=${MIN_DURATION}" \
   --cookies-from-browser chrome --no-download \
-  "https://www.youtube.com/playlist?list=HL" 2>>"$LOGFILE") || true
+  "https://www.youtube.com/playlist?list=LL" 2>>"$LOGFILE") || true
 
 if [ -z "$VIDEOS" ]; then
   log "No videos matched filter. Done."

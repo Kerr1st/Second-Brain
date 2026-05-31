@@ -9,4 +9,4 @@ if ! docker exec second-brain-db pg_isready -U memory_bank &>/dev/null; then
   sleep 5
 fi
 
-exec python3 /Users/kerrfir/second-brain/scripts/dream_cycle_run.py --run-type scheduled
+exec /Users/kerrfir/second-brain/.venv/bin/python /Users/kerrfir/second-brain/scripts/dream_cycle_run.py --run-type scheduled

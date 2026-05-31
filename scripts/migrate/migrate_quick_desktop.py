@@ -31,8 +31,10 @@ def create_memory(**kwargs):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 logger = logging.getLogger(__name__)
 
-QD_DB_PATH = os.path.expanduser("~/.quickwork/knowledge_storage/knowledge_v1.db")
-SYNC_STATE_PATH = os.path.expanduser("~/.quickwork/.second_brain_sync_state.json")
+from src.qd_profile import qd_path, warn_if_stale, QD_ROOT
+
+QD_DB_PATH = qd_path("knowledge_storage", "knowledge_v1.db")
+SYNC_STATE_PATH = os.path.join(QD_ROOT, ".second_brain_sync_state.json")
 
 # QD category -> Second Brain (type, source_type)
 CATEGORY_MAP = {
@@ -62,6 +64,7 @@ def save_sync_state(state):
 
 
 def open_qd_db():
+    warn_if_stale(QD_DB_PATH)
     if not os.path.exists(QD_DB_PATH):
         raise FileNotFoundError(f"Quick Desktop DB not found: {QD_DB_PATH}")
     conn = sqlite3.connect(f"file:{QD_DB_PATH}?mode=ro", uri=True)
@@ -173,20 +176,30 @@ def import_kg_graph(qd_conn, dry_run=False, since_entity_id=0):
         logger.info("KG sync: 0 new entities since id=%d", since_entity_id)
         return {"entities": 0, "edges": 0, "bridge": 0, "edge_failed": 0, "max_entity_id": since_entity_id}
 
-    # Get edges involving any new entity
+    # Get edges involving any new entity (chunked: large backfills exceed SQLite's variable limit)
     new_ids = [e["id"] for e in entities]
-    placeholders = ",".join("?" * len(new_ids))
-    edges = qd_conn.execute(f"""
-        SELECT e1.name as from_name, e1.category as from_cat,
-               e2.name as to_name, e2.category as to_cat,
-               ed.relation, ed.weight, ed.source_type
-        FROM edges ed
-        JOIN nodes n1 ON n1.id = ed.from_node
-        JOIN entities e1 ON e1.node = n1.id
-        JOIN nodes n2 ON n2.id = ed.to_node
-        JOIN entities e2 ON e2.node = n2.id
-        WHERE e1.id IN ({placeholders}) OR e2.id IN ({placeholders})
-    """, new_ids + new_ids).fetchall()
+    edges = []
+    seen = set()
+    CHUNK = 400
+    for i in range(0, len(new_ids), CHUNK):
+        chunk = new_ids[i:i + CHUNK]
+        ph = ",".join("?" * len(chunk))
+        rows = qd_conn.execute(f"""
+            SELECT e1.name as from_name, e1.category as from_cat,
+                   e2.name as to_name, e2.category as to_cat,
+                   ed.relation, ed.weight, ed.source_type
+            FROM edges ed
+            JOIN nodes n1 ON n1.id = ed.from_node
+            JOIN entities e1 ON e1.node = n1.id
+            JOIN nodes n2 ON n2.id = ed.to_node
+            JOIN entities e2 ON e2.node = n2.id
+            WHERE e1.id IN ({ph}) OR e2.id IN ({ph})
+        """, chunk + chunk).fetchall()
+        for r in rows:
+            key = (r["from_cat"], r["from_name"], r["to_cat"], r["to_name"], r["relation"])
+            if key not in seen:
+                seen.add(key)
+                edges.append(r)
 
     max_ent_id = max(e["id"] for e in entities)
 

@@ -2,7 +2,7 @@
 
 A personal knowledge management and ideation system powered by AI. Gives AI agents persistent memory across sessions, turning them into thinking partners that accumulate knowledge over time.
 
-74K+ memories. 9 migrations. PostgreSQL + pgvector + knowledge graph. MCP server for agent access. Dream cycle for autonomous insight generation.
+164K+ memories. 9 migrations. PostgreSQL + pgvector + knowledge graph. MCP server for agent access. Dream cycle for autonomous insight generation.
 
 ## Quickstart
 
@@ -57,11 +57,19 @@ src/                Core library (MCP server, DB, search, embeddings, ingestion,
   prompts/          Agent prompt templates
 scripts/
   jobs/             Scheduled job scripts (backup, sync, scrape, ingest)
-  migrate/          Data migration scripts (Claude, ChatGPT, Notion, Quick Desktop)
+  migrate/          Data migration and sync scripts
+    migrate_quick_desktop.py   QD memories + KG entities/edges
+    enrich_qd_tags.py          QD memory tags + domains
+    ingest_eventlog.py         QD feed events + interactions
+    import_slack_graph.py      Slack channels + users → KG
+    ingest_doc_chunks.py       QD pre-chunked documents (one-time)
+    ingest_session_events.py   QD user prompts (one-time)
   eval/             Evaluation framework (retrieval quality metrics)
+  batch_ingest_parallel.py   Parallel batch ingest (20 workers)
+  ingest_qd_chats.py         Quick Desktop chat session extractor
 migrations/         Numbered SQL migrations (000-008) + runner script
-scheduling/         macOS launchd plists (9 jobs)
-tests/              Tests (property-based, unit, integration)
+scheduling/         macOS launchd plists (9 jobs, all installed)
+tests/              553 tests (property-based, unit, integration, E2E)
 docs/               Architecture specs and runbooks
 docker/             PostgreSQL data volume (gitignored)
 staging/            Transient pipeline data (gitignored)
@@ -72,14 +80,13 @@ staging/            Transient pipeline data (gitignored)
 **Working:**
 - Memory CRUD, hybrid search, reranking, retrieval reinforcement
 - MCP server (8 tools) connected to Kiro CLI and Claude Code
-- Quick Desktop hourly sync (memories + knowledge graph)
-- Daily encrypted backups to Google Drive + S3
+- Quick Desktop hourly sync (memories, tags, KG, chats, feed events, Slack graph)
+- Daily encrypted backups to Google Drive + S3 (full docs included)
 - Chat extraction, Crawlee ingestion, bookmark/YouTube scraping
-- Capture API (Slack, mobile, browser, email)
-
-**In progress:**
-- Dream cycle pipeline (code complete, one manual run, LaunchAgent not yet installed)
-- Evaluation framework (scripts exist, needs documentation and regular runs)
+- Capture API (Slack, mobile, browser, email) — port 8100
+- Dream cycle pipeline (scheduled Sundays 4 AM)
+- All 9 LaunchAgents installed and operational
+- 553 tests (unit, property-based, integration, E2E)
 
 **Planned:**
 - Entity extraction on ingest (auto-populate knowledge graph from all sources)

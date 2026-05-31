@@ -1,22 +1,22 @@
 # Second Brain — Operations
 
-> Last updated: 2026-04-22
+> Last updated: 2026-05-17
 
 ## Scheduled Jobs
 
 All jobs use macOS launchd. Plists live in `scheduling/`. Most use `scripts/jobs/job_wrapper.sh` which sends a macOS notification on failure.
 
-| Schedule | Job | Script | Plist | Installed | Status |
-|---|---|---|---|---|---|
-| Sat 1:00 AM | Bookmark scrape | `scrape_bookmarks.py` | `com.second-brain.bookmarks` | ✅ | Working |
-| Daily 1:30 AM | YouTube scrape | `youtube_scrape.sh` | `com.second-brain.youtube` | ✅ | Working |
-| Daily 2:00 AM | Backup | `backup.sh` | `com.second-brain.backup` | ✅ | Working |
-| Daily 2:30 AM | Chat extraction | `chat_extract.py` | `com.second-brain.chat-extract` | ✅ | Exit 126 (permission) |
-| Daily 3:00 AM | Staged ingestion | `ingest_staged.sh` | `com.second-brain.ingest` | ✅ | Working |
-| Hourly | QD sync | `qd_sync.sh` | `com.second-brain.qd-sync` | ✅ | Working |
-| Sun 3:00 AM | Backup verify | `verify_backup.sh` | `com.second-brain.verify` | ✅ | Working |
-| Sun 4:00 AM | Dream cycle | `dream_cycle_scheduled.sh` | `com.second-brain.dream-cycle` | ❌ | Not installed |
-| — | Capture API | `capture_api.sh` | `com.second-brain.capture-api` | ❌ | Not installed |
+| Schedule | Job | Script | Plist | Status |
+|---|---|---|---|---|
+| Sat 1:00 AM | Bookmark scrape | `scrape_bookmarks.py` | `com.second-brain.bookmarks` | Working |
+| Daily 1:30 AM | YouTube scrape | `youtube_scrape.sh` | `com.second-brain.youtube` | Working |
+| Daily 2:00 AM | Backup | `backup.sh` | `com.second-brain.backup` | Working |
+| Daily 2:30 AM | Chat extraction | `chat_extract.py` | `com.second-brain.chat-extract` | Working |
+| Daily 3:00 AM | Staged ingestion | `ingest_staged.sh` | `com.second-brain.ingest` | Working |
+| Hourly | QD sync | `qd_sync.sh` | `com.second-brain.qd-sync` | Working |
+| Sun 3:00 AM | Backup verify | `verify_backup.sh` | `com.second-brain.verify` | Working |
+| Sun 4:00 AM | Dream cycle | `dream_cycle_scheduled.sh` | `com.second-brain.dream-cycle` | Working |
+| KeepAlive | Capture API | `capture_api.sh` | `com.second-brain.capture-api` | Working (port 8100) |
 
 ### Installing a LaunchAgent
 
@@ -51,7 +51,7 @@ Daily at 2 AM. Full details in [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md).
 | pg_dump (all tables) | Google Drive + S3 | 30 days cloud, 7 days local |
 | JSON exports (memories, entities, edges, memory_entities) | Google Drive + S3 | 30 days cloud, 7 days local |
 | KB source docs | Google Drive + S3 | Current only |
-| Config (migrations, docker-compose, DR doc) | Google Drive + S3 | Current only |
+| Config (all docs, migrations, docker-compose, requirements.txt) | Google Drive + S3 | Current only |
 
 The backup script (`scripts/jobs/backup.sh`) checks AWS SSO token validity before S3 upload and attempts auto-refresh. If SSO is expired and can't be refreshed, S3 is skipped with a warning — Google Drive still runs.
 
@@ -78,14 +78,47 @@ SSO tokens expire after 8-12 hours. When expired:
 
 ## Quick Desktop Sync
 
-Hourly incremental sync from Quick Desktop's SQLite database (`~/.quickwork/knowledge_v1.db`) into PostgreSQL.
+Hourly incremental sync from Quick Desktop's SQLite databases into PostgreSQL. The `qd_sync.sh` orchestrator runs 5 scripts in sequence:
 
-- **What syncs:** memories, KG entities, KG edges, memory↔entity bridge links
-- **Dedup:** via `source_url` using `qd://memory/{id}` and `qd://entity/{id}` scheme
-- **State file:** `~/.quickwork/.second_brain_sync_state.json` (tracks `last_memory_id`, `last_entity_id`, `last_kg_entity_id`)
-- **Script:** `scripts/migrate/migrate_quick_desktop.py` (incremental by default, `--full` for backfill)
+| Script | What it syncs | Source |
+|---|---|---|
+| `migrate_quick_desktop.py` | Memories + KG entities/edges | `knowledge_v1.db` |
+| `enrich_qd_tags.py` | Tags (2,506) + domains (95) onto memories | `knowledge_v1.db` |
+| `ingest_eventlog.py` | Feed events (304) + interaction metadata (175) | `eventlog/` |
+| `import_slack_graph.py` | Channels (330) + users (699) → KG entities | `slack_cache/` |
+| `ingest_qd_chats.py` | Chat sessions (2+ messages) | `sessions.db` |
 
-See [QUICK-DESKTOP-INTEGRATION.md](QUICK-DESKTOP-INTEGRATION.md) for design details.
+**Databases:**
+- `~/.quickwork/knowledge_storage/knowledge_v1.db` — memories, KG, tags, domains
+- `~/.quickwork/sessions/sessions.db` — chat sessions
+- `~/.quickwork/eventlog/events.jsonl` — curated feed events
+- `~/.quickwork/eventlog/interactions.jsonl` — user engagement signals
+- `~/.quickwork/slack_cache/` — channels and users
+
+**Dedup schemes:** `qd://memory/{id}`, `qd://entity/{id}`, `qd-chat://{id}`, `qd-feed://{id}`
+
+**State file:** `~/.quickwork/.second_brain_sync_state.json`
+
+All scripts are idempotent — safe to run repeatedly. See [QUICK-DESKTOP-INTEGRATION.md](QUICK-DESKTOP-INTEGRATION.md) for design details.
+
+## Capture API
+
+HTTP endpoint for ingesting content from Slack, browser extensions, mobile, and email. Runs as a KeepAlive LaunchAgent on port 8100.
+
+```bash
+# Health check
+curl http://localhost:8100/health
+
+# Submit a memory
+curl -X POST http://localhost:8100/capture \
+  -H "Authorization: Bearer $CAPTURE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "...", "content": "...", "type": "insight"}'
+```
+
+Endpoints: `/capture`, `/capture/slack`, `/capture/browser`, `/capture/email`
+
+Token is set in the LaunchAgent plist (`com.second-brain.capture-api.plist`) as the `CAPTURE_API_TOKEN` environment variable. Logs at `~/Library/Logs/second-brain/capture-api-{stdout,stderr}.log`.
 
 ## Docker
 
@@ -109,9 +142,10 @@ docker/data/   # ~2.5 GB
 
 | Check | Command | Expected |
 |---|---|---|
-| All jobs loaded | `launchctl list \| grep second-brain` | 7 entries, exit code 0 |
+| All jobs loaded | `launchctl list \| grep second-brain` | 9 entries, exit code 0 |
+| Capture API healthy | `curl -s http://localhost:8100/health` | `{"status":"healthy"}` |
 | Backup ran today | `cat logs/backup-$(date +%Y%m%d).log` | "Backup complete" |
 | QD sync running | `cat logs/qd-sync-$(date +%Y%m%d).log` | Hourly entries |
 | AWS SSO valid | `aws sts get-caller-identity` | Returns account info |
 | PostgreSQL up | `docker exec second-brain-db pg_isready -U memory_bank` | "accepting connections" |
-| Memory count | `docker exec second-brain-db psql -U memory_bank -c "SELECT count(*) FROM memories"` | 74K+ |
+| Memory count | `docker exec second-brain-db psql -U memory_bank -c "SELECT count(*) FROM memories"` | 164K+ |

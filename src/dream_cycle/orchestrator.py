@@ -371,6 +371,7 @@ class DreamCycleOrchestrator:
             system_prompt=prompt,
             user_message=user_message,
             mcp_config="second-brain",
+            timeout=600,
         )
 
         self._capture("explorer", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))

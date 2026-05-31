@@ -25,7 +25,12 @@ LOGFILE="/Users/kerrfir/second-brain/logs/${JOB_NAME}-$(date +%Y%m%d).log"
 mkdir -p "$(dirname "$LOGFILE")"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting $JOB_NAME" >> "$LOGFILE"
-"$SCRIPT" >> "$LOGFILE" 2>&1
+# Run Python scripts under the project venv (deps live there); shell scripts run directly.
+if [[ "$SCRIPT" == *.py ]]; then
+  /Users/kerrfir/second-brain/.venv/bin/python "$SCRIPT" >> "$LOGFILE" 2>&1
+else
+  "$SCRIPT" >> "$LOGFILE" 2>&1
+fi
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then

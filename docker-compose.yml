@@ -2,6 +2,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg17
     container_name: second-brain-db
+    restart: unless-stopped
     environment:
       POSTGRES_USER: memory_bank
       POSTGRES_PASSWORD: memory_bank

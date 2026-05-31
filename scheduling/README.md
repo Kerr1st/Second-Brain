@@ -11,10 +11,10 @@ All plists live in this directory. Install by symlinking to `~/Library/LaunchAge
 | `com.second-brain.backup` | Daily 2:00 AM | `backup.sh` | Encrypted backup to GDrive + S3 |
 | `com.second-brain.chat-extract` | Daily 2:30 AM | `chat_extract.py` | Phase 1 chat extraction |
 | `com.second-brain.ingest` | Daily 3:00 AM | `ingest_staged.sh` | Phase 2 staged ingestion |
-| `com.second-brain.qd-sync` | Every 3600s | `qd_sync.sh` | Quick Desktop incremental sync |
+| `com.second-brain.qd-sync` | Every 3600s | `qd_sync.sh` | Quick Desktop sync (5 scripts: memories, tags, events, Slack graph, chats) |
 | `com.second-brain.verify` | Sun 3:00 AM | `verify_backup.sh` | Backup verification (both clouds) |
 | `com.second-brain.dream-cycle` | Sun 4:00 AM | `dream_cycle_scheduled.sh` | Dream cycle pipeline |
-| `com.second-brain.capture-api` | — | `capture_api.sh` | HTTP capture endpoint |
+| `com.second-brain.capture-api` | KeepAlive | `capture_api.sh` | HTTP capture endpoint (port 8100) |
 
 ## Install / Uninstall
 

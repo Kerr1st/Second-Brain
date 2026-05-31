@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Daily chat extraction — Phase 1 of hybrid chat ingestion.
 
 Reads from all three chat sources, applies structural stripping and filtering,

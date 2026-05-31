@@ -1,3 +1,3 @@
 #!/bin/bash
 cd /Users/kerrfir/second-brain
-exec python3 -m src.capture_api
+exec .venv/bin/python -m src.capture_api

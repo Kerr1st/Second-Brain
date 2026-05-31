@@ -1,6 +1,6 @@
 # Second Brain — Architecture
 
-> Last updated: 2026-04-22
+> Last updated: 2026-05-17
 
 ## Overview
 
@@ -11,8 +11,9 @@ A personal knowledge system that gives AI agents persistent memory across sessio
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Capture Channels                                           │
-│  Kiro CLI · Kiro IDE · Quick Desktop (Slack/Outlook/Cal)    │
-│  Crawlee (web/YouTube) · Capture API · Browser · Mobile     │
+│  Kiro CLI · Kiro IDE · Quick Desktop (full: memories, KG,   │
+│  chats, feed events, docs, Slack graph) · Crawlee (web/YT)  │
+│  · Capture API (port 8100) · Browser · Mobile               │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -26,8 +27,8 @@ A personal knowledge system that gives AI agents persistent memory across sessio
 │                                                             │
 │  ┌───────────┐ ┌────────────────┐ ┌──────────────────────┐  │
 │  │ memories   │ │ relationships  │ │ knowledge graph      │  │
-│  │ 74K+ rows  │ │ source→target  │ │ entities (2.1K)      │  │
-│  │            │ │ typed edges    │ │ entity_edges (4.6K)  │  │
+│  │ 164K+ rows │ │ source→target  │ │ entities (3.9K)      │  │
+│  │            │ │ typed edges    │ │ entity_edges (6.5K)  │  │
 │  │            │ │                │ │ memory_entities      │  │
 │  └───────────┘ └────────────────┘ └──────────────────────┘  │
 │                                                             │
@@ -74,7 +75,7 @@ CREATE TABLE memories (
     embedding vector(1024),
     tags TEXT[] DEFAULT '{}',
     source_url TEXT,
-    source_type TEXT,                -- youtube, article, pdf, course, kiro_cli_chat, kiro_ide_chat, quick_desktop, notes, manual
+    source_type TEXT,                -- youtube, article, pdf, course, kiro_cli_chat, kiro_ide_chat, quick_desktop, quick_desktop_chat, quick_desktop_feed, quick_desktop_doc, quick_desktop_session_event, notes, manual
     metadata JSONB DEFAULT '{}',
     status TEXT DEFAULT 'active',    -- active, explored, archived, superseded, user_rejected
     confidence FLOAT DEFAULT 1.0,
@@ -211,13 +212,16 @@ Hybrid retrieval with cognitive science-grounded reranking. Implementation: `src
 rerank_score = 0.30 * rrf_score
              + 0.18 * token_overlap
              + 0.18 * title_overlap
-             + 0.12 * recency              (exponential decay, τ=60 days)
+             + 0.10 * context_overlap       (encoding context match)
+             + 0.12 * recency              (power-law decay with stability)
              + 0.08 * length_score
              + 0.05 * depth_score
              + type_boost                   (0.06 for idea/synthesis/insight/decision)
              + mem_class_boost              (0.04 semantic, 0.02 procedural, 0.00 episodic)
              + reinforcement                (0.03 * log1p(access_count) * spacing_bonus)
              + project_penalty              (-0.15 if cross-project)
+             + superseded_penalty           (-0.20 if status=superseded)
+             + staleness_penalty            (-0.05 if unretrieved >90 days)
 ```
 
 See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale.
@@ -263,7 +267,7 @@ See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale.
 | Backup transport | rclone (Google Drive + S3) |
 | Backup encryption | GPG (AES-256) |
 | Content acquisition | Crawlee (Node.js, `~/Work/Tools/Crawlee/`) |
-| QD sync | Quick Desktop (`~/.quickwork/knowledge_v1.db`) |
+| QD sync | Quick Desktop (`knowledge_v1.db`, `sessions.db`, `eventlog/`, `slack_cache/`) |
 
 ## Dream Cycle Pipeline
 

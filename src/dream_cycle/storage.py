@@ -69,7 +69,6 @@ def store_accepted(candidate: CandidateInsight) -> str:
             mem_class=classify_memory(
                 existing.get("type", "idea") if existing else "idea",
                 candidate.content,
-                candidate.content,
             ),
             metadata=merged_metadata,
         )

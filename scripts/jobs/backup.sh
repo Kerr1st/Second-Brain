@@ -43,16 +43,16 @@ docker exec "$CONTAINER" pg_dump -Fc -U "$DB_USER" "$DB_NAME" > "$BACKUP_DIR/mem
 
 log "Exporting JSON fallback..."
 docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
-  "COPY (SELECT row_to_json(m) FROM memories m) TO STDOUT" \
+  "SELECT row_to_json(m) FROM memories m" \
   > "$BACKUP_DIR/memories_${TIMESTAMP}.json"
 docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
-  "COPY (SELECT row_to_json(e) FROM entities e) TO STDOUT" \
+  "SELECT row_to_json(e) FROM entities e" \
   > "$BACKUP_DIR/entities_${TIMESTAMP}.json"
 docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
-  "COPY (SELECT row_to_json(e) FROM entity_edges e) TO STDOUT" \
+  "SELECT row_to_json(e) FROM entity_edges e" \
   > "$BACKUP_DIR/edges_${TIMESTAMP}.json"
 docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
-  "COPY (SELECT row_to_json(me) FROM memory_entities me) TO STDOUT" \
+  "SELECT row_to_json(me) FROM memory_entities me" \
   > "$BACKUP_DIR/memory_entities_${TIMESTAMP}.json"
 
 log "Encrypting..."
@@ -74,8 +74,11 @@ rsync -a --delete ~/Work/Tools/Crawlee/knowledge/sources/ "$BACKUP_DIR/kb-source
 log "Copying config..."
 mkdir -p "$BACKUP_DIR/config"
 cp docker-compose.yml "$BACKUP_DIR/config/" 2>/dev/null || true
+cp requirements.txt "$BACKUP_DIR/config/" 2>/dev/null || true
 cp migrations/*.sql "$BACKUP_DIR/config/" 2>/dev/null || true
-cp docs/DISASTER-RECOVERY.md "$BACKUP_DIR/config/" 2>/dev/null || true
+cp docs/*.md "$BACKUP_DIR/config/" 2>/dev/null || true
+cp README.md "$BACKUP_DIR/config/" 2>/dev/null || true
+cp scheduling/README.md "$BACKUP_DIR/config/scheduling-README.md" 2>/dev/null || true
 cp -r ~/.kiro/skills/ "$BACKUP_DIR/config/kiro-skills/" 2>/dev/null || true
 
 # --- Upload to both clouds ---

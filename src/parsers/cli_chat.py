@@ -140,6 +140,52 @@ def format_as_markdown(conversation_id, messages, timestamp_ms, project=None):
     return "\n".join(lines)
 
 
+def extract_history_messages(data):
+    """Extract (role, text) messages from the newer kiro-cli `history` format.
+
+    Each entry: {"user": {"content": {"Prompt": {"prompt": ...}}}, "assistant":
+    {"Response"|"ToolUse": {"content": ...}}}. Tool-result user turns and empty
+    assistant content are skipped. Returns [] if no usable history.
+    """
+    messages = []
+    for e in data.get("history") or []:
+        if not isinstance(e, dict):
+            continue
+        u = e.get("user")
+        if isinstance(u, dict):
+            c = u.get("content")
+            p = c.get("Prompt") if isinstance(c, dict) else None
+            if isinstance(p, dict) and isinstance(p.get("prompt"), str):
+                txt = p["prompt"].strip()
+                if txt:
+                    messages.append(("human", txt))
+        a = e.get("assistant")
+        if isinstance(a, dict):
+            block = a.get("Response") or a.get("ToolUse")
+            if isinstance(block, dict):
+                txt = (block.get("content") or "").strip()
+                if txt:
+                    messages.append(("bot", txt))
+    return messages
+
+
+_AUTOMATED_MARKERS = (
+    "Run type:",
+    "Please evaluate this candidate insight as the",
+)
+
+
+def is_automated_conversation(messages):
+    """True for dream-cycle / --no-interactive sub-agent conversations."""
+    humans = [c for r, c in messages if r == "human"]
+    if not humans:
+        return True
+    first = humans[0].lstrip()
+    if first.startswith("{"):  # Thinker receives a JSON memory slice
+        return True
+    return any(m in first[:120] for m in _AUTOMATED_MARKERS)
+
+
 def parse_conversation(conversation_id, value_json, created_at):
     """Parse a single CLI conversation. Returns (conv_id, markdown, project) or None if filtered out."""
     try:
@@ -147,11 +193,19 @@ def parse_conversation(conversation_id, value_json, created_at):
     except json.JSONDecodeError:
         return None
 
-    transcript = data.get("transcript", [])
-    if not transcript:
+    # Newer kiro-cli stores turns in structured `history`; older versions used
+    # the `transcript` string list. Prefer history, fall back to transcript.
+    messages = extract_history_messages(data)
+    if not messages:
+        messages = strip_transcript(data.get("transcript", []))
+
+    if not messages:
         return None
 
-    messages = strip_transcript(transcript)
+    # Skip automated --no-interactive sub-agent conversations (dream cycle etc.)
+    # so the brain doesn't ingest itself talking to itself.
+    if is_automated_conversation(messages):
+        return None
 
     if not passes_size_filter(messages):
         return None

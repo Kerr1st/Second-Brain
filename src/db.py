@@ -26,7 +26,12 @@ _pool: SimpleConnectionPool | None = None
 
 @contextmanager
 def get_connection():
-    """Check out a connection from the pool (lazily initialized)."""
+    """Check out a live connection from the pool (lazily initialized).
+
+    Each connection is probed with SELECT 1 on checkout; dead ones (e.g. after
+    a database/container restart) are discarded and replaced, so the long-running
+    pool self-heals instead of handing out stale, closed connections.
+    """
     global _pool
     if _pool is None:
         _pool = SimpleConnectionPool(
@@ -34,11 +39,26 @@ def get_connection():
             int(os.environ.get("DB_POOL_MAX", "5")),
             **DB_CONFIG,
         )
-    conn = _pool.getconn()
+    conn = None
+    for _ in range(int(os.environ.get("DB_POOL_MAX", "5")) + 1):
+        candidate = _pool.getconn()
+        try:
+            with candidate.cursor() as cur:
+                cur.execute("SELECT 1")
+            candidate.rollback()
+            conn = candidate
+            break
+        except psycopg2.Error:
+            _pool.putconn(candidate, close=True)  # drop dead connection
+    if conn is None:
+        raise psycopg2.OperationalError("No live database connection available")
     try:
         yield conn
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except psycopg2.Error:
+            pass
         raise
     finally:
         _pool.putconn(conn)
@@ -106,6 +126,8 @@ def update_memory(memory_id, **fields):
     fields = {k: v for k, v in fields.items() if k in ALLOWED_UPDATE_FIELDS}
     if not fields:
         return
+    if "metadata" in fields and isinstance(fields["metadata"], dict):
+        fields["metadata"] = json.dumps(fields["metadata"])
     set_clause = ", ".join(f"{k} = %s" for k in fields)
     values = list(fields.values()) + [memory_id]
     with get_connection() as conn:
