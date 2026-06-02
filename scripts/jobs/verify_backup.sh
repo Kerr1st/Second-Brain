@@ -1,5 +1,6 @@
 #!/bin/bash
-# Weekly backup verification — checks BOTH cloud destinations independently.
+# Weekly backup verification — decrypts and validates the Google Drive backup.
+# (S3 de-scoped 2026-06-01; durable copies = local + GDrive + git.)
 # See docs/DISASTER-RECOVERY.md for recovery procedures.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -64,7 +65,6 @@ verify_cloud() {
 }
 
 verify_cloud "Google Drive" "gdrive:memory-bank-backups"
-verify_cloud "AWS S3" "s3:memory-bank-backups"
 
 rm -rf "$VERIFY_DIR"
 

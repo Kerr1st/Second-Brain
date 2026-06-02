@@ -1,5 +1,6 @@
 #!/bin/bash
-# Daily backup — pg_dump + GPG encrypt + rclone to Google Drive + S3.
+# Daily backup — pg_dump + GPG encrypt + rclone to Google Drive.
+# S3 de-scoped 2026-06-01 (brittle overnight SSO); durable copies = local + GDrive + git.
 # See docs/DISASTER-RECOVERY.md for full recovery procedures.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -40,6 +41,8 @@ log "=== Backup: $TIMESTAMP ==="
 # --- Database dump ---
 log "Dumping PostgreSQL..."
 docker exec "$CONTAINER" pg_dump -Fc -U "$DB_USER" "$DB_NAME" > "$BACKUP_DIR/memory_bank_${TIMESTAMP}.dump"
+ROWS=$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT COUNT(*) FROM memories;" 2>/dev/null || echo "?")
+log "Backed up $ROWS memories"
 
 log "Exporting JSON fallback..."
 docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
@@ -81,38 +84,29 @@ cp README.md "$BACKUP_DIR/config/" 2>/dev/null || true
 cp scheduling/README.md "$BACKUP_DIR/config/scheduling-README.md" 2>/dev/null || true
 cp -r ~/.kiro/skills/ "$BACKUP_DIR/config/kiro-skills/" 2>/dev/null || true
 
-# --- Upload to both clouds ---
+# --- Upload to Google Drive (primary cloud copy) ---
 log "Uploading to Google Drive..."
-rclone copy "$BACKUP_DIR/" gdrive:memory-bank-backups/ --include "*.gpg" 2>&1 || log "WARN: Google Drive upload failed"
+GDRIVE_OK=true
+rclone copy "$BACKUP_DIR/" gdrive:memory-bank-backups/ --include "*.gpg" 2>&1 || { log "WARN: Google Drive upload failed"; GDRIVE_OK=false; }
 rclone sync "$BACKUP_DIR/kb-sources/" gdrive:memory-bank-backups/kb-sources/ 2>&1 || true
 rclone sync "$BACKUP_DIR/config/" gdrive:memory-bank-backups/config/ 2>&1 || true
 
-log "Checking AWS SSO token..."
-S3_OK=true
-if ! aws sts get-caller-identity &>/dev/null; then
-  log "SSO token expired — attempting refresh..."
-  if aws sso login --profile default &>/dev/null; then
-    log "SSO token refreshed"
-  else
-    log "WARN: SSO refresh failed — S3 upload will be skipped"
-    log "WARN: Run 'aws sso login --profile default' manually to restore S3 backups"
-    S3_OK=false
-  fi
-fi
-
-if [ "$S3_OK" = true ]; then
-  log "Uploading to AWS S3..."
-  rclone copy "$BACKUP_DIR/" s3:memory-bank-backups/ --include "*.gpg" 2>&1 || log "WARN: S3 upload failed"
-  rclone sync "$BACKUP_DIR/kb-sources/" s3:memory-bank-backups/kb-sources/ 2>&1 || true
-  rclone sync "$BACKUP_DIR/config/" s3:memory-bank-backups/config/ 2>&1 || true
+# Verify the encrypted dump actually landed on the remote
+if rclone lsf gdrive:memory-bank-backups/ 2>/dev/null | grep -q "memory_bank_${TIMESTAMP}.dump.gpg"; then
+  log "✅ Google Drive backup verified ($ROWS memories, dump present on remote)"
 else
-  log "WARN: S3 upload SKIPPED — no valid AWS credentials"
+  log "❌ Google Drive backup NOT verified — dump missing on remote"
+  GDRIVE_OK=false
 fi
 
 # --- Retention: 30 days cloud, 7 days local ---
 log "Cleaning old backups..."
 rclone delete gdrive:memory-bank-backups/ --min-age 30d --include "*.gpg" 2>/dev/null || true
-rclone delete s3:memory-bank-backups/ --min-age 30d --include "*.gpg" 2>/dev/null || true
 find "$BACKUP_DIR" -name "*.gpg" -mtime +7 -delete 2>/dev/null || true
 
-log "=== Backup complete: $TIMESTAMP ==="
+if [ "$GDRIVE_OK" = true ]; then
+  log "=== Backup complete: $TIMESTAMP ==="
+else
+  log "=== Backup FAILED to verify on Google Drive: $TIMESTAMP ==="
+  exit 1
+fi

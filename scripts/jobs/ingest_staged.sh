@@ -57,11 +57,17 @@ log "=== Run complete: processed=$PROCESSED failed=$FAILED ==="
 
 # Ingest scraped web/YouTube sources from the Crawlee knowledge store
 log "=== Crawlee source ingestion ==="
+web_count() { docker exec second-brain-db psql -U memory_bank -d memory_bank -tAc \
+  "SELECT COUNT(*) FROM memories WHERE source_type IN ('article','youtube');" 2>/dev/null || echo 0; }
+CRAWLEE_BEFORE=$(web_count)
 if .venv/bin/python scripts/crawlee_ingest.py >> "$LOGFILE" 2>&1; then
   log "Crawlee ingest OK"
 else
   log "Crawlee ingest FAILED (exit $?)"
 fi
+CRAWLEE_AFTER=$(web_count)
+CRAWLEE_CAPTURES=$(( ${CRAWLEE_AFTER:-0} - ${CRAWLEE_BEFORE:-0} ))
+log "captures_this_cycle: chats=$PROCESSED web/youtube=$CRAWLEE_CAPTURES"
 
 # Write status file for monitoring
 cat > logs/last_ingest_status.json << EOF
@@ -69,6 +75,7 @@ cat > logs/last_ingest_status.json << EOF
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "processed": $PROCESSED,
   "failed": $FAILED,
+  "crawlee_captures": ${CRAWLEE_CAPTURES:-0},
   "pending": $(ls staging/chats/*.md 2>/dev/null | wc -l | tr -d ' '),
   "failed_files": $(ls staging/failed/*.md 2>/dev/null | wc -l | tr -d ' ')
 }
