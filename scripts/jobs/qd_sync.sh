@@ -19,6 +19,7 @@ BEFORE=$(qd_count)
 .venv/bin/python scripts/migrate/ingest_eventlog.py >> "$LOG" 2>&1
 .venv/bin/python scripts/migrate/import_slack_graph.py >> "$LOG" 2>&1
 .venv/bin/python scripts/ingest_qd_chats.py >> "$LOG" 2>&1
+.venv/bin/python scripts/migrate/ingest_doc_chunks.py >> "$LOG" 2>&1
 
 AFTER=$(qd_count)
 echo "$(date '+%Y-%m-%d %H:%M:%S') QD sync complete — captures_this_cycle=$(( ${AFTER:-0} - ${BEFORE:-0} ))" >> "$LOG"

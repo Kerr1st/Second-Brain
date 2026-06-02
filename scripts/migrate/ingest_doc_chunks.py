@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Ingest pre-chunked document content from Quick Desktop into Second Brain.
 
-Reads ~/.quickwork/knowledge_storage/knowledge_v1.db (search_content + file_chunks)
-and creates memories for each document chunk (source_type='local').
+Reads the ACTIVE QD profile's knowledge_v1.db (search_content + file_chunks) via
+the qd_profile resolver and creates a memory per local document chunk
+(source_type='quick_desktop_doc'). Low-signal folders (Downloads) are excluded.
 
 Usage:
     .venv/bin/python scripts/migrate/ingest_doc_chunks.py [--dry-run] [--workers 20]
 
 Idempotent — uses source_url 'qd-doc://{node_id}' for deduplication.
-One-time backfill; not added to qd_sync.sh.
+Scheduled incrementally via qd_sync.sh.
 """
 
 import argparse
@@ -26,12 +27,16 @@ os.environ.setdefault("DB_POOL_MAX", "20")
 
 from src.db import create_memory, get_processed_source_urls
 from src.embeddings import generate_embedding
+from src.qd_profile import qd_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
-QD_DB_PATH = os.path.expanduser("~/.quickwork/knowledge_storage/knowledge_v1.db")
+QD_DB_PATH = qd_path("knowledge_storage", "knowledge_v1.db")
 SOURCE_TYPE = "quick_desktop_doc"
+
+# Low-signal folders excluded from capture (SQL LIKE patterns). See investigation 2026-06-02.
+EXCLUDE_FOLDER_PATTERNS = ("%Downloads%",)
 
 
 def source_url_for_chunk(node_id):
@@ -69,17 +74,22 @@ def metadata_for_chunk(node_id, chunk_index, file_id, folder_path, extension, so
 
 
 def query_chunks(db_path):
-    """Query all local document chunks from the SQLite DB."""
+    """Query local document chunks from the SQLite DB, excluding low-signal folders."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    cur = conn.execute("""
+    where = "sc.source_type = 'local'"
+    params = []
+    for pat in EXCLUDE_FOLDER_PATTERNS:
+        where += " AND COALESCE(sc.folder_path, '') NOT LIKE ?"
+        params.append(pat)
+    cur = conn.execute(f"""
         SELECT sc.id, sc.node, sc.folder_path, sc.extension, sc.source,
                sc.text_content, fc.chunk_index, fc.file_id
         FROM search_content sc
         JOIN file_chunks fc ON fc.node = sc.node
-        WHERE sc.source_type = 'local'
+        WHERE {where}
         ORDER BY fc.file_id, fc.chunk_index
-    """)
+    """, params)
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
     return rows
