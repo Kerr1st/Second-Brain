@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.parsers.ide_chat import parse_all as parse_ide_chats, find_chat_files
 from src.parsers.cli_chat import parse_all as parse_cli_chats, get_conversations
+from src.db import get_processed_source_urls
 
 STAGING_DIR = os.path.join(os.path.dirname(__file__), "..", "staging", "chats")
 LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "logs")
@@ -54,6 +55,14 @@ def main():
     os.makedirs(STAGING_DIR, exist_ok=True)
 
     already_staged = set() if "--backfill" in sys.argv else get_already_staged()
+    # Skip chats already ingested in the DB (either source_url scheme) so
+    # re-extraction doesn't re-stage the whole history. batch_ingest_staged is
+    # the downstream dedup backstop, so a DB hiccup here is non-fatal.
+    try:
+        ingested = set() if "--backfill" in sys.argv else (
+            get_processed_source_urls("kiro_cli_chat") | get_processed_source_urls("kiro_ide_chat"))
+    except Exception:
+        ingested = set()
 
     log.info("=== Phase 1: Chat Extraction ===")
     log.info(f"Mode: {'backfill' if '--backfill' in sys.argv else 'incremental'}")
@@ -67,6 +76,8 @@ def main():
     log.info("Processing IDE chats...")
     try:
         for filename, markdown, meta in parse_ide_chats(already_processed=already_staged):
+            if f"chat://{filename}" in ingested or f"ide_{filename}.md" in ingested:
+                continue
             ide_passed += 1
             if not dry_run:
                 out_path = os.path.join(STAGING_DIR, f"ide_{filename}.md")
@@ -80,6 +91,9 @@ def main():
     log.info("Processing CLI chats...")
     try:
         for conv_id, markdown, project in parse_cli_chats(already_processed=already_staged):
+            short_id = conv_id[:12]
+            if f"chat://{short_id}" in ingested or f"cli_{short_id}.md" in ingested:
+                continue
             cli_passed += 1
             if not dry_run:
                 short_id = conv_id[:12]

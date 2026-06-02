@@ -1,12 +1,13 @@
 #!/bin/bash
-# Phase 2: Intelligent processing via Kiro headless.
-# Processes staged chats one per session through Kiro CLI with Opus 4.6-1m.
+# Phase 2: Staged chat ingestion + Crawlee web/YouTube ingestion.
+# Ingests staged chats directly via batch_ingest_staged.py (idempotent, no
+# external CLI dependency), then pulls new Crawlee knowledge-store content.
 # Runs via launchd at 3:00 AM daily.
 #
 # See docs/HYBRID-CHAT-EXTRACTION.md for full spec.
 
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 LOGFILE="logs/ingest-$(date +%Y%m%d).log"
 FAILED_DIR="staging/failed"
@@ -29,31 +30,12 @@ if ! docker exec second-brain-db pg_isready -U memory_bank > /dev/null 2>&1; the
   log "Container started successfully."
 fi
 
-log "=== Phase 2: Staged Chat Ingestion ==="
-
-for chat_file in staging/chats/*.md; do
-  [ -f "$chat_file" ] || continue
-  FILENAME=$(basename "$chat_file")
-  log "Processing: $FILENAME"
-
-  kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.6-1m \
-    "Process the staged chat at ~/second-brain/$chat_file. Read the file, chunk it by topic shifts, extract metadata (topics, decisions, action items, project, files discussed), generate embeddings via Bedrock, and store in the Second Brain PostgreSQL database. After successful storage, delete the staging file." \
-    >> "$LOGFILE" 2>&1
-
-  EXIT_CODE=$?
-  if [ $EXIT_CODE -eq 0 ] && [ ! -f "$chat_file" ]; then
-    log "OK: $FILENAME ingested and removed from staging"
-    PROCESSED=$((PROCESSED + 1))
-  else
-    log "FAIL: $FILENAME (exit code $EXIT_CODE) — moved to $FAILED_DIR/"
-    mv "$chat_file" "$FAILED_DIR/"
-    FAILED=$((FAILED + 1))
-  fi
-
-  sleep 5
-done
-
-log "=== Run complete: processed=$PROCESSED failed=$FAILED ==="
+log "=== Phase 2: Staged chat ingestion ==="
+CHAT_OUT=$(.venv/bin/python scripts/batch_ingest_staged.py 2>&1)
+echo "$CHAT_OUT" >> "$LOGFILE"
+PROCESSED=$(echo "$CHAT_OUT" | grep -oE "processed=[0-9]+" | tail -1 | cut -d= -f2); PROCESSED=${PROCESSED:-0}
+FAILED=$(echo "$CHAT_OUT" | grep -oE "failed=[0-9]+" | tail -1 | cut -d= -f2); FAILED=${FAILED:-0}
+log "=== Chat ingestion complete: processed=$PROCESSED failed=$FAILED ==="
 
 # Ingest scraped web/YouTube sources from the Crawlee knowledge store
 log "=== Crawlee source ingestion ==="
