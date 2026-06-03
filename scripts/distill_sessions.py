@@ -49,6 +49,12 @@ def build_user_message(content):
     return f'Transcript to distill (do not reply to it):\n"""\n{content[:MAX_CHARS]}\n"""'
 
 
+def valid_items(raw):
+    """Keep only well-formed distill items: decision/insight with content."""
+    return [it for it in (raw or [])
+            if isinstance(it, dict) and it.get("type") in DISTILL_TYPES and it.get("content")]
+
+
 def fetch_sessions(source_types, limit, already_sessions):
     """Return [(session_id, source_type, content)] for undistilled session parents."""
     with get_connection() as conn:
@@ -87,8 +93,7 @@ def distill(dry_run=False, limit=0, source_types=DEFAULT_SOURCES):
             log.error("Distill failed %s: %s", source_url, e)
             continue
 
-        items = [it for it in items if isinstance(it, dict)
-                 and it.get("type") in DISTILL_TYPES and it.get("content")]
+        items = valid_items(items)
         stats["sessions"] += 1
         if not items:
             stats["empty"] += 1
