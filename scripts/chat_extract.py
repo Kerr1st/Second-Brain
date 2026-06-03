@@ -18,7 +18,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.parsers.ide_chat import parse_all as parse_ide_chats, find_chat_files
-from src.parsers.cli_chat import parse_all as parse_cli_chats, get_conversations
+from src.parsers.cli_chat import parse_all as parse_cli_chats
 from src.db import get_processed_source_urls
 
 STAGING_DIR = os.path.join(os.path.dirname(__file__), "..", "staging", "chats")

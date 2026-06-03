@@ -1,87 +1,90 @@
 """Kiro CLI chat parser — Phase 1 extraction.
 
-Reads from ~/Library/Application Support/kiro-cli/data.sqlite3,
-strips tool markers and tool output, applies size and content filters,
-returns cleaned conversations as markdown strings.
+Reads Kiro CLI session transcripts from ~/.kiro/sessions/cli/*.jsonl (the store
+kiro-cli writes to as of ~Mar 2026), strips tool activity, applies size/content
+filters, and returns cleaned conversations as markdown strings.
+
+Each .jsonl line is {version, kind, data}:
+  - kind=Prompt          -> user message  (data.content[].data where kind=text)
+  - kind=AssistantMessage -> assistant message (text parts; toolUse skipped)
+  - kind=ToolResults      -> skipped
 
 See docs/HYBRID-CHAT-EXTRACTION.md for stripping rules and filter thresholds.
 """
 
+import glob
 import json
 import os
-import re
-import sqlite3
 from datetime import datetime, timezone
 
 from src.project import normalize_project_tag
 
-CLI_DB_PATH = os.path.expanduser("~/Library/Application Support/kiro-cli/data.sqlite3")
+SESSIONS_DIR = os.path.expanduser("~/.kiro/sessions/cli")
 
 # Minimum thresholds (same as IDE parser)
 MIN_CONTENT_CHARS = 200
 MIN_USER_MESSAGES = 2
 MIN_PARAGRAPH_WORDS = 50
 
-# Patterns for tool markers and tool output to strip
-TOOL_MARKER_RE = re.compile(r'^\s*\[Tool uses:.*\]$')
+
+def _text_from_content(content):
+    """Join the text-kind parts of a message's content list."""
+    parts = []
+    for item in content or []:
+        if isinstance(item, dict) and item.get("kind") == "text":
+            t = (item.get("data") or "").strip()
+            if t:
+                parts.append(t)
+    return "\n\n".join(parts)
+
+
+def extract_session_messages(path):
+    """Read a Kiro CLI session .jsonl. Returns (messages, created_at_ms).
+
+    messages: list of (role, text) with role in {human, bot}.
+    Prompt -> human, AssistantMessage text -> bot, ToolResults skipped.
+    """
+    messages = []
+    first_ts = None
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            data = entry.get("data") or {}
+            if first_ts is None:
+                ts = (data.get("meta") or {}).get("timestamp")
+                if isinstance(ts, (int, float)):
+                    first_ts = ts
+            kind = entry.get("kind")
+            if kind == "Prompt":
+                txt = _text_from_content(data.get("content"))
+                if txt:
+                    messages.append(("human", txt))
+            elif kind == "AssistantMessage":
+                txt = _text_from_content(data.get("content"))
+                if txt:
+                    messages.append(("bot", txt))
+            # ToolResults and any other kinds are skipped
+    created_at_ms = int(first_ts * 1000) if first_ts else None
+    return messages, created_at_ms
 
 
 def get_conversations():
-    """Read all conversations from the CLI SQLite database."""
-    if not os.path.exists(CLI_DB_PATH):
-        return []
-
-    conn = sqlite3.connect(CLI_DB_PATH)
-    rows = conn.execute(
-        "SELECT conversation_id, value, created_at FROM conversations_v2 ORDER BY created_at DESC"
-    ).fetchall()
-    conn.close()
-    return rows
-
-
-def is_tool_output(text):
-    """Heuristic: detect tool output that should be stripped."""
-    stripped = text.strip()
-    # Tool use markers
-    if TOOL_MARKER_RE.match(stripped):
-        return True
-    # Very short tool confirmations embedded in assistant messages aren't tool output
-    # But large blocks that look like file contents or directory listings are
-    if stripped.startswith("# Total entries:"):
-        return True
-    return False
-
-
-def strip_transcript(transcript):
-    """Strip tool markers and classify transcript items into user/assistant messages."""
-    messages = []
-
-    for item in transcript:
-        if not isinstance(item, str):
-            continue
-
-        text = item.strip()
-        if not text:
-            continue
-
-        # Skip pure tool markers
-        if TOOL_MARKER_RE.match(text):
-            continue
-
-        # Detect role: user messages start with "> "
-        if text.startswith("> "):
-            content = text[2:].strip()
-            # Skip slash commands
-            if content.startswith("/"):
-                continue
-            messages.append(("human", content))
-        else:
-            # Assistant message — strip inline tool markers
-            content = re.sub(r'\[Tool uses:.*?\]', '', text).strip()
-            if content:
-                messages.append(("bot", content))
-
-    return messages
+    """Yield (conversation_id, messages, created_at_ms) per CLI session file,
+    newest first."""
+    if not os.path.isdir(SESSIONS_DIR):
+        return
+    paths = sorted(glob.glob(os.path.join(SESSIONS_DIR, "*.jsonl")),
+                   key=os.path.getmtime, reverse=True)
+    for path in paths:
+        conv_id = os.path.basename(path)[:-len(".jsonl")]
+        messages, created_at = extract_session_messages(path)
+        yield conv_id, messages, created_at
 
 
 def passes_size_filter(messages):
@@ -108,6 +111,23 @@ def passes_content_filter(messages):
                 return True
 
     return False
+
+
+_AUTOMATED_MARKERS = (
+    "Run type:",
+    "Please evaluate this candidate insight as the",
+)
+
+
+def is_automated_conversation(messages):
+    """True for dream-cycle / --no-interactive sub-agent conversations."""
+    humans = [c for r, c in messages if r == "human"]
+    if not humans:
+        return True
+    first = humans[0].lstrip()
+    if first.startswith("{"):  # Thinker receives a JSON memory slice
+        return True
+    return any(m in first[:120] for m in _AUTOMATED_MARKERS)
 
 
 def format_as_markdown(conversation_id, messages, timestamp_ms, project=None):
@@ -140,70 +160,12 @@ def format_as_markdown(conversation_id, messages, timestamp_ms, project=None):
     return "\n".join(lines)
 
 
-def extract_history_messages(data):
-    """Extract (role, text) messages from the newer kiro-cli `history` format.
-
-    Each entry: {"user": {"content": {"Prompt": {"prompt": ...}}}, "assistant":
-    {"Response"|"ToolUse": {"content": ...}}}. Tool-result user turns and empty
-    assistant content are skipped. Returns [] if no usable history.
-    """
-    messages = []
-    for e in data.get("history") or []:
-        if not isinstance(e, dict):
-            continue
-        u = e.get("user")
-        if isinstance(u, dict):
-            c = u.get("content")
-            p = c.get("Prompt") if isinstance(c, dict) else None
-            if isinstance(p, dict) and isinstance(p.get("prompt"), str):
-                txt = p["prompt"].strip()
-                if txt:
-                    messages.append(("human", txt))
-        a = e.get("assistant")
-        if isinstance(a, dict):
-            block = a.get("Response") or a.get("ToolUse")
-            if isinstance(block, dict):
-                txt = (block.get("content") or "").strip()
-                if txt:
-                    messages.append(("bot", txt))
-    return messages
-
-
-_AUTOMATED_MARKERS = (
-    "Run type:",
-    "Please evaluate this candidate insight as the",
-)
-
-
-def is_automated_conversation(messages):
-    """True for dream-cycle / --no-interactive sub-agent conversations."""
-    humans = [c for r, c in messages if r == "human"]
-    if not humans:
-        return True
-    first = humans[0].lstrip()
-    if first.startswith("{"):  # Thinker receives a JSON memory slice
-        return True
-    return any(m in first[:120] for m in _AUTOMATED_MARKERS)
-
-
-def parse_conversation(conversation_id, value_json, created_at):
-    """Parse a single CLI conversation. Returns (conv_id, markdown, project) or None if filtered out."""
-    try:
-        data = json.loads(value_json)
-    except json.JSONDecodeError:
-        return None
-
-    # Newer kiro-cli stores turns in structured `history`; older versions used
-    # the `transcript` string list. Prefer history, fall back to transcript.
-    messages = extract_history_messages(data)
-    if not messages:
-        messages = strip_transcript(data.get("transcript", []))
-
+def parse_conversation(conversation_id, messages, created_at):
+    """Filter and format one session. Returns (conv_id, markdown, project) or None."""
     if not messages:
         return None
 
     # Skip automated --no-interactive sub-agent conversations (dream cycle etc.)
-    # so the brain doesn't ingest itself talking to itself.
     if is_automated_conversation(messages):
         return None
 
@@ -219,32 +181,25 @@ def parse_conversation(conversation_id, value_json, created_at):
 
 
 def parse_all(already_processed=None):
-    """Parse all CLI conversations, applying filters. Yields (conv_id, markdown, project) tuples."""
+    """Parse all CLI sessions, applying filters. Yields (conv_id, markdown, project)."""
     already_processed = already_processed or set()
 
-    for conversation_id, value_json, created_at in get_conversations():
+    for conversation_id, messages, created_at in get_conversations():
         if conversation_id in already_processed:
             continue
 
-        result = parse_conversation(conversation_id, value_json, created_at)
+        result = parse_conversation(conversation_id, messages, created_at)
         if result:
             yield result
 
 
 if __name__ == "__main__":
     """Quick test: run parser and print stats."""
-    conversations = get_conversations()
+    conversations = list(get_conversations())
     total = len(conversations)
-    passed = 0
-    filtered = 0
+    passed = sum(1 for cid, msgs, ts in conversations if parse_conversation(cid, msgs, ts))
+    filtered = total - passed
 
-    for cid, value, ts in conversations:
-        result = parse_conversation(cid, value, ts)
-        if result:
-            passed += 1
-        else:
-            filtered += 1
-
-    print(f"Total CLI chats: {total}")
-    print(f"Passed filters:  {passed} ({passed*100//total if total else 0}%)")
-    print(f"Filtered out:    {filtered} ({filtered*100//total if total else 0}%)")
+    print(f"Total CLI sessions: {total}")
+    print(f"Passed filters:  {passed} ({passed * 100 // total if total else 0}%)")
+    print(f"Filtered out:    {filtered}")

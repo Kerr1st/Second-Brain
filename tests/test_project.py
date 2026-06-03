@@ -179,31 +179,21 @@ import json
 from src.parsers.cli_chat import parse_conversation, format_as_markdown as cli_format_as_markdown
 
 
-def _build_valid_transcript_json(user_msgs=None, assistant_msg=None):
-    """Build a JSON string with a transcript that passes size and content filters.
-
-    Defaults produce 2 user messages (>= MIN_USER_MESSAGES),
-    total chars > MIN_CONTENT_CHARS, and one assistant paragraph
-    with >= MIN_PARAGRAPH_WORDS (50 words).
-    """
-    if user_msgs is None:
-        user_msgs = [
-            "> How do I set up authentication in my app?",
-            "> Can you show me an example with JWT tokens?",
-        ]
-    if assistant_msg is None:
-        # 60-word paragraph to exceed MIN_PARAGRAPH_WORDS=50
-        assistant_msg = (
-            "To set up authentication you need to configure your identity provider "
-            "and integrate it with your application backend. First install the required "
-            "dependencies using your package manager. Then create a middleware that "
-            "validates incoming tokens on every request. You should also handle token "
-            "refresh logic so users stay authenticated across sessions. Finally add "
-            "proper error handling for expired or invalid tokens to return clear "
-            "HTTP status codes to the client."
-        )
-    transcript = user_msgs + [assistant_msg]
-    return json.dumps({"transcript": transcript})
+def _valid_messages():
+    """A (role, text) message list that passes the cli_chat size/content filters:
+    2 user messages, > MIN_CONTENT_CHARS total, one assistant paragraph >= 50 words."""
+    return [
+        ("human", "How do I set up authentication in my app?"),
+        ("human", "Can you show me an example with JWT tokens?"),
+        ("bot",
+         "To set up authentication you need to configure your identity provider "
+         "and integrate it with your application backend. First install the required "
+         "dependencies using your package manager. Then create a middleware that "
+         "validates incoming tokens on every request. You should also handle token "
+         "refresh logic so users stay authenticated across sessions. Finally add "
+         "proper error handling for expired or invalid tokens to return clear "
+         "HTTP status codes to the client."),
+    ]
 
 
 class TestParseConversationProjectExtraction:
@@ -213,8 +203,8 @@ class TestParseConversationProjectExtraction:
         """Real workspace path → project is the lowercased leaf directory.
         Validates: Requirements 2.1, 2.2"""
         conv_id = "/Users/kerrfir/AmplifyG2 Workshops/RetailStore"
-        value_json = _build_valid_transcript_json()
-        result = parse_conversation(conv_id, value_json, 1700000000000)
+        messages = _valid_messages()
+        result = parse_conversation(conv_id, messages, 1700000000000)
 
         assert result is not None
         returned_id, markdown, project = result
@@ -225,8 +215,8 @@ class TestParseConversationProjectExtraction:
         """Home directory (absolute, < 3 components) → project is None.
         Validates: Requirements 2.3, 2.4"""
         conv_id = "/Users/kerrfir"
-        value_json = _build_valid_transcript_json()
-        result = parse_conversation(conv_id, value_json, 1700000000000)
+        messages = _valid_messages()
+        result = parse_conversation(conv_id, messages, 1700000000000)
 
         assert result is not None
         _, _, project = result
@@ -236,8 +226,8 @@ class TestParseConversationProjectExtraction:
         """Empty string conversation_id → project is None.
         Validates: Requirement 2.3"""
         conv_id = ""
-        value_json = _build_valid_transcript_json()
-        result = parse_conversation(conv_id, value_json, 1700000000000)
+        messages = _valid_messages()
+        result = parse_conversation(conv_id, messages, 1700000000000)
 
         assert result is not None
         _, _, project = result
