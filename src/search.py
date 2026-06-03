@@ -80,18 +80,34 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
                 scored.append((mid, rrf))
             scored.sort(key=lambda x: x[1], reverse=True)
 
-            # Fetch full records for top results
-            top_ids = [s[0] for s in scored[:limit]]
-            if not top_ids:
+            # Fetch a candidate pool (larger than `limit`) so near-duplicate
+            # results can be dropped while still returning `limit` distinct rows.
+            cand_ids = [s[0] for s in scored[:prefetch]]
+            if not cand_ids:
                 return []
-            rrf_map = dict(scored)
-            cur.execute("SELECT * FROM memories WHERE id = ANY(%s::uuid[])", (top_ids,))
-            rows = cur.fetchall()
+            cur.execute("SELECT * FROM memories WHERE id = ANY(%s::uuid[])", (cand_ids,))
+            row_by_id = {str(r["id"]): r for r in cur.fetchall()}
 
-        for row in rows:
-            row["rrf_score"] = rrf_map.get(str(row["id"]), 0)
-        rows.sort(key=lambda r: r["rrf_score"], reverse=True)
-        return rows
+        # Dedup (P2): collapse near-identical content and cap results per parent
+        # so raw chat/doc chunks and the dual-scheme imports stop flooding results.
+        out, seen_content, per_parent = [], set(), {}
+        for mid, score in scored[:prefetch]:
+            row = row_by_id.get(mid)
+            if row is None:
+                continue
+            ckey = re.sub(r"\s+", " ", (row.get("content") or "")).strip().lower()[:300]
+            if ckey and ckey in seen_content:
+                continue
+            pkey = str(row.get("parent_id") or mid)
+            if per_parent.get(pkey, 0) >= 2:
+                continue
+            seen_content.add(ckey)
+            per_parent[pkey] = per_parent.get(pkey, 0) + 1
+            row["rrf_score"] = score
+            out.append(row)
+            if len(out) >= limit:
+                break
+        return out
 
 
 def compute_spacing_bonus(last_accessed_at, now=None):
