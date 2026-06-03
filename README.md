@@ -62,8 +62,7 @@ scripts/
     enrich_qd_tags.py          QD memory tags + domains
     ingest_eventlog.py         QD feed events + interactions
     import_slack_graph.py      Slack channels + users → KG
-    ingest_doc_chunks.py       QD pre-chunked documents (one-time)
-    ingest_session_events.py   QD user prompts (one-time)
+    ingest_doc_chunks.py       QD pre-chunked documents (hourly)
   eval/             Evaluation framework (retrieval quality metrics)
   batch_ingest_parallel.py   Parallel batch ingest (20 workers)
   ingest_qd_chats.py         Quick Desktop chat session extractor
