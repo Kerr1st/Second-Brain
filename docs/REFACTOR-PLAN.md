@@ -80,3 +80,8 @@ re-run benchmark, commit + push both remotes.
 ## Absorbs prior backlog
 #7 (IDE 2× dedup) → P2b. #3/#6 (monitoring/tests) folded in as those areas are
 touched.
+
+## Progress
+- 2026-06-03: **P1** distiller built, backfilled (cli+qd: 1,419 distilled memories), and scheduled daily (com.second-brain.distill). **P2a** retrieval dedup shipped (hybrid_search collapses near-dups, caps per parent). Benchmark: distilled-in-top5 3→7/12, near-dup 9→0/12, decision-recall 0→3/4.
+- 2026-06-04: **P2b** complete — deleted 73,257 legacy `ide_*.md` rows (187K→114K total; all 5,493 chats preserved via `chat://`). Done as a batched background job (single bulk delete is pathologically slow on the HNSW index). NOTE: a bulk HNSW delete REQUIRES `VACUUM ANALYZE` after — skipping it dropped distilled-in-top5 to 5/12; the vacuum restored it to **8/12** (target met), decision-recall 3/4, near-dup 0/12. Full pg_dump backup taken first (~/sb-backups/).
+- Next: IDE distillation (now unblocked — ~5,493 canonical sessions, scope before running), then P3 (digest), P4 (KG).
