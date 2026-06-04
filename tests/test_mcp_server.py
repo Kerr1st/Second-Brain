@@ -198,3 +198,133 @@ class TestTemporalContextInvariants:
                     cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
                     cur.execute("DELETE FROM memories")
                 conn.commit()
+
+
+class TestMemorySearchFilters:
+    """memory_search passes source_type + since_days (-> created_after) through to hybrid_search."""
+
+    def test_source_type_and_since_days_filter(self, test_db, clean_tables):
+        base = "Vector index tuning notes for HNSW recall"
+        _db.create_memory(type="insight", title="Recent distilled", content=base + " distilled",
+                          embedding=str(_deterministic_embedding(base + " distilled")),
+                          source_type="distilled_chat")
+        _db.create_memory(type="insight", title="Recent article", content=base + " article",
+                          embedding=str(_deterministic_embedding(base + " article")),
+                          source_type="article")
+        old_id = _db.create_memory(type="insight", title="Old distilled",
+                                   content=base + " older distilled variant",
+                                   embedding=str(_deterministic_embedding(base + " older distilled variant")),
+                                   source_type="distilled_chat")
+        with _db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE memories SET created_at = %s WHERE id = %s",
+                            (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=120), old_id))
+            conn.commit()
+
+        with patch("src.mcp_server.generate_embedding", side_effect=_deterministic_embedding):
+            from src.mcp_server import memory_search
+            resp = memory_search(query=base, limit=10, source_type="distilled_chat", since_days=30)
+
+        ids = {r["id"] for r in resp["results"]}
+        assert old_id not in ids, "since_days should exclude the 120-day-old memory"
+        for r in resp["results"]:
+            mem = _db.get_memory(r["id"])
+            assert mem["source_type"] == "distilled_chat", "source_type filter leaked another channel"
+
+
+class TestMemoryReadMcp:
+    """memory_read returns full content (no embedding) or a not-found error."""
+
+    def test_read_not_found(self, test_db, clean_tables):
+        from src.mcp_server import memory_read
+        assert memory_read(str(uuid.uuid4())) == {"error": "Not found"}
+
+    def test_read_returns_full_content_without_embedding(self, test_db, clean_tables):
+        mid = _db.create_memory(type="idea", title="Readable", content="Full content here",
+                                embedding=str(_deterministic_embedding("Full content here")))
+        from src.mcp_server import memory_read
+        out = memory_read(mid)
+        assert out["id"] == mid
+        assert out["title"] == "Readable"
+        assert "embedding" not in out
+        assert isinstance(out["created_at"], str)  # datetimes serialized to ISO
+
+
+class TestMemoryGraphMcp:
+    """memory_graph returns a memory plus its relationships, or a not-found error."""
+
+    def test_graph_not_found(self, test_db, clean_tables):
+        from src.mcp_server import memory_graph
+        assert memory_graph(str(uuid.uuid4())) == {"error": "Not found"}
+
+    def test_graph_returns_relationships(self, test_db, clean_tables):
+        a = _db.create_memory(type="idea", title="A", content="memory A")
+        b = _db.create_memory(type="idea", title="B", content="memory B")
+        _db.create_relationship(a, b, "supports", "because reasons")
+        from src.mcp_server import memory_graph
+        out = memory_graph(a)
+        assert out["memory"]["id"] == a
+        assert b in {rel["target_id"] for rel in out["relationships"]}
+
+
+class TestMemoryRelateMcp:
+    """memory_relate persists a relationship retrievable via get_relationships."""
+
+    def test_relate_creates_relationship(self, test_db, clean_tables):
+        a = _db.create_memory(type="idea", title="A", content="memory A")
+        b = _db.create_memory(type="idea", title="B", content="memory B")
+        from src.mcp_server import memory_relate
+        msg = memory_relate(a, b, "extends", "adds detail")
+        assert a in msg and b in msg
+        rels = _db.get_relationships(a)
+        assert any(str(r["target_id"]) == b and r["relation_type"] == "extends" for r in rels)
+
+
+class TestMemoryListMcp:
+    """memory_list filters by type and returns only matching memories."""
+
+    def test_list_filters_by_type(self, test_db, clean_tables):
+        _db.create_memory(type="decision", title="D1", content="a decision was made")
+        _db.create_memory(type="insight", title="I1", content="an insight emerged")
+        from src.mcp_server import memory_list
+        out = memory_list(type="decision", limit=20)
+        assert len(out) >= 1
+        assert all(r["type"] == "decision" for r in out)
+        titles = {r["title"] for r in out}
+        assert "D1" in titles and "I1" not in titles
+
+
+class TestMemoryUpdateMcp:
+    """memory_update content change re-embeds and recomputes depth_score."""
+
+    def test_update_content_sets_depth_score(self, test_db, clean_tables):
+        mid = _db.create_memory(type="idea", title="Updatable", content="original content",
+                                embedding=str(_deterministic_embedding("original content")))
+        new_content = ("WHY this matters: because repeated work is wasteful, and when we cache "
+                       "then latency drops. Questions this answers: how do we speed up lookups?")
+        with patch("src.mcp_server.generate_embedding", side_effect=_deterministic_embedding):
+            from src.mcp_server import memory_update
+            msg = memory_update(mid, content=new_content)
+        assert mid in msg
+        mem = _db.get_memory(mid)
+        assert mem["content"] == new_content
+        meta = mem["metadata"]
+        if isinstance(meta, str):
+            import json
+            meta = json.loads(meta)
+        assert meta.get("depth_score") is not None
+
+
+class TestMemoryLearnMcp:
+    """memory_learn returns the 'internalize' synthesis template with related memories."""
+
+    def test_learn_returns_internalize_template(self, test_db, clean_tables):
+        _db.create_memory(type="insight", title="Caching basics",
+                          content="caching reduces latency for repeated lookups",
+                          embedding=str(_deterministic_embedding("caching reduces latency")))
+        with patch("src.mcp_server.generate_embedding", side_effect=_deterministic_embedding):
+            from src.mcp_server import memory_learn
+            out = memory_learn(content="New article about caching strategies", topics="caching")
+        assert "External Knowledge to Internalize" in out
+        assert "Your Task" in out
+        assert "New article about caching strategies" in out

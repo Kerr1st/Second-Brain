@@ -6,6 +6,7 @@ with behavioral baselines.
 Validates: Requirements 1.5
 """
 
+import re
 from datetime import datetime, timedelta, timezone
 
 from hypothesis import given, settings
@@ -257,3 +258,145 @@ class TestHybridSearchCreatedAfterFiltering:
         ids = {str(r["id"]) for r in results}
         assert recent_id in ids, "recent memory should pass the created_after filter"
         assert old_id not in ids, "memory older than cutoff should be excluded"
+
+
+class TestHybridSearchSourceTypeProperty:
+    """Feature: agentic-retrieval, Property: hybrid_search source_type filtering.
+
+    For any requested source_type, every result has that source_type — no other
+    channel leaks through the filter.
+    """
+
+    @given(source_type=st.sampled_from(["distilled_chat", "cli_chat", "kiro_ide_chat", "article"]))
+    @settings(max_examples=20, deadline=None)
+    def test_only_matching_source_type_in_results(self, source_type, test_db):
+        from tests.conftest import _deterministic_embedding
+
+        other_type = "other_" + source_type
+        base = "Event sourcing and CQRS tradeoffs in distributed systems"
+        try:
+            tgt = base + " target " + source_type
+            db.create_memory(type="insight", title="Target", content=tgt,
+                             embedding=str(_deterministic_embedding(tgt)), source_type=source_type)
+            oth = base + " other " + other_type
+            db.create_memory(type="insight", title="Other", content=oth,
+                             embedding=str(_deterministic_embedding(oth)), source_type=other_type)
+
+            results = hybrid_search(base, _deterministic_embedding(base), limit=10,
+                                    source_type=source_type)
+
+            for r in results:
+                assert r["source_type"] == source_type, (
+                    f"result has source_type={r['source_type']!r}, expected {source_type!r}"
+                )
+        finally:
+            _truncate_tables()
+
+
+class TestHybridSearchCreatedAfterProperty:
+    """Feature: agentic-retrieval, Property: hybrid_search created_after filtering.
+
+    For any cutoff, no returned memory was created before the cutoff.
+    """
+
+    @given(age_days=st.integers(min_value=31, max_value=365))
+    @settings(max_examples=20, deadline=None)
+    def test_no_result_older_than_cutoff(self, age_days, test_db):
+        from tests.conftest import _deterministic_embedding
+
+        content = "Backpressure handling in streaming data pipelines"
+        try:
+            recent_id = db.create_memory(type="insight", title="Recent", content=content,
+                                         embedding=str(_deterministic_embedding(content)))
+            old_c = content + " older variant"
+            old_id = db.create_memory(type="insight", title="Old", content=old_c,
+                                      embedding=str(_deterministic_embedding(old_c)))
+            with db.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE memories SET created_at = %s WHERE id = %s",
+                                (datetime.now(timezone.utc) - timedelta(days=age_days), old_id))
+                conn.commit()
+
+            cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+            results = hybrid_search(content, _deterministic_embedding(content), limit=10,
+                                    created_after=cutoff)
+
+            ids = {str(r["id"]) for r in results}
+            assert old_id not in ids
+            for r in results:
+                ca = r["created_at"]
+                if ca.tzinfo is None:
+                    ca = ca.replace(tzinfo=timezone.utc)
+                assert ca >= cutoff, f"result created_at {ca} is older than cutoff {cutoff}"
+        finally:
+            _truncate_tables()
+
+
+class TestHybridSearchDedup:
+    """hybrid_search collapses near-duplicate content and caps results per parent (P2a)."""
+
+    def test_near_duplicate_content_collapsed(self, test_db, clean_tables, mock_embedding):
+        content = "Idempotency keys prevent duplicate payment processing"
+        for i in range(3):
+            db.create_memory(type="insight", title=f"Dup {i}", content=content,
+                             embedding=str(mock_embedding(content + f" {i}")))
+
+        results = hybrid_search(content, mock_embedding(content), limit=10)
+
+        keys = [re.sub(r"\s+", " ", r["content"]).strip().lower()[:300] for r in results]
+        assert len(keys) == len(set(keys)), "identical content should collapse to one result"
+
+    def test_per_parent_cap(self, test_db, clean_tables, mock_embedding):
+        parent_id = db.create_memory(
+            type="insight", title="Parent", content="Parent doc on rate limiting algorithms",
+            embedding=str(mock_embedding("parent rate limiting")),
+        )
+        for i in range(4):
+            c = f"Child {i}: token bucket versus leaky bucket rate limiting tradeoffs"
+            db.create_memory(type="insight", title=f"Child {i}", content=c,
+                             embedding=str(mock_embedding(c)), parent_id=parent_id)
+
+        q = "rate limiting token bucket leaky bucket"
+        results = hybrid_search(q, mock_embedding(q), limit=10)
+
+        from collections import Counter
+        counts = Counter(str(r.get("parent_id") or r["id"]) for r in results)
+        assert all(c <= 2 for c in counts.values()), f"a parent exceeded the cap of 2: {counts}"
+
+
+class TestHybridSearchDedupProperty:
+    """Feature: agentic-retrieval, Property: dedup invariants always hold.
+
+    No two results share content[:300], and no parent contributes >2 results.
+    """
+
+    @given(n_dups=st.integers(min_value=2, max_value=5),
+           n_children=st.integers(min_value=3, max_value=6))
+    @settings(max_examples=15, deadline=None)
+    def test_dedup_invariants(self, n_dups, n_children, test_db):
+        from tests.conftest import _deterministic_embedding
+        from collections import Counter
+
+        try:
+            dup = "Shared identical insight about cache invalidation strategy"
+            for i in range(n_dups):
+                db.create_memory(type="insight", title=f"Dup {i}", content=dup,
+                                 embedding=str(_deterministic_embedding(dup + f" {i}")))
+            parent_id = db.create_memory(
+                type="insight", title="Parent", content="Parent on cache invalidation",
+                embedding=str(_deterministic_embedding("parent cache invalidation")),
+            )
+            for i in range(n_children):
+                c = f"Child {i}: cache invalidation TTL versus write-through tradeoffs"
+                db.create_memory(type="insight", title=f"Child {i}", content=c,
+                                 embedding=str(_deterministic_embedding(c)), parent_id=parent_id)
+
+            q = "cache invalidation strategy TTL write-through"
+            results = hybrid_search(q, _deterministic_embedding(q), limit=20)
+
+            keys = [re.sub(r"\s+", " ", r["content"]).strip().lower()[:300] for r in results]
+            assert len(keys) == len(set(keys)), "near-duplicate content not collapsed"
+            counts = Counter(str(r.get("parent_id") or r["id"]) for r in results)
+            assert all(c <= 2 for c in counts.values()), f"parent cap exceeded: {counts}"
+        finally:
+            _truncate_tables()
