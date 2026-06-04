@@ -66,4 +66,4 @@ Re-run: `.venv/bin/python scripts/eval/refactor_probe.py`
 - **Build gotcha:** parallel index workers need ~500MB in Docker's 64MB `/dev/shm` → set `max_parallel_maintenance_workers=0` + `maintenance_work_mem=512MB`, build `CONCURRENTLY`.
 - **P3 done:** `scripts/weekly_digest.py` (synthesis memory `digest://YYYY-WW` + notification), scheduled Mondays (`com.second-brain.weekly-digest`).
 - **Deferred:** RRF→weighted-fusion (was unnecessary once recall fixed; would only risk the best-ever benchmark). **Monitor:** `scripts/eval/recall_check.py`. **Maintenance rule:** REINDEX after any >10% bulk delete.
-- **Next:** finish/verify IDE distillation backfill; consider P4 (KG into retrieval) + query routing (abstract→summary, specific→chunk) — research-validated direction.
+- **Next:** IDE backfill done (497 sessions → 2,046 distilled). P4 (KG into retrieval) **rejected** after deeper research — the KG is 99.5% disconnected and GraphRAG is low-ROI for local/personal queries. Next phase = **agentic-retrieval polish**: see `docs/AGENTIC-RETRIEVAL-PLAN.md`.
