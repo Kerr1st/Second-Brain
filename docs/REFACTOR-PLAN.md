@@ -1,6 +1,7 @@
 # Second Brain — Retrieval-Value Refactor Plan
 
-Supersedes the now-stale `ENHANCEMENT-PLAN.md`. Created 2026-06-03.
+Supersedes the prior capture-enhancement plan (its Phase 1 shipped; remaining
+ideas parked at the end of this doc). Created 2026-06-03.
 
 ## Why
 Purpose of the system: persistent memory that makes agents *thinking partners* —
@@ -85,3 +86,14 @@ touched.
 - 2026-06-03: **P1** distiller built, backfilled (cli+qd: 1,419 distilled memories), and scheduled daily (com.second-brain.distill). **P2a** retrieval dedup shipped (hybrid_search collapses near-dups, caps per parent). Benchmark: distilled-in-top5 3→7/12, near-dup 9→0/12, decision-recall 0→3/4.
 - 2026-06-04: **P2b** complete — deleted 73,257 legacy `ide_*.md` rows (187K→114K total; all 5,493 chats preserved via `chat://`). Done as a batched background job (single bulk delete is pathologically slow on the HNSW index). NOTE: a bulk HNSW delete REQUIRES `VACUUM ANALYZE` after — skipping it dropped distilled-in-top5 to 5/12; the vacuum restored it to **8/12** (target met), decision-recall 3/4, near-dup 0/12. Full pg_dump backup taken first (~/sb-backups/).
 - Next: IDE distillation (now unblocked — ~5,493 canonical sessions, scope before running), then P3 (digest), P4 (KG).
+
+## Parked ideas (salvaged from the retired enhancement plan)
+Unbuilt, not part of the current P1–P4 sequence, but worth revisiting:
+- **embed_priority tiering** — skip vector embeddings for low-value content (keep it
+  in full-text), and demote old low-access memories out of the HNSW index to reclaim
+  space/cost. Directly relevant to the HNSW bloat seen in P2b.
+- **Per-channel friction config** (`capture_config.json`) — capture liberally vs.
+  selectively per source (Slack DMs vs. channels, Outlook summaries-only). Ties into
+  the future Slack/Outlook capture work.
+- **Inverse-metric monitoring** — track "missed content" (searched-for but filtered)
+  and over-consolidation rates, weekly.

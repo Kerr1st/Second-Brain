@@ -1,6 +1,6 @@
 #!/bin/bash
 # Per-source liveness check — alerts when an active capture channel goes silent.
-# Phase 1 (Operating Envelope) of docs/ENHANCEMENT-PLAN.md.
+# Operating-Envelope liveness check (see docs/REFACTOR-PLAN.md).
 #
 # A job can exit 0 yet capture nothing (e.g. the YouTube/bookmark breakages of
 # 2026-05), so liveness is judged by the DB itself: the most recent capture
