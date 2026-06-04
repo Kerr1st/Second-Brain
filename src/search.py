@@ -20,7 +20,8 @@ from src.db import get_connection
 
 # --- Hybrid Search (BM25 + Vector + RRF) ---
 
-def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None, project=None):
+def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None, project=None,
+                  source_type=None, created_after=None):
     """Combine pgvector cosine search + PostgreSQL full-text search via RRF.
 
     Returns list of dicts with 'rrf_score' field, sorted by fused rank.
@@ -39,10 +40,21 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
     if project:
         conditions.append(sql.SQL("(project = %s OR project IS NULL)"))
         params_base.append(project)
+    if source_type:
+        conditions.append(sql.SQL("source_type = %s"))
+        params_base.append(source_type)
+    if created_after:
+        conditions.append(sql.SQL("created_at >= %s"))
+        params_base.append(created_after)
     where = sql.SQL("WHERE ") + sql.SQL(" AND ").join(conditions)
+    # Any WHERE filter post-filters the HNSW result and can make it under-return;
+    # iterative scan keeps scanning until `limit` rows satisfy the filter (pgvector >=0.8).
+    filtered = bool(type or status or project or source_type or created_after)
 
     with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if filtered:
+                cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
             # Vector search
             emb_str = str(query_embedding)
             vec_params = [emb_str] + params_base + [emb_str, prefetch]

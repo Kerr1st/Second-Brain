@@ -4,6 +4,7 @@ Run: python -m src.mcp_server (stdio transport for Kiro/Claude Code)
 """
 
 from mcp.server.fastmcp import FastMCP
+from datetime import datetime, timedelta, timezone
 from src.db import (
     create_memory, get_memory, update_memory, list_memories,
     create_relationship, get_relationships, find_temporal_neighbors,
@@ -69,13 +70,31 @@ def memory_create(
 
 
 @mcp.tool()
-def memory_search(query: str, type: str | None = None, limit: int = 10, project: str | None = None) -> dict:
-    """Semantic + keyword search across all memories. Uses hybrid retrieval
-    (BM25 + vector embeddings + RRF) with utility reranking (recency, type boost,
-    token overlap, retrieval reinforcement)."""
+def memory_search(query: str, type: str | None = None, limit: int = 10, project: str | None = None,
+                  source_type: str | None = None, since_days: int | None = None,
+                  status: str | None = None) -> dict:
+    """Semantic + keyword search across all memories. Hybrid retrieval (full-text +
+    vector + RRF) with utility reranking (recency, type boost, token overlap, access
+    reinforcement). Also returns `temporal_context` (memories near the top hit in time)
+    and `schema_context` (higher-level notes the top hits belong to).
+
+    Filters (all optional, combine freely):
+    - type: memory type, e.g. 'decision', 'insight', 'synthesis'.
+    - source_type: capture channel, e.g. 'distilled_chat', 'cli_chat', 'kiro_ide_chat', 'article'.
+    - since_days: only memories created in the last N days (e.g. 30 = last month).
+    - status: e.g. 'active' to exclude superseded items.
+    - project: scope to a project tag.
+
+    Iterate for best results: if hits are thin or off-target, refine the query or
+    filters and search again, then call memory_read(id) for full content or
+    memory_graph(id) to follow related memories."""
     embedding = generate_embedding(query)
     project = normalize_project_tag(project)
-    results = hybrid_search(query, embedding, limit=limit, type=type, project=project)
+    created_after = None
+    if since_days is not None and since_days > 0:
+        created_after = datetime.now(timezone.utc) - timedelta(days=since_days)
+    results = hybrid_search(query, embedding, limit=limit, type=type, project=project,
+                            source_type=source_type, created_after=created_after, status=status)
     results = rerank(results, query, query_project=project)
 
     increment_access_count([str(r["id"]) for r in results])
@@ -130,7 +149,8 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
 
 @mcp.tool()
 def memory_read(memory_id: str) -> dict:
-    """Read a single memory by ID. Returns full content."""
+    """Read a single memory by ID and return its full content. Use this to expand a
+    memory_search hit whose 500-char preview was truncated, before acting on it."""
     mem = get_memory(memory_id)
     if not mem:
         return {"error": "Not found"}
@@ -196,7 +216,8 @@ def memory_list(
     status: str | None = None,
     limit: int = 20,
 ) -> list[dict]:
-    """List memories with optional filters."""
+    """List/browse recent memories by filter (type, source_type, status) — newest first,
+    no relevance ranking. Use memory_search for relevance; use this to enumerate or audit."""
     results = list_memories(type=type, status=status, source_type=source_type, limit=limit)
     return [
         {"id": str(r["id"]), "title": r["title"], "type": r["type"],
@@ -208,7 +229,9 @@ def memory_list(
 
 @mcp.tool()
 def memory_graph(memory_id: str) -> dict:
-    """Get a memory and all its relationships."""
+    """Get a memory plus its linked relationships (target_id, relation_type, note).
+    Use it to traverse from a memory_search hit to related memories, then memory_read
+    those target_ids to follow a chain of reasoning."""
     mem = get_memory(memory_id)
     if not mem:
         return {"error": "Not found"}

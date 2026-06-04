@@ -1,8 +1,10 @@
 # Agentic-Retrieval Polish — Plan
 
 Next phase after the retrieval-value refactor. This doc is the resume anchor.
-**Status: NOT STARTED** (planned 2026-06-04). Branch `main` (the QD-integration
-branch was fast-forward-merged into main on 2026-06-04), both remotes (`mini` + `origin`).
+**Status: DONE** (implemented 2026-06-04 — `source_type`/`since_days`/`status` filters on
+`memory_search`+`hybrid_search`, `iterative_scan` guard on the filtered path, iteration-oriented
+tool docstrings; full suite 553 passed, benchmark unchanged 9/12·3/4·0/12). Branch `main`
+(the QD-integration branch was fast-forward-merged into main on 2026-06-04), both remotes (`mini` + `origin`).
 
 ## Why this — and why NOT a knowledge graph (P4)
 Deep research (2024-2025 sources) + our own data ruled out P4 (wiring the KG into retrieval):

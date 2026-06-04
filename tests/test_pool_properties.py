@@ -146,7 +146,7 @@ _EXPECTED_SIGNATURES = {
     "db.get_processed_source_urls": {"params": ["source_type"]},
     "db.find_temporal_neighbors": {"params": ["memory_id", "created_at", "limit"]},
     # search.py functions
-    "search.hybrid_search": {"params": ["query_text", "query_embedding", "limit", "type", "status", "project"]},
+    "search.hybrid_search": {"params": ["query_text", "query_embedding", "limit", "type", "status", "project", "source_type", "created_after"]},
     "search.increment_access_count": {"params": ["memory_ids"]},
     # dream_cycle_db.py functions
     "dream_cycle_db.create_run": {"params": ["run_type"]},

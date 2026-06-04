@@ -6,7 +6,7 @@ with behavioral baselines.
 Validates: Requirements 1.5
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -205,3 +205,55 @@ class TestHybridSearchProjectFiltering:
                 )
         finally:
             _truncate_tables()
+
+
+class TestHybridSearchSourceTypeFiltering:
+    """hybrid_search with source_type returns only memories from that channel."""
+
+    def test_source_type_filters_results(self, test_db, clean_tables, mock_embedding):
+        content = "Distributed consensus algorithms and quorum design"
+        db.create_memory(
+            type="insight", title="Consensus (distilled)", content=content,
+            embedding=str(mock_embedding(content)), source_type="distilled_chat",
+        )
+        other = content + " summarized from an external article"
+        db.create_memory(
+            type="insight", title="Consensus (article)", content=other,
+            embedding=str(mock_embedding(other)), source_type="article",
+        )
+
+        results = hybrid_search(content, mock_embedding(content), limit=10,
+                                source_type="distilled_chat")
+
+        assert len(results) >= 1
+        assert all(r["source_type"] == "distilled_chat" for r in results)
+        assert any(r["title"] == "Consensus (distilled)" for r in results)
+
+
+class TestHybridSearchCreatedAfterFiltering:
+    """hybrid_search with created_after excludes memories older than the cutoff."""
+
+    def test_created_after_excludes_old(self, test_db, clean_tables, mock_embedding):
+        content = "Rate limiting strategies for API gateways"
+        recent_id = db.create_memory(
+            type="insight", title="Recent rate limiting", content=content,
+            embedding=str(mock_embedding(content)),
+        )
+        old_content = content + " legacy notes from last quarter"
+        old_id = db.create_memory(
+            type="insight", title="Old rate limiting", content=old_content,
+            embedding=str(mock_embedding(old_content)),
+        )
+        # Backdate the "old" memory well past the cutoff window.
+        with db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE memories SET created_at = %s WHERE id = %s",
+                            (datetime.now(timezone.utc) - timedelta(days=90), old_id))
+            conn.commit()
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        results = hybrid_search(content, mock_embedding(content), limit=10, created_after=cutoff)
+
+        ids = {str(r["id"]) for r in results}
+        assert recent_id in ids, "recent memory should pass the created_after filter"
+        assert old_id not in ids, "memory older than cutoff should be excluded"
