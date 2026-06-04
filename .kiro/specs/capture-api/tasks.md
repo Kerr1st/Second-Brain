@@ -1,5 +1,11 @@
 # Tasks: Capture API
 
+> **STATUS (2026-06-04): BUILT & DEPLOYED.** Fully implemented and running as a
+> live service — `src/capture_api.py`, `tests/test_capture_api.py`, LaunchAgent
+> `com.second-brain.capture-api` (port 8100). The unchecked boxes below predate
+> completion; treat all tasks as done. Kept as the design reference for the
+> planned Slack/Outlook capture extension.
+
 ## Task 1: Add dependencies
 - [ ] Add `fastapi>=0.115.0` and `uvicorn[standard]>=0.34.0` to `requirements.txt`
 - [ ] Install: `pip install -r requirements.txt`
