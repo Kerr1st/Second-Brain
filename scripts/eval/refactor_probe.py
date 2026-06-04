@@ -12,6 +12,7 @@ Trajectory:
   after P1 (distill):          distilled 6/12 | decision 2/4 | near_dup 8/12
   after P2a (retrieval dedup):  distilled 7/12 | decision 3/4 | near_dup 0/12
   after P2b (IDE dedup+vacuum): distilled 8/12 | decision 3/4 | near_dup 0/12
+  after HNSW rebuild (m=32/efc=200, ef_search=200): distilled 10/12 | decision 4/4 | near_dup 0/12
 
 Usage: .venv/bin/python scripts/eval/refactor_probe.py
 """

@@ -60,3 +60,10 @@ Re-run: `.venv/bin/python scripts/eval/refactor_probe.py`
 - Supersession: an older "dual-site incl. S3" decision can outrank the newer "S3
   dropped" one — consider marking superseded.
 - `scripts/backfill_projects.py` still reads dead `conversations_v2` (non-pipeline).
+
+## Update 2026-06-04 (afternoon) — retrieval-quality fix
+- **Systemic HNSW recall failure found & fixed.** The P3 digest not surfacing was a symptom: mean recall@10 was **0.65** (0.0 for conceptual queries) because the P2b 39% delete degraded the HNSW graph (VACUUM ≠ graph rebuild) and the index used weak defaults. Rebuilt with **m=32 / ef_construction=200**, set **ef_search=200** (migration `009_hnsw_recall.sql`; recipe `scripts/jobs/reindex_embedding.sh`). **Recall 0.65→0.96; benchmark distilled 8→10/12, decision 3→4/4, near-dup 0/12; digest now ranks #1.**
+- **Build gotcha:** parallel index workers need ~500MB in Docker's 64MB `/dev/shm` → set `max_parallel_maintenance_workers=0` + `maintenance_work_mem=512MB`, build `CONCURRENTLY`.
+- **P3 done:** `scripts/weekly_digest.py` (synthesis memory `digest://YYYY-WW` + notification), scheduled Mondays (`com.second-brain.weekly-digest`).
+- **Deferred:** RRF→weighted-fusion (was unnecessary once recall fixed; would only risk the best-ever benchmark). **Monitor:** `scripts/eval/recall_check.py`. **Maintenance rule:** REINDEX after any >10% bulk delete.
+- **Next:** finish/verify IDE distillation backfill; consider P4 (KG into retrieval) + query routing (abstract→summary, specific→chunk) — research-validated direction.
