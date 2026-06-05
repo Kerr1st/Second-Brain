@@ -13,7 +13,7 @@ All plists live in this directory. Install by symlinking to `~/Library/LaunchAge
 | `com.second-brain.ingest` | Daily 3:00 AM | `ingest_staged.sh` | Phase 2 staged ingestion |
 | `com.second-brain.qd-sync` | Every 3600s | `qd_sync.sh` | Quick Desktop sync (5 scripts: memories, tags, events, Slack graph, chats) |
 | `com.second-brain.verify` | Sun 3:00 AM | `verify_backup.sh` | Backup verification (Google Drive) |
-| `com.second-brain.dream-cycle` | Sun 4:00 AM | `dream_cycle_scheduled.sh` | Dream cycle pipeline |
+| `com.second-brain.dream-cycle` | Daily 12:00 PM | `dream_cycle_scheduled.sh` | Dream cycle pipeline |
 | `com.second-brain.liveness` | Daily 9:00 AM | `verify_liveness.sh` | Per-source capture liveness check (alerts if a channel goes silent) |
 | `com.second-brain.capture-api` | KeepAlive | `capture_api.sh` | HTTP capture endpoint (port 8100) |
 
