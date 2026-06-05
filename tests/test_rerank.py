@@ -355,3 +355,53 @@ class TestCompleteRerankFormula:
             f"  reinforcement={expected_reinforcement}, project_penalty={expected_project_penalty}\n"
             f"  superseded_penalty={expected_superseded_penalty}, staleness_penalty={expected_staleness_penalty}"
         )
+
+
+# --- Edge-branch coverage: encoding_context overlap + active-forgetting staleness ---
+
+def _mem(**over):
+    base = {
+        "id": str(uuid.uuid4()), "rrf_score": 0.5, "content": "some neutral body text",
+        "title": "neutral title", "type": "idea", "status": "active",
+        "created_at": datetime.now(timezone.utc), "access_count": 0,
+        "last_accessed_at": None, "mem_class": "semantic", "project": None,
+        "metadata": {}, "encoding_context": None,
+    }
+    base.update(over)
+    return base
+
+
+class TestRerankEncodingContextOverlap:
+    """The encoding_context overlap branch (contextual reinstatement) is exercised."""
+
+    def test_context_overlap_positive_when_encoding_context_matches_query(self):
+        mem = _mem(encoding_context="quantum cryptography lattice scheme")
+        rerank([mem], "quantum cryptography")
+        assert mem["_context_overlap"] > 0
+
+    def test_context_overlap_zero_without_encoding_context(self):
+        mem = _mem(encoding_context=None)
+        rerank([mem], "quantum cryptography")
+        assert mem["_context_overlap"] == 0.0
+
+
+class TestRerankStalenessPenalty:
+    """The active-forgetting staleness penalty branch is exercised."""
+
+    def test_penalty_applied_for_old_unaccessed_memory(self):
+        old = datetime.now(timezone.utc) - timedelta(days=200)
+        mem = _mem(created_at=old, access_count=0, last_accessed_at=None)
+        rerank([mem], "anything here")
+        assert mem["_staleness_penalty"] < 0
+
+    def test_no_penalty_for_recent_memory(self):
+        recent = datetime.now(timezone.utc) - timedelta(days=10)
+        mem = _mem(created_at=recent, access_count=0)
+        rerank([mem], "anything here")
+        assert mem["_staleness_penalty"] == 0.0
+
+    def test_no_penalty_when_memory_has_been_accessed(self):
+        old = datetime.now(timezone.utc) - timedelta(days=200)
+        mem = _mem(created_at=old, access_count=5)
+        rerank([mem], "anything here")
+        assert mem["_staleness_penalty"] == 0.0

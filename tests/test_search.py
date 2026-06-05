@@ -400,3 +400,15 @@ class TestHybridSearchDedupProperty:
             assert all(c <= 2 for c in counts.values()), f"parent cap exceeded: {counts}"
         finally:
             _truncate_tables()
+
+
+class TestHybridSearchEmptyFtsQuery:
+    """An all-punctuation query yields an empty ts_query — search must not crash (vector-only)."""
+
+    def test_punctuation_only_query_returns_without_error(self, test_db, clean_tables, mock_embedding):
+        content = "Distributed locks and lease-based coordination"
+        db.create_memory(type="insight", title="Locks", content=content,
+                         embedding=str(mock_embedding(content)))
+        # "!!! ??? ..." strips to an empty FTS query -> exercises the vector-only branch
+        results = hybrid_search("!!! ??? ...", mock_embedding(content), limit=5)
+        assert isinstance(results, list)  # no crash; vector side still returns candidates

@@ -34,6 +34,9 @@ DISTILL_TYPES = {"decision", "insight"}
 MAX_CHARS = 100000
 DEFAULT_SOURCES = ("kiro_cli_chat", "quick_desktop_chat")
 
+# Item cap raised 5->8 (2026-06-04): 65% of distilled sessions were hitting the old
+# cap of 5 exactly, i.e. it was binding and truncating durable items. 8 gives headroom
+# while keeping a ceiling against low-value padding (quality bar enforced by the prompt).
 SYSTEM_PROMPT = (
     "You are a knowledge distiller. You are given the transcript of ONE completed "
     "AI-assistant chat session, delimited by triple quotes. Do NOT continue or reply "
@@ -41,7 +44,7 @@ SYSTEM_PROMPT = (
     "remembering. Output ONLY a JSON array (use [] if nothing qualifies) — no prose, "
     'no code fence. Each element: {"type":"decision"|"insight","title":"<=80 chars",'
     '"content":"WHAT: ... WHY: ..."}. A decision = a choice that was made plus its '
-    "rationale. An insight = a non-obvious learning or principle. At most 5 items. "
+    "rationale. An insight = a non-obvious learning or principle. At most 8 items. "
     "Skip routine chatter, tool output, and trivia. Each item must be self-contained "
     "(understandable without the transcript)."
 )
