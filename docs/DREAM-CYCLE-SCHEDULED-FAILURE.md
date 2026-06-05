@@ -58,3 +58,17 @@ The pipeline works when run manually with a live session (e.g., 05-30: 10 accept
    notify instead of a 10-minute hang + exit-2 false alarm. Consider lowering the 600s Explorer timeout.
 3. Structural truth: an unattended launchd job cannot obtain the interactive SSO token; realistic
    options are run-when-present, guard-and-skip-when-absent, or a non-interactive auth path if one exists.
+
+## Decision 2026-06-05 — accept error-and-retry; no pre-flight guard (chosen for simplicity)
+Decided NOT to add a pre-flight token probe or any auth guard. Rationale: keep the system simple;
+the dream-cycle is a daily, opportunistic synthesis job, so a missed run is benign.
+
+Accepted behavior when the SSO token is unavailable (user absent/unattended):
+- The Explorer's kiro-cli subprocess hangs up to the 600s timeout (noon case) or returns empty
+  (4am case); the run aborts (exit 2); job_wrapper fires a "failed" macOS notification.
+- The next daily run retries from a fresh state. No data corruption, no lock, no backlog
+  (synthesis is opportunistic over recent activity, not a queue).
+
+Net: an occasional benign failure + notification on days the user is away; runs normally on days
+present (the common case at noon). No code change. This closes the scheduled-auth item.
+Only minimal future tweak if ever desired: lower the 600s Explorer timeout to shorten the hang.
