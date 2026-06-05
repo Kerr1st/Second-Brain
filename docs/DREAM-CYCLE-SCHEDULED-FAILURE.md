@@ -39,3 +39,22 @@ reveals whether the agent returned an error, an empty model response, or a delib
    the job, or schedule the cycle for a time a session is typically active.
 3. The pipeline itself is healthy — manual runs work — so supersession + consolidation remain
    functional on demand in the meantime (`.venv/bin/python scripts/dream_cycle_run.py --run-type scheduled`).
+
+## Update 2026-06-05 — noon run also failed (different mode); reschedule not yet validated
+Rescheduled to daily noon (commit 051b5af). The first noon run (06-05 12:02–12:16) **timed out**:
+`Agent timed out after 600s` → Explorer crashed/timed-out → aborted (exit 2). This is a
+*different* failure mode than the 4am instant-"0 slices" — the kiro-cli subprocess hung the
+full 10-minute limit (likely stalling on a token refresh with no interactive user to complete it).
+
+**Crucially, today was not a valid test:** the user was traveling at noon, so the "active at
+noon → fresh token" assumption did not hold. The consistent pattern across ALL scheduled
+failures remains: **runs while the user is absent fail** (mode varies: fast-empty vs hung-timeout).
+The pipeline works when run manually with a live session (e.g., 05-30: 10 accepted).
+
+### Still to do (not yet implemented)
+1. Validate by running the dream-cycle manually while present (token fresh) — confirms the noon
+   schedule is sound on non-travel days.
+2. Add a pre-flight SSO-token check to `scripts/jobs/dream_cycle_scheduled.sh`: if invalid, skip +
+   notify instead of a 10-minute hang + exit-2 false alarm. Consider lowering the 600s Explorer timeout.
+3. Structural truth: an unattended launchd job cannot obtain the interactive SSO token; realistic
+   options are run-when-present, guard-and-skip-when-absent, or a non-interactive auth path if one exists.

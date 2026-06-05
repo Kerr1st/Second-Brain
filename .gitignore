@@ -31,3 +31,4 @@ evaluations/results/
 .env
 backups/
 logs/
+.coverage
