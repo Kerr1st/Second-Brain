@@ -29,6 +29,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefm
 log = logging.getLogger(__name__)
 
 OLD_CAP = 5
+MAX_CONSEC_FAIL = 5  # abort if this many sessions fail in a row (likely expired SSO token)
 
 
 def _norm(text):
@@ -91,6 +92,7 @@ def redistill(dry_run=False, limit=0, cap=8):
              len(sessions), cap, max_new, dry_run)
 
     stats = {"sessions": 0, "new_items": 0, "no_new": 0, "no_transcript": 0, "failed": 0}
+    consec_fail = 0
     for sess in sessions:
         transcript, orig_st = fetch_transcript(sess)
         if not transcript:
@@ -101,9 +103,15 @@ def redistill(dry_run=False, limit=0, cap=8):
         try:
             res = invoker.invoke(SYSTEM_PROMPT, build_user_message(transcript))
             items = valid_items(res["output"] if isinstance(res["output"], list) else [])
+            consec_fail = 0
         except Exception as e:
+            consec_fail += 1
             stats["failed"] += 1
             log.error("redistill failed %s: %s", sess, e)
+            if consec_fail >= MAX_CONSEC_FAIL:
+                log.error("Circuit breaker: %d consecutive failures (likely expired SSO token); "
+                          "aborting. Re-run with a fresh token to resume the remainder.", consec_fail)
+                break
             continue
         stats["sessions"] += 1
 
