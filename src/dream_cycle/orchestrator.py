@@ -306,9 +306,9 @@ class DreamCycleOrchestrator:
         """
         try:
             return self.invoke_evaluator(candidate, role)
-        except (TimeoutError, RuntimeError):
+        except (TimeoutError, RuntimeError, ValueError):
             logger.error(
-                "Evaluator '%s' crashed/timed out for '%s', treating as REJECT",
+                "Evaluator '%s' crashed/timed out/unparseable for '%s', treating as REJECT",
                 role, candidate.title,
             )
             return EvaluatorVerdict(

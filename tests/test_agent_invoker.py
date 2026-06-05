@@ -170,6 +170,22 @@ class TestParseJsonOutputEdgeCases:
         raw = f"```json\n{json.dumps(obj)}\n```"
         assert AgentInvoker.parse_json_output(raw) == obj
 
+    def test_kiro_cli_blockquote_with_literal_newlines(self):
+        """Regression: kiro-cli wraps agent output in ANSI + a '> ' prefix, and LLMs
+        emit multi-paragraph string values with LITERAL (unescaped) newlines. Strict
+        json.loads rejects the raw control chars. This exact pattern aborted dream-cycle
+        evaluators and the 34 redistill items; parse_json_output must tolerate it."""
+        raw = (
+            "\x1b[38;5;141m> \x1b[0m"
+            '{"verdict": "ACCEPT", "reasoning": "PARA1: coherent.\n\n'
+            'PARA2: sound.\n\nPARA3: high."}'
+            "\x07"
+        )
+        result = AgentInvoker.parse_json_output(raw)
+        assert result["verdict"] == "ACCEPT"
+        assert "PARA2: sound." in result["reasoning"]
+        assert "\n" in result["reasoning"]  # literal newline preserved, not lost
+
     def test_no_valid_json_raises(self):
         with pytest.raises(ValueError, match="No valid JSON found"):
             AgentInvoker.parse_json_output("this is not json at all")

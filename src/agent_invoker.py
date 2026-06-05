@@ -181,7 +181,7 @@ class AgentInvoker:
         # 1. Try direct parse
         stripped = raw.strip()
         try:
-            return json.loads(stripped)
+            return json.loads(stripped, strict=False)
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -190,7 +190,7 @@ class AgentInvoker:
         match = fence_pattern.search(raw)
         if match:
             try:
-                return json.loads(match.group(1).strip())
+                return json.loads(match.group(1).strip(), strict=False)
             except (json.JSONDecodeError, ValueError):
                 pass
 
@@ -212,7 +212,7 @@ class AgentInvoker:
         for start_idx, _sc, _ec, end_idx in candidates:
             fragment = stripped[start_idx : end_idx + 1]
             try:
-                return json.loads(fragment)
+                return json.loads(fragment, strict=False)
             except (json.JSONDecodeError, ValueError):
                 continue
 
