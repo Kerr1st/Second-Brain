@@ -402,6 +402,15 @@ class DreamCycleOrchestrator:
             except (KeyError, TypeError) as exc:
                 logger.warning("Failed to parse Explorer slice: %s — %s", raw, exc)
 
+        if not slices:
+            # Surface the raw agent output so a scheduled 0-slice abort is diagnosable
+            # (distinguishes a genuine "nothing to do" from a degraded/failed invocation,
+            # e.g. a model call that returned empty when the host woke for the 4am job).
+            raw_head = (result.get("raw") or "")[:1000]
+            logger.warning(
+                "Explorer produced no usable slices (raw_candidates=%s). Raw output head: %r",
+                len(raw_slices) if isinstance(raw_slices, list) else "n/a", raw_head,
+            )
         return slices
 
     def invoke_thinker(
