@@ -164,6 +164,46 @@ class AgentInvoker:
     # Regex to strip ANSI escape sequences from kiro-cli terminal output
     _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+    @staticmethod
+    def _balanced_json_spans(text: str):
+        """Yield (start, end) index spans of balanced { } / [ ] structures.
+
+        Respects JSON string literals and escapes so braces/brackets inside
+        strings are ignored. Used to recover the JSON payload from a 4.8
+        tool-using transcript where the real envelope is surrounded by
+        tool-call arg fragments, progress markers, and conversational prose.
+        """
+        spans = []
+        i, n = 0, len(text)
+        while i < n:
+            if text[i] in "{[":
+                depth = 0
+                in_str = esc = False
+                j = i
+                while j < n:
+                    c = text[j]
+                    if in_str:
+                        if esc:
+                            esc = False
+                        elif c == "\\":
+                            esc = True
+                        elif c == '"':
+                            in_str = False
+                    elif c == '"':
+                        in_str = True
+                    elif c in "{[":
+                        depth += 1
+                    elif c in "}]":
+                        depth -= 1
+                        if depth == 0:
+                            spans.append((i, j + 1))
+                            break
+                    j += 1
+                i = j + 1 if j > i else i + 1
+            else:
+                i += 1
+        return spans
+
     @classmethod
     def parse_json_output(cls, raw: str) -> dict | list:
         """Extract JSON from agent output.
@@ -199,26 +239,20 @@ class AgentInvoker:
             except (json.JSONDecodeError, ValueError):
                 pass
 
-        # 3. Try finding first { or [ and parse from there.
-        #    Pick whichever delimiter appears earliest so that an outer array
-        #    is preferred over an inner object (e.g. "[{}]" should parse as a list).
-        candidates = []
-        for start_char, end_char in [("{", "}"), ("[", "]")]:
-            start_idx = stripped.find(start_char)
-            if start_idx == -1:
-                continue
-            end_idx = stripped.rfind(end_char)
-            if end_idx == -1 or end_idx <= start_idx:
-                continue
-            candidates.append((start_idx, start_char, end_char, end_idx))
-
-        # Sort by earliest start position so the outermost structure wins
-        candidates.sort(key=lambda c: c[0])
-        for start_idx, _sc, _ec, end_idx in candidates:
-            fragment = stripped[start_idx : end_idx + 1]
+        # 3. Scan for all balanced JSON structures and return the largest that
+        #    parses. A 4.8 tool-using transcript interleaves tool-arg fragments
+        #    ({"window_days": 14}), progress markers ([1.1]), and prose around
+        #    the real envelope; the payload is reliably the largest valid JSON.
+        best = None
+        for start_idx, end_idx in cls._balanced_json_spans(raw):
+            fragment = raw[start_idx:end_idx]
             try:
-                return json.loads(fragment, strict=False)
+                value = json.loads(fragment, strict=False)
             except (json.JSONDecodeError, ValueError):
                 continue
+            if isinstance(value, (dict, list)) and (best is None or len(fragment) > best[0]):
+                best = (len(fragment), value)
+        if best is not None:
+            return best[1]
 
         raise ValueError(f"No valid JSON found in agent output: {raw[:200]}")

@@ -359,3 +359,44 @@ class TestInvokeDecodesLeniently:
         assert kwargs.get("text") is True
         assert kwargs.get("encoding") == "utf-8"
         assert kwargs.get("errors") == "replace"
+
+
+class TestParseJsonFromToolTranscript:
+    """Regression: 4.8 tool-using agents emit the JSON envelope surrounded by
+    tool-call arg fragments ({"window_days": 14}), a [1.1] progress marker, and
+    conversational prose both before and after. The real noon-run Explorer output
+    (run 4453445f, 2026-06-06) failed the old first-{/last-} extractor this exact
+    way — it produced a valid 2-slice array but the parser grabbed tool-arg/marker
+    noise. parse_json_output must recover the largest balanced JSON payload.
+
+    **Validates: Requirement 13.3**
+    """
+
+    def test_extracts_array_amid_tool_transcript_and_prose(self):
+        raw = (
+            "> I'll get oriented. Let me gather context in parallel.\n"
+            "Running tool memory_brief with the param (from mcp server: second-brain)\n"
+            ' \u22ee  {\n \u22ee    "window_days": 14\n \u22ee  }\n'
+            "Running tool memory_list with the param\n"
+            ' \u22ee  {\n \u22ee    "type": "question",\n \u22ee    "limit": 25\n \u22ee  }\n'
+            " - Completed in 0.16s\n [1.1]\n"
+            "> Strong signal emerging across projects. Final slices:\n"
+            '[{"strategy": "pattern_emergence", "memory_ids": ["a", "b"], "hypothesis": "H1"},'
+            ' {"strategy": "cross_project_collision", "memory_ids": ["c"], "hypothesis": "H2"}]\n'
+            "\nNote: I captured a short-hash prefix only; the Thinker should resolve it.\n"
+            "I deliberately stopped at two slices rather than padding with weak ones.\x07"
+        )
+        result = AgentInvoker.parse_json_output(raw)
+        assert isinstance(result, list)
+        assert [s["strategy"] for s in result] == ["pattern_emergence", "cross_project_collision"]
+        assert result[0]["memory_ids"] == ["a", "b"]
+
+    def test_prose_wrapped_object_still_parses(self):
+        """A single evaluator verdict object wrapped in prose (no tools) parses."""
+        raw = (
+            "> Here is my verdict after weighing the evidence.\n"
+            '{"verdict": "ACCEPT", "reasoning": "Cross-project and well grounded."}\n'
+            "Let me know if you need more detail.\x07"
+        )
+        result = AgentInvoker.parse_json_output(raw)
+        assert result["verdict"] == "ACCEPT"
