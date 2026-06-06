@@ -1,6 +1,6 @@
 # Second Brain — Architecture
 
-> Last updated: 2026-05-17
+> Last updated: 2026-06-06
 
 ## Overview
 
@@ -27,7 +27,7 @@ A personal knowledge system that gives AI agents persistent memory across sessio
 │                                                             │
 │  ┌───────────┐ ┌────────────────┐ ┌──────────────────────┐  │
 │  │ memories   │ │ relationships  │ │ knowledge graph      │  │
-│  │ 164K+ rows │ │ source→target  │ │ entities (3.9K)      │  │
+│  │ ~120K rows │ │ source→target  │ │ entities (3.9K)      │  │
 │  │            │ │ typed edges    │ │ entity_edges (6.5K)  │  │
 │  │            │ │                │ │ memory_entities      │  │
 │  └───────────┘ └────────────────┘ └──────────────────────┘  │
@@ -40,8 +40,8 @@ A personal knowledge system that gives AI agents persistent memory across sessio
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  MCP Server (src/mcp_server.py)                             │
-│  8 tools: create, search, read, update, relate,            │
-│           list, graph, learn                                │
+│  9 tools: create, search, read, update, relate,            │
+│           list, graph, learn, brief                         │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -56,11 +56,12 @@ A personal knowledge system that gives AI agents persistent memory across sessio
 2. **Ingest** — Content is parsed, classified (semantic/episodic/procedural), chunked, embedded, and stored with auto-discovered relationships
 3. **Retrieve** — Hybrid search (BM25 + vector + RRF) with cognitive science-grounded reranking
 4. **Synthesize** — Dream cycle pipeline (Explorer → Thinker → 4-evaluator Consensus Panel) autonomously surfaces connections and insights
-5. **Backup** — Daily encrypted pg_dump + JSON exports to Google Drive and S3
+5. **Deliver (Express)** — surfaces synthesized output to the user: on-demand `brief`, a gated Gmail push chained after the noon dream cycle, and the `memory_brief` MCP tool; shaped by delivery preferences (`express_feedback`, migration 010)
+6. **Backup** — Daily encrypted pg_dump + JSON exports to Google Drive and S3
 
 ## Database Schema
 
-9 migrations applied in order (`migrations/000` through `008`).
+11 migrations applied in order (`migrations/000` through `010`).
 
 ### Core Tables
 
@@ -280,11 +281,21 @@ Four-agent autonomous learning system (`src/dream_cycle/`):
 
 Digests written to `logs/dream-cycle-digest-*.md`.
 
+## Express (Delivery Layer)
+
+The Partnership rung — surfaces synthesized output to the user instead of waiting to be queried.
+Implementation: `src/express.py`, `scripts/brief.py`, `scripts/express_push.py`.
+
+- **compose_briefing** gathers from existing synthesis: recent dream-cycle insights (cross-project detected), active `contradicts` edges, resurfaced high-value/forgotten memories, the weekly digest, open questions. **edit_briefing** ranks and writes headlines (LLM editor, deterministic fallback).
+- **Surfaces:** on-demand `brief` (CLI); a gated Gmail push (`should_push` sends only on a new cross-project synthesis or contradiction, chained after the noon dream cycle); the `memory_brief` MCP tool (in-session).
+- **Feedback (delivery preferences):** `brief --useful/--less/--mute/--unmute` targeting item/kind/topic, stored in `express_feedback` (migration 010); applied as hard filters + soft re-rank. Delivery-only (does not yet feed synthesis).
+
 ## Source Code Layout
 
 ```
 src/
-  mcp_server.py          MCP server (8 tools)
+  mcp_server.py          MCP server (9 tools)
+  express.py             Express delivery: briefing compose/edit/render, feedback, Gmail push
   db.py                  PostgreSQL connection, memory CRUD, relationships
   search.py              Hybrid search, reranking, retrieval reinforcement
   embeddings.py          Bedrock Titan embedding generation

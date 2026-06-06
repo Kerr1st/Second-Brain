@@ -11,13 +11,20 @@ parse fix, and runs **daily at noon**.
 - `ff2742b` — model → `claude-opus-4.8` + per-role `--effort`.
 - (this commit) — Express plan locked + purpose/evolution analysis + this handoff.
 
-## NEXT — primary: build Express
-Build per **`docs/EXPRESS-PLAN.md`** — all decisions locked there (see "Locked decisions" +
-"Build sequence (start here)"). v1 = **P1 on-demand `brief`** then **P2 high-bar Gmail push**
-chained after the noon dream cycle. New code ≈ `src/express.py` + `scripts/brief.py` +
-`scripts/express_push.py` + one schedule hook; reuse existing synthesis sources.
-Email config via env/gitignored (`EXPRESS_EMAIL_TO` etc.) — **address NOT committed**; user will
-generate the Gmail App Password at P2 build.
+## NEXT — quality-first streamlining review
+**Express is COMPLETE** (P1 on-demand `brief` `a16632c`; P2 gated Gmail push `d715b90`; P3 `memory_brief` MCP tool `109249b`; feedback loop `ef0d730`). All on `main`, both remotes synced.
+
+Active goal: the **streamlining review** (do everything simpler, to best demonstrate the focus
+capabilities). Framing locked with the user: (1) primarily a **demonstration** of "memory that
+thinks"; (2) **sacred core** = dream cycle (synthesis) + Express (delivery) + cognitive-grounded
+hybrid retrieval (substrate); (3+4) **defer** "what's simplest" and rewrite-vs-refactor until we've
+seen good **quality**. Focus = **quality** (not reliability/speed).
+
+Immediate task: **assess quality of the sacred core, then validate the noon 4.8 dream-cycle run.**
+Baseline already measured (pre-4.8): retrieval recall@10 0.93, golden hit@10 90% / hit@1 37% /
+MRR 0.53 (one blind spot: memory 890e87c3); synthesis content strong but panel lenient (36 ACCEPTED
+/ 2 REJECTED, dissent 6/38); Express high-signal. Pending: the **first `claude-opus-4.8` dream-cycle
+run** (noon daily) — assess its accepted-insight quality + that the chained `express_push` behaved.
 
 ## Carryover (lower priority)
 - **#2 Redistill remainder:** 34 sessions failed on the old parse bug — now fixed, so re-running `scripts/redistill_capped.py` (idempotent, lockfile-guarded) should recover them.

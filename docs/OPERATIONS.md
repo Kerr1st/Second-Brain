@@ -179,4 +179,4 @@ docker/data/   # ~2.5 GB
 | QD sync running | `cat logs/qd-sync-$(date +%Y%m%d).log` | Hourly entries |
 | AWS SSO valid | `aws sts get-caller-identity` | Returns account info |
 | PostgreSQL up | `docker exec second-brain-db pg_isready -U memory_bank` | "accepting connections" |
-| Memory count | `docker exec second-brain-db psql -U memory_bank -c "SELECT count(*) FROM memories"` | 164K+ |
+| Memory count | `docker exec second-brain-db psql -U memory_bank -c "SELECT count(*) FROM memories"` | ~120K |

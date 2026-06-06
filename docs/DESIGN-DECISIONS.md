@@ -16,7 +16,7 @@ Splitting them with a staging directory means Phase 1 runs unattended every nigh
 
 ## Why one chat per Kiro session (Phase 2)
 
-Even with Opus 4.6-1m's 1M token window, processing one chat per session ensures:
+Even with Opus 4.8's 1M token window, processing one chat per session ensures:
 - Each chat gets full LLM attention (no degradation from accumulated context)
 - Failures are isolated — one bad chat doesn't block others
 - The wrapper script can retry individual failures

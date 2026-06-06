@@ -2,7 +2,7 @@
 
 A personal knowledge management and ideation system powered by AI. Gives AI agents persistent memory across sessions, turning them into thinking partners that accumulate knowledge over time.
 
-164K+ memories. 9 migrations. PostgreSQL + pgvector + knowledge graph. MCP server for agent access. Dream cycle for autonomous insight generation.
+~120K memories. 10 migrations. PostgreSQL + pgvector + knowledge graph. MCP server (9 tools) for agent access. Dream cycle for autonomous synthesis. Express delivery layer (on-demand briefing, gated email push, in-session tool, feedback).
 
 ## Quickstart
 
@@ -43,6 +43,7 @@ Tests require a running PostgreSQL instance (Docker). The test fixture creates a
 |---|---|
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, database schema, search architecture, tech stack |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Scheduled jobs, backup, SSO management, monitoring |
+| [EXPRESS-PLAN.md](docs/EXPRESS-PLAN.md) | Express delivery layer: briefing, gated email push, in-context tool, feedback loop |
 | [DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) | Backup topology, recovery procedures, encryption keys |
 | [DESIGN-DECISIONS.md](docs/DESIGN-DECISIONS.md) | Why key architectural choices were made (cognitive science rationale) |
 | [QUICK-DESKTOP-INTEGRATION.md](docs/QUICK-DESKTOP-INTEGRATION.md) | Quick Desktop sync design and knowledge graph import |
@@ -66,9 +67,9 @@ scripts/
   eval/             Evaluation framework (retrieval quality metrics)
   batch_ingest_parallel.py   Parallel batch ingest (20 workers)
   ingest_qd_chats.py         Quick Desktop chat session extractor
-migrations/         Numbered SQL migrations (000-008) + runner script
+migrations/         Numbered SQL migrations (000-010) + runner script
 scheduling/         macOS launchd plists (9 jobs, all installed)
-tests/              553 tests (property-based, unit, integration, E2E)
+tests/              637 tests (property-based, unit, integration, E2E)
 docs/               Architecture specs and runbooks
 docker/             PostgreSQL data volume (gitignored)
 staging/            Transient pipeline data (gitignored)
@@ -78,14 +79,15 @@ staging/            Transient pipeline data (gitignored)
 
 **Working:**
 - Memory CRUD, hybrid search, reranking, retrieval reinforcement
-- MCP server (8 tools) connected to Kiro CLI and Claude Code
+- MCP server (9 tools) connected to Kiro CLI and Claude Code
 - Quick Desktop hourly sync (memories, tags, KG, chats, feed events, Slack graph)
 - Daily encrypted backups to Google Drive + S3 (full docs included)
 - Chat extraction, Crawlee ingestion, bookmark/YouTube scraping
 - Capture API (Slack, mobile, browser, email) — port 8100
-- Dream cycle pipeline (scheduled Sundays 4 AM)
+- Dream cycle pipeline (daily at noon; chains the Express email push)
+- Express delivery — on-demand `brief`, gated Gmail push, `memory_brief` MCP tool, feedback loop
 - All 9 LaunchAgents installed and operational
-- 553 tests (unit, property-based, integration, E2E)
+- 637 tests (unit, property-based, integration, E2E)
 
 **Planned:**
 - Entity extraction on ingest (auto-populate knowledge graph from all sources)

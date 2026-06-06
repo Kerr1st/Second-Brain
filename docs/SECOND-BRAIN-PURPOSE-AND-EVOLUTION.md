@@ -71,7 +71,7 @@ Nine schema migrations, each a cognitive capability: `v2 columns → dream_cycle
 
 ## 3. Where it is now (June 2026)
 
-**Size:** ~25K LOC — `src` 5,035 (28 files), `scripts` 6,153, **`tests` 13,840 (37 files — ~55% of all code)**. 9 migrations, 9 specs (two were deleted in a June cleanup), ~120K memories. Six capability clusters: capture, store, retrieve, synthesize, evaluate, operate.
+**Size:** ~25K LOC — `src` 5,035 (28 files), `scripts` 6,153, **`tests` 13,840 (37 files — ~55% of all code)**. 10 migrations, 9 specs (two were deleted in a June cleanup), ~120K memories. Capability clusters: capture, store, retrieve, synthesize, evaluate, operate — and now **deliver** (Express).
 
 **Depth achieved:** an 11-signal cognitive reranker; typed memories; a relationship graph; a schema layer; and a working **4-judge Byzantine-consensus dream cycle** that — validated today — produced 10 accepted insights from 12 candidates, including a genuine cross-project principle ("every autonomous agent system needs an explicit termination contract") drawn from five separate projects.
 
@@ -97,7 +97,7 @@ The verdict, in the project's own words: **"Capture is healthy; distillation is 
 ## 5. What was lost (or never fully had)
 
 - **Simplicity.** The cost of the depth is surface area: 6 clusters, ~25K LOC, **more test code than everything else combined**, ~10 scheduled jobs, multiple capture channels and migration scripts. Today's bugs were all *surface-area* bugs — duplicate-producing backfill, a JSON-parse crash that aborted whole runs, scheduled-auth fragility. None were about the *ideas*; all were about the *amount of machinery*.
-- **"Express" — the top of the ladder.** The system captures, stores, retrieves, and now synthesizes — but the **proactive surfacing to *you*** is thin (the weekly digest is its only instance). It thinks; it doesn't yet reliably *tell you what it thought*. Partnership is the unfinished half.
+- **"Express" — the top of the ladder.** The system captures, stores, retrieves, and now synthesizes — but the **proactive surfacing to *you*** is thin (the weekly digest is its only instance). It thinks; it doesn't yet reliably *tell you what it thought*. Partnership is the unfinished half. _(Update 2026-06-06: since built — on-demand `brief`, gated Gmail push, an in-context `memory_brief` MCP tool, and a feedback loop. See `docs/EXPRESS-PLAN.md`. This bullet is preserved as the pre-build analysis.)_
 - **Legibility / demonstrability.** With six clusters, the *focus* capability — memory that thinks — is buried under capture pipelines, ops, and an eval harness. The most impressive thing it does is the hardest thing to *see*.
 
 ---

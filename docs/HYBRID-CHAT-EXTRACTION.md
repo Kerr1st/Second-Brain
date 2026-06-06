@@ -10,7 +10,7 @@ Chat ingestion is split into two phases: a deterministic script for mechanical c
 ```
 Phase 1: Script (launchd, 2:30 AM)       Phase 2: Kiro headless (launchd, 3:00 AM)
 ├── Read from 3 chat sources              ├── One chat per Kiro session
-├── Structural stripping                  ├── kiro-cli --no-interactive --model claude-opus-4.6-1m
+├── Structural stripping                  ├── kiro-cli --no-interactive --model claude-opus-4.8
 ├── Size filtering                        ├── Chunk by topic (LLM)
 ├── Content filtering                     ├── Extract metadata (LLM)
 └── Write cleaned chats to staging/       ├── Generate embeddings (Bedrock)
@@ -148,11 +148,11 @@ LLM-powered. Runs via Kiro CLI in headless mode (`--no-interactive`). Processes 
 Kiro CLI headless with Claude Opus 4.6 (1M context):
 
 ```bash
-kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.6-1m \
+kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.8 \
   "Process the staged chat at ~/second-brain/staging/chats/{filename}. Read the file, chunk by topic, extract metadata, generate embeddings, and store in the Second Brain PostgreSQL database."
 ```
 
-**One chat per Kiro session.** A cleaned chat can be 5–50KB. Claude Opus 4.6-1m has a 1,000,000 token window (~4MB), so context overflow is not a concern for any single chat. We still process one per session because:
+**One chat per Kiro session.** A cleaned chat can be 5–50KB. Claude Opus 4.8 has a 1,000,000 token window (~4MB), so context overflow is not a concern for any single chat. We still process one per session because:
 - Each chat gets the LLM's full attention
 - No context window overflow risk
 - If one chat fails, the others aren't affected
@@ -186,7 +186,7 @@ for chat_file in staging/chats/*.md; do
   FILENAME=$(basename "$chat_file")
   log "Processing: $FILENAME"
 
-  kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.6-1m \
+  kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.8 \
     "Process the staged chat at ~/second-brain/$chat_file. Read the file, chunk it by topic shifts, extract metadata (topics, decisions, action items, project, files discussed), generate embeddings via Bedrock, and store in the Second Brain PostgreSQL database. After successful storage, delete the staging file." \
     >> "$LOGFILE" 2>&1
 
