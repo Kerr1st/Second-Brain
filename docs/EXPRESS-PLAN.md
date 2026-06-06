@@ -3,6 +3,15 @@
 *Draft for iteration, 2026-06-06. Builds on `SECOND-BRAIN-PURPOSE-AND-EVOLUTION.md`: Express is
 the unfinished top of the ladder (Storage → Retrieval → Synthesis → **Partnership**).*
 
+## Status (2026-06-06) — built
+
+- ✅ **P1 — on-demand `brief`** (`a16632c`): `src/express.py` (compose + LLM editor + render) and `scripts/brief.py`. Verified live; high-quality headlines.
+- ✅ **P2 — proactive Gmail push** (`d715b90`): `should_push()` (high bar) + `render_email()` + `send_email()`, gated CLI `scripts/express_push.py`, chained after the noon dream cycle. *Activation pending: user sets `EXPRESS_EMAIL_TO/FROM` + `GMAIL_APP_PASSWORD`; until then it composes-but-skips benignly.*
+- ✅ **P3 (slice) — `memory_brief` MCP tool** (`109249b`): the in-context surface; an agent can volunteer the briefing at session start.
+- ⏳ **P3 (remaining) — the feedback loop** ("useful / not" → learn what to surface). **Deferred: needs a design decision** — email has no buttons, so the signal mechanism (a `brief --useful <id>` CLI, an MCP feedback tool, reply-parsing, …) is an open choice.
+
+Full suite: 627 passing.
+
 ## The gap, precisely
 
 The system already produces synthesis in **three** places — and **none of them reach you**:
