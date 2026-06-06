@@ -120,6 +120,37 @@ Endpoints: `/capture`, `/capture/slack`, `/capture/browser`, `/capture/email`
 
 Token is set in the LaunchAgent plist (`com.second-brain.capture-api.plist`) as the `CAPTURE_API_TOKEN` environment variable. Logs at `~/Library/Logs/second-brain/capture-api-{stdout,stderr}.log`.
 
+## Express (briefing & feedback)
+
+The delivery layer that surfaces what the system has synthesized. The on-demand
+`brief` is the pull surface; a high-bar Gmail push (`express_push.py`) is chained
+after the noon dream cycle; the `memory_brief` MCP tool surfaces it in-session.
+
+```bash
+# Read the briefing
+.venv/bin/python scripts/brief.py                # LLM-edited headlines
+.venv/bin/python scripts/brief.py --no-llm       # fast deterministic ranking
+.venv/bin/python scripts/brief.py --window-days 30
+
+# Shape what it surfaces (delivery preferences — gradient)
+.venv/bin/python scripts/brief.py --useful <target>   # boost
+.venv/bin/python scripts/brief.py --less   <target>   # soft down-weight
+.venv/bin/python scripts/brief.py --mute   <target>   # hard hide
+.venv/bin/python scripts/brief.py --unmute <target>   # clear a preference
+.venv/bin/python scripts/brief.py --prefs             # list preferences
+
+# Proactive email (gated; sends only on a cross-project synthesis or contradiction)
+.venv/bin/python scripts/express_push.py --dry-run    # compose + print, never send
+```
+
+`<target>` is an item id (the `#abcd1234` shown by `brief`), a kind
+(`insight|contradiction|resurface|digest|question`), or a topic/project name.
+Run `scripts/brief.py --help` for the full reference.
+
+Email config (never committed) — set for the LaunchAgent that runs the chained push:
+`EXPRESS_EMAIL_TO`, `EXPRESS_EMAIL_FROM`, `GMAIL_APP_PASSWORD`. Until set, the push
+composes but skips sending (benign exit 0).
+
 ## Docker
 
 PostgreSQL 17 + pgvector runs in Docker. Compose file at project root.

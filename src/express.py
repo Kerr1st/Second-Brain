@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import smtplib
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
@@ -39,6 +40,121 @@ MAX_ITEMS = 5                   # lead + up to 4
 
 # Kind priority for the deterministic fallback (lower = more important).
 _KIND_PRIORITY = {"contradiction": 0, "insight": 1, "resurface": 2, "digest": 3, "question": 4}
+
+# --- Feedback (delivery preferences; migration 010) ---
+KINDS = {"insight", "contradiction", "resurface", "digest", "question"}
+VALID_SIGNALS = {"useful", "less", "mute"}
+# Soft ranking effect for the non-mute signals (mute is a hard filter, weight unused).
+_SIGNAL_WEIGHT = {"useful": 1.0, "less": -0.6, "mute": 0.0}
+
+
+def _classify_target(target: str) -> tuple[str, str]:
+    """Classify a feedback target as ('kind'|'item'|'topic', normalized_key).
+
+    A known kind keyword → kind; an 8+ hex string (uuid / uuid-prefix / 'src:tgt')
+    → item; anything else → topic/project.
+    """
+    t = target.strip()
+    if t.lower() in KINDS:
+        return ("kind", t.lower())
+    core = t.replace("-", "").replace(":", "")
+    if len(core) >= 8 and re.fullmatch(r"[0-9a-fA-F]+", core):
+        return ("item", t.lower())
+    return ("topic", t)
+
+
+def record_feedback(target: str, signal: str) -> dict:
+    """Upsert a delivery-preference signal (latest per target wins)."""
+    if signal not in VALID_SIGNALS:
+        raise ValueError(f"signal must be one of {sorted(VALID_SIGNALS)}")
+    ttype, tkey = _classify_target(target)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO express_feedback (target_type, target_key, signal, weight)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (target_type, target_key)
+                DO UPDATE SET signal = EXCLUDED.signal, weight = EXCLUDED.weight, updated_at = now()
+                """,
+                (ttype, tkey, signal, _SIGNAL_WEIGHT[signal]),
+            )
+        conn.commit()
+    return {"target_type": ttype, "target_key": tkey, "signal": signal}
+
+
+def remove_feedback(target: str) -> int:
+    """Remove any stored signal for a target (the --unmute / reset path). Returns rows deleted."""
+    ttype, tkey = _classify_target(target)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM express_feedback WHERE target_type = %s AND target_key = %s",
+                (ttype, tkey),
+            )
+            n = cur.rowcount
+        conn.commit()
+    return n
+
+
+def list_feedback() -> list[dict]:
+    """All stored preferences, newest first (for `brief --prefs`)."""
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT target_type, target_key, signal, weight, updated_at "
+                "FROM express_feedback ORDER BY updated_at DESC"
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def load_prefs() -> dict:
+    """Compile stored feedback into muted sets + soft weights for fast application."""
+    prefs = {
+        "muted": {"item": set(), "kind": set(), "topic": set()},
+        "weight": {"item": {}, "kind": {}, "topic": {}},
+    }
+    for r in list_feedback():
+        tt, tk = r["target_type"], r["target_key"]
+        if r["signal"] == "mute":
+            prefs["muted"][tt].add(tk)
+        else:
+            prefs["weight"][tt][tk] = r["weight"]
+    return prefs
+
+
+def _apply_prefs(items: list[dict], prefs: dict) -> list[dict]:
+    """Drop hard-muted items (by kind / item-id-prefix / topic); annotate the rest
+    with a soft `pref_weight` (sum of matching kind + topic + item weights)."""
+    muted, weight = prefs["muted"], prefs["weight"]
+    kept = []
+    for it in items:
+        kind = it["kind"]
+        topics = it.get("meta", {}).get("topics", []) or []
+        if kind in muted["kind"]:
+            continue
+        if any(it["id"].lower().startswith(p) for p in muted["item"]):
+            continue
+        if muted["topic"] and (set(topics) & muted["topic"]):
+            continue
+        w = weight["kind"].get(kind, 0.0)
+        w += sum(weight["topic"].get(t, 0.0) for t in topics)
+        w += sum(v for k, v in weight["item"].items() if it["id"].lower().startswith(k))
+        it["meta"]["pref_weight"] = w
+        kept.append(it)
+    return kept
+
+
+def _pref_hint(prefs: dict) -> str:
+    """Short natural-language preference summary for the LLM editor prompt."""
+    more = [k for k, v in {**prefs["weight"]["kind"], **prefs["weight"]["topic"]}.items() if v > 0]
+    less = [k for k, v in {**prefs["weight"]["kind"], **prefs["weight"]["topic"]}.items() if v < 0]
+    parts = []
+    if more:
+        parts.append("favor (rank higher): " + ", ".join(sorted(more)))
+    if less:
+        parts.append("de-emphasize (rank lower): " + ", ".join(sorted(less)))
+    return "User preferences — " + "; ".join(parts) + "." if parts else ""
 
 
 def _truncate(text: str | None, n: int = 600) -> str:
@@ -102,6 +218,7 @@ def _gather_insights(cur, window_days: int) -> list[dict]:
                     "confidence": meta.get("confidence"),
                     "cross_project": cross_project,
                     "projects": sorted(projects),
+                    "topics": sorted(projects),
                     "source_titles": source_titles[:5],
                 },
             }
@@ -161,7 +278,7 @@ def _gather_resurfaced(cur, limit: int, suppress_days: int) -> list[dict]:
     """
     cur.execute(
         """
-        SELECT id, type, title, content, created_at, access_count,
+        SELECT id, type, title, content, created_at, access_count, project,
                COALESCE((metadata->>'depth_score')::float, 0) AS depth
         FROM memories
         WHERE status = 'active'
@@ -187,7 +304,8 @@ def _gather_resurfaced(cur, limit: int, suppress_days: int) -> list[dict]:
                 "title": r["title"],
                 "detail": _truncate(r["content"]),
                 "created_at": r["created_at"],
-                "meta": {"depth": round(r["depth"], 2), "access_count": r["access_count"]},
+                "meta": {"depth": round(r["depth"], 2), "access_count": r["access_count"],
+                         "topics": [r["project"]] if r["project"] else []},
             }
         )
     return items
@@ -197,7 +315,7 @@ def _gather_digest(cur) -> list[dict]:
     """The latest weekly digest ('what you're working on / learning')."""
     cur.execute(
         """
-        SELECT id, title, content, created_at
+        SELECT id, title, content, created_at, project
         FROM memories
         WHERE source_type = 'weekly_digest'
         ORDER BY created_at DESC
@@ -214,7 +332,7 @@ def _gather_digest(cur) -> list[dict]:
             "title": r["title"],
             "detail": _truncate(r["content"]),
             "created_at": r["created_at"],
-            "meta": {},
+            "meta": {"topics": [r["project"]] if r["project"] else []},
         }
     ]
 
@@ -223,7 +341,7 @@ def _gather_questions(cur, limit: int) -> list[dict]:
     """Active open questions (currently none in the store; future-proofed)."""
     cur.execute(
         """
-        SELECT id, title, content, created_at
+        SELECT id, title, content, created_at, project
         FROM memories
         WHERE type = 'question' AND status = 'active'
         ORDER BY created_at DESC
@@ -238,7 +356,7 @@ def _gather_questions(cur, limit: int) -> list[dict]:
             "title": r["title"],
             "detail": _truncate(r["content"]),
             "created_at": r["created_at"],
-            "meta": {},
+            "meta": {"topics": [r["project"]] if r["project"] else []},
         }
         for r in cur.fetchall()
     ]
@@ -263,6 +381,10 @@ def compose_briefing(
             items += _gather_digest(cur)
             items += _gather_questions(cur, QUESTION_LIMIT)
 
+    # Apply delivery preferences: drop hard-muted items, annotate soft weights.
+    prefs = load_prefs()
+    items = _apply_prefs(items, prefs)
+
     counts: dict[str, int] = {}
     for it in items:
         counts[it["kind"]] = counts.get(it["kind"], 0) + 1
@@ -270,6 +392,7 @@ def compose_briefing(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "items": items,
         "counts": counts,
+        "pref_hint": _pref_hint(prefs),
     }
 
 
@@ -295,8 +418,11 @@ _EDITOR_SYSTEM = (
 )
 
 
-def _editor_user_message(items: list[dict]) -> str:
-    lines = ["Candidate items (idx | kind | title | signal | detail):"]
+def _editor_user_message(items: list[dict], pref_hint: str = "") -> str:
+    lines = []
+    if pref_hint:
+        lines.append(pref_hint + "\n")
+    lines.append("Candidate items (idx | kind | title | signal | detail):")
     for i, it in enumerate(items):
         m = it["meta"]
         signal = ""
@@ -323,7 +449,9 @@ def _deterministic_edit(items: list[dict]) -> dict:
         kp = _KIND_PRIORITY.get(it["kind"], 9)
         if it["kind"] == "insight" and it["meta"].get("cross_project"):
             kp = -1  # cross-project insight outranks everything
-        return (kp, -(it["created_at"].timestamp() if it.get("created_at") else 0))
+        # Soft preference: positive weight pulls earlier, negative pushes later.
+        eff = kp - it["meta"].get("pref_weight", 0.0)
+        return (eff, -(it["created_at"].timestamp() if it.get("created_at") else 0))
 
     ordered = sorted(items, key=sort_key)[:MAX_ITEMS]
     for it in ordered:
@@ -353,7 +481,7 @@ def edit_briefing(briefing: dict, invoker=None) -> dict:
             from src.agent_invoker import AgentInvoker
 
             invoker = AgentInvoker()
-        res = invoker.invoke(_EDITOR_SYSTEM, _editor_user_message(items), timeout=180)
+        res = invoker.invoke(_EDITOR_SYSTEM, _editor_user_message(items, briefing.get("pref_hint", "")), timeout=180)
         out = res["output"] if isinstance(res.get("output"), dict) else {}
         chosen = out.get("items") or []
         ordered = []
@@ -404,7 +532,8 @@ def render_markdown(briefing: dict) -> str:
     # Detail layer.
     for i, it in enumerate(ranked):
         lines.append("")
-        lines.append(f"### {'★ ' if i == 0 else ''}{it['headline']}")
+        sid = it["id"].split(":")[0][:8]
+        lines.append(f"### {'★ ' if i == 0 else ''}{it['headline']}  `#{sid}`")
         meta_bits = []
         if it["kind"] == "insight" and it["meta"].get("projects"):
             meta_bits.append("across " + ", ".join(it["meta"]["projects"]))
@@ -418,6 +547,9 @@ def render_markdown(briefing: dict) -> str:
             lines.append("")
             lines.append("Drawn from: " + "; ".join(f"«{t}»" for t in it["meta"]["source_titles"]))
     lines.append("")
+    lines.append("---")
+    lines.append("_Shape it: `brief --useful <#id>` · `brief --less <kind|topic>` · "
+                 "`brief --mute <#id|kind|topic>` · `brief --unmute …` · `brief --prefs`_")
     return "\n".join(lines)
 
 

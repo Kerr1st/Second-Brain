@@ -344,3 +344,108 @@ def test_send_email_uses_transport():
         if p.get_content_type() in ("text/plain", "text/html")
     )
     assert "HTML" in bodies and "plain text" in bodies
+
+
+# --------------------------------------------------------------------------- #
+# Feedback loop (delivery preferences)
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture()
+def clean_express_feedback(test_db):
+    def _c():
+        with db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM express_feedback")
+            conn.commit()
+    _c()
+    yield
+    _c()
+
+
+def test_classify_target():
+    assert express._classify_target("insight") == ("kind", "insight")
+    assert express._classify_target("Contradiction") == ("kind", "contradiction")
+    assert express._classify_target("aba591ea-cb15-477f-9730-9e267561c54f")[0] == "item"
+    assert express._classify_target("abcd1234")[0] == "item"
+    assert express._classify_target("kiro") == ("topic", "kiro")
+    assert express._classify_target("my-project") == ("topic", "my-project")
+
+
+def test_apply_prefs_filters_muted_kind_item_topic():
+    items = [
+        _item("insight", "abcd1234ef", topics=["P1"]),
+        _item("resurface", "r1"),
+        _item("contradiction", "c1", topics=["secret"]),
+    ]
+    prefs = {
+        "muted": {"item": {"abcd1234"}, "kind": {"resurface"}, "topic": {"secret"}},
+        "weight": {"item": {}, "kind": {}, "topic": {}},
+    }
+    out = express._apply_prefs(items, prefs)
+    assert out == []  # insight muted by item-prefix, resurface by kind, contradiction by topic
+
+
+def test_apply_prefs_annotates_soft_weight():
+    items = [_item("insight", "i1", topics=["P1"])]
+    prefs = {
+        "muted": {"item": set(), "kind": set(), "topic": set()},
+        "weight": {"item": {}, "kind": {"insight": 1.0}, "topic": {"P1": 0.5}},
+    }
+    out = express._apply_prefs(items, prefs)
+    assert out[0]["meta"]["pref_weight"] == 1.5
+
+
+def test_deterministic_edit_respects_pref_weight():
+    items = [_item("contradiction", "c"), _item("resurface", "r")]
+    items[1]["meta"]["pref_weight"] = 5.0  # heavily boost the normally-lower resurface
+    out = express._deterministic_edit(items)
+    assert out["items"][0]["title"] == "r"
+
+
+def test_pref_hint_summarizes_weights():
+    prefs = {
+        "muted": {"item": set(), "kind": set(), "topic": set()},
+        "weight": {"item": {}, "kind": {"contradiction": 1.0}, "topic": {"kiro": -0.6}},
+    }
+    hint = express._pref_hint(prefs)
+    assert "contradiction" in hint and "kiro" in hint
+
+
+def test_record_list_remove_feedback(clean_express_feedback):
+    express.record_feedback("insight", "useful")
+    fb = express.list_feedback()
+    assert len(fb) == 1 and fb[0]["target_key"] == "insight" and fb[0]["signal"] == "useful"
+    assert express.remove_feedback("insight") == 1
+    assert express.list_feedback() == []
+
+
+def test_record_feedback_upserts_latest(clean_express_feedback):
+    express.record_feedback("resurface", "less")
+    express.record_feedback("resurface", "mute")  # same target → replace
+    fb = express.list_feedback()
+    assert len(fb) == 1 and fb[0]["signal"] == "mute"
+
+
+def test_record_feedback_rejects_bad_signal(clean_express_feedback):
+    with pytest.raises(ValueError):
+        express.record_feedback("insight", "love-it")
+
+
+def test_load_prefs_shape(clean_express_feedback):
+    express.record_feedback("insight", "mute")
+    express.record_feedback("kiro", "less")  # topic
+    p = express.load_prefs()
+    assert "insight" in p["muted"]["kind"]
+    assert p["weight"]["topic"]["kiro"] < 0
+
+
+def test_compose_respects_muted_kind(clean_express_feedback, sample_memory_factory):
+    sample_memory_factory(
+        type="insight", title="DC insight", content="x",
+        tags=["dream-cycle", "assimilation"],
+        metadata={"dream_cycle": True, "strategy": "cross_project_collision",
+                  "source_memories": [], "confidence": "high"},
+    )
+    assert any(i["kind"] == "insight" for i in express.compose_briefing()["items"])
+    express.record_feedback("insight", "mute")
+    assert not any(i["kind"] == "insight" for i in express.compose_briefing()["items"])
