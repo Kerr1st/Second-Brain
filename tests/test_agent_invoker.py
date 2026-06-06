@@ -328,3 +328,34 @@ class TestMcpConfigNotPassed:
         args, kwargs = mock_run.call_args
         cmd = args[0]
         assert "--trust-all-tools" not in cmd
+
+
+class TestInvokeDecodesLeniently:
+    """Regression: agent subprocess output must be decoded leniently.
+
+    On 2026-06-06 the first claude-opus-4.8 dream-cycle run aborted with
+    UnicodeDecodeError ('utf-8' codec can't decode byte 0xdc in position ~25K) — the
+    agent emitted a stray non-UTF-8 byte and strict decoding discarded the entire run
+    (0 candidates). invoke() must pass encoding='utf-8' + errors='replace' so a bad byte
+    becomes the replacement char instead of crashing synthesis.
+
+    **Validates: Requirements 13.1, 13.5**
+    """
+
+    @patch("src.agent_invoker.subprocess.run")
+    def test_invoke_passes_lenient_decode_kwargs(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"result": "ok"}',
+            stderr="",
+        )
+
+        AgentInvoker().invoke(
+            system_prompt="You are a test agent.",
+            user_message="input",
+        )
+
+        _, kwargs = mock_run.call_args
+        assert kwargs.get("text") is True
+        assert kwargs.get("encoding") == "utf-8"
+        assert kwargs.get("errors") == "replace"
