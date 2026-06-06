@@ -209,3 +209,138 @@ def test_compose_resurface_suppresses_recently_surfaced(clean_tables, sample_mem
 
     items = express.compose_briefing()["items"]
     assert not any(i["title"] == "Recently surfaced" for i in items)
+
+
+# --------------------------------------------------------------------------- #
+# P2: should_push (DB-backed)
+# --------------------------------------------------------------------------- #
+
+import src.dream_cycle_db as dcdb  # noqa: E402
+
+
+@pytest.fixture()
+def clean_dream_cycle(test_db):
+    """Truncate dream-cycle tables around a test (clean_tables doesn't touch them)."""
+    def _clean():
+        with db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM dream_cycle_candidates")
+                cur.execute("DELETE FROM dream_cycle_runs")
+            conn.commit()
+    _clean()
+    yield
+    _clean()
+
+
+def _completed_run_with(candidate: dict, verdict: str = "ACCEPTED") -> str:
+    run_id = dcdb.create_run("scheduled")
+    dcdb.store_candidate(run_id, candidate, {}, verdict)
+    dcdb.complete_run(run_id, {"candidates_generated": 1, "candidates_accepted": 1,
+                               "candidates_rejected": 0}, "digest")
+    return run_id
+
+
+def test_should_push_true_on_contradiction(clean_dream_cycle):
+    _completed_run_with({
+        "title": "Reversal detected",
+        "relationships": [{"relation_type": "contradicts", "target_id": "x"}],
+    })
+    d = express.should_push()
+    assert d["push"] is True
+    assert any(t["kind"] == "contradiction" for t in d["triggers"])
+
+
+def test_should_push_true_on_cross_project_strategy(clean_dream_cycle):
+    _completed_run_with({
+        "title": "A connection across projects",
+        "strategy_that_found_it": "cross_project_collision",
+        "source_memories": [],
+    })
+    d = express.should_push()
+    assert d["push"] is True
+    assert any(t["kind"] == "cross_project" for t in d["triggers"])
+
+
+def test_should_push_false_when_routine(clean_dream_cycle):
+    _completed_run_with({
+        "title": "A routine single-project insight",
+        "strategy_that_found_it": "depth_gradient",
+        "source_memories": [],
+        "relationships": [{"relation_type": "extends", "target_id": "x"}],
+    })
+    d = express.should_push()
+    assert d["push"] is False
+
+
+def test_should_push_respects_already_pushed(clean_dream_cycle):
+    run_id = _completed_run_with({
+        "title": "Reversal", "relationships": [{"relation_type": "contradicts", "target_id": "x"}],
+    })
+    assert express.should_push(last_pushed_run_id=run_id)["push"] is False
+
+
+def test_should_push_false_when_no_runs(clean_dream_cycle):
+    d = express.should_push()
+    assert d["push"] is False
+    assert d["run_id"] is None
+
+
+# --------------------------------------------------------------------------- #
+# P2: render_email + send_email
+# --------------------------------------------------------------------------- #
+
+def _edited(items, invoke_return):
+    invoker = MagicMock()
+    invoker.invoke.return_value = {"output": invoke_return, "raw": "{}"}
+    return express.edit_briefing({"items": items}, invoker=invoker)
+
+
+def test_render_email_has_subject_headlines_and_detail():
+    briefing = _edited(
+        [_item("contradiction", "c", detail="conflicting detail"),
+         _item("insight", "i", detail="insight detail", cross_project=True, projects=["P1", "P2"])],
+        {"items": [{"idx": 0, "headline": "Lead headline"}, {"idx": 1, "headline": "Second headline"}]},
+    )
+    em = express.render_email(briefing)
+    assert em["subject"].startswith("🧠")
+    assert "Lead headline" in em["html"] and "<h3" in em["html"]
+    assert "conflicting detail" in em["html"]
+    assert "Lead headline" in em["text"] and "Second headline" in em["text"]
+
+
+def test_render_email_empty_is_graceful():
+    em = express.render_email({"ranked": []})
+    assert "nothing" in em["subject"].lower() or "nothing" in em["text"].lower()
+
+
+def test_send_email_requires_config(monkeypatch):
+    for var in (express.ENV_TO, express.ENV_FROM, express.ENV_PASSWORD):
+        monkeypatch.delenv(var, raising=False)
+    with pytest.raises(RuntimeError, match="not configured"):
+        express.send_email("s", "<p>h</p>", "t")
+
+
+def test_send_email_uses_transport():
+    sent = {}
+    smtp = MagicMock()
+    smtp.sendmail.side_effect = lambda frm, to, msg: sent.update(frm=frm, to=to, msg=msg)
+
+    ok = express.send_email(
+        "Subject line", "<h3>HTML</h3>", "plain text",
+        to="me@example.com", sender="me@example.com", password="app-pw",
+        smtp_factory=lambda: smtp,
+    )
+    assert ok is True
+    smtp.starttls.assert_called_once()
+    smtp.login.assert_called_once_with("me@example.com", "app-pw")
+    assert sent["to"] == ["me@example.com"]
+
+    import email as email_lib
+    parsed = email_lib.message_from_string(sent["msg"])
+    assert parsed["Subject"] == "Subject line"
+    bodies = "\n".join(
+        p.get_payload(decode=True).decode("utf-8")
+        for p in parsed.walk()
+        if p.get_content_type() in ("text/plain", "text/html")
+    )
+    assert "HTML" in bodies and "plain text" in bodies

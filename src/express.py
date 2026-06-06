@@ -15,7 +15,12 @@ P2 (proactive Gmail push) builds on the same compose/edit and adds should_push()
 from __future__ import annotations
 
 import logging
+import os
+import smtplib
 from datetime import datetime, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from html import escape
 
 from psycopg2.extras import RealDictCursor
 
@@ -414,3 +419,184 @@ def render_markdown(briefing: dict) -> str:
             lines.append("Drawn from: " + "; ".join(f"«{t}»" for t in it["meta"]["source_titles"]))
     lines.append("")
     return "\n".join(lines)
+
+
+# --- P2: proactive push (high-bar Gmail) --------------------------------------
+
+# Config via env / gitignored (see EXPRESS-PLAN.md "Locked decisions" #9).
+ENV_TO = "EXPRESS_EMAIL_TO"
+ENV_FROM = "EXPRESS_EMAIL_FROM"
+ENV_PASSWORD = "GMAIL_APP_PASSWORD"
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 587
+
+
+def email_configured() -> bool:
+    """True iff all Gmail send credentials are present in the environment."""
+    return all(os.environ.get(v) for v in (ENV_TO, ENV_FROM, ENV_PASSWORD))
+
+
+def _distinct_projects(cur, source_ids) -> list[str]:
+    """Distinct non-empty projects among the given source memory UUIDs."""
+    ids = [s for s in (source_ids or []) if s]
+    if not ids:
+        return []
+    cur.execute(
+        "SELECT DISTINCT project FROM memories "
+        "WHERE id = ANY(%s::uuid[]) AND project IS NOT NULL AND project <> ''",
+        (ids,),
+    )
+    return [row["project"] for row in cur.fetchall()]
+
+
+def should_push(last_pushed_run_id: str | None = None) -> dict:
+    """Decide whether the latest dream-cycle run warrants an unsolicited email.
+
+    The bar (locked): push only when the latest completed run produced a NEW
+    cross-project synthesis OR a detected contradiction. Everything else stays
+    in the on-demand `brief`.
+
+    Args:
+        last_pushed_run_id: the run id already emailed (suppresses re-push).
+
+    Returns:
+        {"push": bool, "run_id": str|None, "reason": str, "triggers": [...]}
+    """
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id FROM dream_cycle_runs WHERE completed_at IS NOT NULL "
+                "ORDER BY completed_at DESC LIMIT 1"
+            )
+            run = cur.fetchone()
+            if not run:
+                return {"push": False, "run_id": None,
+                        "reason": "no completed dream-cycle run", "triggers": []}
+            run_id = str(run["id"])
+            if last_pushed_run_id and run_id == last_pushed_run_id:
+                return {"push": False, "run_id": run_id,
+                        "reason": "latest run already pushed", "triggers": []}
+
+            cur.execute(
+                "SELECT candidate_json FROM dream_cycle_candidates "
+                "WHERE run_id = %s AND final_verdict = 'ACCEPTED'",
+                (run_id,),
+            )
+            accepted = cur.fetchall()
+            triggers = []
+            for c in accepted:
+                cj = c["candidate_json"] or {}
+                title = cj.get("title") or "(insight)"
+                rels = cj.get("relationships") or []
+                if any((r or {}).get("relation_type") == "contradicts" for r in rels):
+                    triggers.append({"kind": "contradiction", "title": title})
+                    continue
+                projects = _distinct_projects(cur, cj.get("source_memories"))
+                if cj.get("strategy_that_found_it") == "cross_project_collision" or len(projects) >= 2:
+                    triggers.append({"kind": "cross_project", "title": title, "projects": projects})
+
+    push = bool(triggers)
+    if push:
+        reason = "; ".join(f"{t['kind']}: {t['title']}" for t in triggers)
+    else:
+        reason = f"{len(accepted)} accepted insight(s), none cross-project or contradiction"
+    return {"push": push, "run_id": run_id, "reason": reason, "triggers": triggers}
+
+
+def render_email(briefing: dict) -> dict:
+    """Render an edited briefing as an email. Returns {subject, html, text}.
+
+    Scannable headlines at the top, detail beneath (no fragile collapsible HTML).
+    """
+    ranked = briefing.get("ranked", [])
+    if not ranked:
+        return {
+            "subject": "Your second brain — nothing urgent",
+            "html": "<p>Nothing worth surfacing right now.</p>",
+            "text": "Nothing worth surfacing right now.\n",
+        }
+
+    lead = ranked[0]["headline"]
+    subject = f"🧠 {lead}" if len(lead) <= 110 else f"🧠 {lead[:107]}…"
+
+    # Scan layer
+    html = [
+        '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'
+        'max-width:640px;margin:0 auto;color:#1a1a1a;line-height:1.5">',
+        '<p style="color:#666;font-size:13px;margin:0 0 4px">Your second brain noticed:</p>',
+        "<ul style='padding-left:18px'>",
+    ]
+    text = ["Your second brain noticed:\n"]
+    for i, it in enumerate(ranked):
+        label = _KIND_LABEL.get(it["kind"], it["kind"])
+        mark = "★" if i == 0 else "•"
+        html.append(
+            f"<li style='margin:6px 0'><strong>{escape(it['headline'])}</strong>"
+            f" <span style='color:#999;font-size:12px'>({escape(label)})</span></li>"
+        )
+        text.append(f"{mark} {it['headline']}  ({label})")
+    html.append("</ul><hr style='border:none;border-top:1px solid #eee;margin:16px 0'>")
+    text.append("\n" + "-" * 40)
+
+    # Detail layer
+    for i, it in enumerate(ranked):
+        star = "★ " if i == 0 else ""
+        html.append(f"<h3 style='margin:18px 0 6px'>{star}{escape(it['headline'])}</h3>")
+        text.append(f"\n{star}{it['headline']}\n")
+        if it["kind"] == "insight" and it["meta"].get("projects"):
+            across = "across " + ", ".join(it["meta"]["projects"])
+            html.append(f"<p style='color:#888;font-size:12px;margin:0 0 6px'>{escape(across)}</p>")
+            text.append(f"({across})")
+        detail = it["detail"]
+        html.append(f"<p style='white-space:pre-wrap;margin:0'>{escape(detail)}</p>")
+        text.append(detail)
+        if it["kind"] == "insight" and it["meta"].get("source_titles"):
+            src = "Drawn from: " + "; ".join(f"«{t}»" for t in it["meta"]["source_titles"])
+            html.append(f"<p style='color:#888;font-size:12px;margin:6px 0 0'>{escape(src)}</p>")
+            text.append(src)
+    html.append("</div>")
+
+    return {"subject": subject, "html": "\n".join(html), "text": "\n".join(text) + "\n"}
+
+
+def send_email(subject: str, html: str, text: str, *, to: str | None = None,
+               sender: str | None = None, password: str | None = None,
+               smtp_factory=None) -> bool:
+    """Send a multipart (plain + HTML) email via Gmail SMTP (STARTTLS).
+
+    Credentials come from env (EXPRESS_EMAIL_TO/FROM, GMAIL_APP_PASSWORD) unless
+    passed explicitly. `smtp_factory` allows tests to inject a fake transport.
+
+    Raises:
+        RuntimeError: if email is not configured (missing to/from/password).
+    """
+    to = to or os.environ.get(ENV_TO)
+    sender = sender or os.environ.get(ENV_FROM)
+    password = password or os.environ.get(ENV_PASSWORD)
+    if not (to and sender and password):
+        raise RuntimeError(
+            f"Express email not configured: set {ENV_TO}, {ENV_FROM}, and {ENV_PASSWORD}."
+        )
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = to
+    msg.attach(MIMEText(text, "plain", "utf-8"))
+    msg.attach(MIMEText(html, "html", "utf-8"))
+
+    if smtp_factory is not None:
+        smtp = smtp_factory()
+    else:  # pragma: no cover — real network path, exercised live not in tests
+        smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+    try:
+        smtp.starttls()
+        smtp.login(sender, password)
+        smtp.sendmail(sender, [to], msg.as_string())
+    finally:
+        try:
+            smtp.quit()
+        except Exception:  # noqa: BLE001
+            pass
+    logger.info("Express email sent to %s: %s", to, subject)
+    return True
