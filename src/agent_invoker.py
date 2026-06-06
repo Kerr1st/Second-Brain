@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 KIRO_CLI = os.environ.get("KIRO_CLI", os.path.expanduser("~/.local/bin/kiro-cli"))
 AGENTS_DIR = os.path.expanduser("~/.kiro/agents")
-DEFAULT_MODEL = "claude-opus-4.6-1m"
+DEFAULT_MODEL = "claude-opus-4.8"
 
 # MCP server config for the Second Brain — Explorer and Thinker need this
 # to query memories via memory_search, memory_read, etc.
@@ -50,6 +50,7 @@ class AgentInvoker:
         user_message: str,
         mcp_config: str | None = None,
         timeout: int = 300,
+        effort: str | None = None,
     ) -> dict:
         """Invoke kiro-cli chat --no-interactive as a subprocess.
 
@@ -96,6 +97,8 @@ class AgentInvoker:
             ]
             if needs_tools:
                 cmd.append("--trust-all-tools")
+            if effort:
+                cmd += ["--effort", effort]
 
             # User message is the positional INPUT argument
             cmd.append(user_message)

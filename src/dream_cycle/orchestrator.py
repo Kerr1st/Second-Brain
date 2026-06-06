@@ -372,6 +372,7 @@ class DreamCycleOrchestrator:
             user_message=user_message,
             mcp_config="second-brain",
             timeout=600,
+            effort="high",
         )
 
         self._capture("explorer", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
@@ -451,6 +452,7 @@ class DreamCycleOrchestrator:
             system_prompt=prompt,
             user_message=user_message,
             mcp_config="second-brain",
+            effort="max",
         )
 
         safe_name = slice.name.replace(" ", "_").replace("/", "_")[:50]
@@ -534,6 +536,7 @@ class DreamCycleOrchestrator:
         result = self.invoker.invoke(
             system_prompt=prompt,
             user_message=user_message,
+            effort="high",
         )
 
         safe_title = candidate.title.replace(" ", "_").replace("/", "_")[:40]
