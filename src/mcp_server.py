@@ -15,6 +15,7 @@ from src.embeddings import generate_embedding
 from src.classify import classify_memory
 from src.depth import compute_depth_score
 from src.project import normalize_project_tag
+from src import express
 
 mcp = FastMCP("Second Brain")
 
@@ -304,6 +305,34 @@ def memory_learn(
         f"5. Prefix title with: 'From {source or '[source]'}:'",
         "\nCreate ONE memory per atomic insight, not one giant summary.",
     ])
+
+
+@mcp.tool()
+def memory_brief(window_days: int = 14, use_llm: bool = False) -> str:
+    """Surface what the second brain has synthesized but hasn't told you yet.
+
+    Call this at the START of a work session to get oriented: it volunteers recent
+    cross-project insights, detected contradictions (decisions you may be reversing),
+    high-value memories you haven't revisited in a while, the latest activity digest,
+    and open questions — connections you'd otherwise have to go looking for.
+
+    This is the "Express" surface: the system pushing its synthesis to you rather than
+    waiting to be queried. Use memory_search instead when you have a specific question.
+
+    Args:
+        window_days: how far back to pull recent dream-cycle insights (default 14).
+        use_llm: write polished headlines via an LLM editor pass (slower, spawns a
+            subprocess); default False uses fast deterministic ranking.
+
+    Returns a scannable Markdown briefing (headlines first, detail below).
+    """
+    class _NoLLM:
+        def invoke(self, *a, **k):
+            raise RuntimeError("deterministic")
+
+    briefing = express.compose_briefing(window_days=window_days)
+    briefing = express.edit_briefing(briefing, invoker=None if use_llm else _NoLLM())
+    return express.render_markdown(briefing)
 
 
 if __name__ == "__main__":

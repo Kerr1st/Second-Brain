@@ -328,3 +328,33 @@ class TestMemoryLearnMcp:
         assert "External Knowledge to Internalize" in out
         assert "Your Task" in out
         assert "New article about caching strategies" in out
+
+
+class TestMemoryBrief:
+    """memory_brief returns a Markdown briefing surfacing synthesized items."""
+
+    def test_memory_brief_surfaces_dream_cycle_insight(self, test_db, clean_tables):
+        import src.db as db
+
+        db.create_memory(
+            type="insight",
+            title="A cross-project synthesis",
+            content="connects project A and project B in a non-obvious way",
+            tags=["dream-cycle", "assimilation"],
+            metadata={"dream_cycle": True, "strategy": "cross_project_collision",
+                      "source_memories": [], "confidence": "high"},
+        )
+
+        from src.mcp_server import memory_brief
+
+        out = memory_brief(use_llm=False)  # deterministic — no LLM subprocess
+        assert isinstance(out, str)
+        assert "# Your briefing" in out
+        assert "A cross-project synthesis" in out
+
+    def test_memory_brief_empty_is_graceful(self, test_db, clean_tables):
+        from src.mcp_server import memory_brief
+
+        out = memory_brief(use_llm=False)
+        assert isinstance(out, str)
+        assert "quiet" in out.lower()
