@@ -1,82 +1,11 @@
 #!/bin/bash
-# Nightly YouTube liked-videos scrape via Crawlee.
-# Runs at 1:30 AM via launchd, before the chat extraction pipeline.
+# YouTube capture — self-contained yt-dlp + curl_cffi path.
 #
-# Scrapes YouTube Liked videos via browser cookies, filtering to videos
-# >=5 minutes (skips shorts/clips). Watch-history (list=HL) was blocked by
-# YouTube in 2026, so Liked videos (list=LL) is the capture signal.
-# Crawlee writes transcripts to knowledge/sources/ with metadata headers
-# and registers them in knowledge/index.md. The Second Brain ingestion
-# pipeline picks them up from there.
-
+# Enumerates the user's Liked + Watch Later playlists (cookies) and ingests
+# English transcripts (anonymous fetch + browser impersonation) via
+# src.capture.youtube. Replaces the former Crawlee/Node scrape (see git history).
+# Invoked nightly by launchd through job_wrapper.sh; args pass through for
+# manual runs, e.g.:  scripts/jobs/youtube_scrape.sh --dry-run --limit 5
 set -uo pipefail
-
-CRAWLEE_DIR="/Users/kerrfir/Work/Tools/Crawlee"
-LOGFILE="/Users/kerrfir/second-brain/logs/youtube-$(date +%Y%m%d).log"
-MIN_DURATION=300  # 5 minutes in seconds
-
-mkdir -p "$(dirname "$LOGFILE")"
-log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOGFILE"; }
-
-# Pre-flight: check yt-dlp is available
-if ! command -v yt-dlp &>/dev/null; then
-  log "ABORT: yt-dlp not found. Install with: brew install yt-dlp"
-  exit 1
-fi
-
-cd "$CRAWLEE_DIR"
-
-log "=== YouTube Liked Videos Scrape (min ${MIN_DURATION}s) ==="
-
-# Get liked-videos playlist URLs, filtering to >= MIN_DURATION.
-# NOTE: YouTube blocked watch-history (list=HL, "playlist type is unviewable")
-# in 2026, so we use Liked videos (list=LL) — a higher-signal, intentional
-# capture that still works with browser cookies.
-# --no-flat-playlist fetches metadata so --match-filter can check duration.
-VIDEOS=$(yt-dlp --print webpage_url --match-filter "duration>=${MIN_DURATION}" \
-  --cookies-from-browser chrome --no-download \
-  "https://www.youtube.com/playlist?list=LL" 2>>"$LOGFILE") || true
-
-if [ -z "$VIDEOS" ]; then
-  log "No videos matched filter. Done."
-  exit 0
-fi
-
-PROCESSED=0
-SKIPPED=0
-FAILED=0
-
-while IFS= read -r VIDEO_URL; do
-  [ -z "$VIDEO_URL" ] && continue
-
-  log "Processing: $VIDEO_URL"
-  node --input-type=module -e "
-    const yt = await import('./youtube.js');
-    const ks = await import('./knowledge-store.js');
-    const md = yt.extractTranscript('$VIDEO_URL', { lang: 'en' });
-    if (md.includes('No transcript available')) {
-      process.stderr.write('No subtitles\\n');
-      process.exit(2);
-    }
-    ks.ensureKnowledgeStore('$CRAWLEE_DIR/knowledge');
-    const title = (md.match(/^# (.+)$/m) || [])[1] || 'Untitled';
-    const videoId = (md.match(/^Video ID: (.+)$/m) || [])[1]?.trim() || '';
-    const filename = yt.youtubeFilename(title, videoId);
-    ks.writeSource('$CRAWLEE_DIR/knowledge', filename, md);
-    const date = new Date().toISOString().split('T')[0];
-    const entry = { title, url: '$VIDEO_URL', type: 'youtube-transcript', filename: filename.replace('.md', ''), date };
-    ks.updateIndex('$CRAWLEE_DIR/knowledge', entry);
-    ks.updateTypeIndex('$CRAWLEE_DIR/knowledge', 'youtube-transcript', entry);
-  " >> "$LOGFILE" 2>&1
-
-  EXIT_CODE=$?
-  if [ $EXIT_CODE -eq 0 ]; then
-    PROCESSED=$((PROCESSED + 1))
-  elif [ $EXIT_CODE -eq 2 ]; then
-    SKIPPED=$((SKIPPED + 1))
-  else
-    FAILED=$((FAILED + 1))
-  fi
-done <<< "$VIDEOS"
-
-log "=== Done: processed=$PROCESSED skipped=$SKIPPED failed=$FAILED ==="
+cd "$(dirname "$0")/../.."          # repo root, so `-m src.capture.youtube` resolves
+exec .venv/bin/python -m src.capture.youtube "$@"
