@@ -1,22 +1,22 @@
 # Second Brain — Operations
 
-> Last updated: 2026-05-17
+> Last updated: 2026-06-08
 
 ## Scheduled Jobs
 
-All jobs use macOS launchd. Plists live in `scheduling/`. Most use `scripts/jobs/job_wrapper.sh` which sends a macOS notification on failure.
+All jobs use macOS launchd. Plists live in `scheduling/`. Most use `scripts/jobs/job_wrapper.sh` which sends a macOS notification on failure. (The list below is the primary set; `scheduling/` also holds `distill`, `weekly-digest`, and `liveness` jobs — see that directory for the authoritative set and exact schedules.)
 
 | Schedule | Job | Script | Plist | Status |
 |---|---|---|---|---|
 | Sat 1:00 AM | Bookmark scrape | `scrape_bookmarks.py` | `com.second-brain.bookmarks` | Working |
-| Daily 1:30 AM | YouTube scrape | `youtube_scrape.sh` | `com.second-brain.youtube` | Working |
+| Daily 1:30 AM | YouTube capture | `youtube_scrape.sh` → `src/capture/youtube.py` | `com.second-brain.youtube` | Working (self-contained yt-dlp) |
 | Daily 2:00 AM | Backup | `backup.sh` | `com.second-brain.backup` | Working |
 | Daily 2:30 AM | Chat extraction | `chat_extract.py` | `com.second-brain.chat-extract` | Working |
 | Daily 3:00 AM | Staged ingestion | `ingest_staged.sh` | `com.second-brain.ingest` | Working |
 | Hourly | QD sync | `qd_sync.sh` | `com.second-brain.qd-sync` | Working |
 | Sun 3:00 AM | Backup verify | `verify_backup.sh` | `com.second-brain.verify` | Working |
-| Sun 4:00 AM | Dream cycle | `dream_cycle_scheduled.sh` | `com.second-brain.dream-cycle` | Working |
-| KeepAlive | Capture API | `capture_api.sh` | `com.second-brain.capture-api` | Working (port 8100) |
+| (see plist) | Dream cycle | `dream_cycle_scheduled.sh` | `com.second-brain.dream-cycle` | Working |
+| ~~KeepAlive~~ | ~~Capture API~~ | `capture_api.sh` | `com.second-brain.capture-api` | **DEPRECATED — 0 captures ever; slated for removal** |
 
 ### Installing a LaunchAgent
 
@@ -48,16 +48,16 @@ Daily at 2 AM. Full details in [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md).
 
 | What | Where | Retention |
 |---|---|---|
-| pg_dump (all tables) | Google Drive + S3 | 30 days cloud, 7 days local |
-| JSON exports (memories, entities, edges, memory_entities) | Google Drive + S3 | 30 days cloud, 7 days local |
-| KB source docs | Google Drive + S3 | Current only |
-| Config (all docs, migrations, docker-compose, requirements.txt) | Google Drive + S3 | Current only |
+| pg_dump (all tables) | Google Drive + local | 30 days cloud, 7 days local |
+| JSON exports (memories, entities, edges, memory_entities) | Google Drive + local | 30 days cloud, 7 days local |
+| KB source docs | Google Drive + local | Current only |
+| Config (all docs, migrations, docker-compose, requirements.txt) | Google Drive + local | Current only |
 
-The backup script (`scripts/jobs/backup.sh`) checks AWS SSO token validity before S3 upload and attempts auto-refresh. If SSO is expired and can't be refreshed, S3 is skipped with a warning — Google Drive still runs.
+**AWS S3 was de-scoped on 2026-06-01** (brittle overnight SSO). Durable copies are now Google Drive + local (code/config also in git on `origin`/`mini`). `scripts/jobs/backup.sh` no longer uploads to S3. The JSON exports still include `entities`/`edges`/`memory_entities` (the now-dormant KG tables) pending cleanup.
 
 ## AWS SSO Management
 
-The S3 backup leg and Bedrock embedding calls depend on AWS SSO credentials.
+Bedrock embedding/generation calls depend on AWS SSO credentials. (The S3 backup leg was de-scoped 2026-06-01, so backups no longer depend on SSO — only embedding and the dream cycle's LLM calls do.)
 
 ```bash
 # Check token status
@@ -72,9 +72,8 @@ aws sso login --profile default
 ```
 
 SSO tokens expire after 8-12 hours. When expired:
-- S3 backups fail (Google Drive unaffected)
-- Bedrock embedding calls fail (affects memory_search, integration tests)
-- The backup script attempts auto-refresh but this requires an active desktop session
+- Bedrock embedding/generation calls fail (affects ingestion, `memory_search`, the dream cycle, integration tests)
+- Backups are unaffected (Google Drive + local; S3 de-scoped)
 
 ## Quick Desktop Sync
 
@@ -101,24 +100,9 @@ Hourly incremental sync from Quick Desktop's SQLite databases into PostgreSQL. T
 
 All scripts are idempotent — safe to run repeatedly. See [QUICK-DESKTOP-INTEGRATION.md](QUICK-DESKTOP-INTEGRATION.md) for design details.
 
-## Capture API
+## Capture API — DEPRECATED
 
-HTTP endpoint for ingesting content from Slack, browser extensions, mobile, and email. Runs as a KeepAlive LaunchAgent on port 8100.
-
-```bash
-# Health check
-curl http://localhost:8100/health
-
-# Submit a memory
-curl -X POST http://localhost:8100/capture \
-  -H "Authorization: Bearer $CAPTURE_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"title": "...", "content": "...", "type": "insight"}'
-```
-
-Endpoints: `/capture`, `/capture/slack`, `/capture/browser`, `/capture/email`
-
-Token is set in the LaunchAgent plist (`com.second-brain.capture-api.plist`) as the `CAPTURE_API_TOKEN` environment variable. Logs at `~/Library/Logs/second-brain/capture-api-{stdout,stderr}.log`.
+**Status: unused, slated for removal.** The HTTP capture endpoint (`src/capture_api.py`; Slack/browser/mobile/email on port 8100) has captured **0 memories** in its lifetime. Its launchd job (`com.second-brain.capture-api`) and test (`test_capture_api.py`) are part of the dead-code cleanup. In-session capture goes through the MCP `memory_create` tool; new ingestion follows the capture component (`docs/CAPTURE-COMPONENTS.md`).
 
 ## Express (briefing & feedback)
 
@@ -173,8 +157,7 @@ docker/data/   # ~2.5 GB
 
 | Check | Command | Expected |
 |---|---|---|
-| All jobs loaded | `launchctl list \| grep second-brain` | 9 entries, exit code 0 |
-| Capture API healthy | `curl -s http://localhost:8100/health` | `{"status":"healthy"}` |
+| All jobs loaded | `launchctl list \| grep second-brain` | jobs present, exit code 0 |
 | Backup ran today | `cat logs/backup-$(date +%Y%m%d).log` | "Backup complete" |
 | QD sync running | `cat logs/qd-sync-$(date +%Y%m%d).log` | Hourly entries |
 | AWS SSO valid | `aws sts get-caller-identity` | Returns account info |

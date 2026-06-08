@@ -3,6 +3,14 @@
 **Date:** 2026-04-21
 **Branch:** `quick_desktop_integration`
 
+> **⚠️ STATUS (2026-06-08):** This documents the original QD integration, including the **entity
+> knowledge graph**. The KG (`entities`/`entity_edges`/`memory_entities`) was imported but is
+> **currently DORMANT — unused by retrieval, synthesis, or Express** (0 `src/` references; ~99.5%
+> disconnected from memories). See `AGENTIC-RETRIEVAL-PLAN.md` (KG deferred) and `ARCHITECTURE.md`.
+> The QD *memory / doc / chat / feed* sync still runs; the **KG sections below are historical**.
+> Entity counts cited here predate later imports and conflict with other docs — treat as
+> illustrative, not current.
+
 ## Context
 
 Quick Desktop (QD) is an AI desktop assistant that monitors Slack, Outlook, and calendar, extracting knowledge into a local SQLite database (`~/.quickwork/knowledge_storage/knowledge_v1.db`). After one week of use, it had accumulated:

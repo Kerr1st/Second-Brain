@@ -1,19 +1,19 @@
 # Second Brain — Architecture
 
-> Last updated: 2026-06-06
+> Last updated: 2026-06-08
 
 ## Overview
 
-A personal knowledge system that gives AI agents persistent memory across sessions. PostgreSQL + pgvector stores memories, relationships, and a knowledge graph. An MCP server exposes this to Kiro CLI, Claude Code, and other agents. A dream cycle pipeline autonomously surfaces connections and insights.
+A personal knowledge system that gives AI agents persistent memory across sessions. PostgreSQL + pgvector stores memories and their typed relationships. An MCP server exposes this to Kiro CLI, Claude Code, and other agents. A dream cycle pipeline autonomously surfaces connections and insights. (An entity knowledge graph was imported from Quick Desktop but is currently **dormant** — unused by retrieval/synthesis; see below.)
 
 ## System Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Capture Channels                                           │
-│  Kiro CLI · Kiro IDE · Quick Desktop (full: memories, KG,   │
-│  chats, feed events, docs, Slack graph) · Crawlee (web/YT)  │
-│  · Capture API (port 8100) · Browser · Mobile               │
+│  Kiro CLI · Kiro IDE chats · Quick Desktop (docs, chats,    │
+│  feed events) · YouTube (yt-dlp, src/capture/youtube.py)    │
+│  · Web articles (Crawlee, ~/Work/Tools/Crawlee)             │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -27,9 +27,9 @@ A personal knowledge system that gives AI agents persistent memory across sessio
 │                                                             │
 │  ┌───────────┐ ┌────────────────┐ ┌──────────────────────┐  │
 │  │ memories   │ │ relationships  │ │ knowledge graph      │  │
-│  │ ~120K rows │ │ source→target  │ │ entities (3.9K)      │  │
-│  │            │ │ typed edges    │ │ entity_edges (6.5K)  │  │
-│  │            │ │                │ │ memory_entities      │  │
+│  │ ~121K rows │ │ source→target  │ │ (imported from QD,   │  │
+│  │            │ │ typed edges    │ │ DORMANT — unused in  │  │
+│  │            │ │                │ │ retrieval/synthesis) │  │
 │  └───────────┘ └────────────────┘ └──────────────────────┘  │
 │                                                             │
 │  ┌───────────────────┐ ┌──────────────────────────────────┐ │
@@ -52,12 +52,12 @@ A personal knowledge system that gives AI agents persistent memory across sessio
 
 ## Data Flow
 
-1. **Capture** — Content arrives from multiple channels (AI chats, Quick Desktop, Crawlee scrapes, manual input, Capture API)
+1. **Capture** — Content arrives from multiple channels (Kiro CLI/IDE chats, Quick Desktop, YouTube transcripts, web scrapes)
 2. **Ingest** — Content is parsed, classified (semantic/episodic/procedural), chunked, embedded, and stored with auto-discovered relationships
 3. **Retrieve** — Hybrid search (BM25 + vector + RRF) with cognitive science-grounded reranking
 4. **Synthesize** — Dream cycle pipeline (Explorer → Thinker → 4-evaluator Consensus Panel) autonomously surfaces connections and insights
 5. **Deliver (Express)** — surfaces synthesized output to the user: on-demand `brief`, a gated Gmail push chained after the noon dream cycle, and the `memory_brief` MCP tool; shaped by delivery preferences (`express_feedback`, migration 010)
-6. **Backup** — Daily encrypted pg_dump + JSON exports to Google Drive and S3
+6. **Backup** — Daily encrypted pg_dump + JSON exports to Google Drive (+ local + git). **S3 was de-scoped 2026-06-01** (brittle overnight SSO).
 
 ## Database Schema
 
@@ -76,7 +76,7 @@ CREATE TABLE memories (
     embedding vector(1024),
     tags TEXT[] DEFAULT '{}',
     source_url TEXT,
-    source_type TEXT,                -- youtube, article, pdf, course, kiro_cli_chat, kiro_ide_chat, quick_desktop, quick_desktop_chat, quick_desktop_feed, quick_desktop_doc, quick_desktop_session_event, notes, manual
+    source_type TEXT,                -- youtube, article, kiro_cli_chat, kiro_ide_chat, distilled_chat, quick_desktop_doc, quick_desktop_chat, quick_desktop_feed, ... (see DB for full set)
     metadata JSONB DEFAULT '{}',
     status TEXT DEFAULT 'active',    -- active, explored, archived, superseded, user_rejected
     confidence FLOAT DEFAULT 1.0,
@@ -88,9 +88,11 @@ CREATE TABLE memories (
     mem_class TEXT,                   -- semantic, episodic, procedural
     project TEXT,
     last_accessed_at TIMESTAMPTZ,
-    encoding_context TEXT,           -- cognitive context at creation time (migration 006)
-    schema_type TEXT                 -- memory schema type (migration 007)
+    encoding_context TEXT            -- cognitive context at creation time (migration 006)
 );
+-- NOTE: migration 007 added partial INDEXES for schema-type memories
+-- (type='schema' + derived_from edges) — NOT a column. There is no schema_type
+-- column, and the schema feature is currently inert (0 type='schema' rows).
 
 -- memory_relationships: Typed edges between memories
 CREATE TABLE memory_relationships (
@@ -104,9 +106,9 @@ CREATE TABLE memory_relationships (
 );
 ```
 
-### Knowledge Graph Tables (migration 008)
+### Knowledge Graph Tables (migration 008) — DORMANT
 
-Imported from Quick Desktop's knowledge graph. Entities represent real-world objects (people, tools, projects); edges represent factual relationships between them. The bridge table links entities to memories.
+**Status: imported from Quick Desktop but unused by retrieval, synthesis, or Express (0 `src/` references).** Retained for possible future use; see `AGENTIC-RETRIEVAL-PLAN.md` (the KG is ~99.5% disconnected from memories, so it is deferred). Entities represent real-world objects (people, tools, projects); edges represent factual relationships between them; the bridge table links entities to memories.
 
 ```sql
 CREATE TABLE entities (
@@ -265,16 +267,17 @@ See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale.
 | LLM | Amazon Bedrock (Claude) |
 | Embeddings | Amazon Bedrock (Titan v2, 1024-dim) |
 | Scheduling | macOS launchd |
-| Backup transport | rclone (Google Drive + S3) |
+| Backup transport | rclone (Google Drive) + local + git — S3 de-scoped 2026-06-01 |
 | Backup encryption | GPG (AES-256) |
-| Content acquisition | Crawlee (Node.js, `~/Work/Tools/Crawlee/`) |
+| YouTube capture | yt-dlp + curl_cffi (in-repo, `src/capture/youtube.py`) |
+| Web/article acquisition | Crawlee (Node.js, `~/Work/Tools/Crawlee/`) |
 | QD sync | Quick Desktop (`knowledge_v1.db`, `sessions.db`, `eventlog/`, `slack_cache/`) |
 
 ## Dream Cycle Pipeline
 
 Four-agent autonomous learning system (`src/dream_cycle/`):
 
-1. **Explorer** — Assembles "memory slices" using 10 strategies (temporal juxtaposition, cross-project collision, orphan archaeology, etc.)
+1. **Explorer** — Assembles "memory slices" using 11 strategies (temporal juxtaposition, cross-project collision, orphan archaeology, etc.)
 2. **Thinker** — Analyzes slices, proposes candidate insights (CREATE, UPDATE, or SUPERSEDE operations)
 3. **Consensus Panel** — 4 evaluators (Skeptic, User Advocate, Epistemologist, Methodologist) vote independently. Binary BFT: ≥3/4 = ACCEPTED
 4. **Storage** — Accepted candidates become memories with `tags: ["dream-cycle"]` and `metadata: {"dream_cycle": true}`
@@ -302,7 +305,8 @@ src/
   ingest.py              Ingestion pipeline
   classify.py            Memory classifier (semantic/episodic/procedural)
   depth.py               Depth scorer (0.0–1.0)
-  capture_api.py         HTTP capture endpoint
+  capture_api.py         HTTP capture endpoint (DEPRECATED — 0 captures, slated for removal)
+  capture/               Self-contained capture sources (youtube.py); see CAPTURE-COMPONENTS.md
   models.py              Data models
   agent_invoker.py       Subprocess-based agent invocation
   parsers/               Chat and content parsers

@@ -1,19 +1,30 @@
 # Agent Memory Architecture — Disaster Recovery Runbook
 
-> Last updated: 2026-04-22
+> Last updated: 2026-06-08
 > Backup schedule: Daily at 2:00 AM (launchd)
 > Verification schedule: Weekly, Sundays at 3:00 AM (launchd)
 > Encryption: AES-256 via GPG
 > RPO: 24 hours | RTO: ~15-30 minutes
-> Recovery principle: **Either Google OR AWS alone is sufficient to fully recover the entire system.**
+
+> ## ⚠️ CURRENT POSTURE (changed 2026-06-01)
+> **AWS S3 was de-scoped** (brittle overnight SSO). Backups now go to **Google Drive + local
+> only** (code/config also in git on `origin`/`mini`). This means:
+> - The old "**Either Google OR AWS alone is sufficient**" dual-cloud guarantee **no longer holds**
+>   for data — offsite redundancy is now **single-cloud (Google Drive)**.
+> - **Scenario 2 (recovery from AWS S3) is UNAVAILABLE** — no S3 backups since 2026-06-01.
+> - The AWS sections below are retained for **historical reference / if S3 is re-enabled**.
+>
+> **OPEN DECISION:** accept single-cloud + local, or re-establish a second offsite target
+> (re-enable S3, or add e.g. Backblaze B2). Until then, treat Google Drive + local as the
+> sole recovery path and verify the Google leg diligently.
 
 ### Known Failure Modes
 
 | Issue | Impact | Mitigation |
 |---|---|---|
-| AWS SSO token expiry | S3 uploads fail silently | Backup script auto-refreshes via `aws sso login`; falls back to Google Drive only with WARN log |
-| Google OAuth token expiry | Google Drive uploads fail | Uses refresh token — hasn't expired in practice. Re-auth: `rclone config reconnect gdrive:` |
+| Google OAuth token expiry | Google Drive uploads fail → **no offsite backup** (S3 de-scoped, so Google is the only cloud) | Uses refresh token — hasn't expired in practice. Re-auth: `rclone config reconnect gdrive:`. Local copy still retained 7 days. |
 | Docker not running at 2 AM | Backup aborts | Script auto-starts container; pre-flight check |
+| ~~AWS SSO token expiry~~ | ~~S3 uploads fail~~ | **N/A — S3 de-scoped 2026-06-01.** SSO now only affects Bedrock embedding/generation. |
 
 ### AWS SSO Recovery
 
@@ -192,6 +203,10 @@ echo "✅ Full recovery from Google Drive complete"
 ---
 
 ### Scenario 2: Full recovery from AWS (no Google, no local machine)
+
+> **⚠️ UNAVAILABLE since 2026-06-01 — S3 was de-scoped, so no S3 backups exist to recover from.**
+> This scenario is retained for historical reference and applies only if S3 is re-enabled.
+> Use Scenario 1 (Google Drive) as the offsite recovery path.
 
 ```bash
 # On a new machine:

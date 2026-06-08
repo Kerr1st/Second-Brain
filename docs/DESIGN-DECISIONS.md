@@ -30,6 +30,8 @@ Kiro CLI in `--no-interactive` mode IS the LLM integration layer. It handles aut
 
 Clean separation of concerns. Crawlee is a content acquisition tool — it shouldn't know about PostgreSQL, embeddings, or the Second Brain schema. It outputs markdown to a directory. The ingestion pipeline reads from that directory. If either side changes, the other doesn't break.
 
+> **Update (2026-06-08):** Still true for **web/article** capture. **YouTube moved in-repo** to a self-contained `yt-dlp` connector (`src/capture/youtube.py`) that no longer goes through Crawlee — see `CAPTURE-COMPONENTS.md`. The connector emits the same markdown-with-metadata-header contract, so the separation principle is preserved.
+
 ## Why the Open Brain comparison matters
 
 Nate B Jones' "Open Brain" system (YouTube: "You Don't Need SaaS") independently converged on the same core stack (PostgreSQL + pgvector + MCP). Comparing architectures revealed gaps in ours:
@@ -219,6 +221,11 @@ The research shows that repeated elaborative interrogation at increasing interva
 Added 2026-03-28. The `expired_at` column on `memory_relationships` existed but was never set. Now, after each dream cycle run, relationships where neither endpoint has been accessed in 90+ days are marked expired. This prevents stale relationships from cluttering the knowledge graph. A "contradicts" relationship from 6 months ago between two memories nobody looks at is noise, not signal.
 
 ## Why schema-type memories (two-level retrieval)
+
+> **Status (2026-06-08): INERT.** This describes the *intended* design. In practice the write path
+> was never completed — there are **0 `type='schema'` memories** in the DB, so the `schema_context`
+> field always returns empty. Migration 007 added supporting partial indexes (NOT a `schema_type`
+> column). Rationale retained as design history; the feature is a candidate for completion or removal.
 
 Added 2026-03-28. Bartlett (1932): schema theory; Piaget: assimilation/accommodation.
 
