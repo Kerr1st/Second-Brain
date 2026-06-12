@@ -176,8 +176,8 @@ SKIPPED=0
 log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOGFILE"; }
 
 # Pre-flight: check PostgreSQL is reachable
-if ! docker exec second-brain-db pg_isready -U memory_bank > /dev/null 2>&1; then
-  log "ABORT: PostgreSQL is not reachable. Is Docker running?"
+if ! pg_isready -h 127.0.0.1 -p 5432 -U memory_bank > /dev/null 2>&1; then
+  log "ABORT: PostgreSQL is not reachable. Is the postgresql@17 service running?"
   exit 1
 fi
 
@@ -289,7 +289,7 @@ Stored in the `metadata` JSONB column.
 
 ### Phase 2 Error Handling (ingest_staged.sh)
 
-- **Pre-flight check**: Before processing any files, verify PostgreSQL is reachable via `docker exec`. If not, abort immediately — don't waste Kiro credits on sessions that can't write to the database.
+- **Pre-flight check**: Before processing any files, verify PostgreSQL is reachable (native, `pg_isready -h 127.0.0.1`). If not, abort immediately — don't waste Kiro credits on sessions that can't write to the database.
 - **Per-file isolation**: Each chat is a separate Kiro session. If one fails, the others still process.
 - **Failure handling**: If Kiro exits non-zero or the staging file still exists after the session (meaning it wasn't successfully ingested and deleted), move the file to `staging/failed/` for later investigation.
 - **Status file**: After each run, write `logs/last_ingest_status.json` with counts of processed, failed, and pending files. This is the single file to check for pipeline health.

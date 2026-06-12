@@ -2,7 +2,9 @@
 
 Paste-to-resume anchor for context compaction. Repo `/Users/kerrfir/second-brain`,
 branch `main` @ `4305cc8`, remotes `origin` (GitHub) + `mini` (192.168.1.224), tree clean.
-**venv rebuilt on Python 3.14.3** (was 3.13). Live DB via `docker exec second-brain-db psql -U memory_bank -d memory_bank` — but see Docker blocker below.
+**venv rebuilt on Python 3.14.3** (was 3.13).
+
+> **UPDATE (2026-06-12, later the same day):** The Docker Desktop sign-in **BLOCKER described below was RESOLVED by migrating the database off Docker entirely.** The live DB is now **native Homebrew PostgreSQL 17 + pgvector** (`psql -h 127.0.0.1 -U memory_bank -d memory_bank`; `brew services`, localhost-only). Phases 1–4 of `MIGRATION-native-postgres.md` are complete; Phase 5 (decommission Docker) is pending. The "BLOCKER" and "sign into Docker Desktop" items below are **historical**.
 
 ## STATE (good)
 - **Tests: 643/643 pass on Python 3.14.** Migration verified clean.

@@ -40,7 +40,7 @@ Nate B Jones' "Open Brain" system (YouTube: "You Don't Need SaaS") independently
 - **Memory migration** — he has prompts to pull from Claude/ChatGPT memory. Added to our roadmap.
 - **Weekly synthesis** — periodic review that surfaces patterns. Added to our roadmap.
 
-Our system is deeper (relationship graph, typed memories, dual-site backup). His is more accessible (low-friction capture). We're adding his accessibility to our depth.
+Our system is deeper (relationship graph, typed memories, encrypted offsite + local backup). His is more accessible (low-friction capture). We're adding his accessibility to our depth.
 
 ## Why `metadata JSONB` instead of dedicated columns
 

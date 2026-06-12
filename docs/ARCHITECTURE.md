@@ -1,6 +1,6 @@
 # Second Brain — Architecture
 
-> Last updated: 2026-06-08
+> Last updated: 2026-06-12
 
 ## Overview
 
@@ -23,7 +23,7 @@ A personal knowledge system that gives AI agents persistent memory across sessio
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  PostgreSQL 17 + pgvector (Docker)                          │
+│  PostgreSQL 17 + pgvector (native)                          │
 │                                                             │
 │  ┌───────────┐ ┌────────────────┐ ┌──────────────────────┐  │
 │  │ memories   │ │ relationships  │ │ knowledge graph      │  │
@@ -262,7 +262,7 @@ See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale.
 
 | Component | Technology |
 |---|---|
-| Knowledge store | PostgreSQL 17 + pgvector (Docker) |
+| Knowledge store | PostgreSQL 17 + pgvector (native Homebrew, localhost:5432; Docker container retained as rollback pending Phase 5 decommission) |
 | Agent interface | MCP server (`src/mcp_server.py`) |
 | LLM | Amazon Bedrock (Claude) |
 | Embeddings | Amazon Bedrock (Titan v2, 1024-dim) |

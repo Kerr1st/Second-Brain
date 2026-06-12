@@ -25,7 +25,7 @@ The existing test suite (174 tests across 8 files) covers the dream cycle pipeli
 - **Relationship_Discovery**: The automatic process of creating `related_to` relationships between a newly ingested Memory and its Semantic_Neighbors and Temporal_Neighbors.
 - **Ingest_Pipeline**: The `ingest_content()` function in `src/ingest.py` that parses, chunks, embeds, and stores content as memories.
 - **MCP_Server**: The `src/mcp_server.py` module exposing Second Brain tools (memory_create, memory_search, etc.) to AI agents via the MCP protocol.
-- **Test_DB**: An isolated `memory_bank_test` PostgreSQL database used for automated testing, sharing the same Docker container as the production database.
+- **Test_DB**: An isolated `memory_bank_test` PostgreSQL database used for automated testing, sharing the same local PostgreSQL instance as the production database.
 - **Embedding_Mock**: A deterministic fake embedding generator used in tests to avoid Bedrock API calls.
 
 ## Requirements

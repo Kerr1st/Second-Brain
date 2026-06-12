@@ -1,6 +1,6 @@
 # Migration Plan — Docker Desktop → native PostgreSQL + pgvector (Option B)
 
-Status: **PLAN — awaiting sign-off. No execution yet.** Reversible until Phase 5.
+Status: **Phases 1–4 COMPLETE (2026-06-12)** — native PostgreSQL 17 + pgvector is the live DB (`127.0.0.1:5432`, brew services, localhost-only; 643/643 tests pass). **Phase 5 (decommission Docker) is pending** a 2–3 day soak + ≥1 successful scheduled nightly backup. Reversible until Phase 5 (the Docker container is retained, stopped).
 
 ## Why
 The app talks to plain `localhost:5432` (env-driven in `src/db.py`) — it does not care whether

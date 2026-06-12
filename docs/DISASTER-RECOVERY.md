@@ -23,7 +23,7 @@
 | Issue | Impact | Mitigation |
 |---|---|---|
 | Google OAuth token expiry | Google Drive uploads fail → **no offsite backup** (S3 de-scoped, so Google is the only cloud) | Uses refresh token — hasn't expired in practice. Re-auth: `rclone config reconnect gdrive:`. Local copy still retained 7 days. |
-| Docker not running at 2 AM | Backup aborts | Script auto-starts container; pre-flight check |
+| PostgreSQL not running at 2 AM | Backup aborts | Pre-flight check; `brew services` auto-starts `postgresql@17` at login |
 | ~~AWS SSO token expiry~~ | ~~S3 uploads fail~~ | **N/A — S3 de-scoped 2026-06-01.** SSO now only affects Bedrock embedding/generation. |
 
 ### AWS SSO Recovery
@@ -42,45 +42,46 @@ aws sso login --profile default
 
 ---
 
-## Dual-Site Backup Strategy
+## Backup Strategy (Google Drive + local — S3 de-scoped 2026-06-01)
 
 ```
                          Local Machine
                               │
-                   daily encrypted backup
+                   daily encrypted backup (GPG AES-256)
                          ┌────┴────┐
                          ▼         ▼
-                  Google Drive    AWS S3
+                  Google Drive    Local disk
                   ┌──────────┐  ┌──────────┐
                   │ pg_dump   │  │ pg_dump   │
                   │ JSON      │  │ JSON      │
-                  │ KB sources│  │ KB sources│
-                  │ Config    │  │ Config    │
+                  │ KB sources│  │ (recent)  │
+                  │ Config    │  │           │
                   └──────────┘  └──────────┘
-                  Key in         Key in
-                  Google         AWS Secrets
-                  Secret Mgr     Manager
+                  30-day cloud   7-day local
+                  retention      retention
+
+                  Key: Google Secret Mgr + ~/second-brain/.backup-key
 ```
 
-Either column alone can rebuild the entire system from scratch.
+Google Drive is the sole offsite copy; the 7-day local retention + git (code/config on `origin`/`mini`) are the other safety nets.
 
 ---
 
 ## What's Backed Up (and Where)
 
-| Asset | Google Drive | AWS S3 | Local |
-|---|---|---|---|
-| Layer 2: PostgreSQL dump (.dump.gpg) | ✅ | ✅ | Temporary |
-| Layer 2: JSON — memories (.json.gpg) | ✅ | ✅ | Temporary |
-| Layer 2: JSON — entities (.json.gpg) | ✅ | ✅ | Temporary |
-| Layer 2: JSON — entity_edges (.json.gpg) | ✅ | ✅ | Temporary |
-| Layer 2: JSON — memory_entities (.json.gpg) | ✅ | ✅ | Temporary |
-| Layer 3: Knowledge base source docs | ✅ | ✅ | Local copy |
-| Layer 1: Kiro skills / bootstrap | ✅ | ✅ | `~/.kiro/skills/` |
-| Config: docker-compose.yml, schema.sql | ✅ | ✅ | `~/second-brain/` |
-| Config: backup & verify scripts | ✅ | ✅ | `~/second-brain/` |
-| Config: this runbook | ✅ | ✅ | `~/second-brain/` |
-| Encryption key | ✅ Google Secret Mgr | ✅ AWS Secrets Mgr | `~/second-brain/.backup-key` |
+| Asset | Google Drive | Local |
+|---|---|---|
+| Layer 2: PostgreSQL dump (.dump.gpg) | ✅ | 7-day |
+| Layer 2: JSON — memories (.json.gpg) | ✅ | 7-day |
+| Layer 2: JSON — entities (.json.gpg) | ✅ | 7-day |
+| Layer 2: JSON — entity_edges (.json.gpg) | ✅ | 7-day |
+| Layer 2: JSON — memory_entities (.json.gpg) | ✅ | 7-day |
+| Layer 3: Knowledge base source docs | ✅ | Local copy |
+| Layer 1: Kiro skills / bootstrap | ✅ | `~/.kiro/skills/` |
+| Config: docker-compose.yml, schema.sql | ✅ | `~/second-brain/` (+ git) |
+| Config: backup & verify scripts | ✅ | `~/second-brain/` (+ git) |
+| Config: this runbook | ✅ | `~/second-brain/` (+ git) |
+| Encryption key | ✅ Google Secret Mgr | `~/second-brain/.backup-key` |
 
 ### Data Sources (upstream of Second Brain)
 
@@ -97,7 +98,7 @@ If the Second Brain is lost, it can be rebuilt from these sources via the migrat
 ## What's NOT Backed Up (by design)
 
 - Vector indexes (Layer 2 pgvector + Layer 3 Bedrock) — rebuilt automatically from source data
-- Docker container state — stateless, just restart
+- PostgreSQL service config — managed by Homebrew (`brew services`); reinstall via `brew install postgresql@17 pgvector`
 - rclone config — re-authorize in 2 minutes (interactive)
 
 ---
@@ -138,8 +139,7 @@ The backup script lives at `scripts/jobs/backup.sh`. It handles:
 - PostgreSQL dump (`pg_dump -Fc`)
 - JSON fallback exports (memories, entities, entity_edges, memory_entities)
 - GPG encryption (AES-256)
-- Upload to Google Drive and AWS S3
-- AWS SSO token health check with auto-refresh
+- Upload to Google Drive (S3 de-scoped 2026-06-01)
 - Local retention (7 days), cloud retention (30 days)
 
 Do not duplicate the script here — see the source file for current implementation.
@@ -152,7 +152,7 @@ Do not duplicate the script here — see the source file for current implementat
 
 ```bash
 # On a new machine:
-brew install postgresql rclone gpg docker
+brew install postgresql@17 pgvector rclone gpg
 
 # 1. Configure rclone for Google Drive
 rclone config  # n → gdrive → drive → authorize in browser
@@ -171,10 +171,11 @@ rclone copy gdrive:memory-bank-backups/ /tmp/restore/ --include "*.dump.gpg" --m
 # 4. Restore Kiro skills
 cp -r ~/second-brain/kiro-skills/ ~/.kiro/skills/
 
-# 5. Restore Layer 2 (PostgreSQL memory bank)
-docker compose -f ~/second-brain/docker-compose.yml up -d
-sleep 5  # wait for PostgreSQL to start
-psql -h localhost -U memory_bank -d memory_bank -f ~/second-brain/migrations/001_initial_schema.sql
+# 5. Restore Layer 2 (PostgreSQL memory bank — native PG 17 + pgvector)
+brew services start postgresql@17          # serves localhost:5432
+createuser -s memory_bank 2>/dev/null || true
+createdb -O memory_bank memory_bank 2>/dev/null || true
+psql -h localhost -U memory_bank -d memory_bank -c "CREATE EXTENSION IF NOT EXISTS vector;"
 for f in ~/second-brain/migrations/0*.sql; do
   psql -h localhost -U memory_bank -d memory_bank -f "$f"
 done
@@ -284,8 +285,10 @@ rclone copy gdrive:memory-bank-backups/ /tmp/restore/ --include "*.json.gpg" --m
 LATEST=$(ls -t /tmp/restore/*.json.gpg | head -1)
 gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key "$LATEST" > /tmp/memories.json
 
-# Start fresh database, apply schema, import JSON
-docker compose -f ~/second-brain/docker-compose.yml up -d
+# Start fresh native database, apply schema, import JSON
+brew services start postgresql@17
+createuser -s memory_bank 2>/dev/null || true; createdb -O memory_bank memory_bank 2>/dev/null || true
+psql -h localhost -U memory_bank -d memory_bank -c "CREATE EXTENSION IF NOT EXISTS vector;"
 psql -h localhost -U memory_bank -d memory_bank -f ~/second-brain/migrations/001_initial_schema.sql
 
 # Import (embeddings will need to be regenerated)
@@ -346,14 +349,11 @@ See `scheduling/com.second-brain.backup.plist` for current configuration. All pl
 | Situation | Command |
 |---|---|
 | List backups (Google) | `rclone ls gdrive:memory-bank-backups/` |
-| List backups (AWS) | `rclone ls s3:memory-bank-backups/` |
 | Download latest (Google) | `rclone copy gdrive:memory-bank-backups/<file> ./` |
-| Download latest (AWS) | `aws s3 cp s3://memory-bank-backups/<file> ./` |
 | Get key (Google) | `gcloud secrets versions access latest --secret=memory-bank-key` |
-| Get key (AWS) | `aws secretsmanager get-secret-value --secret-id memory-bank-key --query SecretString --output text --region us-east-1` |
 | Decrypt a file | `gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key <file.gpg> > <output>` |
 | Restore database | `pg_restore -h localhost -U memory_bank -d memory_bank --clean --if-exists <file.dump>` |
-| Restart PostgreSQL | `docker compose up -d` (from `~/second-brain/`) |
+| Restart PostgreSQL | `brew services restart postgresql@17` |
 | Re-sync Bedrock KB | `aws bedrock-agent start-ingestion-job --knowledge-base-id <id> --data-source-id <id> --region us-east-1` |
 | Verify backups | `bash ~/second-brain/scripts/jobs/verify_backup.sh` |
 | Manual backup now | `bash ~/second-brain/scripts/jobs/backup.sh` |

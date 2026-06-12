@@ -1008,7 +1008,7 @@ Properties to test:
 
 ### Integration Testing Approach
 
-Integration tests use a test database (same Docker container, separate DB) with mock agent responses:
+Integration tests use a test database (same local PostgreSQL instance, separate DB) with mock agent responses:
 
 - `test_full_pipeline_with_mock_agents` → orchestrator runs end-to-end with deterministic agent outputs, verifies all database records created correctly
 - `test_post_learn_scoped_run` → verifies Explorer receives scoped prompt
@@ -1034,7 +1034,7 @@ Integration tests use a test database (same Docker container, separate DB) with 
 ## Dependencies
 
 - **Existing modules**: `src/db.py` (CRUD, search, rerank), `src/embeddings.py` (Bedrock embedding generation), `src/mcp_server.py` (MCP tools used by agents)
-- **External**: `kiro` CLI (--no-interactive mode for agent invocation), PostgreSQL + pgvector (Docker), Amazon Bedrock (embeddings)
+- **External**: `kiro` CLI (--no-interactive mode for agent invocation), PostgreSQL + pgvector (native, localhost), Amazon Bedrock (embeddings)
 - **Python stdlib**: `subprocess` (agent invocation), `json` (data serialization), `datetime`, `pathlib`, `logging`
 - **New tables**: `dream_cycle_runs`, `dream_cycle_candidates` (migration required)
 - **Schema changes**: `expired_at` column on `memory_relationships` (migration required)

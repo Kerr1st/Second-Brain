@@ -135,23 +135,31 @@ Email config (never committed) — set for the LaunchAgent that runs the chained
 `EXPRESS_EMAIL_TO`, `EXPRESS_EMAIL_FROM`, `GMAIL_APP_PASSWORD`. Until set, the push
 composes but skips sending (benign exit 0).
 
-## Docker
+## Database
 
-PostgreSQL 17 + pgvector runs in Docker. Compose file at project root.
+PostgreSQL 17 + pgvector runs **natively** via Homebrew (`postgresql@17`), serving `127.0.0.1:5432` (localhost-only), auto-started at login by `brew services`.
 
 ```bash
-# Start
-docker compose up -d
+# Start / restart (auto-starts at login)
+brew services start postgresql@17
+brew services restart postgresql@17
 
 # Check health
-docker exec second-brain-db pg_isready -U memory_bank
+pg_isready -h 127.0.0.1 -p 5432 -U memory_bank
+
+# Connect
+psql -h 127.0.0.1 -U memory_bank -d memory_bank
 
 # Apply migrations
 ./migrations/migrate.sh
 
-# Data volume
-docker/data/   # ~2.5 GB
+# Data dir
+/opt/homebrew/var/postgresql@17
 ```
+
+> `postgresql@17` is keg-only — add `/opt/homebrew/opt/postgresql@17/bin` to `PATH` (or use full paths) for `psql`/`pg_dump`/`pg_isready`.
+>
+> The former Docker container (`second-brain-db`, `pgvector/pgvector:pg17`) is **stopped but retained as a migration rollback** until Phase 5 decommission; its bind-mount data is at `docker/data/` (~2.5 GB). See `docs/MIGRATION-native-postgres.md`.
 
 ## Monitoring Checklist
 
@@ -161,5 +169,5 @@ docker/data/   # ~2.5 GB
 | Backup ran today | `cat logs/backup-$(date +%Y%m%d).log` | "Backup complete" |
 | QD sync running | `cat logs/qd-sync-$(date +%Y%m%d).log` | Hourly entries |
 | AWS SSO valid | `aws sts get-caller-identity` | Returns account info |
-| PostgreSQL up | `docker exec second-brain-db pg_isready -U memory_bank` | "accepting connections" |
-| Memory count | `docker exec second-brain-db psql -U memory_bank -c "SELECT count(*) FROM memories"` | ~120K |
+| PostgreSQL up | `pg_isready -h 127.0.0.1 -p 5432 -U memory_bank` | "accepting connections" |
+| Memory count | `psql -h 127.0.0.1 -U memory_bank -d memory_bank -c "SELECT count(*) FROM memories"` | ~122K |

@@ -2,13 +2,14 @@
 
 A personal knowledge management and ideation system powered by AI. Gives AI agents persistent memory across sessions, turning them into thinking partners that accumulate knowledge over time.
 
-~120K memories. 10 migrations. PostgreSQL + pgvector + knowledge graph. MCP server (9 tools) for agent access. Dream cycle for autonomous synthesis. Express delivery layer (on-demand briefing, gated email push, in-session tool, feedback).
+~122K memories. 10 migrations. Native PostgreSQL 17 + pgvector (plus a dormant imported knowledge graph). MCP server (9 tools) for agent access. Dream cycle for autonomous synthesis. Express delivery layer (on-demand briefing, gated email push, in-session tool, feedback).
 
 ## Quickstart
 
 ```bash
-# Start PostgreSQL + pgvector
-docker compose up -d
+# PostgreSQL 17 + pgvector (native, via Homebrew) — serves localhost:5432, auto-starts at login
+brew install postgresql@17 pgvector
+brew services start postgresql@17
 
 # Create virtualenv and install dependencies
 python3 -m venv .venv
@@ -35,7 +36,7 @@ python -m src.mcp_server
 .venv/bin/python -m pytest tests/test_db.py tests/test_search.py tests/test_mcp_server.py -q
 ```
 
-Tests require a running PostgreSQL instance (Docker). The test fixture creates an isolated `memory_bank_test` database. Embedding calls are mocked — no Bedrock credentials needed for tests.
+Tests require a running PostgreSQL instance (native, on `localhost:5432`). The test fixture creates an isolated `memory_bank_test` database. Embedding calls are mocked — no Bedrock credentials needed for tests.
 
 ## Documentation
 
@@ -69,9 +70,9 @@ scripts/
   ingest_qd_chats.py         Quick Desktop chat session extractor
 migrations/         Numbered SQL migrations (000-010) + runner script
 scheduling/         macOS launchd plists (9 jobs, all installed)
-tests/              637 tests (property-based, unit, integration, E2E)
+tests/              643 tests (property-based, unit, integration, E2E)
 docs/               Architecture specs and runbooks
-docker/             PostgreSQL data volume (gitignored)
+docker/             Legacy container data dir (gitignored) — retained as migration rollback, removed in Phase 5
 staging/            Transient pipeline data (gitignored)
 ```
 
@@ -81,13 +82,12 @@ staging/            Transient pipeline data (gitignored)
 - Memory CRUD, hybrid search, reranking, retrieval reinforcement
 - MCP server (9 tools) connected to Kiro CLI and Claude Code
 - Quick Desktop hourly sync (memories, tags, KG, chats, feed events, Slack graph)
-- Daily encrypted backups to Google Drive + S3 (full docs included)
+- Daily encrypted backups to Google Drive + local (S3 de-scoped 2026-06-01)
 - Chat extraction, Crawlee ingestion, bookmark/YouTube scraping
-- Capture API (Slack, mobile, browser, email) — port 8100
 - Dream cycle pipeline (daily at noon; chains the Express email push)
 - Express delivery — on-demand `brief`, gated Gmail push, `memory_brief` MCP tool, feedback loop
 - All 9 LaunchAgents installed and operational
-- 637 tests (unit, property-based, integration, E2E)
+- 643 tests (unit, property-based, integration, E2E)
 
 **Planned:**
 - Entity extraction on ingest (auto-populate knowledge graph from all sources)
