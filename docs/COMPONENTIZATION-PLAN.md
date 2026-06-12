@@ -78,8 +78,32 @@ structure visible. This is import churn for cosmetics — do it last, in one mec
 - ▢ Phase B store-primitive collapse.
 - ▢ Phases C–E.
 
+## Synthesis-fuel evidence (folded in from the streamlining review)
+Provenance of the 8 accepted insights in dream-cycle run `7c712903` (corpus = 121,226 memories, 2026-06-06) — *why* the roadmap protects distillation + diverse capture rather than collapsing to one channel:
+- **Fuel is concentrated, not uniform:** `distilled_chat` (31 source-refs, in 6/8 insights) and `quick_desktop_doc` (13 refs, 6/8) dominate; `article` (5/3), `quick_desktop_decision` (3/3), `youtube` (2/2) are a useful long tail.
+- **Raw volume ≠ value:** `kiro_ide_chat` is 60% of the corpus (73,250 memories) yet contributed **zero** source-refs to any accepted insight — its value is realized only *after* distillation into `distilled_chat`. **Distillation is the value, not raw capture** → Phase A's "generalize distill" is the high-leverage move.
+- **Diversity is load-bearing:** the flagship goal-directed insight spanned 4 source_types / 12 sources. Keep the surviving capture path content-diverse, not narrow.
+
+## Verified dead / inert subsystems (retire in Phase A/C/D)
+From the verify-before-cut audit (2026-06-06), still valid:
+- **Entity KG** (`entities`, `entity_edges`, `memory_entities`, migration 008) — **0 `src/` references**; imported from QD, never wired into the core. Highest-confidence cut.
+- **Schema feature** (`type='schema'` + `derived_from` + migration-007 indexes + the `schema_context` read path) — functionally inert: **0** `type='schema'` memories, **6** `derived_from` edges; write path never built. (NB: there is **no `schema_type` column**.)
+- **`encoding_context`** (migration 006) — it *is* the rerank `context_overlap` term (weight 0.10) but populated on only **1/121,226** memories → effectively always 0. Keep-cheap, activate, or cut.
+- **Eval harness** (~12 `scripts/eval/` scripts) — tuning scaffolding; keep `recall_check.py` as the health gate, archive the rest.
+
+## Open decisions
+1. **How aggressive on capture collapse** — raw volume (`kiro_ide_chat`, 60%) is low-yield; distillation + doc ingest are high-yield → be aggressive on *raw* capture while protecting distillation + long-form ingest.
+2. **Rewrite vs. incremental refactor** — verified-inert KG/schema/eval make *prune-in-place* low-risk (the roadmap assumes this); green-field is cleaner but higher-effort.
+3. **Drop vs. dormant** for the KG tables (008) + schema-feature indexes (007) — unused either way.
+4. **`encoding_context`: keep-cheap vs. activate vs. cut** (Phase C).
+
+## Future considerations (parked, salvaged from the retired REFACTOR-PLAN)
+- **embed_priority tiering** — skip vector embeddings for low-value content (keep full-text); demote old low-access memories out of the HNSW index to reclaim space/cost.
+- **Per-channel friction config** (`capture_config.json`) — capture liberally vs. selectively per source (Slack DMs vs. channels, Outlook summaries-only).
+- **Inverse-metric monitoring** — track "missed content" (searched-for but filtered) + over-consolidation rate, weekly.
+
 ## Cross-references
 - `CAPTURE-COMPONENTS.md` — capture deep-dive + connector contract.
 - `ARCHITECTURE.md` — current system (reconciled).
-- `STREAMLINING-DESIGN.md` — what to cut (dead-code findings still valid).
 - `AGENTIC-RETRIEVAL-PLAN.md` — why the entity KG stays deferred.
+- `QUALITY-BASELINE-2026-06-06.md` — the quality gate that unlocked this design work.

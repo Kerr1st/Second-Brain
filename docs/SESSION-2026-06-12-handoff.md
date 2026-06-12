@@ -8,7 +8,7 @@ branch `main` @ `4305cc8`, remotes `origin` (GitHub) + `mini` (192.168.1.224), t
 
 ## STATE (good)
 - **Tests: 643/643 pass on Python 3.14.** Migration verified clean.
-- **Docs: reconciled to ground truth** (no more dead-as-live). ARCHITECTURE/OPERATIONS/DISASTER-RECOVERY/QUICK-DESKTOP-INTEGRATION/DESIGN-DECISIONS/STREAMLINING-DESIGN all corrected.
+- **Docs: reconciled to ground truth** (no more dead-as-live). ARCHITECTURE/OPERATIONS/DISASTER-RECOVERY/QUICK-DESKTOP-INTEGRATION/DESIGN-DECISIONS all corrected.
 - **Data safe:** 122,152 memories; DB container running (reachable via app/psycopg2 on localhost).
 - All work committed + pushed both remotes.
 
