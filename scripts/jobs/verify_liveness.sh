@@ -9,6 +9,7 @@
 # Run daily 09:00 via com.second-brain.liveness. Thresholds are in DAYS and are
 # deliberately generous enough to absorb weekends / a powered-off machine.
 set -uo pipefail
+export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")/.."
 
 CONTAINER="${DB_CONTAINER:-second-brain-db}"
@@ -40,7 +41,7 @@ CHANNELS=(
   "youtube|source_type = 'youtube'|9"
 )
 
-if ! docker exec "$CONTAINER" pg_isready -U "$DB_USER" &>/dev/null; then
+if ! pg_isready -h 127.0.0.1 -p 5432 -U "$DB_USER" &>/dev/null; then
   log "ABORT: database not reachable"
   notify "Liveness check could not reach the database"
   exit 1
@@ -50,7 +51,7 @@ log "=== Capture liveness: $(date '+%Y-%m-%d %H:%M') ==="
 SILENT_MSG=""
 for entry in "${CHANNELS[@]}"; do
   IFS='|' read -r label pred max_age <<< "$entry"
-  age=$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+  age=$(psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -tAc \
     "SELECT COALESCE(now()::date - MAX(created_at)::date, 99999) FROM memories WHERE $pred;" 2>/dev/null)
   [[ "$age" =~ ^[0-9]+$ ]] || age=99999
   if [ "$age" -gt "$max_age" ]; then

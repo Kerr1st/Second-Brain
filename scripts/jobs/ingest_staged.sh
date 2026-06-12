@@ -7,6 +7,7 @@
 # See docs/HYBRID-CHAT-EXTRACTION.md for full spec.
 
 set -uo pipefail
+export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")/../.."
 
 LOGFILE="logs/ingest-$(date +%Y%m%d).log"
@@ -19,15 +20,15 @@ mkdir -p "$FAILED_DIR" logs
 log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOGFILE"; }
 
 # Pre-flight: ensure PostgreSQL is reachable, starting Docker container if needed
-if ! docker exec second-brain-db pg_isready -U memory_bank > /dev/null 2>&1; then
-  log "PostgreSQL not reachable — starting container..."
-  docker start second-brain-db > /dev/null 2>&1
+if ! pg_isready -h 127.0.0.1 -p 5432 -U memory_bank > /dev/null 2>&1; then
+  log "PostgreSQL not reachable — starting brew service..."
+  brew services start postgresql@17 > /dev/null 2>&1
   sleep 5
-  if ! docker exec second-brain-db pg_isready -U memory_bank > /dev/null 2>&1; then
-    log "ABORT: PostgreSQL still not reachable after starting container."
+  if ! pg_isready -h 127.0.0.1 -p 5432 -U memory_bank > /dev/null 2>&1; then
+    log "ABORT: PostgreSQL still not reachable after starting brew service."
     exit 1
   fi
-  log "Container started successfully."
+  log "Brew service started successfully."
 fi
 
 log "=== Phase 2: Staged chat ingestion ==="
@@ -39,7 +40,7 @@ log "=== Chat ingestion complete: processed=$PROCESSED failed=$FAILED ==="
 
 # Ingest scraped web/YouTube sources from the Crawlee knowledge store
 log "=== Crawlee source ingestion ==="
-web_count() { docker exec second-brain-db psql -U memory_bank -d memory_bank -tAc \
+web_count() { psql -h 127.0.0.1 -p 5432 -U memory_bank -d memory_bank -tAc \
   "SELECT COUNT(*) FROM memories WHERE source_type IN ('article','youtube');" 2>/dev/null || echo 0; }
 CRAWLEE_BEFORE=$(web_count)
 if .venv/bin/python scripts/crawlee_ingest.py >> "$LOGFILE" 2>&1; then

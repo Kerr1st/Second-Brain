@@ -3,6 +3,7 @@
 # (S3 de-scoped 2026-06-01; durable copies = local + GDrive + git.)
 # See docs/DISASTER-RECOVERY.md for recovery procedures.
 set -uo pipefail
+export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")/.."
 
 KEY_FILE="$HOME/second-brain/.backup-key"
@@ -45,8 +46,8 @@ verify_cloud() {
     "$VERIFY_DIR/$(basename "$LATEST")" > "$VERIFY_DIR/test.dump" 2>/dev/null; then
 
     # Validate dump structure via docker
-    if docker exec -i second-brain-db pg_restore -l < "$VERIFY_DIR/test.dump" > /dev/null 2>&1; then
-      TABLES=$(docker exec -i second-brain-db pg_restore -l < "$VERIFY_DIR/test.dump" 2>/dev/null | grep "TABLE DATA" | wc -l | tr -d ' ')
+    if pg_restore -l < "$VERIFY_DIR/test.dump" > /dev/null 2>&1; then
+      TABLES=$(pg_restore -l < "$VERIFY_DIR/test.dump" 2>/dev/null | grep "TABLE DATA" | wc -l | tr -d ' ')
       log "✅ $name backup valid ($TABLES tables)"
     else
       log "❌ $name BACKUP CORRUPT — pg_restore cannot read it"

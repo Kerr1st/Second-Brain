@@ -1,14 +1,15 @@
 #!/bin/bash
 # Run all pending migrations against the Second Brain database.
-# Uses docker exec so no local psql client is needed.
+# Uses the local (native) psql client.
 set -euo pipefail
+export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
 
 CONTAINER="${DB_CONTAINER:-second-brain-db}"
 DB_USER="${DB_USER:-memory_bank}"
 DB_NAME="${DB_NAME:-memory_bank}"
 MIGRATIONS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-run_sql() { docker exec -i "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" "$@"; }
+run_sql() { psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" "$@"; }
 
 # Ensure migrations tracking table exists
 run_sql < "$MIGRATIONS_DIR/000_migrations_table.sql" 2>/dev/null

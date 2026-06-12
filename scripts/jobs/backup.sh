@@ -3,6 +3,7 @@
 # S3 de-scoped 2026-06-01 (brittle overnight SSO); durable copies = local + GDrive + git.
 # See docs/DISASTER-RECOVERY.md for full recovery procedures.
 set -uo pipefail
+export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")/.."
 
 BACKUP_DIR="backups"
@@ -21,12 +22,12 @@ MISSING=""
 command -v gpg &>/dev/null || MISSING="$MISSING gpg"
 command -v rclone &>/dev/null || MISSING="$MISSING rclone"
 # Start container if not running
-if ! docker exec "$CONTAINER" pg_isready -U "$DB_USER" &>/dev/null; then
-  log "PostgreSQL not reachable — starting container..."
-  docker start "$CONTAINER" &>/dev/null
+if ! pg_isready -h 127.0.0.1 -p 5432 -U "$DB_USER" &>/dev/null; then
+  log "PostgreSQL not reachable — starting brew service..."
+  brew services start postgresql@17 &>/dev/null
   sleep 5
 fi
-docker exec "$CONTAINER" pg_isready -U "$DB_USER" &>/dev/null || MISSING="$MISSING docker/postgresql"
+pg_isready -h 127.0.0.1 -p 5432 -U "$DB_USER" &>/dev/null || MISSING="$MISSING postgresql"
 [ -f "$KEY_FILE" ] || MISSING="$MISSING encryption-key"
 
 if [ -n "$MISSING" ]; then
@@ -40,21 +41,21 @@ log "=== Backup: $TIMESTAMP ==="
 
 # --- Database dump ---
 log "Dumping PostgreSQL..."
-docker exec "$CONTAINER" pg_dump -Fc -U "$DB_USER" "$DB_NAME" > "$BACKUP_DIR/memory_bank_${TIMESTAMP}.dump"
-ROWS=$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT COUNT(*) FROM memories;" 2>/dev/null || echo "?")
+pg_dump -h 127.0.0.1 -p 5432 -Fc -U "$DB_USER" "$DB_NAME" > "$BACKUP_DIR/memory_bank_${TIMESTAMP}.dump"
+ROWS=$(psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT COUNT(*) FROM memories;" 2>/dev/null || echo "?")
 log "Backed up $ROWS memories"
 
 log "Exporting JSON fallback..."
-docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
+psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -t -A -c \
   "SELECT row_to_json(m) FROM memories m" \
   > "$BACKUP_DIR/memories_${TIMESTAMP}.json"
-docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
+psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -t -A -c \
   "SELECT row_to_json(e) FROM entities e" \
   > "$BACKUP_DIR/entities_${TIMESTAMP}.json"
-docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
+psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -t -A -c \
   "SELECT row_to_json(e) FROM entity_edges e" \
   > "$BACKUP_DIR/edges_${TIMESTAMP}.json"
-docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
+psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -t -A -c \
   "SELECT row_to_json(me) FROM memory_entities me" \
   > "$BACKUP_DIR/memory_entities_${TIMESTAMP}.json"
 

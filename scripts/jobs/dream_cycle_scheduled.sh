@@ -1,12 +1,13 @@
 #!/bin/bash
+export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
 # Thin wrapper for launchd-scheduled dream cycle runs.
 # Runs the dream cycle (synthesis), then chains the Express push (delivery, P2)
 # so the freshest synthesis can reach the user. job_wrapper.sh expects a single
 # script path.
 
 # Ensure PostgreSQL container is running
-if ! docker exec second-brain-db pg_isready -U memory_bank &>/dev/null; then
-  docker start second-brain-db &>/dev/null
+if ! pg_isready -h 127.0.0.1 -p 5432 -U memory_bank &>/dev/null; then
+  brew services start postgresql@17 &>/dev/null
   sleep 5
 fi
 

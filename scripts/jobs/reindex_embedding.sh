@@ -10,16 +10,17 @@
 #
 # Usage: bash scripts/jobs/reindex_embedding.sh
 set -euo pipefail
+export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
 CON=second-brain-db
-PSQL=(docker exec "$CON" psql -U memory_bank -d memory_bank)
+PSQL=(psql -h 127.0.0.1 -p 5432 -U memory_bank -d memory_bank)
 
 echo "$(date '+%H:%M:%S') building idx_memories_embedding_v2 (m=32, ef_construction=200)..."
 # maintenance_work_mem must be large enough to hold the whole graph in RAM. If the
 # build logs "hnsw graph no longer fits into maintenance_work_mem", the newest vectors
 # are built in a degraded on-disk phase that measurably hurts recall — raise this value.
 # 1GB fits ~120k vectors; bump it as the corpus grows.
-docker exec -e PGOPTIONS="-c max_parallel_maintenance_workers=0 -c maintenance_work_mem=1GB" "$CON" \
-  psql -U memory_bank -d memory_bank \
+PGOPTIONS="-c max_parallel_maintenance_workers=0 -c maintenance_work_mem=1GB" \
+  psql -h 127.0.0.1 -p 5432 -U memory_bank -d memory_bank \
   -c "DROP INDEX IF EXISTS idx_memories_embedding_v2;" \
   -c "CREATE INDEX CONCURRENTLY idx_memories_embedding_v2 ON memories USING hnsw (embedding vector_cosine_ops) WITH (m = 32, ef_construction = 200);"
 

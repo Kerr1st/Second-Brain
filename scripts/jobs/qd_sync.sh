@@ -3,12 +3,13 @@
 # Runs hourly via LaunchAgent, imports new QD memories and KG entities since last sync
 
 set -euo pipefail
+export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")/../.."
 
 DATE=$(date +%Y%m%d)
 LOG="logs/qd-sync-$DATE.log"
 
-qd_count() { docker exec second-brain-db psql -U memory_bank -d memory_bank -tAc \
+qd_count() { psql -h 127.0.0.1 -p 5432 -U memory_bank -d memory_bank -tAc \
   "SELECT COUNT(*) FROM memories WHERE source_type LIKE 'quick_desktop_%';" 2>/dev/null || echo 0; }
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') Starting QD sync" >> "$LOG"
