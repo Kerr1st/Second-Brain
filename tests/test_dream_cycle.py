@@ -1069,9 +1069,10 @@ class TestDigestCompletenessExplicit:
             mock_digest_db.was_feedback_injected.return_value = False
             result_path = generate_digest("run-path", [candidate], [])
 
-        # Result path is a string pointing to logs/ directory
+        # Result path is a string pointing to a logs/ directory (absolute since
+        # digest resolves logs/ from the module path, not cwd).
         assert isinstance(result_path, str)
-        assert result_path.startswith("logs/")
+        assert "/logs/" in result_path or result_path.startswith("logs/")
         assert "dream-cycle-digest-" in result_path
         assert result_path.endswith(".md")
         # Content was written
