@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -158,7 +159,9 @@ def generate_digest(
 
     # Write file. Resolve logs/ relative to the repo root (not cwd): scheduled
     # launchd runs have cwd=/ (read-only), which broke the previous Path("logs").
-    logs_dir = Path(__file__).resolve().parents[2] / "logs"
+    # Built as a single Path() call over an os.path string so it stays both
+    # cwd-independent and simple to mock in tests.
+    logs_dir = Path(os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "logs")))
     logs_dir.mkdir(parents=True, exist_ok=True)
     file_path = logs_dir / f"dream-cycle-digest-{today}.md"
     file_path.write_text("\n".join(lines), encoding="utf-8")
