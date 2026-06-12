@@ -6,17 +6,17 @@
 > Encryption: AES-256 via GPG
 > RPO: 24 hours | RTO: ~15-30 minutes
 
-> ## ⚠️ CURRENT POSTURE (changed 2026-06-01)
+> ## BACKUP POSTURE — single-cloud (Google Drive) + local · ACCEPTED 2026-06-12
 > **AWS S3 was de-scoped** (brittle overnight SSO). Backups now go to **Google Drive + local
 > only** (code/config also in git on `origin`/`mini`). This means:
 > - The old "**Either Google OR AWS alone is sufficient**" dual-cloud guarantee **no longer holds**
 >   for data — offsite redundancy is now **single-cloud (Google Drive)**.
 > - **Scenario 2 (recovery from AWS S3) is UNAVAILABLE** — no S3 backups since 2026-06-01.
-> - The AWS sections below are retained for **historical reference / if S3 is re-enabled**.
+> - The AWS sections below are retained for **historical reference only** (S3 is not planned to return).
 >
-> **OPEN DECISION:** accept single-cloud + local, or re-establish a second offsite target
-> (re-enable S3, or add e.g. Backblaze B2). Until then, treat Google Drive + local as the
-> sole recovery path and verify the Google leg diligently.
+> **DECISION (2026-06-12): ACCEPTED.** Single-cloud (Google Drive) + local is the intended posture;
+> S3 will **not** be re-established. Google Drive is the sole offsite path — the weekly backup-verify
+> job and the 7-day local copy are the safety net. Verify the Google Drive leg diligently.
 
 ### Known Failure Modes
 
