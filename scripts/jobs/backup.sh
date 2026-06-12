@@ -92,8 +92,17 @@ rclone copy "$BACKUP_DIR/" gdrive:memory-bank-backups/ --include "*.gpg" 2>&1 ||
 rclone sync "$BACKUP_DIR/kb-sources/" gdrive:memory-bank-backups/kb-sources/ 2>&1 || true
 rclone sync "$BACKUP_DIR/config/" gdrive:memory-bank-backups/config/ 2>&1 || true
 
-# Verify the encrypted dump actually landed on the remote
-if rclone lsf gdrive:memory-bank-backups/ 2>/dev/null | grep -q "memory_bank_${TIMESTAMP}.dump.gpg"; then
+# Verify the encrypted dump actually landed on the remote. Retry: Google Drive
+# listing is eventually-consistent and can lag a large upload by several seconds,
+# which would otherwise false-negative a backup that actually succeeded.
+REMOTE_OK=false
+for _ in 1 2 3 4 5 6; do
+  if rclone lsf gdrive:memory-bank-backups/ 2>/dev/null | grep -q "memory_bank_${TIMESTAMP}.dump.gpg"; then
+    REMOTE_OK=true; break
+  fi
+  sleep 10
+done
+if [ "$REMOTE_OK" = true ]; then
   log "✅ Google Drive backup verified ($ROWS memories, dump present on remote)"
 else
   log "❌ Google Drive backup NOT verified — dump missing on remote"
