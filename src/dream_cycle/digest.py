@@ -156,8 +156,9 @@ def generate_digest(
                 lines.append("---")
                 lines.append("")
 
-    # Write file
-    logs_dir = Path("logs")
+    # Write file. Resolve logs/ relative to the repo root (not cwd): scheduled
+    # launchd runs have cwd=/ (read-only), which broke the previous Path("logs").
+    logs_dir = Path(__file__).resolve().parents[2] / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     file_path = logs_dir / f"dream-cycle-digest-{today}.md"
     file_path.write_text("\n".join(lines), encoding="utf-8")
