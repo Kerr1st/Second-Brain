@@ -46,6 +46,7 @@ class DreamCycleOrchestrator:
     def __init__(self):
         self.invoker = AgentInvoker()
         self._capture_dir: str | None = None
+        self._current_run_id: str | None = None
 
     def _capture(self, name: str, *, inputs: dict | None = None, output: object = None) -> None:
         """Write agent call inputs/outputs to capture_dir as JSON fixtures.
@@ -154,6 +155,9 @@ class DreamCycleOrchestrator:
         Separated from ``run()`` so that the top-level error handler can
         always attempt to complete the run record on failure.
         """
+        # Phase 0: attribute per-call LLM metrics to this run.
+        self._current_run_id = run_id
+
         # Step 2: Build feedback from historical rejections
         feedback = build_feedback_injection()
         logger.debug("Feedback injection length: %d chars", len(feedback))
@@ -373,6 +377,8 @@ class DreamCycleOrchestrator:
             mcp_config="second-brain",
             timeout=600,
             effort="high",
+            stage="explorer",
+            run_id=self._current_run_id,
         )
 
         self._capture("explorer", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
@@ -453,6 +459,8 @@ class DreamCycleOrchestrator:
             user_message=user_message,
             mcp_config="second-brain",
             effort="max",
+            stage="thinker",
+            run_id=self._current_run_id,
         )
 
         safe_name = slice.name.replace(" ", "_").replace("/", "_")[:50]
@@ -537,6 +545,8 @@ class DreamCycleOrchestrator:
             system_prompt=prompt,
             user_message=user_message,
             effort="high",
+            stage=f"evaluator:{role}",
+            run_id=self._current_run_id,
         )
 
         safe_title = candidate.title.replace(" ", "_").replace("/", "_")[:40]

@@ -19,7 +19,9 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,29 @@ _SECOND_BRAIN_MCP = {
     }
 }
 
+# --- Phase 0 LLM-call instrumentation (see docs/FABLE5-THINKER-PLAN.md) ---
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+METRICS_DIR = os.environ.get(
+    "KIRO_LLM_METRICS_DIR", os.path.join(_REPO_ROOT, "logs", "llm_metrics")
+)
+
+
+def _record_call_metrics(metrics: dict, run_id: str | None) -> None:
+    """Append one JSONL record of an LLM call's metrics. Never raises.
+
+    Captures per-call stage, model, effort, latency, and char-based token
+    ESTIMATES. The kiro-cli path returns no structured usage, so token counts
+    are estimates (chars / 4); real usage arrives when a stage moves to a
+    direct Bedrock InvokeModel call (Phase 1).
+    """
+    try:
+        os.makedirs(METRICS_DIR, exist_ok=True)
+        fname = f"{run_id}.jsonl" if run_id else "adhoc.jsonl"
+        with open(os.path.join(METRICS_DIR, fname), "a", encoding="utf-8") as f:
+            f.write(json.dumps(metrics) + "\n")
+    except Exception:
+        logger.debug("Failed to record LLM call metrics", exc_info=True)
+
 
 class AgentInvoker:
     """Invoke kiro-cli chat --no-interactive as isolated subprocesses."""
@@ -51,6 +76,10 @@ class AgentInvoker:
         mcp_config: str | None = None,
         timeout: int = 300,
         effort: str | None = None,
+        stage: str | None = None,
+        run_id: str | None = None,
+        mcp_startup_retries: int = 2,
+        mcp_startup_backoff: float = 3.0,
     ) -> dict:
         """Invoke kiro-cli chat --no-interactive as a subprocess.
 
@@ -85,6 +114,27 @@ class AgentInvoker:
         agent_path = os.path.join(AGENTS_DIR, f"{agent_name}.json")
         os.makedirs(AGENTS_DIR, exist_ok=True)
 
+        # Phase 0 instrumentation: per-call metrics (docs/FABLE5-THINKER-PLAN.md).
+        # Token counts are ESTIMATES (chars / 4); kiro-cli returns no usage.
+        metrics = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id,
+            "stage": stage,
+            "agent_name": agent_name,
+            "model": self.model,
+            "effort": effort,
+            "tools": needs_tools,
+            "timeout_s": timeout,
+            "system_prompt_chars": len(system_prompt),
+            "user_message_chars": len(user_message),
+            "input_chars": len(system_prompt) + len(user_message),
+            "output_chars": 0,
+            "success": False,
+            "error": None,
+            "mcp_startup_retries": 0,
+        }
+        t0 = time.monotonic()
+
         try:
             with open(agent_path, "w", encoding="utf-8") as f:
                 json.dump(agent_config, f)
@@ -97,6 +147,10 @@ class AgentInvoker:
             ]
             if needs_tools:
                 cmd.append("--trust-all-tools")
+                # Fail loudly (exit 3) if an MCP server can't start, instead of
+                # silently running tool-less (root cause of the Jun 8–12 zero-candidate
+                # runs). See docs/FABLE5-THINKER-PLAN.md.
+                cmd.append("--require-mcp-startup")
             if effort:
                 cmd += ["--effort", effort]
 
@@ -108,23 +162,42 @@ class AgentInvoker:
                 agent_name, timeout, needs_tools,
             )
 
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout,
-                )
-            except subprocess.TimeoutExpired as exc:
-                stderr = exc.stderr or ""
-                logger.error("Agent timed out after %ds: %s", timeout, stderr)
-                raise TimeoutError(
-                    f"Agent subprocess timed out after {timeout}s: {stderr}"
-                ) from exc
+            # MCP startup can fail transiently in the scheduled (launchd) context.
+            # With --require-mcp-startup, kiro exits 3 *before* any model call, so
+            # retrying is cheap (no tokens spent) and usually succeeds once warm.
+            attempts_allowed = 1 + (mcp_startup_retries if needs_tools else 0)
+            backoff = mcp_startup_backoff
+            for attempt in range(1, attempts_allowed + 1):
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=timeout,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    stderr = exc.stderr or ""
+                    metrics["error"] = "timeout"
+                    logger.error("Agent timed out after %ds: %s", timeout, stderr)
+                    raise TimeoutError(
+                        f"Agent subprocess timed out after {timeout}s: {stderr}"
+                    ) from exc
+
+                if needs_tools and result.returncode == 3 and attempt < attempts_allowed:
+                    metrics["mcp_startup_retries"] = attempt
+                    logger.warning(
+                        "MCP startup failed (exit 3), attempt %d/%d; retrying in %.0fs. stderr tail: %s",
+                        attempt, attempts_allowed, backoff, (result.stderr or "")[-400:],
+                    )
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                break
 
             if result.returncode != 0:
+                metrics["error"] = f"exit_code={result.returncode}"
                 logger.error(
                     "Agent exited with code %d: %s",
                     result.returncode, result.stderr,
@@ -135,6 +208,7 @@ class AgentInvoker:
                 )
 
             raw = result.stdout
+            metrics["output_chars"] = len(raw)
             logger.debug("Agent raw output length: %d chars", len(raw))
 
             # Save raw output for debugging (especially useful for first runs)
@@ -149,12 +223,18 @@ class AgentInvoker:
             try:
                 parsed = self.parse_json_output(raw)
             except ValueError:
+                metrics["error"] = "json_parse_failed"
                 logger.error("Failed to parse JSON from agent output (%d chars). Raw saved to %s", len(raw), raw_debug_path)
                 raise
 
+            metrics["success"] = True
             return {"output": parsed, "raw": raw}
 
         finally:
+            metrics["latency_s"] = round(time.monotonic() - t0, 3)
+            metrics["est_input_tokens"] = metrics["input_chars"] // 4
+            metrics["est_output_tokens"] = metrics["output_chars"] // 4
+            _record_call_metrics(metrics, run_id)
             # Clean up the temporary agent config
             try:
                 os.remove(agent_path)

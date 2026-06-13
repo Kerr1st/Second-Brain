@@ -8,15 +8,10 @@ set -uo pipefail
 # launchd uses a minimal PATH — ensure Homebrew binaries are available
 export PATH="/opt/homebrew/bin:$PATH"
 
-# Ensure Docker Desktop is running (needed for PostgreSQL container)
-if ! docker info &>/dev/null; then
-  open -a Docker
-  # Wait up to 30s for daemon to be ready
-  for i in $(seq 1 30); do
-    docker info &>/dev/null && break
-    sleep 1
-  done
-fi
+# PostgreSQL runs natively (Homebrew postgresql@17); per-job scripts ensure it is up.
+# (Removed the legacy Docker Desktop auto-start — unused since the native-Postgres
+#  migration, and it wasted up to ~30s + spiked load at job start when Docker's
+#  org sign-in blocks the daemon.)
 
 SCRIPT="$1"
 JOB_NAME="${2:-$(basename "$SCRIPT")}"

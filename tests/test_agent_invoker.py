@@ -13,6 +13,13 @@ from hypothesis import given, strategies as st
 from src.agent_invoker import AgentInvoker
 
 
+@pytest.fixture(autouse=True)
+def _isolate_llm_metrics(tmp_path, monkeypatch):
+    """Phase 0: redirect per-call metrics writes to a temp dir so invoke tests
+    don't pollute the real logs/llm_metrics/ directory."""
+    monkeypatch.setattr("src.agent_invoker.METRICS_DIR", str(tmp_path / "llm_metrics"))
+
+
 # ---------------------------------------------------------------------------
 # Hypothesis strategies for generating valid JSON values
 # ---------------------------------------------------------------------------
@@ -400,3 +407,138 @@ class TestParseJsonFromToolTranscript:
         )
         result = AgentInvoker.parse_json_output(raw)
         assert result["verdict"] == "ACCEPT"
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 instrumentation: per-call metrics recording
+# **Validates: docs/FABLE5-THINKER-PLAN.md (Phase 0 — instrument + baseline)**
+# ---------------------------------------------------------------------------
+
+import os
+import src.agent_invoker as ai
+
+
+class TestInvokeMetrics:
+    """invoke() records one JSONL metrics line per call, grouped by run_id."""
+
+    @patch("src.agent_invoker.subprocess.run")
+    def test_records_metrics_line_on_success(self, mock_run):
+        payload = {"verdict": "ACCEPT", "reasoning": "ok"}
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout=json.dumps(payload), stderr=""
+        )
+
+        AgentInvoker(model="claude-opus-4.8").invoke(
+            system_prompt="sys",
+            user_message="msg",
+            effort="high",
+            stage="evaluator:skeptic",
+            run_id="run-123",
+        )
+
+        path = os.path.join(ai.METRICS_DIR, "run-123.jsonl")
+        assert os.path.exists(path)
+        lines = [ln for ln in open(path, encoding="utf-8").read().splitlines() if ln.strip()]
+        assert len(lines) == 1
+        rec = json.loads(lines[0])
+        assert rec["stage"] == "evaluator:skeptic"
+        assert rec["model"] == "claude-opus-4.8"
+        assert rec["effort"] == "high"
+        assert rec["tools"] is False
+        assert rec["success"] is True
+        assert rec["error"] is None
+        assert rec["output_chars"] == len(json.dumps(payload))
+        assert rec["est_input_tokens"] == (len("sys") + len("msg")) // 4
+        assert "latency_s" in rec and rec["latency_s"] >= 0.0
+
+    @patch("src.agent_invoker.subprocess.run")
+    def test_records_metrics_line_on_failure(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="boom")
+
+        with pytest.raises(RuntimeError):
+            AgentInvoker().invoke(
+                system_prompt="s", user_message="m", run_id="run-fail"
+            )
+
+        path = os.path.join(ai.METRICS_DIR, "run-fail.jsonl")
+        assert os.path.exists(path)
+        rec = json.loads(open(path, encoding="utf-8").read().splitlines()[0])
+        assert rec["success"] is False
+        assert rec["error"] == "exit_code=1"
+
+    @patch("src.agent_invoker.subprocess.run")
+    def test_no_run_id_writes_adhoc_file(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout='{"ok": true}', stderr=""
+        )
+
+        AgentInvoker().invoke(system_prompt="s", user_message="m", stage="thinker")
+
+        assert os.path.exists(os.path.join(ai.METRICS_DIR, "adhoc.jsonl"))
+
+
+# ---------------------------------------------------------------------------
+# MCP startup hardening: --require-mcp-startup + exit-3 retry
+# **Validates: docs/FABLE5-THINKER-PLAN.md (Explorer MCP-attach fix)**
+# ---------------------------------------------------------------------------
+
+
+class TestRequireMcpStartup:
+    """--require-mcp-startup is added only when the call uses MCP tools."""
+
+    @patch("src.agent_invoker.subprocess.run")
+    def test_flag_present_with_tools(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"ok": 1}', stderr="")
+        AgentInvoker().invoke(system_prompt="s", user_message="m", mcp_config="second-brain")
+        cmd = mock_run.call_args[0][0]
+        assert "--require-mcp-startup" in cmd
+        assert "--trust-all-tools" in cmd
+
+    @patch("src.agent_invoker.subprocess.run")
+    def test_flag_absent_without_tools(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"ok": 1}', stderr="")
+        AgentInvoker().invoke(system_prompt="s", user_message="m", mcp_config=None)
+        cmd = mock_run.call_args[0][0]
+        assert "--require-mcp-startup" not in cmd
+
+
+class TestMcpStartupRetry:
+    """Exit code 3 (MCP startup failed) is retried for tool-using calls."""
+
+    @patch("src.agent_invoker.time.sleep", return_value=None)
+    @patch("src.agent_invoker.subprocess.run")
+    def test_exit3_retries_then_raises(self, mock_run, mock_sleep):
+        mock_run.return_value = MagicMock(returncode=3, stdout="", stderr="mcp boom")
+        with pytest.raises(RuntimeError, match="exit code 3"):
+            AgentInvoker().invoke(
+                system_prompt="s", user_message="m", mcp_config="second-brain",
+                mcp_startup_retries=2, mcp_startup_backoff=0.0,
+            )
+        assert mock_run.call_count == 3   # 1 initial + 2 retries
+        assert mock_sleep.call_count == 2
+
+    @patch("src.agent_invoker.time.sleep", return_value=None)
+    @patch("src.agent_invoker.subprocess.run")
+    def test_exit3_then_success_on_retry(self, mock_run, mock_sleep):
+        mock_run.side_effect = [
+            MagicMock(returncode=3, stdout="", stderr="mcp boom"),
+            MagicMock(returncode=0, stdout='{"verdict": "ACCEPT", "reasoning": "ok"}', stderr=""),
+        ]
+        out = AgentInvoker().invoke(
+            system_prompt="s", user_message="m", mcp_config="second-brain",
+            mcp_startup_retries=2, mcp_startup_backoff=0.0,
+        )
+        assert out["output"]["verdict"] == "ACCEPT"
+        assert mock_run.call_count == 2
+
+    @patch("src.agent_invoker.time.sleep", return_value=None)
+    @patch("src.agent_invoker.subprocess.run")
+    def test_exit3_not_retried_without_tools(self, mock_run, mock_sleep):
+        mock_run.return_value = MagicMock(returncode=3, stdout="", stderr="x")
+        with pytest.raises(RuntimeError):
+            AgentInvoker().invoke(
+                system_prompt="s", user_message="m", mcp_config=None,
+                mcp_startup_retries=2,
+            )
+        assert mock_run.call_count == 1
+        assert mock_sleep.call_count == 0

@@ -10,7 +10,9 @@ Usage:
     python scripts/dream_cycle_run.py --run-type post_learn --memory-ids uuid1,uuid2
     python scripts/dream_cycle_run.py --run-type session_start
 
-Exit codes: 0 success, 1 partial failure (some candidates rejected), 2 total failure.
+Exit codes: 0 = pipeline ran (any accept/reject mix is healthy); 2 = failed to run
+(circuit breaker / crash / DB unreachable). Candidate rejections do NOT signal
+failure — quality is tracked via metrics, not the exit code.
 
 Requirements: 19.2, 19.3, 19.4, 19.5
 """
@@ -86,14 +88,20 @@ def main() -> int:
     if result.aborted_early:
         print("Status:     aborted early")
 
-    # Determine exit code
-    if result.aborted_early:
-        return 2
-    if result.candidates_rejected > 0 and result.candidates_accepted > 0:
-        return 1
-    if result.candidates_generated > 0 and result.candidates_accepted == 0:
-        return 1
-    return 0
+    return exit_code_for(result)
+
+
+def exit_code_for(result) -> int:
+    """Map a DreamCycleResult to a process exit code.
+
+    The exit code signals whether the pipeline *ran*, not how many candidates the
+    panel accepted. Candidate rejections — and even zero acceptances — are normal,
+    healthy outcomes (the BFT panel doing its job), so they exit 0. Only a genuine
+    failure-to-run (circuit breaker / crash / DB unreachable → aborted_early) is
+    non-zero, so job_wrapper's failure alert fires only on real failures. Quality is
+    tracked via the metrics trends, not this code.
+    """
+    return 2 if result.aborted_early else 0
 
 
 if __name__ == "__main__":
