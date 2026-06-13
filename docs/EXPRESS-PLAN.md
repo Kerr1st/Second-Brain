@@ -99,3 +99,46 @@ Each Express form maps to a finding the project already honors:
 ## Non-goals
 
 - No web UI or app. No new datastore. Express **delivers** synthesis; it does not **re-think** it (no second synthesis engine).
+
+## Activation runbook — launchd credential wiring (2026-06-13)
+
+P2 is built and verified-composing; the only thing gating live delivery is that the three Gmail
+env vars (decision #9) aren't present in launchd's minimal environment, so `email_configured()`
+returns False and `express_push.py` composes-but-skips benignly. **No code change is needed — this
+is pure secret wiring.** Effort ~30 min, no metered cost, independent of Fable.
+
+**Mechanism (confirmed in code):** `scripts/express_push.py` is chained after the noon cycle in
+`scripts/jobs/dream_cycle_scheduled.sh` (`express_push.py || true`) → `should_push()` gate →
+compose/edit/render → `email_configured()` → `send_email()` (Gmail SMTP STARTTLS on :587, login
+with `EXPRESS_EMAIL_FROM` + `GMAIL_APP_PASSWORD`). Env constants live in `src/express.py`
+(`ENV_TO/ENV_FROM/ENV_PASSWORD`).
+
+**Approach — gitignored env file sourced by the wrapper** (keeps the secret out of git *and* the
+plist):
+
+1. Secret file *outside the repo*, created by the user so the app password never enters chat/logs:
+   `~/.config/second-brain/express.env`, `chmod 600`:
+   ```sh
+   export EXPRESS_EMAIL_TO="you@gmail.com"
+   export EXPRESS_EMAIL_FROM="you@gmail.com"
+   export GMAIL_APP_PASSWORD="................"   # 16-char Google App Password, not the login pw
+   ```
+2. One guarded source line in `dream_cycle_scheduled.sh`, just before the `express_push.py` call
+   (references only the *path* — safe to commit + push both remotes):
+   ```sh
+   [ -f "$HOME/.config/second-brain/express.env" ] && set -a && . "$HOME/.config/second-brain/express.env" && set +a
+   ```
+   Sourced here (not in `job_wrapper.sh`) to scope the creds to the one job that needs them.
+
+**Why not plist `EnvironmentVariables`:** it would force the secret into the installed plist and
+risk it diverging into / leaking through the committed `scheduling/` copy.
+
+**Verification (sends real mail — do with the user present, explicit go):**
+1. `express_push.py --dry-run` → proves compose+render, no send.
+2. Inspect `should_push()` on the latest run; if it trips (cross-project/contradiction),
+   `express_push.py --force` sends a real email; otherwise do a one-off direct `send_email()` test
+   so delivery is confirmed regardless of the gate.
+3. Confirm inbox delivery; optional `launchctl kickstart` to prove the scheduled path end-to-end.
+
+**Caveat:** `should_push` is intentionally selective (decision #6) — email fires only on days with
+a new cross-project synthesis or contradiction. Selective by design, not a misconfiguration.
