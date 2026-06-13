@@ -7,8 +7,12 @@
 
 ## Impact
 
-The daily scheduled dream cycle produced **0 candidates every run Jun 8–12** (last good run
-Jun 6: 9 generated → 8 accepted). The failures were *silent* — the job exited and appeared to run.
+The daily scheduled dream cycle produced **0 candidates Jun 8–12**, *silently* (the job exited
+and appeared to run). In fact the scheduled path had been failing with **rotating** causes: a
+`UnicodeDecodeError` under the old Python 3.13 venv on **Jun 6** (since covered by
+`errors="replace"` in `agent_invoker`), then the cwd / `-32002` failure under the rebuilt 3.14
+venv (Jun 8 05:56) on **Jun 8–12**. The oft-cited **9 → 8 accepted** Jun-6 result was a
+**manual** run (cwd=repo) — which masked that the *scheduled* path was already broken.
 
 ## Root cause (confirmed)
 
@@ -57,7 +61,8 @@ It was a **braid** of distinct launchd-context faults — not all cwd-related:
 
 **Verified:** a `launchctl kickstart` in the real scheduled context loaded MCP; the Explorer
 returned 3 real slices (second-brain tools, not the wander); the Thinker produced 8 candidates →
-7 accepted / 1 rejected (≈ Jun-6 baseline); `digest.py` wrote cleanly. Full test suite: 657 passed.
+7 accepted / 1 rejected (≈ the Jun-6 *manual* run's 9→8, and likely the first clean
+*scheduled-context* run in a while); `digest.py` wrote cleanly. Full test suite: 657 passed.
 
 ## Decoupling decision: B1 deferred, B2 → Fable Phase-1b
 
