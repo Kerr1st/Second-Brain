@@ -1,9 +1,11 @@
 # Fable 5 → Thinker Integration Plan (Dream Cycle)
 
-> **Status: DRAFT / proposal — no code changed.** Date: 2026-06-12.
+> **Status: DRAFT.** Date: 2026-06-12 (rev. 2026-06-13). Phase 0a instrumentation shipped
+> (commit `b4c3a7e`); the dream cycle runs healthy on the **Opus + MCP** path — the Jun 8–12
+> outage was a launchd `cwd` bug, now fixed (see `docs/DREAM-CYCLE-MCP-DECOUPLING.md`).
 > Apply Claude Fable 5 to the Second Brain **surgically and cost-consciously**, targeting
-> only the dream-cycle **Thinker** agent. Grounded in a read of `src/agent_invoker.py`,
-> `src/dream_cycle/orchestrator.py`, and the agent prompts in `src/prompts/`.
+> only the dream-cycle **Thinker** agent. Fable work is gated on **B2** (the Thinker context
+> packet), built only when pursuing Fable.
 
 ## TL;DR
 
@@ -13,6 +15,21 @@
   if Fable 5 ran everywhere (the four evaluators would be ~80% of that).
 - Ship behind a flag (default **OFF**), prove a quality lift with an A/B, then enable with a
   per-run cost cap + kill switch.
+
+## Design decisions (locked 2026-06-13)
+
+- **Orchestration stays deterministic Python** — no agentic LLM controller. (An agentic Fable
+  orchestrator would reintroduce multi-turn/tool fragility and multiply cost.)
+- **The 4-evaluator independent BFT consensus (≥3/4) is the quality gate, always.** No synthesis
+  model — Fable included — evaluates its own output as the sole judge. Self-grading invites
+  self-consistency bias; independent critics are how we ensure only the best insights reach the
+  store.
+- **Fable is confined to synthesis (the Thinker), and only B2 is needed for it.** The broader
+  Explorer decoupling (**B1**) is **deferred** — the Jun outage was a launchd `cwd` bug (fixed),
+  not intractable MCP fragility, so the agentic Explorer stays on the now-reliable MCP path
+  (it's the path producing the cross-project/contradiction "crown jewels"). A *consolidated*
+  Fable synthesis core remains an **optional** A/B arm, still gated by the independent panel.
+  See `docs/DREAM-CYCLE-MCP-DECOUPLING.md`.
 
 ## The reframe that drives the cost plan
 
@@ -84,6 +101,9 @@ is inherently bounded and controllable.
    - **recent rejected candidates** for meta-cognitive reflection (mode #7).
    - *Alternative:* keep a **bounded** tool loop (cap tool calls) if pre-fetching proves to
      narrow the Thinker's live search too much. Decide in Phase 1.
+   - **Scope (B2):** this packet is the *only* decoupling Fable needs. The Explorer stays
+     agentic on the (cwd-fixed) MCP path; full Explorer decoupling (B1) is deferred. The cycle
+     is healthy on Opus+MCP today, so build B2 only when pursuing Fable.
 
 3. **Route only the Thinker to the Fable backend, behind a flag.** `AgentInvoker(model=...)`
    is already per-instance configurable. In `DreamCycleOrchestrator.__init__`, add a second
@@ -108,11 +128,18 @@ is inherently bounded and controllable.
 
 - **Phase 0 — instrument + baseline.** Add token/cost logging; record the current run's
   accept-rate and cross-project-insight count as the quality baseline. *(No-risk first step.)*
-- **Phase 1 — build behind flag (OFF).** Fable backend + context-packet pre-fetch; then
-  **A/B the Thinker** (Opus via kiro vs Fable 5) on the **same** slices for ~a week. Compare
-  accepted-insight quality and measured cost.
-- **Decision gate:** does Fable 5 measurably lift insight quality enough to justify the
-  ~$50–80/month? Only then →
+- **Phase 1 — build behind flag (OFF).** Fable backend + the **B2** Thinker context packet;
+  then **A/B the Thinker** on the **same** slices across **several cycles** (not n=1):
+  - **Arm 0 — Opus + tools** (today's agentic Thinker): the baseline.
+  - **Arm 1 — Opus + packet** (tool-less, pre-fetched): **control** — isolates the
+    access-pattern change (incl. the loss of CLS mode-#8 live neighbor search) so any delta is
+    attributable to the *packet*, not the model.
+  - **Arm 2 — Fable + packet**: isolates the *model* (vs Arm 1) — the real question.
+  - **Arm 3 (optional) — consolidated Fable synthesis** (Explorer+Thinker collapsed).
+  Compare **cross-project / contradiction insight rate** (not just accept count — that's the
+  crown-jewel signal) and measured cost. The independent panel gates **all** arms.
+- **Decision gate:** does Fable (Arm 2 vs Arm 1) measurably lift the crown-jewel rate enough to
+  justify the ~$50–80/month? Only then →
 - **Phase 2 — enable by default** with caps; optionally test Explorer-on-Fable.
 
 ## Open decision — data sharing (user's call)
