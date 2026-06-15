@@ -4,6 +4,8 @@ Validates normalization, parser extraction, ingestion, and backfill properties
 for the project auto-tagging feature.
 """
 
+import string
+
 from hypothesis import given, settings, strategies as st
 
 from src.project import normalize_project_tag
@@ -490,8 +492,8 @@ class TestIngestionProjectResolutionExplicitOverridesHeader:
 # ---------------------------------------------------------------------------
 
 # Strategy: long paragraph text (> 100 chars to make sections substantial)
-_long_paragraph = st.from_regex(
-    r"[A-Za-z ]{200,400}", fullmatch=True
+_long_paragraph = st.text(
+    alphabet=string.ascii_letters + " ", min_size=200, max_size=400
 )
 
 # Strategy: number of sections (at least 3 to guarantee multiple chunks)
