@@ -950,10 +950,9 @@ for q in queries:
 
 ### Error Scenario 3: Evaluator Agent Failure
 
-**Condition**: One of the three evaluators crashes or times out
-**Response**: Treat the candidate as if that evaluator voted REJECT (conservative default). Log the failure. Continue with remaining candidates.
-**Recovery**: The candidate may be re-examined in a future cycle if the Explorer assembles a similar slice.
-**Developer note**: An evaluator crash effectively caps the candidate at DEFERRED (best case 2/3 ACCEPT). This is consistent with the precision-over-recall design philosophy. The candidate gets a second chance via the deferred re-evaluation mechanism in the next cycle.
+**Condition**: An evaluator crashes, times out, or returns unparseable output
+**Response**: Retry the evaluator up to `EVALUATOR_MAX_ATTEMPTS` (transient flakes — a kiro hiccup or Bedrock throttle — usually clear on retry). If it still fails, abort the run loudly (`aborted_early=True`, exit 2, notification) — do NOT fabricate a verdict. A crash is an *omission* (no vote), not a *commission* (a bad vote); recording it as REJECT would spend the panel's f=1 Byzantine budget on a non-Byzantine event. Candidates evaluated before the abort are preserved (accurate partial stats — no orphaned memories against a zeroed run row).
+**Recovery**: The abort notification surfaces the infra failure for a fix; the next scheduled cycle re-examines the memories. The ≥3/4 quorum continues to tolerate one genuine bad *vote*.
 
 ### Error Scenario 4: Deduplication False Positive
 

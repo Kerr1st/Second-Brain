@@ -77,7 +77,7 @@ The Reflexion pattern (Shinn 2023) that DEFERRED enabled — feeding the dissent
 #### Acceptance Criteria
 
 1. WHEN the Consensus Panel evaluates a candidate, THE Orchestrator SHALL invoke the Skeptic, User_Advocate, Epistemologist, and Methodologist evaluators independently.
-2. THE Orchestrator SHALL apply the same crash/timeout handling to the Methodologist as to the existing three evaluators: on failure, treat the Methodologist's verdict as REJECT.
+2. THE Orchestrator SHALL apply the same crash/timeout handling to the Methodologist as to the existing three evaluators: retry on failure, then abort the run loudly if it persists — never fabricate a REJECT verdict.
 3. THE Orchestrator SHALL build a verdicts dictionary containing evaluator_a through evaluator_d verdict and reasoning fields before storing the candidate record.
 4. THE Consensus_Panel SHALL evaluate each candidate independently — no evaluator's prompt contains another evaluator's verdict or reasoning.
 

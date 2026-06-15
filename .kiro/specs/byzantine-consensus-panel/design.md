@@ -457,9 +457,9 @@ verdicts_dict = {
 
 ### Methodologist Crash/Timeout
 
-The Methodologist uses the same `_invoke_evaluator_safe` wrapper as the existing three evaluators. On `TimeoutError` or `RuntimeError`, the Methodologist's verdict defaults to `REJECT` with reasoning `"Evaluator crashed or timed out"`.
+The Methodologist uses the same `_invoke_evaluator_safe` wrapper as the existing three evaluators. On `TimeoutError`, `RuntimeError`, or unparseable output, the wrapper retries up to `EVALUATOR_MAX_ATTEMPTS`; if the evaluator still fails, it raises and the run aborts loudly (`aborted_early=True`, exit 2, notification) — it never fabricates a verdict.
 
-With the binary model, a Methodologist crash means the best possible outcome is still ACCEPTED (3/4 from the other three evaluators, which meets the BFT quorum). This is correct — the BFT model is designed to tolerate exactly this scenario.
+A crash is an *omission* fault (no vote), not a *commission* fault (an arbitrary/hallucinated vote). The BFT quorum (≥3/4, f=1) is designed to tolerate one *commission* fault — not to absorb a crash. Fabricating a REJECT would convert an omission into a commission and spend the f=1 budget on a non-Byzantine event: a crash plus one genuine bad vote would then be two effective faults against an f=1 panel, and the quorum could be wrong. So crashes are handled upstream by retry/abort, reserving the quorum's full tolerance for genuine bad votes.
 
 ### Migration Safety
 
@@ -503,7 +503,7 @@ Use Hypothesis with `@settings(max_examples=100)` for each property test.
 - `tally_consensus` with wrong-length input → ValueError
 - `get_evaluator_prompt("methodologist", ...)` returns prompt with role description
 - `get_evaluator_prompt("invalid_role", ...)` raises ValueError listing 4 roles
-- Methodologist crash/timeout → default REJECT verdict, candidate can still be ACCEPTED (3/4)
+- Methodologist crash/timeout → retried, then (if persistent) raises → run aborts (`aborted_early`); never a fabricated REJECT
 - `store_candidate` with missing evaluator_d keys → NULL values
 - Cost efficiency metric uses factor of 4
 - Migration SQL contains evaluator_d columns

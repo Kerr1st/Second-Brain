@@ -225,7 +225,7 @@ The Dream Cycle adds autonomous, proactive learning to the Second Brain personal
 
 1. IF the Explorer agent crashes or times out, THEN THE Orchestrator SHALL log the error, mark the run as completed with zero candidates, and exit cleanly.
 2. IF the Thinker agent fails for a single slice, THEN THE Orchestrator SHALL skip that slice, log the error, and continue processing remaining slices.
-3. IF an evaluator agent crashes or times out, THEN THE Orchestrator SHALL treat that evaluator's verdict as REJECT and continue with the remaining evaluators.
+3. IF an evaluator agent crashes or times out, THEN THE Orchestrator SHALL retry it up to a bounded number of attempts; if it still fails, THE Orchestrator SHALL abort the run loudly (`aborted_early`, exit 2) rather than fabricate a verdict. A crashed evaluator returns no vote (an omission fault) and MUST NOT be recorded as REJECT; candidates already evaluated are preserved in the run's stats.
 4. IF the database becomes unreachable mid-run, THEN THE Orchestrator SHALL log the error and exit with code 2.
 5. IF a SUPERSEDE target memory does not exist, THEN THE Orchestrator SHALL downgrade to a CREATE operation and log a warning.
 

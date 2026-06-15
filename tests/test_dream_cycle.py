@@ -20,6 +20,7 @@ from src.models import (
     MemorySlice,
 )
 from src.dream_cycle.feedback import build_feedback_injection
+from src.dream_cycle.orchestrator import EVALUATOR_MAX_ATTEMPTS
 
 
 # ---------------------------------------------------------------------------
@@ -1198,15 +1199,99 @@ class TestErrorHandling:
             # Evaluators should have been called 4 times (4 evaluators × 1 candidate)
             assert mock_eval.call_count == 4
 
-    def test_evaluator_timeout_treated_as_reject(self):
-        """When an evaluator raises TimeoutError, its verdict is treated
-        as REJECT and the remaining evaluators still run.
+    def test_unrecoverable_evaluator_aborts_run(self):
+        """When an evaluator fails every retry, the run aborts loudly
+        (aborted_early=True) — it never fabricates a REJECT vote.
 
-        **Validates: Requirement 16.3**
+        Supersedes the old "timeout treated as REJECT" rule (Req 16.3): a crash
+        is silence, not a verdict. The orchestrator retries, then fails loud.
         """
         orch = _make_orchestrator()
         test_slice = self._make_slice()
-        candidate = self._make_candidate("Timeout Eval Candidate")
+        candidate = self._make_candidate("Unrecoverable Eval Candidate")
+
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch("src.dream_cycle.orchestrator.time.sleep"), \
+             patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
+             patch.object(orch, "invoke_thinker", return_value=[candidate]), \
+             patch.object(orch, "invoke_evaluator", side_effect=TimeoutError("evaluator down")) as mock_eval, \
+             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
+             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
+
+            mock_db.create_run.return_value = "run-eval-unrecoverable"
+            mock_db.get_memory_stats.return_value = {
+                "total_count": 100,
+                "recent_activity": 5,
+                "date_range": {"min": None, "max": None},
+                "type_distribution": {},
+            }
+            mock_db.store_candidate.return_value = "cand-id"
+
+            result = orch.run(run_type="scheduled")
+
+            # Unrecoverable evaluator → run aborts; candidate neither accepted
+            # nor fabricated-rejected.
+            assert result.aborted_early is True
+            assert result.candidates_accepted == 0
+            assert result.candidates_rejected == 0
+            mock_db.store_candidate.assert_not_called()
+            # the failing evaluator was retried the full budget before aborting
+            assert mock_eval.call_count == EVALUATOR_MAX_ATTEMPTS
+
+    def test_unrecoverable_evaluator_aborts_with_accurate_partial_stats(self):
+        """Regression (orphaned-stats): when a later candidate's evaluator is
+        unrecoverable, the run aborts but reports the candidates already
+        evaluated — never a zeroed run row against persisted accepted memories.
+        """
+        orch = _make_orchestrator()
+        test_slice = self._make_slice()
+        c1 = self._make_candidate("First — fully evaluated")
+        c2 = self._make_candidate("Second — evaluator dies")
+
+        def eval_side_effect(candidate, role):
+            if candidate is c1:
+                return EvaluatorVerdict(role=role, verdict="ACCEPT", reasoning="ok")
+            raise TimeoutError("panel down on c2")
+
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch("src.dream_cycle.orchestrator.time.sleep"), \
+             patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
+             patch.object(orch, "invoke_thinker", return_value=[c1, c2]), \
+             patch.object(orch, "invoke_evaluator", side_effect=eval_side_effect), \
+             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
+             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
+             patch("src.dream_cycle.orchestrator.check_duplicate", return_value=None), \
+             patch("src.dream_cycle.orchestrator.store_accepted", return_value="mem-id"):
+
+            mock_db.create_run.return_value = "run-partial-abort"
+            mock_db.get_memory_stats.return_value = {
+                "total_count": 100,
+                "recent_activity": 5,
+                "date_range": {"min": None, "max": None},
+                "type_distribution": {},
+            }
+            mock_db.store_candidate.return_value = "cand-id"
+
+            result = orch.run(run_type="scheduled")
+
+            # Aborted, but c1's acceptance is preserved (not zeroed).
+            assert result.aborted_early is True
+            assert result.candidates_generated == 2
+            assert result.candidates_accepted == 1
+            assert result.candidates_rejected == 0
+            # complete_run recorded real partial stats, not _ZERO_STATS
+            stats = mock_db.complete_run.call_args.kwargs["stats"]
+            assert stats["candidates_generated"] == 2
+            assert stats["candidates_accepted"] == 1
+
+    def test_one_dissenting_vote_tolerated_quorum_accepts(self):
+        """Byzantine tolerance (real votes): one dissenting REJECT among four is
+        tolerated — 3/4 ACCEPT → ACCEPTED. The quorum tolerates a bad *vote*;
+        crashes are handled separately (retry/abort), not folded into the tally.
+        """
+        orch = _make_orchestrator()
+        test_slice = self._make_slice()
+        candidate = self._make_candidate("One Dissent Candidate")
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
@@ -1217,19 +1302,18 @@ class TestErrorHandling:
              patch("src.dream_cycle.orchestrator.check_duplicate", return_value=None), \
              patch("src.dream_cycle.orchestrator.store_accepted", return_value="mem-id"):
 
-            mock_db.create_run.return_value = "run-eval-timeout"
+            mock_db.create_run.return_value = "run-one-dissent"
             mock_db.get_memory_stats.return_value = {
                 "total_count": 100,
                 "recent_activity": 5,
                 "date_range": {"min": None, "max": None},
                 "type_distribution": {},
             }
-            mock_db.get_previous_run_id.return_value = None
             mock_db.store_candidate.return_value = "cand-id"
 
-            # Skeptic times out, advocate, epistemologist, and methodologist ACCEPT
+            # Real verdicts: one genuine REJECT, three ACCEPT → 3/4 → ACCEPTED
             mock_eval.side_effect = [
-                TimeoutError("Skeptic timed out"),
+                EvaluatorVerdict(role="skeptic", verdict="REJECT", reasoning="unconvinced"),
                 EvaluatorVerdict(role="advocate", verdict="ACCEPT", reasoning="useful"),
                 EvaluatorVerdict(role="epistemologist", verdict="ACCEPT", reasoning="novel"),
                 EvaluatorVerdict(role="methodologist", verdict="ACCEPT", reasoning="sound methodology"),
@@ -1237,25 +1321,19 @@ class TestErrorHandling:
 
             result = orch.run(run_type="scheduled")
 
-            # 3/4 ACCEPT (timeout = REJECT) → ACCEPTED (BFT quorum met)
-            assert result.candidates_generated == 1
+            assert result.aborted_early is False
             assert result.candidates_accepted == 1
             assert result.candidates_rejected == 0
-
-            # store_candidate called with ACCEPTED
             store_call = mock_db.store_candidate.call_args
             assert store_call[0][3] == "ACCEPTED"
 
-    def test_two_evaluator_crashes_exceeds_bft_tolerance(self):
-        """When 2 evaluators crash/timeout, both become REJECT via
-        _invoke_evaluator_safe. With at most 2 ACCEPTs from the surviving
-        evaluators, the candidate is REJECTED (2 faults exceeds f=1 tolerance).
-
-        **Validates: BFT correctness under cascading failure**
+    def test_two_dissenting_votes_rejected(self):
+        """Two genuine REJECT votes (2/4 ACCEPT) → REJECTED — the quorum bound.
+        These are real verdicts, not crashes: rejected on merit, run completes.
         """
         orch = _make_orchestrator()
         test_slice = self._make_slice()
-        candidate = self._make_candidate("Double Crash Candidate")
+        candidate = self._make_candidate("Two Dissent Candidate")
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
@@ -1264,7 +1342,7 @@ class TestErrorHandling:
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
 
-            mock_db.create_run.return_value = "run-double-crash"
+            mock_db.create_run.return_value = "run-two-dissent"
             mock_db.get_memory_stats.return_value = {
                 "total_count": 100,
                 "recent_activity": 5,
@@ -1273,18 +1351,16 @@ class TestErrorHandling:
             }
             mock_db.store_candidate.return_value = "cand-id"
 
-            # Skeptic and methodologist crash, advocate and epistemologist ACCEPT
             mock_eval.side_effect = [
-                TimeoutError("Skeptic timed out"),
+                EvaluatorVerdict(role="skeptic", verdict="REJECT", reasoning="weak"),
                 EvaluatorVerdict(role="advocate", verdict="ACCEPT", reasoning="useful"),
-                EvaluatorVerdict(role="epistemologist", verdict="ACCEPT", reasoning="novel"),
-                RuntimeError("Methodologist crashed"),
+                EvaluatorVerdict(role="epistemologist", verdict="REJECT", reasoning="not novel"),
+                EvaluatorVerdict(role="methodologist", verdict="ACCEPT", reasoning="ok"),
             ]
 
             result = orch.run(run_type="scheduled")
 
-            # 2 crashes → 2 REJECT, 2 ACCEPT → ≤2/4 → REJECTED
-            assert result.candidates_generated == 1
+            assert result.aborted_early is False
             assert result.candidates_accepted == 0
             assert result.candidates_rejected == 1
 
@@ -2234,37 +2310,52 @@ class TestCheckDuplicateSkipsChunksStrictThreshold:
 
 
 # ---------------------------------------------------------------------------
-# Property 4: _invoke_evaluator_safe returns REJECT on failure
-# **Feature: dream-cycle-decomposition, Property 4: _invoke_evaluator_safe returns REJECT on failure**
-# **Validates: Requirements 7.3**
+# _invoke_evaluator_safe: retry transient failures, then raise (never REJECT)
+# Supersedes Property 4 / Requirement 7.3 ("returns REJECT on failure"):
+# an unresponsive evaluator is silence (omission), not a vote — retry, then
+# fail loudly. Fabricating a REJECT would spend the f=1 Byzantine budget on a
+# non-Byzantine event.
 # ---------------------------------------------------------------------------
 
-class TestInvokeEvaluatorSafeRejectOnFailure:
-    """Property-based tests verifying _invoke_evaluator_safe returns REJECT
-    when invoke_evaluator raises TimeoutError or RuntimeError."""
+class TestInvokeEvaluatorSafeRetryThenRaise:
+    """_invoke_evaluator_safe retries transient evaluator failures and, if they
+    persist, raises — it never fabricates a REJECT verdict."""
 
-    evaluator_roles = st.sampled_from(["skeptic", "advocate", "epistemologist", "methodologist"])
-    error_types = st.sampled_from([TimeoutError, RuntimeError])
-
-    @given(candidate=create_candidates, role=st.sampled_from(["skeptic", "advocate", "epistemologist", "methodologist"]), error_cls=st.sampled_from([TimeoutError, RuntimeError]))
-    @settings(max_examples=100)
-    def test_returns_reject_verdict_on_failure(self, candidate, role, error_cls):
-        """For any CandidateInsight and evaluator role, when invoke_evaluator()
-        raises TimeoutError or RuntimeError, _invoke_evaluator_safe() returns
-        an EvaluatorVerdict with verdict="REJECT" and does not propagate the exception.
-
-        **Feature: dream-cycle-decomposition, Property 4: _invoke_evaluator_safe returns REJECT on failure**
-        **Validates: Requirements 7.3**
-        """
+    @given(
+        candidate=create_candidates,
+        role=st.sampled_from(["skeptic", "advocate", "epistemologist", "methodologist"]),
+        error_cls=st.sampled_from([TimeoutError, RuntimeError, ValueError]),
+    )
+    @settings(max_examples=25)
+    def test_raises_after_exhausting_attempts(self, candidate, role, error_cls):
+        """When invoke_evaluator fails every attempt, _invoke_evaluator_safe
+        raises (no fabricated REJECT), after retrying the full budget."""
         orch = _make_orchestrator()
 
-        with patch.object(orch, "invoke_evaluator", side_effect=error_cls("agent failed")):
+        with patch("src.dream_cycle.orchestrator.time.sleep"), \
+             patch.object(orch, "invoke_evaluator", side_effect=error_cls("agent failed")) as mock_eval:
+            with pytest.raises(RuntimeError):
+                orch._invoke_evaluator_safe(candidate, role)
+            assert mock_eval.call_count == EVALUATOR_MAX_ATTEMPTS
+
+    @given(
+        candidate=create_candidates,
+        role=st.sampled_from(["skeptic", "advocate", "epistemologist", "methodologist"]),
+    )
+    @settings(max_examples=25)
+    def test_retries_then_succeeds(self, candidate, role):
+        """A transient failure followed by success returns the real verdict
+        (invoke_evaluator called twice; no fabricated REJECT)."""
+        orch = _make_orchestrator()
+        real = EvaluatorVerdict(role=role, verdict="ACCEPT", reasoning="recovered")
+
+        with patch("src.dream_cycle.orchestrator.time.sleep"), \
+             patch.object(orch, "invoke_evaluator", side_effect=[TimeoutError("flake"), real]) as mock_eval:
             result = orch._invoke_evaluator_safe(candidate, role)
 
-        assert isinstance(result, EvaluatorVerdict)
-        assert result.verdict == "REJECT"
-        assert result.role == role
-        assert len(result.reasoning) > 0
+        assert result is real
+        assert result.verdict == "ACCEPT"
+        assert mock_eval.call_count == 2
 
 
 # ---------------------------------------------------------------------------

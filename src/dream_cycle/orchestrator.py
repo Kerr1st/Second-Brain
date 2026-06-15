@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 
@@ -38,6 +39,12 @@ _ZERO_STATS = {
     "candidates_accepted": 0,
     "candidates_rejected": 0,
 }
+
+# Evaluator resilience: retry transient evaluator failures before treating the
+# panel as broken. An infra failure (timeout/crash/unparseable output) must never
+# be silently recorded as a quality REJECT vote — retry, then abort loudly.
+EVALUATOR_MAX_ATTEMPTS = 3
+EVALUATOR_BACKOFF_S = 2.0
 
 
 class DreamCycleOrchestrator:
@@ -209,12 +216,27 @@ class DreamCycleOrchestrator:
         accepted: list[CandidateInsight] = []
         rejected: list[CandidateInsight] = []
 
-        # Step 7: Consensus Panel — invoke 4 evaluators per candidate
+        # Step 7: Consensus Panel — invoke 4 evaluators per candidate.
+        # If an evaluator is unrecoverable after retries (the panel is genuinely
+        # down), abort the run loudly — but keep the candidates already evaluated
+        # so the run record reflects real persisted work (no zeroed-stats lie /
+        # orphaned accepted memories). An infra failure never fabricates a verdict.
+        panel_aborted = False
         for candidate in all_candidates:
-            verdict_a = self._invoke_evaluator_safe(candidate, "skeptic")
-            verdict_b = self._invoke_evaluator_safe(candidate, "advocate")
-            verdict_c = self._invoke_evaluator_safe(candidate, "epistemologist")
-            verdict_d = self._invoke_evaluator_safe(candidate, "methodologist")
+            try:
+                verdict_a = self._invoke_evaluator_safe(candidate, "skeptic")
+                verdict_b = self._invoke_evaluator_safe(candidate, "advocate")
+                verdict_c = self._invoke_evaluator_safe(candidate, "epistemologist")
+                verdict_d = self._invoke_evaluator_safe(candidate, "methodologist")
+            except RuntimeError as exc:
+                logger.error(
+                    "Evaluator unrecoverable for candidate '%s' after retries; "
+                    "aborting run after %d/%d candidates (accepted=%d, rejected=%d): %s",
+                    candidate.title, len(accepted) + len(rejected),
+                    len(all_candidates), len(accepted), len(rejected), exc,
+                )
+                panel_aborted = True
+                break
 
             evaluator_verdicts = [verdict_a, verdict_b, verdict_c, verdict_d]
             final = tally_consensus(evaluator_verdicts)
@@ -291,35 +313,52 @@ class DreamCycleOrchestrator:
             candidates_accepted=len(accepted),
             candidates_rejected=len(rejected),
             digest_path=digest,
-            aborted_early=False,
+            aborted_early=panel_aborted,
         )
 
 
     def _invoke_evaluator_safe(self, candidate: CandidateInsight, role: str) -> EvaluatorVerdict:
-        """Invoke evaluator with crash/timeout handling.
+        """Invoke an evaluator, retrying transient failures before giving up.
 
-        On TimeoutError or RuntimeError, returns a default REJECT verdict
-        instead of propagating the exception.
+        Transient infra failures (timeout / subprocess error / unparseable output)
+        are retried up to ``EVALUATOR_MAX_ATTEMPTS`` times with linear backoff. If
+        the evaluator still fails, the exception is raised so the run aborts loudly
+        (the top-level handler sets ``aborted_early`` -> exit 2 + notification)
+        instead of silently recording a REJECT vote.
+
+        An infrastructure failure must never masquerade as a quality verdict: a
+        crashed evaluator is the judging machinery breaking, not a verdict on the
+        insight. (This mirrors how ``invoke_explorer`` already aborts on crash.)
 
         Args:
             candidate: The CandidateInsight to evaluate.
             role: One of 'skeptic', 'advocate', 'epistemologist', 'methodologist'.
 
         Returns:
-            EvaluatorVerdict — real verdict on success, default REJECT on failure.
+            EvaluatorVerdict — the real verdict once the evaluator succeeds.
+
+        Raises:
+            RuntimeError: If the evaluator fails every attempt (unrecoverable).
         """
-        try:
-            return self.invoke_evaluator(candidate, role)
-        except (TimeoutError, RuntimeError, ValueError):
-            logger.error(
-                "Evaluator '%s' crashed/timed out/unparseable for '%s', treating as REJECT",
-                role, candidate.title,
-            )
-            return EvaluatorVerdict(
-                role=role,
-                verdict="REJECT",
-                reasoning="Evaluator crashed or timed out",
-            )
+        last_exc: Exception | None = None
+        for attempt in range(1, EVALUATOR_MAX_ATTEMPTS + 1):
+            try:
+                return self.invoke_evaluator(candidate, role)
+            except (TimeoutError, RuntimeError, ValueError) as exc:
+                last_exc = exc
+                logger.warning(
+                    "Evaluator '%s' failed for '%s' (attempt %d/%d): %s",
+                    role, candidate.title, attempt, EVALUATOR_MAX_ATTEMPTS, exc,
+                )
+                if attempt < EVALUATOR_MAX_ATTEMPTS:
+                    time.sleep(EVALUATOR_BACKOFF_S * attempt)
+        logger.error(
+            "Evaluator '%s' unrecoverable after %d attempts for '%s'; aborting run",
+            role, EVALUATOR_MAX_ATTEMPTS, candidate.title,
+        )
+        raise RuntimeError(
+            f"Evaluator '{role}' unrecoverable after {EVALUATOR_MAX_ATTEMPTS} attempts"
+        ) from last_exc
 
 
 
