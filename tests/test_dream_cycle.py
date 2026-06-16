@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import ANY, MagicMock, patch, call
 
 import pytest
 from hypothesis import given, settings, strategies as st
@@ -692,8 +692,8 @@ class TestSessionStartFrequencyCap:
 
             result = orch.run(run_type="session_start")
 
-            # Run record should be created
-            mock_db.create_run.assert_called_once_with("session_start")
+            # Run record should be created (with backend provenance snapshot)
+            mock_db.create_run.assert_called_once_with("session_start", backend_provenance=ANY)
             # Explorer should be invoked
             mock_explorer.assert_called_once()
 
@@ -2386,6 +2386,7 @@ class TestFinalOrchestratorMethodSet:
             "invoke_evaluator",
             "_invoke_evaluator_safe",
             "_invoker_for",
+            "_backend_provenance",
             "_capture",
         }
 

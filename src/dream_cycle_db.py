@@ -12,17 +12,26 @@ from psycopg2.extras import RealDictCursor
 from src.db import get_connection
 
 
-def create_run(run_type: str) -> str:
-    """Insert a new dream_cycle_runs record. Returns run UUID."""
+def create_run(run_type: str, backend_provenance: dict | None = None) -> str:
+    """Insert a new dream_cycle_runs record. Returns run UUID.
+
+    backend_provenance: optional snapshot of the active backend profile —
+        ``{role: {backend, model, effort}}`` — stored so a run's verdicts stay
+        auditable across a backend swap or the Mac Mini cutover (see
+        docs/MODEL-BACKENDS.md). ``None`` (the default) leaves the column NULL.
+    """
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO dream_cycle_runs (run_type)
-                VALUES (%s)
+                INSERT INTO dream_cycle_runs (run_type, backend_provenance)
+                VALUES (%s, %s)
                 RETURNING id
                 """,
-                (run_type,),
+                (
+                    run_type,
+                    json.dumps(backend_provenance) if backend_provenance is not None else None,
+                ),
             )
             run_id = cur.fetchone()[0]
         conn.commit()

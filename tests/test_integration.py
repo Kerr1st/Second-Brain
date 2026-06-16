@@ -235,7 +235,7 @@ class TestFullPipelineIntegration:
         result, mocks = self._run_pipeline()
 
         # Run record created
-        mocks["dc_db"].create_run.assert_called_once_with("scheduled")
+        mocks["dc_db"].create_run.assert_called_once_with("scheduled", backend_provenance=ANY)
         assert result.run_id == MOCK_RUN_ID
 
         # Run record completed with correct stats

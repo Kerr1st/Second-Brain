@@ -64,8 +64,35 @@ class TestCreateRun(unittest.TestCase):
         sql_arg = mock_cur.execute.call_args[0][0]
         params = mock_cur.execute.call_args[0][1]
         self.assertIn("INSERT INTO dream_cycle_runs", sql_arg)
+        self.assertIn("backend_provenance", sql_arg)
         self.assertIn("RETURNING id", sql_arg)
-        self.assertEqual(params, ("post_learn",))
+        # No provenance passed -> column inserted as NULL.
+        self.assertEqual(params, ("post_learn", None))
+
+    @patch("src.dream_cycle_db.get_connection")
+    def test_create_run_persists_backend_provenance(self, mock_get_conn):
+        """When backend_provenance is provided, it is JSON-serialized into the
+        backend_provenance column."""
+        expected_id = uuid4()
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = (expected_id,)
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        provenance = {
+            "explorer": {"backend": "kiro", "model": "claude-opus-4.8", "effort": "high"},
+            "thinker": {"backend": "kiro", "model": "claude-opus-4.8", "effort": "max"},
+        }
+        create_run("scheduled", backend_provenance=provenance)
+
+        sql_arg = mock_cur.execute.call_args[0][0]
+        params = mock_cur.execute.call_args[0][1]
+        self.assertIn("backend_provenance", sql_arg)
+        self.assertEqual(params[0], "scheduled")
+        self.assertEqual(json.loads(params[1]), provenance)
 
 
 class TestCompleteRun(unittest.TestCase):

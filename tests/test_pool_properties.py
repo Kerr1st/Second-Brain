@@ -149,7 +149,7 @@ _EXPECTED_SIGNATURES = {
     "search.hybrid_search": {"params": ["query_text", "query_embedding", "limit", "type", "status", "project", "source_type", "created_after"]},
     "search.increment_access_count": {"params": ["memory_ids"]},
     # dream_cycle_db.py functions
-    "dream_cycle_db.create_run": {"params": ["run_type"]},
+    "dream_cycle_db.create_run": {"params": ["run_type", "backend_provenance"]},
     "dream_cycle_db.complete_run": {"params": ["run_id", "stats", "digest", "explorer_output", "explorer_feedback_injected"]},
     "dream_cycle_db.store_candidate": {"params": ["run_id", "candidate", "verdicts", "final_verdict", "created_memory_id"]},
     "dream_cycle_db.get_recent_rejections": {"params": ["n_cycles"]},
