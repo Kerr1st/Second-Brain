@@ -40,6 +40,8 @@ Tests require a running PostgreSQL instance (native, on `localhost:5432`). The t
 
 ## Documentation
 
+**New to Second Brain? Start with the [User Guide](docs/user-guide/index.md)** — what it is, how to install and configure it, day-to-day use, and operations. The references below are deeper design and architecture docs.
+
 | Doc | What it covers |
 |---|---|
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, database schema, search architecture, tech stack |
