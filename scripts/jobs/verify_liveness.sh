@@ -10,7 +10,7 @@
 # deliberately generous enough to absorb weekends / a powered-off machine.
 set -uo pipefail
 export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 CONTAINER="${DB_CONTAINER:-second-brain-db}"
 DB_USER="${DB_USER:-memory_bank}"

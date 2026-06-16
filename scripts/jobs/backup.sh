@@ -4,7 +4,7 @@
 # See docs/DISASTER-RECOVERY.md for full recovery procedures.
 set -uo pipefail
 export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 BACKUP_DIR="backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -92,21 +92,24 @@ rclone copy "$BACKUP_DIR/" gdrive:memory-bank-backups/ --include "*.gpg" 2>&1 ||
 rclone sync "$BACKUP_DIR/kb-sources/" gdrive:memory-bank-backups/kb-sources/ 2>&1 || true
 rclone sync "$BACKUP_DIR/config/" gdrive:memory-bank-backups/config/ 2>&1 || true
 
-# Verify the encrypted dump actually landed on the remote. Retry: Google Drive
-# listing is eventually-consistent and can lag a large upload by several seconds,
-# which would otherwise false-negative a backup that actually succeeded.
-REMOTE_OK=false
-for _ in 1 2 3 4 5 6; do
-  if rclone lsf gdrive:memory-bank-backups/ 2>/dev/null | grep -q "memory_bank_${TIMESTAMP}.dump.gpg"; then
-    REMOTE_OK=true; break
+# rclone copy (above) verifies each transfer's size/hash and exits non-zero if the
+# upload didn't land — so GDRIVE_OK from the copy is the source of truth for upload
+# success. As a best-effort confirmation, list the SPECIFIC file (--files-only so
+# the config/ and kb-sources/ subdirs don't count as a match). A transient Drive
+# list error (rate-limit / "couldn't find root directory ID") must NOT flip a
+# successful upload to "failed", so a list miss only warns — it never sets
+# GDRIVE_OK=false. (Root cause of the prior nightly false-failures: the Drive API
+# rate-limit on the verify's listing, masked by 2>/dev/null.)
+if [ "$GDRIVE_OK" = true ]; then
+  REMOTE_FILE="memory_bank_${TIMESTAMP}.dump.gpg"
+  if rclone lsf gdrive:memory-bank-backups/ --files-only --include "$REMOTE_FILE" \
+       --contimeout 20s --timeout 90s --retries 3 --low-level-retries 10 2>/tmp/sb_verify_err \
+       | grep -Fxq "$REMOTE_FILE"; then
+    log "✅ Google Drive backup verified ($ROWS memories; $REMOTE_FILE present on remote)"
+  else
+    log "⚠️  Upload reported success (rclone copy ok) but listing didn't confirm $REMOTE_FILE — likely a transient Drive rate-limit: $(tail -1 /tmp/sb_verify_err 2>/dev/null)"
   fi
-  sleep 10
-done
-if [ "$REMOTE_OK" = true ]; then
-  log "✅ Google Drive backup verified ($ROWS memories, dump present on remote)"
-else
-  log "❌ Google Drive backup NOT verified — dump missing on remote"
-  GDRIVE_OK=false
+  rm -f /tmp/sb_verify_err
 fi
 
 # --- Retention: 30 days cloud, 7 days local ---

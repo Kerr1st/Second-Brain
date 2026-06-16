@@ -4,7 +4,7 @@
 # See docs/DISASTER-RECOVERY.md for recovery procedures.
 set -uo pipefail
 export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 KEY_FILE="$HOME/second-brain/.backup-key"
 VERIFY_DIR="/tmp/second-brain-verify"
