@@ -23,7 +23,7 @@ from src.db import close_pool
 # Database fixtures
 # ---------------------------------------------------------------------------
 
-TEST_DB_NAME = "memory_bank_test"
+TEST_DB_NAME = os.environ.get("TEST_DB_NAME", "memory_bank_test")
 
 # Connection params for the admin database (used to CREATE/DROP the test DB)
 _ADMIN_CONFIG = {
