@@ -215,11 +215,11 @@ class TestEvaluatorIndependenceProperty:
 
         captured_calls = []
 
-        def mock_invoke(system_prompt, user_message, mcp_config=None, **kwargs):
+        def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
             captured_calls.append({
                 "system_prompt": system_prompt,
                 "user_message": user_message,
-                "mcp_config": mcp_config,
+                "tools": tools,
             })
             return {"output": {"verdict": "ACCEPT", "reasoning": "looks good"}, "raw": "{}"}
 
@@ -240,9 +240,9 @@ class TestEvaluatorIndependenceProperty:
             prompt = call_data["system_prompt"]
             role = roles[i]
 
-            # Verify no MCP config for evaluators
-            assert call_data["mcp_config"] is None, (
-                f"Evaluator {role} should NOT receive MCP config"
+            # Verify no tool access for evaluators
+            assert call_data["tools"] is False, (
+                f"Evaluator {role} should NOT receive tool access"
             )
 
             # Verify the prompt contains the evaluator's own role
@@ -271,17 +271,17 @@ class TestEvaluatorIndependenceProperty:
 class TestEvaluatorIndependenceExplicit:
     """Explicit tests for evaluator independence."""
 
-    def test_evaluators_invoked_without_mcp_config(self):
-        """Evaluator agents must not receive MCP configuration.
+    def test_evaluators_invoked_without_tools(self):
+        """Evaluator agents must not receive tool access.
 
         **Validates: Requirements 13.4**
         """
         orch = _make_orchestrator()
 
-        captured_mcp_configs = []
+        captured_tools = []
 
-        def mock_invoke(system_prompt, user_message, mcp_config=None, **kwargs):
-            captured_mcp_configs.append(mcp_config)
+        def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
+            captured_tools.append(tools)
             return {"output": {"verdict": "ACCEPT", "reasoning": "solid"}, "raw": "{}"}
 
         orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
@@ -299,9 +299,9 @@ class TestEvaluatorIndependenceExplicit:
         for role in ["skeptic", "advocate", "epistemologist", "methodologist"]:
             orch.invoke_evaluator(candidate, role)
 
-        # All 4 evaluator invocations should have mcp_config=None
-        assert all(cfg is None for cfg in captured_mcp_configs), (
-            f"Evaluators received MCP configs: {captured_mcp_configs}"
+        # All 4 evaluator invocations should have tools=False
+        assert all(t is False for t in captured_tools), (
+            f"Evaluators received tool access: {captured_tools}"
         )
 
     def test_each_evaluator_gets_own_role_criteria(self):

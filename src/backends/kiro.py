@@ -81,7 +81,7 @@ class KiroInvoker:
         self,
         system_prompt: str,
         user_message: str,
-        mcp_config: str | None = None,
+        tools: bool = False,
         timeout: int = 300,
         effort: str | None = None,
         stage: str | None = None,
@@ -97,9 +97,9 @@ class KiroInvoker:
         Args:
             system_prompt: The agent's role prompt (written to agent config).
             user_message: Input data passed as the chat input argument.
-            mcp_config: When truthy, the Second Brain MCP server is included
-                in the agent config so the agent can use memory tools.
-                Evaluators should pass None (no tool access).
+            tools: When True, the Second Brain MCP server is included in the
+                agent config so the agent can use memory tools. Evaluators
+                pass False (no tool access).
             timeout: Max seconds before killing the process (default 300).
 
         Returns:
@@ -111,7 +111,7 @@ class KiroInvoker:
         """
         # Build agent config
         agent_name = f"dream_cycle_{uuid.uuid4().hex[:8]}"
-        needs_tools = mcp_config is not None
+        needs_tools = tools
         agent_config = {
             "name": agent_name,
             "prompt": system_prompt,

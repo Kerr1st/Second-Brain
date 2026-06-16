@@ -185,7 +185,7 @@ class TestEvaluatorIndependence:
 
         captured_prompts = {}
 
-        def mock_invoke(system_prompt, user_message, mcp_config=None, **kwargs):
+        def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
             # Determine which role this is for by checking the user_message
             for role in EVALUATOR_ROLES:
                 if role in user_message:
@@ -219,8 +219,8 @@ class TestEvaluatorIndependence:
         prompt_values = list(captured_prompts.values())
         assert len(set(prompt_values)) == 4, "All 4 evaluator prompts should be distinct"
 
-        # Verify no evaluator receives MCP config
-        # (already tested by the mock — mcp_config defaults to None for evaluators)
+        # Verify no evaluator receives tool access
+        # (already tested by the mock — tools defaults to False for evaluators)
 
 
 # ---------------------------------------------------------------------------

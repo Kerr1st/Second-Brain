@@ -140,3 +140,16 @@ class TestDefaultResolver:
         )
         with pytest.raises(ValueError, match="unknown role"):
             default_resolver(config_path=str(cfg))
+
+    def test_unknown_backend_in_active_profile_rejected(self, tmp_path, monkeypatch):
+        """A profile naming a backend that isn't a known capability key (a typo
+        like 'kiroo') is rejected with a clear error before the resolver builds."""
+        monkeypatch.delenv("SECOND_BRAIN_PROFILE", raising=False)
+        rows = []
+        for r in VALID_ROLES:
+            backend = "kiroo" if r == "skeptic" else "kiro"  # one typo'd backend
+            rows.append(f'{r} = {{ backend = "{backend}", model = "m", effort = "high" }}')
+        cfg = tmp_path / "backends.toml"
+        cfg.write_text('default_profile = "p"\n[profiles.p]\n' + "\n".join(rows) + "\n")
+        with pytest.raises(ValueError, match="unknown backend"):
+            default_resolver(config_path=str(cfg))

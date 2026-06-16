@@ -60,7 +60,7 @@ class Invoker(Protocol):
         system_prompt: str,
         user_message: str,
         *,
-        mcp_config: Optional[str] = None,
+        tools: bool = False,
         timeout: int = 300,
         effort: Optional[str] = None,
         stage: Optional[str] = None,
@@ -71,10 +71,10 @@ class Invoker(Protocol):
         Args:
             system_prompt: The role prompt establishing the agent's identity.
             user_message: The input payload for this turn.
-            mcp_config: Tool-access signal. Truthy means attach the live
-                second-brain MCP tools (agentic stages: Explorer/Thinker).
-                Tool-less stages (evaluators, Express) pass ``None``. Direct-API
-                backends require ``None`` and must fail loudly otherwise.
+            tools: Tool-access flag. ``True`` attaches the live second-brain MCP
+                tools (agentic stages: Explorer/Thinker). Tool-less stages
+                (evaluators, Express) pass ``False``. Direct-API backends require
+                ``False`` and must fail loudly otherwise.
             timeout: Max seconds before the call is aborted (``TimeoutError``).
             effort: Reasoning-effort level. NOTE: level names/semantics differ
                 across backends ("high" on Claude != Kiro != Codex), so it is
@@ -160,6 +160,10 @@ def assert_backend_supports_role(backend: str, role: str) -> None:
         KeyError: If ``backend`` is unknown.
         ValueError: If the assignment violates a capability requirement.
     """
+    if backend not in BACKEND_CAPABILITIES:
+        raise KeyError(
+            f"unknown backend {backend!r}; valid backends: {sorted(BACKEND_CAPABILITIES)}"
+        )
     caps = BACKEND_CAPABILITIES[backend]
     if role == "explorer" and not caps.supports_mcp:
         raise ValueError(

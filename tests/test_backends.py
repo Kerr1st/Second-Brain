@@ -72,9 +72,9 @@ class TestInvokerProtocol:
         """A class with a matching invoke() is a structural Invoker."""
 
         class Dummy:
-            def invoke(self, system_prompt, user_message, *, mcp_config=None,
+            def invoke(self, system_prompt, user_message, *, tools=False,
                        timeout=300, effort=None, stage=None, run_id=None):
-                return {"output": None, "raw": "", "usage": None}
+                return {"output": None, "raw": "", "usage": None, "usage_source": "estimate"}
 
         assert isinstance(Dummy(), Invoker)
 

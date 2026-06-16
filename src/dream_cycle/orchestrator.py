@@ -417,7 +417,7 @@ class DreamCycleOrchestrator:
         result = self._invoker_for("explorer").invoke(
             system_prompt=prompt,
             user_message=user_message,
-            mcp_config="second-brain",
+            tools=True,
             timeout=600,
             effort=self.resolver.spec_for("explorer").effort,
             stage="explorer",
@@ -500,7 +500,7 @@ class DreamCycleOrchestrator:
         result = self._invoker_for("thinker").invoke(
             system_prompt=prompt,
             user_message=user_message,
-            mcp_config="second-brain",
+            tools=True,
             effort=self.resolver.spec_for("thinker").effort,
             stage="thinker",
             run_id=self._current_run_id,

@@ -18,7 +18,7 @@ import os
 import tomllib
 from dataclasses import dataclass
 
-from src.backends.base import Invoker, assert_backend_supports_role
+from src.backends.base import BACKEND_CAPABILITIES, Invoker, assert_backend_supports_role
 from src.backends.kiro import KiroInvoker
 
 _REPO_ROOT = os.path.dirname(
@@ -65,6 +65,12 @@ def _validate_profile(name: str, role_map: dict[str, "RoleBackend"]) -> None:
             f"backend profile {name!r} has unknown role(s): {sorted(unknown)} (typo?). "
             f"Valid roles: {list(VALID_ROLES)}."
         )
+    for role, spec in role_map.items():
+        if spec.backend not in BACKEND_CAPABILITIES:
+            raise ValueError(
+                f"backend profile {name!r}: role {role!r} uses unknown backend "
+                f"{spec.backend!r}. Valid backends: {sorted(BACKEND_CAPABILITIES)}."
+            )
 
 
 @dataclass(frozen=True)

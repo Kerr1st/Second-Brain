@@ -303,7 +303,7 @@ class TestMcpConfigPassed:
         invoker.invoke(
             system_prompt="You are the Explorer.",
             user_message="explore",
-            mcp_config="second-brain",
+            tools=True,
         )
 
         args, kwargs = mock_run.call_args
@@ -313,7 +313,7 @@ class TestMcpConfigPassed:
 
 
 class TestMcpConfigNotPassed:
-    """Test tool access denied to evaluators (mcp_config=None)."""
+    """Test tool access denied to evaluators (tools=False)."""
 
     @patch("src.backends.kiro.subprocess.run")
     def test_no_mcp_config_omits_trust_all_tools_from_command(self, mock_run):
@@ -331,7 +331,7 @@ class TestMcpConfigNotPassed:
         invoker.invoke(
             system_prompt="You are the Skeptic evaluator.",
             user_message="evaluate this candidate",
-            mcp_config=None,
+            tools=False,
         )
 
         args, kwargs = mock_run.call_args
@@ -491,7 +491,7 @@ class TestRequireMcpStartup:
     @patch("src.backends.kiro.subprocess.run")
     def test_flag_present_with_tools(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout='{"ok": 1}', stderr="")
-        AgentInvoker().invoke(system_prompt="s", user_message="m", mcp_config="second-brain")
+        AgentInvoker().invoke(system_prompt="s", user_message="m", tools=True)
         cmd = mock_run.call_args[0][0]
         assert "--require-mcp-startup" in cmd
         assert "--trust-all-tools" in cmd
@@ -499,7 +499,7 @@ class TestRequireMcpStartup:
     @patch("src.backends.kiro.subprocess.run")
     def test_flag_absent_without_tools(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout='{"ok": 1}', stderr="")
-        AgentInvoker().invoke(system_prompt="s", user_message="m", mcp_config=None)
+        AgentInvoker().invoke(system_prompt="s", user_message="m", tools=False)
         cmd = mock_run.call_args[0][0]
         assert "--require-mcp-startup" not in cmd
 
@@ -513,7 +513,7 @@ class TestMcpStartupRetry:
         mock_run.return_value = MagicMock(returncode=3, stdout="", stderr="mcp boom")
         with pytest.raises(RuntimeError, match="exit code 3"):
             AgentInvoker().invoke(
-                system_prompt="s", user_message="m", mcp_config="second-brain",
+                system_prompt="s", user_message="m", tools=True,
                 mcp_startup_retries=2, mcp_startup_backoff=0.0,
             )
         assert mock_run.call_count == 3   # 1 initial + 2 retries
@@ -527,7 +527,7 @@ class TestMcpStartupRetry:
             MagicMock(returncode=0, stdout='{"verdict": "ACCEPT", "reasoning": "ok"}', stderr=""),
         ]
         out = AgentInvoker().invoke(
-            system_prompt="s", user_message="m", mcp_config="second-brain",
+            system_prompt="s", user_message="m", tools=True,
             mcp_startup_retries=2, mcp_startup_backoff=0.0,
         )
         assert out["output"]["verdict"] == "ACCEPT"
@@ -539,7 +539,7 @@ class TestMcpStartupRetry:
         mock_run.return_value = MagicMock(returncode=3, stdout="", stderr="x")
         with pytest.raises(RuntimeError):
             AgentInvoker().invoke(
-                system_prompt="s", user_message="m", mcp_config=None,
+                system_prompt="s", user_message="m", tools=False,
                 mcp_startup_retries=2,
             )
         assert mock_run.call_count == 1
