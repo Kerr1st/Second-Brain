@@ -20,6 +20,8 @@ See ``docs/MODEL-BACKENDS.md``.
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from typing import Any, Literal, Optional, Protocol, TypedDict, runtime_checkable
 
@@ -165,3 +167,106 @@ def assert_backend_supports_role(backend: str, role: str) -> None:
             f"(supports_mcp=False). Routing the Explorer to a Direct-API backend is the "
             f"deferred B1 decoupling — see docs/DREAM-CYCLE-MCP-DECOUPLING.md."
         )
+
+
+# --- JSON recovery backstop (backend-agnostic) ---------------------------------
+# A backend's final text may wrap the real JSON envelope in prose, markdown
+# fences, ANSI color, or (for a tool-using transcript) tool-call fragments and
+# progress markers. This backstop recovers the payload regardless of backend so
+# each adapter shares one parser instead of reimplementing it. Native structured
+# output (Claude Code / Codex) is preferred when available; this stays the
+# fallback. Hoisted here from KiroInvoker so future adapters need not import from
+# kiro.
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _balanced_json_spans(text: str):
+    """Yield (start, end) index spans of balanced { } / [ ] structures.
+
+    Respects JSON string literals and escapes so braces/brackets inside strings
+    are ignored. Recovers the JSON payload from a tool-using transcript where the
+    real envelope is surrounded by tool-call arg fragments, progress markers, and
+    conversational prose.
+    """
+    spans = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] in "{[":
+            depth = 0
+            in_str = esc = False
+            j = i
+            while j < n:
+                c = text[j]
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif c == "\\":
+                        esc = True
+                    elif c == '"':
+                        in_str = False
+                elif c == '"':
+                    in_str = True
+                elif c in "{[":
+                    depth += 1
+                elif c in "}]":
+                    depth -= 1
+                    if depth == 0:
+                        spans.append((i, j + 1))
+                        break
+                j += 1
+            i = j + 1 if j > i else i + 1
+        else:
+            i += 1
+    return spans
+
+
+def parse_json_output(raw: str) -> dict | list:
+    """Extract JSON from agent output (backend-agnostic backstop).
+
+    Handles ANSI escape codes (stripped first), bare JSON objects/arrays, JSON
+    wrapped in markdown code fences, and JSON surrounded by non-JSON text.
+
+    Returns:
+        The parsed JSON object or array.
+
+    Raises:
+        ValueError: If no valid JSON is found in the output.
+    """
+    # 0. Strip ANSI escape codes — CLIs emit colored terminal text.
+    raw = _ANSI_RE.sub("", raw)
+
+    # 1. Try direct parse.
+    stripped = raw.strip()
+    try:
+        return json.loads(stripped, strict=False)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # 2. Try extracting from markdown code fences.
+    fence_pattern = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
+    match = fence_pattern.search(raw)
+    if match:
+        try:
+            return json.loads(match.group(1).strip(), strict=False)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # 3. Scan for all balanced JSON structures and return the largest that
+    #    parses. A tool-using transcript interleaves tool-arg fragments, progress
+    #    markers, and prose around the real envelope; the payload is reliably the
+    #    largest valid JSON.
+    best = None
+    for start_idx, end_idx in _balanced_json_spans(raw):
+        fragment = raw[start_idx:end_idx]
+        try:
+            value = json.loads(fragment, strict=False)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(value, (dict, list)) and (best is None or len(fragment) > best[0]):
+            best = (len(fragment), value)
+    if best is not None:
+        return best[1]
+
+    raise ValueError(f"No valid JSON found in agent output: {raw[:200]}")

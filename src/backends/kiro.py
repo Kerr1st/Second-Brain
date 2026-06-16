@@ -23,6 +23,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+from src.backends.base import parse_json_output as _parse_json_output
+
 logger = logging.getLogger(__name__)
 
 KIRO_CLI = os.environ.get("KIRO_CLI", os.path.expanduser("~/.local/bin/kiro-cli"))
@@ -251,98 +253,8 @@ class KiroInvoker:
             except OSError:
                 pass
 
-    # Regex to strip ANSI escape sequences from kiro-cli terminal output
-    _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-    @staticmethod
-    def _balanced_json_spans(text: str):
-        """Yield (start, end) index spans of balanced { } / [ ] structures.
-
-        Respects JSON string literals and escapes so braces/brackets inside
-        strings are ignored. Used to recover the JSON payload from a 4.8
-        tool-using transcript where the real envelope is surrounded by
-        tool-call arg fragments, progress markers, and conversational prose.
-        """
-        spans = []
-        i, n = 0, len(text)
-        while i < n:
-            if text[i] in "{[":
-                depth = 0
-                in_str = esc = False
-                j = i
-                while j < n:
-                    c = text[j]
-                    if in_str:
-                        if esc:
-                            esc = False
-                        elif c == "\\":
-                            esc = True
-                        elif c == '"':
-                            in_str = False
-                    elif c == '"':
-                        in_str = True
-                    elif c in "{[":
-                        depth += 1
-                    elif c in "}]":
-                        depth -= 1
-                        if depth == 0:
-                            spans.append((i, j + 1))
-                            break
-                    j += 1
-                i = j + 1 if j > i else i + 1
-            else:
-                i += 1
-        return spans
-
-    @classmethod
-    def parse_json_output(cls, raw: str) -> dict | list:
-        """Extract JSON from agent output.
-
-        Handles:
-        - ANSI escape codes (stripped first)
-        - Bare JSON objects/arrays
-        - JSON wrapped in markdown code fences (```json ... ```)
-        - JSON with surrounding non-JSON text (kiro-cli adds credit/timing lines)
-
-        Returns:
-            The parsed JSON object or array.
-
-        Raises:
-            ValueError: If no valid JSON found in the output.
-        """
-        # 0. Strip ANSI escape codes — kiro-cli outputs colored terminal text
-        raw = cls._ANSI_RE.sub("", raw)
-
-        # 1. Try direct parse
-        stripped = raw.strip()
-        try:
-            return json.loads(stripped, strict=False)
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        # 2. Try extracting from markdown code fences
-        fence_pattern = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
-        match = fence_pattern.search(raw)
-        if match:
-            try:
-                return json.loads(match.group(1).strip(), strict=False)
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        # 3. Scan for all balanced JSON structures and return the largest that
-        #    parses. A 4.8 tool-using transcript interleaves tool-arg fragments
-        #    ({"window_days": 14}), progress markers ([1.1]), and prose around
-        #    the real envelope; the payload is reliably the largest valid JSON.
-        best = None
-        for start_idx, end_idx in cls._balanced_json_spans(raw):
-            fragment = raw[start_idx:end_idx]
-            try:
-                value = json.loads(fragment, strict=False)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if isinstance(value, (dict, list)) and (best is None or len(fragment) > best[0]):
-                best = (len(fragment), value)
-        if best is not None:
-            return best[1]
-
-        raise ValueError(f"No valid JSON found in agent output: {raw[:200]}")
+    # JSON recovery backstop lives in base.py now (shared across backends, so a
+    # future ClaudeCodeInvoker need not import from kiro). The KiroInvoker
+    # entry point is kept for back-compat — the agent_invoker shim re-exports it
+    # as AgentInvoker.parse_json_output, which the test-suite and older callers use.
+    parse_json_output = staticmethod(_parse_json_output)
