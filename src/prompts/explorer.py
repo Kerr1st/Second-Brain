@@ -4,7 +4,7 @@ The Explorer autonomously decides what regions of the memory space to examine
 and assembles curated "memory slices" of 10-20 memories for the Thinker.
 """
 
-# All 10 named exploration strategies
+# All 11 named exploration strategies
 ALL_STRATEGIES = """\
 ## Your exploration strategies (use at least 3 per cycle, vary across cycles):
 
