@@ -31,6 +31,27 @@ The **canonical checkout** `/Users/kerrfir/second-brain` on `main` is the
 integration target **and** the only place the live system runs (dream cycle,
 ingest, MCP server, launchd jobs, backups). It is never an agent's scratch space.
 
+## Active lanes & assignments
+
+The current roster — each agent works **only** in its own worktree, on its branch, in its
+lane's files. **Update this table whenever a lane is staffed or retired.**
+
+| Lane | Worktree (under `/Users/kerrfir/second-brain-worktrees/`) | Branch | Current task | Key guardrail |
+|---|---|---|---|---|
+| **backends** | `claude-code-adapter` | `feat/claude-code-adapter` | Build the ClaudeCodeInvoker (see `MODEL-BACKENDS.md`) | New file + `base`/`resolver` registration — **do not touch `orchestrator.py`** |
+| **docs** | `docs` | `feat/docs` | User guide + keep docs consistent with code | Docs only — never `src/`, `tests/`, `config/` |
+| **dream-cycle** *(create when staffing)* | `dream-cycle` | `feat/dream-cycle` | Pipeline logic: `src/dream_cycle/`, `src/prompts/` | Sole owner of `orchestrator.py`; pure lane (no DB) |
+
+These three are mutually **file-disjoint** (as long as `backends` stays out of `orchestrator.py`),
+so all three can run concurrently and merge into `main` with **zero conflicts**. Do **not** staff
+a second DB-heavy lane (`retrieval` / `ingestion` / `express+mcp`) next to another without giving
+each a unique `TEST_DB_NAME` — they share Postgres and `db.py`.
+
+Create a worktree when staffing a lane:
+```bash
+git worktree add /Users/kerrfir/second-brain-worktrees/<lane> -b feat/<lane>
+```
+
 ## The lanes
 
 | Lane | Owns (paths) | Tests hit Postgres? | Parallel-safe | Notes |
