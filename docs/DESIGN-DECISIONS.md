@@ -56,7 +56,7 @@ Added 2026-03-09, inspired by the kiro-memory project (`~/KiromemoryMCP/mainline
 
 Pure vector search (pgvector cosine distance) misses exact keyword matches. If you search for "gridfinity baseplate" and a memory contains those exact words but the embedding doesn't rank it highly, you won't find it. This mirrors the dual-process model of human memory (Tulving, 1972): we recall things both by surface cues (a specific word) and by meaning (the gist). BM25 handles the first; vector embeddings handle the second.
 
-Implementation: PostgreSQL's built-in `tsvector/tsquery` for BM25 (no external dependencies), fused with pgvector cosine search via Reciprocal Rank Fusion (RRF). A utility reranking layer then scores results by recency (exponential decay, τ=60 days), memory type boost (ideas/insights rank higher than raw sources), token overlap, content length, and retrieval reinforcement.
+Implementation: PostgreSQL's built-in `tsvector/tsquery` for BM25 (no external dependencies), fused with pgvector cosine search via Reciprocal Rank Fusion (RRF). A utility reranking layer then scores results by recency (power-law decay, `(1 + days/S)^-0.8`, where stability S grows with access count), memory type boost (ideas/insights rank higher than raw sources), token overlap, content length, and retrieval reinforcement.
 
 ## Why retrieval reinforcement (access_count + spaced retrieval)
 
@@ -86,7 +86,7 @@ The DEFERRED state was removed because with 4 evaluators, the "one dissenter" ca
 
 ## Why V2 reranking weights were rebalanced
 
-The V1 formula weights summed to 1.00 (0.35 + 0.20 + 0.20 + 0.15 + 0.10). V2 added `depth_score` as a new 0.05 factor, requiring the base weights to be reduced slightly (sum from 1.00 to 0.86) to keep the total in a similar range. The boosts/penalties (type, mem_class, reinforcement, project) are additive on top. The specific weight choices were informed by the cognitive science research grounding each factor (see "Research Grounding for V2 Reranking Signals" below).
+The reranking base weights in `src/search.py` are `0.30·rrf_score + 0.18·token_overlap + 0.18·title_overlap + 0.10·context_overlap + 0.12·recency + 0.08·length + 0.05·depth_score`, which sum to ~1.01. V2 added `depth_score` (0.05) as the newest factor and lightly rebalanced the others from the V1 set (which summed to ~1.00); the change sharpens ranking without materially inflating the overall score. The boosts/penalties (type, mem_class, reinforcement, project) are additive on top. The specific weight choices were informed by the cognitive science research grounding each factor (see "Research Grounding for V2 Reranking Signals" below).
 
 ## Research Grounding for V2 Reranking Signals
 
