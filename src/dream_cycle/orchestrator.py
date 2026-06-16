@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import psycopg2
 
-from src.agent_invoker import AgentInvoker
+from src.backends.resolver import default_resolver
 from src.models import (
     CandidateInsight,
     DreamCycleResult,
@@ -51,9 +51,13 @@ class DreamCycleOrchestrator:
     """Coordinates the four-agent dream cycle pipeline."""
 
     def __init__(self):
-        self.invoker = AgentInvoker()
+        self.resolver = default_resolver()
         self._capture_dir: str | None = None
         self._current_run_id: str | None = None
+
+    def _invoker_for(self, role: str):
+        """Resolve the Invoker for a role from the active backend profile."""
+        return self.resolver.invoker_for(role)
 
     def _capture(self, name: str, *, inputs: dict | None = None, output: object = None) -> None:
         """Write agent call inputs/outputs to capture_dir as JSON fixtures.
@@ -410,12 +414,12 @@ class DreamCycleOrchestrator:
         )
 
         logger.info("Invoking Explorer agent (run_type=%s)", run_type)
-        result = self.invoker.invoke(
+        result = self._invoker_for("explorer").invoke(
             system_prompt=prompt,
             user_message=user_message,
             mcp_config="second-brain",
             timeout=600,
-            effort="high",
+            effort=self.resolver.spec_for("explorer").effort,
             stage="explorer",
             run_id=self._current_run_id,
         )
@@ -493,11 +497,11 @@ class DreamCycleOrchestrator:
             "Invoking Thinker agent (slice=%s)",
             slice.name,
         )
-        result = self.invoker.invoke(
+        result = self._invoker_for("thinker").invoke(
             system_prompt=prompt,
             user_message=user_message,
             mcp_config="second-brain",
-            effort="max",
+            effort=self.resolver.spec_for("thinker").effort,
             stage="thinker",
             run_id=self._current_run_id,
         )
@@ -580,10 +584,10 @@ class DreamCycleOrchestrator:
         )
 
         logger.info("Invoking evaluator: role=%s, candidate=%s", role, candidate.title)
-        result = self.invoker.invoke(
+        result = self._invoker_for(role).invoke(
             system_prompt=prompt,
             user_message=user_message,
-            effort="high",
+            effort=self.resolver.spec_for(role).effort,
             stage=f"evaluator:{role}",
             run_id=self._current_run_id,
         )

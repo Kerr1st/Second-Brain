@@ -28,10 +28,9 @@ from src.dream_cycle.orchestrator import EVALUATOR_MAX_ATTEMPTS
 # ---------------------------------------------------------------------------
 
 def _make_orchestrator():
-    """Instantiate DreamCycleOrchestrator with mocked __init__ dependencies."""
-    with patch("src.dream_cycle.orchestrator.AgentInvoker"):
-        from src.dream_cycle import DreamCycleOrchestrator
-        return DreamCycleOrchestrator()
+    """Instantiate DreamCycleOrchestrator (all-Kiro laptop profile; construction is subprocess-free)."""
+    from src.dream_cycle import DreamCycleOrchestrator
+    return DreamCycleOrchestrator()
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +223,7 @@ class TestEvaluatorIndependenceProperty:
             })
             return {"output": {"verdict": "ACCEPT", "reasoning": "looks good"}, "raw": "{}"}
 
-        orch.invoker.invoke = mock_invoke
+        orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
 
         # Invoke all 4 evaluators
         roles = ["skeptic", "advocate", "epistemologist", "methodologist"]
@@ -285,7 +284,7 @@ class TestEvaluatorIndependenceExplicit:
             captured_mcp_configs.append(mcp_config)
             return {"output": {"verdict": "ACCEPT", "reasoning": "solid"}, "raw": "{}"}
 
-        orch.invoker.invoke = mock_invoke
+        orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
 
         candidate = CandidateInsight(
             title="Test Insight",
@@ -319,7 +318,7 @@ class TestEvaluatorIndependenceExplicit:
             captured_prompts[len(captured_prompts)] = system_prompt
             return {"output": {"verdict": "ACCEPT", "reasoning": "good"}, "raw": "{}"}
 
-        orch.invoker.invoke = mock_invoke
+        orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
 
         candidate = CandidateInsight(
             title="Test",
@@ -2371,7 +2370,7 @@ class TestFinalOrchestratorMethodSet:
     def test_method_set_is_exactly_coordination_methods(self):
         """The set of non-dunder methods on DreamCycleOrchestrator must be exactly:
         run, _run_pipeline, invoke_explorer, invoke_thinker, invoke_evaluator,
-        _invoke_evaluator_safe, _capture.
+        _invoke_evaluator_safe, _invoker_for, _capture.
 
         **Feature: dream-cycle-decomposition, Property 5: Final orchestrator method set contains only coordination methods**
         **Validates: Requirements 7.1**
@@ -2386,6 +2385,7 @@ class TestFinalOrchestratorMethodSet:
             "invoke_thinker",
             "invoke_evaluator",
             "_invoke_evaluator_safe",
+            "_invoker_for",
             "_capture",
         }
 

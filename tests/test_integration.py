@@ -110,11 +110,10 @@ def _verdict_reject(role: str, reasoning: str = "Rejected") -> EvaluatorVerdict:
 # ---------------------------------------------------------------------------
 
 def _make_orchestrator():
-    """Instantiate DreamCycleOrchestrator with mocked AgentInvoker."""
-    with patch("src.dream_cycle.orchestrator.AgentInvoker"):
-        from src.dream_cycle import DreamCycleOrchestrator
-        orch = DreamCycleOrchestrator()
-        return orch
+    """Instantiate DreamCycleOrchestrator (all-Kiro laptop profile; construction is subprocess-free)."""
+    from src.dream_cycle import DreamCycleOrchestrator
+    orch = DreamCycleOrchestrator()
+    return orch
 
 
 # ---------------------------------------------------------------------------

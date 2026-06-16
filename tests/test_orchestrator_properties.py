@@ -25,10 +25,9 @@ from src.models import (
 # ---------------------------------------------------------------------------
 
 def _make_orchestrator():
-    """Instantiate DreamCycleOrchestrator with mocked __init__ dependencies."""
-    with patch("src.dream_cycle.orchestrator.AgentInvoker"):
-        from src.dream_cycle import DreamCycleOrchestrator
-        return DreamCycleOrchestrator()
+    """Instantiate DreamCycleOrchestrator (all-Kiro laptop profile; construction is subprocess-free)."""
+    from src.dream_cycle import DreamCycleOrchestrator
+    return DreamCycleOrchestrator()
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +193,7 @@ class TestEvaluatorIndependence:
                     break
             return {"output": {"verdict": "ACCEPT", "reasoning": "looks good"}, "raw": "{}"}
 
-        orch.invoker.invoke = mock_invoke
+        orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
 
         # Invoke all 4 evaluators
         for role in EVALUATOR_ROLES:

@@ -17,7 +17,7 @@ from src.agent_invoker import AgentInvoker
 def _isolate_llm_metrics(tmp_path, monkeypatch):
     """Phase 0: redirect per-call metrics writes to a temp dir so invoke tests
     don't pollute the real logs/llm_metrics/ directory."""
-    monkeypatch.setattr("src.agent_invoker.METRICS_DIR", str(tmp_path / "llm_metrics"))
+    monkeypatch.setattr("src.backends.kiro.METRICS_DIR", str(tmp_path / "llm_metrics"))
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +210,7 @@ from unittest.mock import patch, MagicMock
 class TestInvokeSuccess:
     """Test invoke with mock subprocess returning valid JSON."""
 
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.subprocess.run")
     def test_invoke_returns_dict_with_output_and_raw(self, mock_run):
         """Successful invocation returns dict with 'output' (parsed) and 'raw' keys.
 
@@ -234,12 +234,14 @@ class TestInvokeSuccess:
         assert "raw" in result
         assert result["output"] == payload
         assert result["raw"] == json.dumps(payload)
+        assert result["usage"] is None
+        assert result["usage_source"] == "estimate"
 
 
 class TestInvokeTimeout:
     """Test invoke timeout raises TimeoutError with stderr content."""
 
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.subprocess.run")
     def test_timeout_raises_timeout_error_with_stderr(self, mock_run):
         """When subprocess times out, TimeoutError is raised containing stderr.
 
@@ -261,7 +263,7 @@ class TestInvokeTimeout:
 class TestInvokeCrash:
     """Test invoke crash (non-zero exit code) raises RuntimeError with stderr."""
 
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.subprocess.run")
     def test_nonzero_exit_raises_runtime_error_with_stderr(self, mock_run):
         """When subprocess exits non-zero, RuntimeError is raised containing stderr.
 
@@ -284,7 +286,7 @@ class TestInvokeCrash:
 class TestMcpConfigPassed:
     """Test tool access granted to Explorer/Thinker (mcp_config provided)."""
 
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.subprocess.run")
     def test_mcp_config_adds_trust_all_tools_to_command(self, mock_run):
         """When mcp_config is provided, --trust-all-tools appears in the command
         and the agent config includes mcpServers.
@@ -313,7 +315,7 @@ class TestMcpConfigPassed:
 class TestMcpConfigNotPassed:
     """Test tool access denied to evaluators (mcp_config=None)."""
 
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.subprocess.run")
     def test_no_mcp_config_omits_trust_all_tools_from_command(self, mock_run):
         """When mcp_config is None, --trust-all-tools must NOT appear in the command.
 
@@ -349,7 +351,7 @@ class TestInvokeDecodesLeniently:
     **Validates: Requirements 13.1, 13.5**
     """
 
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.subprocess.run")
     def test_invoke_passes_lenient_decode_kwargs(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0,
@@ -415,13 +417,13 @@ class TestParseJsonFromToolTranscript:
 # ---------------------------------------------------------------------------
 
 import os
-import src.agent_invoker as ai
+import src.backends.kiro as ai
 
 
 class TestInvokeMetrics:
     """invoke() records one JSONL metrics line per call, grouped by run_id."""
 
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.subprocess.run")
     def test_records_metrics_line_on_success(self, mock_run):
         payload = {"verdict": "ACCEPT", "reasoning": "ok"}
         mock_run.return_value = MagicMock(
@@ -451,7 +453,7 @@ class TestInvokeMetrics:
         assert rec["est_input_tokens"] == (len("sys") + len("msg")) // 4
         assert "latency_s" in rec and rec["latency_s"] >= 0.0
 
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.subprocess.run")
     def test_records_metrics_line_on_failure(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="boom")
 
@@ -466,7 +468,7 @@ class TestInvokeMetrics:
         assert rec["success"] is False
         assert rec["error"] == "exit_code=1"
 
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.subprocess.run")
     def test_no_run_id_writes_adhoc_file(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0, stdout='{"ok": true}', stderr=""
@@ -486,7 +488,7 @@ class TestInvokeMetrics:
 class TestRequireMcpStartup:
     """--require-mcp-startup is added only when the call uses MCP tools."""
 
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.subprocess.run")
     def test_flag_present_with_tools(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout='{"ok": 1}', stderr="")
         AgentInvoker().invoke(system_prompt="s", user_message="m", mcp_config="second-brain")
@@ -494,7 +496,7 @@ class TestRequireMcpStartup:
         assert "--require-mcp-startup" in cmd
         assert "--trust-all-tools" in cmd
 
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.subprocess.run")
     def test_flag_absent_without_tools(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout='{"ok": 1}', stderr="")
         AgentInvoker().invoke(system_prompt="s", user_message="m", mcp_config=None)
@@ -505,8 +507,8 @@ class TestRequireMcpStartup:
 class TestMcpStartupRetry:
     """Exit code 3 (MCP startup failed) is retried for tool-using calls."""
 
-    @patch("src.agent_invoker.time.sleep", return_value=None)
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.time.sleep", return_value=None)
+    @patch("src.backends.kiro.subprocess.run")
     def test_exit3_retries_then_raises(self, mock_run, mock_sleep):
         mock_run.return_value = MagicMock(returncode=3, stdout="", stderr="mcp boom")
         with pytest.raises(RuntimeError, match="exit code 3"):
@@ -517,8 +519,8 @@ class TestMcpStartupRetry:
         assert mock_run.call_count == 3   # 1 initial + 2 retries
         assert mock_sleep.call_count == 2
 
-    @patch("src.agent_invoker.time.sleep", return_value=None)
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.time.sleep", return_value=None)
+    @patch("src.backends.kiro.subprocess.run")
     def test_exit3_then_success_on_retry(self, mock_run, mock_sleep):
         mock_run.side_effect = [
             MagicMock(returncode=3, stdout="", stderr="mcp boom"),
@@ -531,8 +533,8 @@ class TestMcpStartupRetry:
         assert out["output"]["verdict"] == "ACCEPT"
         assert mock_run.call_count == 2
 
-    @patch("src.agent_invoker.time.sleep", return_value=None)
-    @patch("src.agent_invoker.subprocess.run")
+    @patch("src.backends.kiro.time.sleep", return_value=None)
+    @patch("src.backends.kiro.subprocess.run")
     def test_exit3_not_retried_without_tools(self, mock_run, mock_sleep):
         mock_run.return_value = MagicMock(returncode=3, stdout="", stderr="x")
         with pytest.raises(RuntimeError):

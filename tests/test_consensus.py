@@ -22,10 +22,9 @@ from src.models import EvaluatorVerdict
 # ---------------------------------------------------------------------------
 
 def _make_orchestrator():
-    """Instantiate DreamCycleOrchestrator with mocked __init__ dependencies."""
-    with patch("src.dream_cycle.orchestrator.AgentInvoker"):
-        from src.dream_cycle import DreamCycleOrchestrator
-        return DreamCycleOrchestrator()
+    """Instantiate DreamCycleOrchestrator (all-Kiro laptop profile; construction is subprocess-free)."""
+    from src.dream_cycle import DreamCycleOrchestrator
+    return DreamCycleOrchestrator()
 
 
 # ---------------------------------------------------------------------------

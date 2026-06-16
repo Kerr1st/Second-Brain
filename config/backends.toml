@@ -1,0 +1,31 @@
+# Per-machine model-backend profiles for the dream cycle.
+#
+# Each role maps to (backend, model, effort). Select a profile with the
+# SECOND_BRAIN_PROFILE env var; unset => `default_profile` below.
+#
+# The `laptop` profile reproduces today's behavior exactly (all-Kiro / Opus 4.8,
+# $0 metered). The `mini` profile targets the Mac Mini (Claude Code on Bedrock);
+# its adapter lands in a later step, so selecting it errors until then.
+#
+# Credentials are NOT stored here — they stay out-of-band / gitignored.
+# See docs/MODEL-BACKENDS.md.
+
+default_profile = "laptop"
+
+[profiles.laptop]
+explorer       = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
+thinker        = { backend = "kiro", model = "claude-opus-4.8", effort = "max" }
+skeptic        = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
+advocate       = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
+epistemologist = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
+methodologist  = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
+
+[profiles.mini]
+# Mac Mini: no Kiro -> Claude Code on Bedrock. The claude_code adapter is
+# implemented in a later step; selecting this profile errors until then.
+explorer       = { backend = "claude_code", model = "claude-opus-4.8", effort = "high" }
+thinker        = { backend = "claude_code", model = "claude-opus-4.8", effort = "max" }
+skeptic        = { backend = "claude_code", model = "claude-opus-4.8", effort = "high" }
+advocate       = { backend = "claude_code", model = "claude-opus-4.8", effort = "high" }
+epistemologist = { backend = "claude_code", model = "claude-opus-4.8", effort = "high" }
+methodologist  = { backend = "claude_code", model = "claude-opus-4.8", effort = "high" }
