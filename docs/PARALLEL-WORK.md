@@ -130,6 +130,60 @@ git push origin feat/<name>          # (push mini too if used)
 # then merge feat/<name> -> main (review the diff), and the canonical checkout pulls
 ```
 
+## Integration & conflict resolution
+
+A **commit** and an **integration** are different events — this is the part people trip on:
+
+- **Commit** = an agent saving to *its own* branch. Local, frequent, and **invisible to the
+  other worktrees**. Committing on `feat/<lane>` does nothing to anyone else's folder, branch,
+  or uncommitted work. **No one re-checks-out in response to someone else's commit.**
+- **Integrate (merge)** = bringing a lane's branch into `main`. Done by the **integrator** (you /
+  the orchestrator) in the canonical checkout, **one branch at a time**. This is the only place
+  conflicts can occur.
+
+### Merging a lane into `main` (integrator)
+
+```bash
+cd /Users/kerrfir/second-brain          # the [main] worktree
+git merge feat/<lane>                    # bring in one lane's thread
+# resolve conflicts if any (see below), then:
+git push origin main && git push mini main
+```
+
+What happens depends on whether two branches touched the **same lines of the same file**:
+
+- **Disjoint lanes → clean auto-merge, zero conflicts.** This is the whole point of the lane
+  map: e.g. `backends` (`src/backends/`) and `docs` (`docs/`) share no file, so their merges
+  never conflict — merge and push, nothing to resolve.
+- **Overlapping lines → git reports a conflict** (`<<<<<<<` / `=======` / `>>>>>>>` markers) in
+  the affected file. Edit it to pick or combine the two sides, then `git add <file>` and
+  `git commit` to finish the merge. This only happens on a **hot file** (`orchestrator.py`,
+  `db.py`, `conftest.py`, `migrations/`) or a blurred lane boundary — which is exactly why those
+  are serialized.
+
+### Catching up an in-flight worktree
+
+After `main` advances, a still-running lane pulls the new state **when it wants it** — not via a
+re-checkout, and never forced:
+
+```bash
+cd /Users/kerrfir/second-brain-worktrees/<lane>
+git merge main        # or: git rebase main
+```
+
+It keeps working on its own branch meanwhile; it only needs to sync if it depends on the new
+code or before its own final merge. Conflicts there resolve the same way.
+
+### Keeping merges trivial
+
+- **Disjoint lanes** (the table above) → most merges auto-resolve with nothing to do.
+- **Serialize the hot files** — only one lane touches `orchestrator.py` / `db.py` /
+  `conftest.py` / `migrations/` at a time.
+- **Integrate in small, frequent merges**, not week-long branches — small diffs mean small or no
+  conflicts.
+- This file (`PARALLEL-WORK.md`) is owned by the **integrator**, not the docs-content lane, so it
+  isn't a cross-lane conflict point.
+
 ## Checklist for a spawned agent
 
 Before you start work, confirm:
