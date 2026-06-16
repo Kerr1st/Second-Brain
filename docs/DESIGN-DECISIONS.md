@@ -26,6 +26,10 @@ Even with Opus 4.8's 1M token window, processing one chat per session ensures:
 
 Kiro CLI in `--no-interactive` mode IS the LLM integration layer. It handles auth, model selection, tool use, and MCP server connections. Writing our own LLM orchestration in Python would duplicate all of that. The tradeoff is Kiro credit cost vs development time — Kiro headless wins.
 
+## Why a pluggable model-backend resolver (and per-machine profiles)
+
+The dream cycle was hard-wired to `kiro-cli`/Amazon Q. To run the brain on a machine without Kiro (the always-on Mac Mini) — and to leave the door open for Fable-5-on-the-Thinker and evaluator-panel diversity — the orchestrator now resolves an `Invoker` per role from a named profile in `config/backends.toml`, selected by `SECOND_BRAIN_PROFILE`. Constraints baked into the design: it is **default-preserving** (the `laptop` profile reproduces today's all-Kiro/Opus behavior exactly, so nothing changes until a profile is edited); a tool-less Direct-API backend (Bedrock) **cannot** run the agentic Explorer, enforced by an eager guard at construction; and the MVP is **one model per instance**, with per-role model selection and panel diversity deliberately deferred. See `docs/MODEL-BACKENDS.md`.
+
 ## Why Crawlee outputs markdown files (not database writes)
 
 Clean separation of concerns. Crawlee is a content acquisition tool — it shouldn't know about PostgreSQL, embeddings, or the Second Brain schema. It outputs markdown to a directory. The ingestion pipeline reads from that directory. If either side changes, the other doesn't break.

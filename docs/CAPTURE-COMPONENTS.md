@@ -112,7 +112,7 @@ src/capture/
    (`youtube` ✅ → `kiro_chat` → `web` → `quick_desktop`), retiring its scattered scripts as it lands.
 3. **Collapse the 3 store paths → 1** (`store.py`); point `mcp_server`/any HTTP writer at it.
 4. **Generalize `distill`** to any source_type + backfill (the highest-leverage step for synthesis).
-5. Keep the 643-test suite green and commit per step (origin + mini).
+5. Keep the test suite green and commit per step (origin + mini).
 
 ## Status snapshot
 - ✅ `youtube` connector shipped (`ac3054d`); reference contract established.

@@ -1,6 +1,10 @@
 # Second Brain — Operations
 
-> Last updated: 2026-06-08
+> Last updated: 2026-06-16
+
+## Model Backend Profile
+
+The dream cycle's LLM execution path is selected by a named profile in `config/backends.toml` via the `SECOND_BRAIN_PROFILE` environment variable. **Unset (the default) = the `laptop` profile**, which runs every role on `kiro-cli` → Amazon Q (Claude Opus 4.8), $0 metered — i.e. today's behavior. Other profiles (e.g. `mini`) select an alternative backend; selecting a profile whose adapter isn't built yet fails fast with a clear error. Credentials never live in the TOML. See `docs/MODEL-BACKENDS.md`.
 
 ## Scheduled Jobs
 

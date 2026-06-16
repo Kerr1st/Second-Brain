@@ -37,7 +37,7 @@
 
 ## The reframe that drives the cost plan
 
-Today the dream cycle is effectively **$0 in metered Bedrock**: `agent_invoker.py` invokes
+Today the dream cycle is effectively **$0 in metered Bedrock**: `backends/kiro.py` (`KiroInvoker`) invokes
 `kiro-cli chat --model claude-opus-4.8`, so every Explorer / Thinker / evaluator call runs
 through the **Amazon Q service**, not this account's Bedrock. Kiro's model catalog does **not**
 include `claude-fable-5` (verified — catalog is `auto, claude-opus-4.8/4.7/4.6/4.5,
@@ -126,11 +126,14 @@ so worst-case spend stays bounded regardless.
    - **Scope (B2):** this packet is the *only* decoupling Fable needs. The Explorer stays
      agentic on the (cwd-fixed) MCP path; B1 is deferred. Build B2 only when pursuing Fable.
 
-3. **Route only the Thinker to the Fable backend, behind a flag.** `AgentInvoker(model=...)`
-   is already per-instance configurable. In `DreamCycleOrchestrator.__init__`, add a second
-   invoker (e.g. `self.thinker_invoker`) used solely in `invoke_thinker`; Explorer and
-   evaluators keep using the existing kiro-cli/Opus `self.invoker` unchanged. Gate the new
-   invoker on a setting (default OFF).
+3. **Route only the Thinker to the Fable backend, behind a flag.**
+   > **Superseded (2026-06-16) by the Model Backends refactor.** The single `self.invoker`
+   > is gone; the orchestrator now resolves an Invoker per role (`self.resolver` /
+   > `_invoker_for(role)`), with effort from the active `config/backends.toml` profile.
+   > Fable-on-the-Thinker becomes a **per-role profile entry** (a `(backend, model, effort)`
+   > for the `thinker` row), not a hand-added `self.thinker_invoker`. The *intent* below
+   > stands (route only the Thinker, gated, keep Explorer/evaluators on Opus); the mechanism
+   > is obsolete.
 
 ## Guardrails & cost controls
 

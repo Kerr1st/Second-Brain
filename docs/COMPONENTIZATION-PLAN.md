@@ -41,7 +41,7 @@ A component is "componentized" when it has: (1) a one-paragraph **contract doc**
 duplicated** responsibilities with other components, and (5) an entry in the component index
 (this file's status table).
 
-## Roadmap (incremental — keep 643 tests green, commit per step, push origin+mini)
+## Roadmap (incremental — keep the test suite green, commit per step, push origin+mini)
 
 **Phase A — Capture (in progress).** Per `CAPTURE-COMPONENTS.md`: extract shared `store.py` +
 `runner.py`; lift connectors (`youtube` ✅ → `kiro_chat` → `web` → `quick_desktop`); retire dead

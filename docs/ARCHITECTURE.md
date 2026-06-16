@@ -1,6 +1,6 @@
 # Second Brain — Architecture
 
-> Last updated: 2026-06-12
+> Last updated: 2026-06-16
 
 ## Overview
 
@@ -46,7 +46,7 @@ A personal knowledge system that gives AI agents persistent memory across sessio
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Agents: Kiro CLI · Claude Code · Dream Cycle Pipeline      │
-│  LLM: Amazon Bedrock (Claude for reasoning)                 │
+│  LLM: kiro-cli → Amazon Q (Opus 4.8), backend-selectable    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -264,7 +264,7 @@ See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale.
 |---|---|
 | Knowledge store | PostgreSQL 17 + pgvector (native Homebrew, localhost:5432; Docker container retained as rollback pending Phase 5 decommission) |
 | Agent interface | MCP server (`src/mcp_server.py`) |
-| LLM | Amazon Bedrock (Claude) |
+| LLM (reasoning) | kiro-cli → Amazon Q (Claude Opus 4.8), $0 metered; pluggable per-machine via `config/backends.toml` (see MODEL-BACKENDS.md) |
 | Embeddings | Amazon Bedrock (Titan v2, 1024-dim) |
 | Scheduling | macOS launchd |
 | Backup transport | rclone (Google Drive) + local + git — S3 de-scoped 2026-06-01 |
@@ -308,7 +308,11 @@ src/
   capture_api.py         HTTP capture endpoint (DEPRECATED — 0 captures, slated for removal)
   capture/               Self-contained capture sources (youtube.py); see CAPTURE-COMPONENTS.md
   models.py              Data models
-  agent_invoker.py       Subprocess-based agent invocation
+  agent_invoker.py       Backward-compat shim → re-exports backends.kiro.KiroInvoker
+  backends/              Pluggable model-backend layer (see MODEL-BACKENDS.md)
+    base.py              Invoker Protocol, BackendCapabilities, capability table
+    kiro.py              KiroInvoker — kiro-cli → Amazon Q (the default adapter)
+    resolver.py          Resolves an Invoker per role from config/backends.toml
   parsers/               Chat and content parsers
   prompts/               Agent prompt templates
   dream_cycle/
