@@ -88,7 +88,7 @@ rerank_score = 0.30 × rrf_score
 
 ### Why these specific weights?
 
-The V2 rebalancing reduced base weights from a clean 1.00 sum (V1) to ~1.01 to make room for the new `depth_score` signal. Each weight reflects how strongly the corresponding cognitive mechanism predicts retrieval success in practice. RRF dominates because dual-channel agreement is the single best relevance indicator; token and title overlap together (0.36) represent the keyword path of dual-process recall; context overlap, recency, and depth together (0.27) represent the elaborative/contextual path.
+V2 added the `depth_score` signal (0.05) and lightly rebalanced the other factors, bringing the base weights to a sum of ~1.01 — essentially unchanged from V1's ~1.00, so the new signal sharpens ranking without inflating the overall score. Each weight reflects how strongly the corresponding cognitive mechanism predicts retrieval success in practice. RRF dominates because dual-channel agreement is the single best relevance indicator; token and title overlap together (0.36) represent the keyword path of dual-process recall; context overlap, recency, and depth together (0.27) represent the elaborative/contextual path.
 
 ## Retrieval reinforcement and the spacing effect
 
