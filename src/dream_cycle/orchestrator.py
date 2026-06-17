@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import psycopg2
 
-from src.backends.resolver import default_resolver
+from src.backends.resolver import VALID_ROLES, default_resolver
 from src.models import (
     CandidateInsight,
     DreamCycleResult,
@@ -58,6 +58,25 @@ class DreamCycleOrchestrator:
     def _invoker_for(self, role: str):
         """Resolve the Invoker for a role from the active backend profile."""
         return self.resolver.invoker_for(role)
+
+    def _backend_provenance(self) -> dict:
+        """Snapshot the active profile's (backend, model, effort) per role.
+
+        Persisted on the run record so a run's candidates/verdicts stay auditable
+        across a backend swap or the Mac Mini cutover (Kiro-Opus era vs
+        Claude-Code-on-Bedrock era). Built here from the resolver (read-only)
+        rather than on the Resolver itself, to keep this change out of the
+        backends lane. See docs/MODEL-BACKENDS.md.
+        """
+        provenance: dict[str, dict] = {}
+        for role in VALID_ROLES:
+            spec = self.resolver.spec_for(role)
+            provenance[role] = {
+                "backend": spec.backend,
+                "model": spec.model,
+                "effort": spec.effort,
+            }
+        return provenance
 
     def _capture(self, name: str, *, inputs: dict | None = None, output: object = None) -> None:
         """Write agent call inputs/outputs to capture_dir as JSON fixtures.
@@ -121,9 +140,11 @@ class DreamCycleOrchestrator:
             logger.info("Session-start briefing skipped: frequency cap not met")
             return self._aborted_result("", run_type, started_at)
 
-        # Step 1: Create run record
+        # Step 1: Create run record (with backend provenance for cross-swap audit)
         try:
-            run_id = dream_cycle_db.create_run(run_type)
+            run_id = dream_cycle_db.create_run(
+                run_type, backend_provenance=self._backend_provenance()
+            )
         except psycopg2.OperationalError:
             logger.error("Database unreachable when creating run record")
             return self._aborted_result("", run_type, started_at)
