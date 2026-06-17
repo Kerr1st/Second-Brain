@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import pytest
 
+from src.backends.claude_code import ClaudeCodeInvoker
+from src.backends.codex import CodexInvoker
 from src.backends.kiro import KiroInvoker
 from src.backends.resolver import (
+    DEFAULT_ADAPTERS,
     Resolver,
     RoleBackend,
     VALID_ROLES,
@@ -88,8 +91,8 @@ class TestResolver:
             Resolver(profile)
 
     def test_unimplemented_backend_raises(self):
-        profile = {"thinker": RoleBackend("thinker", "claude_code", "claude-opus-4.8", "max")}
-        r = Resolver(profile)  # default adapters = {kiro} only
+        profile = {"thinker": RoleBackend("thinker", "bedrock", "claude-opus-4.8", "max")}
+        r = Resolver(profile)  # bedrock adapter not implemented yet
         with pytest.raises(NotImplementedError):
             r.invoker_for("thinker")
 
@@ -101,11 +104,10 @@ class TestDefaultResolver:
         assert isinstance(r.invoker_for("skeptic"), KiroInvoker)
 
     def test_profile_selected_by_env(self, monkeypatch):
-        """mini routes to claude_code, whose adapter isn't implemented yet."""
+        """mini routes to claude_code, whose adapter is now registered."""
         monkeypatch.setenv("SECOND_BRAIN_PROFILE", "mini")
         r = default_resolver()
-        with pytest.raises(NotImplementedError):
-            r.invoker_for("thinker")
+        assert isinstance(r.invoker_for("thinker"), ClaudeCodeInvoker)
 
     def test_unknown_profile_raises(self, monkeypatch):
         monkeypatch.setenv("SECOND_BRAIN_PROFILE", "nonexistent")
@@ -153,3 +155,76 @@ class TestDefaultResolver:
         cfg.write_text('default_profile = "p"\n[profiles.p]\n' + "\n".join(rows) + "\n")
         with pytest.raises(ValueError, match="unknown backend"):
             default_resolver(config_path=str(cfg))
+
+
+class TestNewAdaptersRegistered:
+    """Task 6 / Requirement 19: claude_code + codex are registered adapters."""
+
+    def test_default_adapters_map_claude_code(self):
+        # Req 19.1
+        assert DEFAULT_ADAPTERS["claude_code"] is ClaudeCodeInvoker
+
+    def test_default_adapters_map_codex(self):
+        # Req 19.2
+        assert DEFAULT_ADAPTERS["codex"] is CodexInvoker
+
+    def test_claude_code_role_resolves_to_adapter(self):
+        """A profile selecting claude_code resolves to ClaudeCodeInvoker, not
+        NotImplementedError (Req 19.1). A real model id is required because the
+        metered adapter rejects a blank id at construction."""
+        profile = {"thinker": RoleBackend("thinker", "claude_code", "claude-opus-4.8", "max")}
+        r = Resolver(profile)
+        inv = r.invoker_for("thinker")
+        assert isinstance(inv, ClaudeCodeInvoker)
+        assert inv.model == "claude-opus-4.8"
+
+    def test_codex_role_resolves_to_adapter(self):
+        """A profile selecting codex resolves to CodexInvoker, not
+        NotImplementedError (Req 19.2)."""
+        profile = {"thinker": RoleBackend("thinker", "codex", "gpt-5-codex", "high")}
+        r = Resolver(profile)
+        inv = r.invoker_for("thinker")
+        assert isinstance(inv, CodexInvoker)
+        assert inv.model == "gpt-5-codex"
+
+    def test_claude_code_invoker_cached_per_backend_model(self):
+        """Repeated resolution of the same (backend, model) reuses one invoker
+        (Req 19.3)."""
+        profile = {
+            "thinker": RoleBackend("thinker", "claude_code", "claude-opus-4.8", "max"),
+            "skeptic": RoleBackend("skeptic", "claude_code", "claude-opus-4.8", "high"),
+        }
+        r = Resolver(profile)
+        assert r.invoker_for("thinker") is r.invoker_for("thinker")  # cached per role
+        # same (backend, model) across roles shares one cached invoker
+        assert r.invoker_for("thinker") is r.invoker_for("skeptic")
+
+    def test_codex_invoker_cached_per_backend_model(self):
+        # Req 19.3
+        profile = {"thinker": RoleBackend("thinker", "codex", "gpt-5-codex", "high")}
+        r = Resolver(profile)
+        assert r.invoker_for("thinker") is r.invoker_for("thinker")
+
+    def test_distinct_models_on_claude_code_get_distinct_invokers(self):
+        """Cache key is (backend, model): distinct models => distinct invokers
+        (Req 19.3)."""
+        profile = {
+            "thinker": RoleBackend("thinker", "claude_code", "claude-opus-4.8", "max"),
+            "skeptic": RoleBackend("skeptic", "claude_code", "claude-sonnet-4", "high"),
+        }
+        r = Resolver(profile)
+        assert r.invoker_for("thinker") is not r.invoker_for("skeptic")
+
+    def test_explorer_on_claude_code_passes_guard_at_construction(self):
+        """Explorer on claude_code passes assert_backend_supports_role because
+        claude_code declares supports_mcp=True (Req 19.4)."""
+        profile = {"explorer": RoleBackend("explorer", "claude_code", "claude-opus-4.8", "high")}
+        r = Resolver(profile)  # must not raise
+        assert isinstance(r.invoker_for("explorer"), ClaudeCodeInvoker)
+
+    def test_explorer_on_codex_passes_guard_at_construction(self):
+        """Explorer on codex passes the guard because codex declares
+        supports_mcp=True (Req 19.4)."""
+        profile = {"explorer": RoleBackend("explorer", "codex", "gpt-5-codex", "high")}
+        r = Resolver(profile)  # must not raise
+        assert isinstance(r.invoker_for("explorer"), CodexInvoker)

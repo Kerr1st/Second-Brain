@@ -501,6 +501,7 @@ class DreamCycleOrchestrator:
             system_prompt=prompt,
             user_message=user_message,
             tools=True,
+            timeout=600,
             effort=self.resolver.spec_for("thinker").effort,
             stage="thinker",
             run_id=self._current_run_id,

@@ -1,28 +1,37 @@
-"""Agent Invoker — abstraction layer for kiro-cli chat subprocesses.
+"""Kiro backend adapter — kiro-cli chat subprocesses.
 
 Handles agent config creation, process spawning, timeout enforcement,
 output parsing, and error handling. Used by the DreamCycleOrchestrator
-for all agent invocations.
+for all agent invocations on the laptop (all-Kiro) profile.
 
 Each invocation writes a temporary agent config to ~/.kiro/agents/ with
 the system prompt in the "prompt" field and MCP servers (if needed) in
 the "mcpServers" field, then invokes kiro-cli chat --no-interactive.
 
-Requirements: 13.1, 13.2, 13.3, 13.4, 13.5
+The shared subprocess mechanics (spawn, timeout/exit mapping, the per-call
+metrics JSONL writer, raw-output debug dump, temp-config cleanup, and the JSON
+recovery backstop) live in :class:`src.backends.agentic_cli.AgenticCliInvoker`.
+``KiroInvoker`` overrides only the Kiro-specific hooks and keeps its exact
+command surface (``--no-interactive --agent --model``, ``--trust-all-tools
+--require-mcp-startup``, the MCP-startup exit-3 retry, and
+``usage=None``/``usage_source="estimate"``). See ``docs/MODEL-BACKENDS.md``.
+
+Requirements: 13.1, 13.2, 13.3, 13.4, 13.5, 20.1, 20.2, 20.3
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
-import subprocess
+import subprocess  # noqa: F401 — kept so tests can patch src.backends.kiro.subprocess.run
 import sys
-import time
+import time  # noqa: F401 — kept so tests can patch src.backends.kiro.time.sleep
 import uuid
-from datetime import datetime, timezone
 
+from src.backends.agentic_cli import (
+    AgenticCliInvoker,
+    _write_metrics_line,
+)
 from src.backends.base import parse_json_output as _parse_json_output
 
 logger = logging.getLogger(__name__)
@@ -31,51 +40,68 @@ KIRO_CLI = os.environ.get("KIRO_CLI", os.path.expanduser("~/.local/bin/kiro-cli"
 AGENTS_DIR = os.path.expanduser("~/.kiro/agents")
 DEFAULT_MODEL = "claude-opus-4.8"
 
-# MCP server config for the Second Brain — Explorer and Thinker need this
-# to query memories via memory_search, memory_read, etc.
-_SECOND_BRAIN_MCP = {
-    "second-brain": {
-        "command": sys.executable,
-        "args": ["-m", "src.mcp_server"],
-        "cwd": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    }
-}
-
 # --- Phase 0 LLM-call instrumentation (see docs/FABLE5-THINKER-PLAN.md) ---
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# METRICS_DIR stays defined here (not just re-exported) so the test-suite and
+# launchd env keep monkeypatching/overriding src.backends.kiro.METRICS_DIR, and
+# KiroInvoker's _metrics_dir() reads this module global at call time. Repo root
+# is dirname THREE times from src/backends/kiro.py (the file sits one level deeper
+# than the original src/agent_invoker.py, which used two).
+_REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 METRICS_DIR = os.environ.get(
     "KIRO_LLM_METRICS_DIR", os.path.join(_REPO_ROOT, "logs", "llm_metrics")
 )
 
 
 def _record_call_metrics(metrics: dict, run_id: str | None) -> None:
-    """Append one JSONL record of an LLM call's metrics. Never raises.
-
-    Captures per-call stage, model, effort, latency, and char-based token
-    ESTIMATES. The kiro-cli path returns no structured usage, so token counts
-    are estimates (chars / 4); real usage arrives when a stage moves to a
-    direct Bedrock InvokeModel call (Phase 1).
-    """
-    try:
-        os.makedirs(METRICS_DIR, exist_ok=True)
-        fname = f"{run_id}.jsonl" if run_id else "adhoc.jsonl"
-        with open(os.path.join(METRICS_DIR, fname), "a", encoding="utf-8") as f:
-            f.write(json.dumps(metrics) + "\n")
-    except Exception:
-        logger.debug("Failed to record LLM call metrics", exc_info=True)
+    """Append one JSONL record of an LLM call's metrics to this module's
+    METRICS_DIR. Never raises. Kept here (reading the module-global METRICS_DIR
+    at call time) so monkeypatching ``src.backends.kiro.METRICS_DIR`` works and
+    the agent_invoker shim can re-export it unchanged."""
+    _write_metrics_line(metrics, run_id, METRICS_DIR)
 
 
-class KiroInvoker:
+# Re-exported for back-compat: the agent_invoker shim and the test-suite import
+# these from src.backends.kiro.
+__all__ = [
+    "KiroInvoker",
+    "KIRO_CLI",
+    "AGENTS_DIR",
+    "DEFAULT_MODEL",
+    "METRICS_DIR",
+    "_SECOND_BRAIN_MCP",
+    "_record_call_metrics",
+]
+
+# MCP server config for the Second Brain — Explorer and Thinker need this
+# to query memories via memory_search, memory_read, etc.
+_SECOND_BRAIN_MCP = {
+    "second-brain": {
+        "command": sys.executable,
+        "args": ["-m", "src.mcp_server"],
+        "cwd": _REPO_ROOT,
+    }
+}
+
+
+class KiroInvoker(AgenticCliInvoker):
     """Invoke ``kiro-cli chat --no-interactive`` as isolated subprocesses.
 
     The Kiro backend adapter — routes to Amazon Q ($0 metered). Implements the
-    :class:`src.backends.base.Invoker` contract; returns ``usage=None`` because
-    kiro-cli exposes no real token usage (only char/4 estimates in the metrics
-    log). See ``docs/MODEL-BACKENDS.md``.
+    :class:`src.backends.base.Invoker` contract via
+    :class:`src.backends.agentic_cli.AgenticCliInvoker`; returns ``usage=None``
+    because kiro-cli exposes no real token usage (only char/4 estimates in the
+    metrics log). See ``docs/MODEL-BACKENDS.md``.
     """
 
-    def __init__(self, model: str | None = None):
-        self.model = model or DEFAULT_MODEL
+    BACKEND_NAME = "kiro"
+    DEFAULT_MODEL = DEFAULT_MODEL
+
+    # JSON recovery backstop is shared from base.py; kept as an explicit entry
+    # point because the agent_invoker shim re-exports it as
+    # AgentInvoker.parse_json_output, which the test-suite and older callers use.
+    parse_json_output = staticmethod(_parse_json_output)
 
     def invoke(
         self,
@@ -101,160 +127,110 @@ class KiroInvoker:
                 agent config so the agent can use memory tools. Evaluators
                 pass False (no tool access).
             timeout: Max seconds before killing the process (default 300).
+            mcp_startup_retries: Extra attempts when MCP startup fails (exit 3),
+                used only for tool-using calls.
+            mcp_startup_backoff: Initial backoff (seconds) between MCP retries.
 
         Returns:
-            dict with 'output' (parsed JSON) and 'raw' (raw stdout text).
+            dict with 'output' (parsed JSON), 'raw' (raw stdout text),
+            'usage' (None — kiro-cli reports no real usage), and
+            'usage_source' ("estimate").
 
         Raises:
             TimeoutError: If the subprocess exceeds the timeout.
             RuntimeError: If the subprocess exits with a non-zero code.
         """
-        # Build agent config
-        agent_name = f"dream_cycle_{uuid.uuid4().hex[:8]}"
-        needs_tools = tools
-        agent_config = {
-            "name": agent_name,
+        return super().invoke(
+            system_prompt,
+            user_message,
+            tools=tools,
+            timeout=timeout,
+            effort=effort,
+            stage=stage,
+            run_id=run_id,
+            mcp_startup_retries=mcp_startup_retries,
+            mcp_startup_backoff=mcp_startup_backoff,
+        )
+
+    # --- Kiro-specific hooks ------------------------------------------------
+    def _make_invocation_name(self) -> str:
+        return f"dream_cycle_{uuid.uuid4().hex[:8]}"
+
+    def _config_path(self, name: str) -> str:
+        return os.path.join(AGENTS_DIR, f"{name}.json")
+
+    def _build_config(self, name: str, system_prompt: str, needs_tools: bool):
+        return {
+            "name": name,
             "prompt": system_prompt,
             "mcpServers": _SECOND_BRAIN_MCP if needs_tools else {},
             "tools": ["*"] if needs_tools else [],
         }
 
-        agent_path = os.path.join(AGENTS_DIR, f"{agent_name}.json")
-        os.makedirs(AGENTS_DIR, exist_ok=True)
+    def _build_command(
+        self,
+        *,
+        name,
+        config_path,
+        system_prompt,
+        user_message,
+        needs_tools,
+        effort,
+        **_adapter_opts,
+    ) -> list:
+        cmd = [
+            KIRO_CLI, "chat",
+            "--no-interactive",
+            "--agent", name,
+            "--model", self.model,
+        ]
+        if needs_tools:
+            cmd.append("--trust-all-tools")
+            # Fail loudly (exit 3) if an MCP server can't start, instead of
+            # silently running tool-less (root cause of the Jun 8–12 zero-candidate
+            # runs). See docs/FABLE5-THINKER-PLAN.md.
+            cmd.append("--require-mcp-startup")
+        if effort:
+            cmd += ["--effort", effort]
+        # User message is the positional INPUT argument
+        cmd.append(user_message)
+        return cmd
 
-        # Phase 0 instrumentation: per-call metrics (docs/FABLE5-THINKER-PLAN.md).
-        # Token counts are ESTIMATES (chars / 4); kiro-cli returns no usage.
-        metrics = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "run_id": run_id,
-            "stage": stage,
-            "agent_name": agent_name,
-            "model": self.model,
-            "effort": effort,
-            "tools": needs_tools,
-            "timeout_s": timeout,
-            "system_prompt_chars": len(system_prompt),
-            "user_message_chars": len(user_message),
-            "input_chars": len(system_prompt) + len(user_message),
-            "output_chars": 0,
-            "success": False,
-            "error": None,
-            "mcp_startup_retries": 0,
-        }
-        t0 = time.monotonic()
+    def _adapter_metrics_defaults(self) -> dict:
+        return {"mcp_startup_retries": 0}
 
-        try:
-            with open(agent_path, "w", encoding="utf-8") as f:
-                json.dump(agent_config, f)
+    def _metrics_dir(self) -> str:
+        # Read this module's global at call time so monkeypatching
+        # src.backends.kiro.METRICS_DIR (tests) and the launchd env override both
+        # take effect — identical to the original inline behavior.
+        return METRICS_DIR
 
-            cmd = [
-                KIRO_CLI, "chat",
-                "--no-interactive",
-                "--agent", agent_name,
-                "--model", self.model,
-            ]
-            if needs_tools:
-                cmd.append("--trust-all-tools")
-                # Fail loudly (exit 3) if an MCP server can't start, instead of
-                # silently running tool-less (root cause of the Jun 8–12 zero-candidate
-                # runs). See docs/FABLE5-THINKER-PLAN.md.
-                cmd.append("--require-mcp-startup")
-            if effort:
-                cmd += ["--effort", effort]
+    def _extract_usage(self, *, parsed, raw, result, metrics):
+        # usage=None / usage_source="estimate": kiro-cli exposes no real token
+        # usage — only the char/4 estimates recorded in the metrics log. Metered
+        # backends return real counts with usage_source="real", so the run cost
+        # budget never silently compares an estimate against a measurement.
+        return None, "estimate"
 
-            # User message is the positional INPUT argument
-            cmd.append(user_message)
+    # --- MCP startup hardening: --require-mcp-startup + exit-3 retry ---------
+    def _attempts_allowed(self, *, needs_tools, mcp_startup_retries: int = 2, **_opts) -> int:
+        return 1 + (mcp_startup_retries if needs_tools else 0)
 
-            logger.debug(
-                "Invoking agent: name=%s, timeout=%ds, tools=%s",
-                agent_name, timeout, needs_tools,
+    def _initial_backoff(self, *, mcp_startup_backoff: float = 3.0, **_opts) -> float:
+        return mcp_startup_backoff
+
+    def _should_retry(
+        self, result, *, needs_tools, attempt, attempts_allowed, metrics, backoff
+    ) -> bool:
+        # MCP startup can fail transiently in the scheduled (launchd) context.
+        # With --require-mcp-startup, kiro exits 3 *before* any model call, so
+        # retrying is cheap (no tokens spent) and usually succeeds once warm.
+        if needs_tools and result.returncode == 3:
+            metrics["mcp_startup_retries"] = attempt
+            logger.warning(
+                "MCP startup failed (exit 3), attempt %d/%d; retrying in %.0fs. "
+                "stderr tail: %s",
+                attempt, attempts_allowed, backoff, (result.stderr or "")[-400:],
             )
-
-            # MCP startup can fail transiently in the scheduled (launchd) context.
-            # With --require-mcp-startup, kiro exits 3 *before* any model call, so
-            # retrying is cheap (no tokens spent) and usually succeeds once warm.
-            attempts_allowed = 1 + (mcp_startup_retries if needs_tools else 0)
-            backoff = mcp_startup_backoff
-            for attempt in range(1, attempts_allowed + 1):
-                try:
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=timeout,
-                    )
-                except subprocess.TimeoutExpired as exc:
-                    stderr = exc.stderr or ""
-                    metrics["error"] = "timeout"
-                    logger.error("Agent timed out after %ds: %s", timeout, stderr)
-                    raise TimeoutError(
-                        f"Agent subprocess timed out after {timeout}s: {stderr}"
-                    ) from exc
-
-                if needs_tools and result.returncode == 3 and attempt < attempts_allowed:
-                    metrics["mcp_startup_retries"] = attempt
-                    logger.warning(
-                        "MCP startup failed (exit 3), attempt %d/%d; retrying in %.0fs. stderr tail: %s",
-                        attempt, attempts_allowed, backoff, (result.stderr or "")[-400:],
-                    )
-                    time.sleep(backoff)
-                    backoff *= 2
-                    continue
-                break
-
-            if result.returncode != 0:
-                metrics["error"] = f"exit_code={result.returncode}"
-                logger.error(
-                    "Agent exited with code %d: %s",
-                    result.returncode, result.stderr,
-                )
-                raise RuntimeError(
-                    f"Agent subprocess failed (exit code {result.returncode}): "
-                    f"{result.stderr}"
-                )
-
-            raw = result.stdout
-            metrics["output_chars"] = len(raw)
-            logger.debug("Agent raw output length: %d chars", len(raw))
-
-            # Save raw output for debugging (especially useful for first runs)
-            raw_debug_path = os.path.join("/tmp", f"kiro_agent_{agent_name}_raw.txt")
-            try:
-                with open(raw_debug_path, "w", encoding="utf-8") as f:
-                    f.write(raw)
-                logger.debug("Raw output saved to %s", raw_debug_path)
-            except OSError:
-                pass
-
-            try:
-                parsed = self.parse_json_output(raw)
-            except ValueError:
-                metrics["error"] = "json_parse_failed"
-                logger.error("Failed to parse JSON from agent output (%d chars). Raw saved to %s", len(raw), raw_debug_path)
-                raise
-
-            metrics["success"] = True
-            # usage=None / usage_source="estimate": kiro-cli exposes no real token
-            # usage — only the char/4 estimates recorded in the metrics log. Metered
-            # backends return real counts with usage_source="real", so the run cost
-            # budget never silently compares an estimate against a measurement.
-            return {"output": parsed, "raw": raw, "usage": None, "usage_source": "estimate"}
-
-        finally:
-            metrics["latency_s"] = round(time.monotonic() - t0, 3)
-            metrics["est_input_tokens"] = metrics["input_chars"] // 4
-            metrics["est_output_tokens"] = metrics["output_chars"] // 4
-            _record_call_metrics(metrics, run_id)
-            # Clean up the temporary agent config
-            try:
-                os.remove(agent_path)
-            except OSError:
-                pass
-
-    # JSON recovery backstop lives in base.py now (shared across backends, so a
-    # future ClaudeCodeInvoker need not import from kiro). The KiroInvoker
-    # entry point is kept for back-compat — the agent_invoker shim re-exports it
-    # as AgentInvoker.parse_json_output, which the test-suite and older callers use.
-    parse_json_output = staticmethod(_parse_json_output)
+            return True
+        return False

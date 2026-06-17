@@ -19,6 +19,8 @@ import tomllib
 from dataclasses import dataclass
 
 from src.backends.base import BACKEND_CAPABILITIES, Invoker, assert_backend_supports_role
+from src.backends.claude_code import ClaudeCodeInvoker
+from src.backends.codex import CodexInvoker
 from src.backends.kiro import KiroInvoker
 
 _REPO_ROOT = os.path.dirname(
@@ -27,9 +29,12 @@ _REPO_ROOT = os.path.dirname(
 DEFAULT_CONFIG_PATH = os.path.join(_REPO_ROOT, "config", "backends.toml")
 
 # backend name -> adapter class. Adapters are registered as they are implemented
-# (priority order: kiro today; claude_code / codex / bedrock land in later steps).
+# (priority order: kiro today; claude_code / codex landed here; bedrock in a
+# later step).
 DEFAULT_ADAPTERS: dict[str, type] = {
     "kiro": KiroInvoker,
+    "claude_code": ClaudeCodeInvoker,
+    "codex": CodexInvoker,
 }
 
 VALID_ROLES = (

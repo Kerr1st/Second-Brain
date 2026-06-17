@@ -1,6 +1,42 @@
 # Model Backends — pluggable execution paths (agentic CLIs + direct APIs)
 
 > **Status: IMPLEMENTED (uncommitted).** Built + wired into the orchestrator; full suite green (685). Date: 2026-06-15 (status updated 2026-06-16).
+>
+> **Adapter status (2026-06-16, spec `model-backend-adapters`).** The two
+> agentic-CLI adapters are now **implemented and registered**:
+> - **`ClaudeCodeInvoker`** (`src/backends/claude_code.py`, `claude -p`) — built
+>   on the shared `AgenticCliInvoker` base, registered in the resolver as
+>   `claude_code`. **Live-verified** (tool-less path) on the local ASBX build.
+> - **`CodexInvoker`** (`src/backends/codex.py`, `codex exec`) — built on the
+>   same base, registered as `codex`. Verified by **mocked-subprocess unit
+>   tests** plus a **manual smoke-test checklist** (Codex is not installed
+>   anywhere today). Checklist location: **`docs/MODEL-BACKENDS-VERIFICATION.md`
+>   Part B** — run it on a Codex-equipped box.
+>
+> Full suite **green (814 passed)** on the `laptop` profile (default, all-Kiro —
+> zero behavior change; the ~688 pre-feature baseline is unchanged) and the
+> adapter/resolver/probe suites pass under the `claude_code` (`mini`) profile
+> against the mocked adapters. The embedding path (Bedrock Titan, `src/embeddings.py`)
+> is **untouched** (Req 20.3). Per-environment verification is recorded in
+> **`docs/MODEL-BACKENDS-VERIFICATION.md`**.
+>
+> > **Agentic Claude Code path (tools=True) — FIXED (spec `claude-code-stream-json-probe-fix`).**
+> > The tool-less Claude Code path (evaluators / Express) was always
+> > **live-verified and working**. The **agentic** path (Explorer / Thinker,
+> > `tools=True`) is now **fixed**: previously `--output-format json` did not
+> > expose the tool-use/tool-result transcript the `MCP_Startup_Probe` scans, so
+> > an agentic Claude Code call raised a **false-positive `RuntimeError`** even
+> > when MCP tools attached and were used successfully. The adapter now emits
+> > **`--output-format stream-json --verbose`**, extracts `.result`/`is_error`/
+> > `usage` from the terminal `{"type":"result"}` event of the JSONL stream, and
+> > feeds the stream events to `detect_tool_result` so the probe confirms the
+> > real `tool_result`. The compounding **Finding 2** defect (the safety-tuned
+> > model refused the injection-styled probe instruction) is also fixed:
+> > `MCPStartupProbe.instruction()` was reworded to a transparent
+> > natural-language request (the `PROBE_NAME`/`TOOL`/`QUERY` tokens are
+> > retained). See `docs/MODEL-BACKENDS-VERIFICATION.md` **Finding 1** and
+> > **Finding 2**. The Codex adapter and the embedding path are unaffected.
+>
 > **rev. 2026-06-15c — incorporates doc review.** Generalized from the original two-implementation
 > sketch (`KiroInvoker` + `BedrockInvoker`) to a **backend-family abstraction** so each dream-cycle
 > agent role can run on a chosen model via any of several execution paths — the existing **Kiro
@@ -94,7 +130,7 @@ not assumed.
 | Model select | `--model <id>` | `--model opus\|sonnet\|haiku\|fable\|<id>` | `-m <id>` / `model_provider` | inference-profile ID |
 | Effort / thinking | `--effort low…max` | `--effort low\|medium\|high\|xhigh\|max` | `model_reasoning_effort none…xhigh` (`-c`) | `output_config.effort` (Fable) |
 | Structured output | ❌ (scrape) | ✅ `--json-schema` | ✅ `--output-schema` | request/response JSON |
-| Final-text extraction | stdout (scrape) | `--output-format json` → `.result` | `-o <file>` or `--json` events | response body |
+| Final-text extraction | stdout (scrape) | `--output-format stream-json --verbose` → terminal `{"type":"result"}` event `.result` | `-o <file>` or `--json` events | response body |
 | Real token `usage` | ❌ (char/4 estimate) | ✅ envelope (`usage`,`total_cost_usd`) | ✅ `--json` events | ✅ response |
 | Fail-loud if MCP didn't attach | `--require-mcp-startup` (exit 3) — **strong** | envelope `is_error`/tool-use check — **weaker** | `mcp_servers.<n>.required=true` — **strong** | n/a |
 | Cost cap knob | — | `--max-budget-usd`, `--max-turns` | per-call `usage` + budget | per-call `usage` + budget |
@@ -154,10 +190,12 @@ extraction, the effort flag, and **failure-mode mapping**.
 - **`KiroInvoker`** (today's `AgentInvoker`, unchanged). `kiro-cli chat --no-interactive --agent
   <name> --model <id>` (`--trust-all-tools --require-mcp-startup` with tools; `--effort`). `usage=None`.
 - **`ClaudeCodeInvoker`.** Tool-less: `claude -p "<msg>" --system-prompt-file <role>.txt
-  --strict-mcp-config --tools "" --model <id> --effort high --output-format json`. With tools: add
-  `--mcp-config <sb>.json --permission-mode bypassPermissions`. Take `.result` → `parse_json_output`;
-  capture `usage`/`total_cost_usd`; bound with `--max-budget-usd`. Fail-loud = inspect `is_error`
-  + confirm tool-use (no exact `--require-mcp-startup` analog — weaker).
+  --strict-mcp-config --tools "" --model <id> --effort high --output-format stream-json --verbose`.
+  With tools: add `--mcp-config <sb>.json --permission-mode bypassPermissions`. Read the terminal
+  `{"type":"result"}` event of the JSONL stream for `.result` → `parse_json_output`, `is_error`, and
+  `usage`/`total_cost_usd`; bound with `--max-budget-usd`. Fail-loud = inspect `is_error` + confirm
+  a real `tool_result` in the stream events via the `MCP_Startup_Probe` (no exact
+  `--require-mcp-startup` analog — weaker).
 - **`CodexInvoker`.** Tool-less: `codex exec "<msg>" -m <id> -c model_reasoning_effort="high"
   -c developer_instructions="<role>" --sandbox read-only --output-last-message <out>.txt`. With tools:
   config `[mcp_servers.second_brain] command=<py> args=["-m","src.mcp_server"] cwd=<repo>
@@ -185,9 +223,9 @@ explorer = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
 thinker  = { backend = "kiro", model = "claude-opus-4.8", effort = "max"  }
 # skeptic / advocate / epistemologist / methodologist = kiro / opus / high
 
-[profiles.mini]                           # claude_code adapter lands in a later step
-explorer = { backend = "claude_code", model = "claude-opus-4.8", effort = "high" }
-# ... one backend + one model across all roles
+[profiles.mini]                           # Claude Code on Bedrock (implemented + validated)
+explorer = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+# ... one backend + one model across all roles (Bedrock inference-profile id the CLI accepts)
 ```
 
 `Resolver.invoker_for(role)` looks up the role's spec, runs `assert_backend_supports_role` (the
@@ -279,7 +317,8 @@ internal role→backend map keep the door open, so they are additive, not a rede
   metered instance like the Mini.
 - **Evaluator-panel model diversity** — different models/labs per seat to de-correlate the ≥3/4 vote.
   A measured A/B (hold the backend fixed), not an assumed win; no regression vs today's same-model panel.
-- **Additional adapters** — `CodexInvoker`, direct `OpenAIInvoker`/`AnthropicInvoker`, and
+- **Additional adapters** — ~~`CodexInvoker`~~ (now implemented — see *Adapter status* above),
+  direct `OpenAIInvoker`/`AnthropicInvoker`, and
   `BedrockInvoker` (Fable Phase 1b) — added when a deployment profile actually needs them.
 
 ## Rollout (demand-driven — coupled to the first real machine)

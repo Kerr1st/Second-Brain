@@ -22,10 +22,16 @@ methodologist  = { backend = "kiro", model = "claude-opus-4.8", effort = "high" 
 
 [profiles.mini]
 # Mac Mini: no Kiro -> Claude Code on Bedrock. The claude_code adapter is
-# implemented in a later step; selecting this profile errors until then.
-explorer       = { backend = "claude_code", model = "claude-opus-4.8", effort = "high" }
-thinker        = { backend = "claude_code", model = "claude-opus-4.8", effort = "max" }
-skeptic        = { backend = "claude_code", model = "claude-opus-4.8", effort = "high" }
-advocate       = { backend = "claude_code", model = "claude-opus-4.8", effort = "high" }
-epistemologist = { backend = "claude_code", model = "claude-opus-4.8", effort = "high" }
-methodologist  = { backend = "claude_code", model = "claude-opus-4.8", effort = "high" }
+# implemented and validated end-to-end against the local ASBX `claude` build.
+#
+# Model ids are Bedrock inference-profile ids the Claude Code CLI accepts on
+# this build (confirmed live): `global.anthropic.claude-opus-4-8` is the latest
+# Opus. The short/dotted forms (`claude-opus-4.8`, `claude-opus-4-8`) and the
+# `opus` alias (which resolves to the older 4-6) are NOT used. For a cheaper /
+# faster instance, swap to `global.anthropic.claude-sonnet-4-6`.
+explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+thinker        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "max" }
+skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
