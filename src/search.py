@@ -16,6 +16,16 @@ from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 
 from src.db import get_connection
+from src.rerank_weights import (
+    COEFFICIENTS,
+    MEM_CLASS_BOOST,
+    PROJECT_PENALTY,
+    REINFORCEMENT_COEFF,
+    STALENESS_PENALTY_MAX,
+    SUPERSEDED_PENALTY,
+    TYPE_BOOST,
+    TYPE_BOOST_TYPES,
+)
 
 
 # --- Hybrid Search (BM25 + Vector + RRF) ---
@@ -193,7 +203,7 @@ def rerank(results, query_text, query_project=None):
         if access == 0 and created and hasattr(created, "timestamp"):
             days_unretrieved = max(0, (now - created).total_seconds() / 86400)
             if days_unretrieved > 90:
-                staleness_penalty = -0.05 * min(1.0, (days_unretrieved - 90) / 180)
+                staleness_penalty = STALENESS_PENALTY_MAX * min(1.0, (days_unretrieved - 90) / 180)
             else:
                 staleness_penalty = 0.0
         else:
@@ -205,27 +215,27 @@ def rerank(results, query_text, query_project=None):
 
         # Type boost (ideas/syntheses/insights > raw sources)
         mem_type = r.get("type", "")
-        type_boost = 0.06 if mem_type in ("idea", "synthesis", "insight", "decision") else 0.0
+        type_boost = TYPE_BOOST if mem_type in TYPE_BOOST_TYPES else 0.0
 
         # Memory classification boost (semantic > procedural > episodic)
         mem_class = r.get("mem_class")
-        mem_class_boost = {"semantic": 0.04, "procedural": 0.02}.get(mem_class, 0.0)
+        mem_class_boost = MEM_CLASS_BOOST.get(mem_class, 0.0)
 
         # Depth score from metadata (numeric depth of explanation)
         depth_score = (r.get("metadata") or {}).get("depth_score", 0.0)
 
         # Spaced retrieval reinforcement (logarithmic, modulated by spacing bonus)
         spacing_bonus = compute_spacing_bonus(r.get("last_accessed_at"), now)
-        reinforcement = 0.03 * math.log1p(access) * spacing_bonus
+        reinforcement = REINFORCEMENT_COEFF * math.log1p(access) * spacing_bonus
 
         # Cross-project penalty
         mem_project = r.get("project")
-        project_penalty = -0.15 if (query_project and mem_project and mem_project != query_project) else 0.0
+        project_penalty = PROJECT_PENALTY if (query_project and mem_project and mem_project != query_project) else 0.0
 
         # Supersession penalty (interference theory: retroactive interference)
         # Superseded memories should fade in favor of their replacements.
         mem_status = r.get("status", "active")
-        superseded_penalty = -0.20 if mem_status == "superseded" else 0.0
+        superseded_penalty = SUPERSEDED_PENALTY if mem_status == "superseded" else 0.0
 
         # Store intermediate signals for evaluation/ablation (underscore-prefixed)
         r["_overlap"] = overlap
@@ -243,13 +253,13 @@ def rerank(results, query_text, query_project=None):
         r["_staleness_penalty"] = staleness_penalty
 
         r["rerank_score"] = (
-            0.30 * r.get("rrf_score", 0)
-            + 0.18 * overlap
-            + 0.18 * title_overlap
-            + 0.10 * context_overlap
-            + 0.12 * recency
-            + 0.08 * length_score
-            + 0.05 * depth_score
+            COEFFICIENTS["rrf"] * r.get("rrf_score", 0)
+            + COEFFICIENTS["overlap"] * overlap
+            + COEFFICIENTS["title_overlap"] * title_overlap
+            + COEFFICIENTS["context_overlap"] * context_overlap
+            + COEFFICIENTS["recency"] * recency
+            + COEFFICIENTS["length"] * length_score
+            + COEFFICIENTS["depth"] * depth_score
             + type_boost
             + mem_class_boost
             + reinforcement

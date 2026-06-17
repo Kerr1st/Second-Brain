@@ -227,6 +227,8 @@ rerank_score = 0.30 * rrf_score
              + staleness_penalty            (-0.05 if unretrieved >90 days)
 ```
 
+> **Authoritative source:** `src/rerank_weights.py` is the single source of truth for these weight values; both the production scorer (`src/search.py`) and the evaluation scorer derive from it.
+
 See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale.
 
 ## Memory Types

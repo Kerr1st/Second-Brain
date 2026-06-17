@@ -22,31 +22,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.db import get_connection
 from src.dream_cycle_db import get_golden_queries
 from src.embeddings import generate_embedding
+from src.rerank_weights import COEFFICIENTS, REINFORCEMENT_COEFF
 from src.search import hybrid_search, rerank
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Production weights (mirrored from src/search.py rerank() for re-scoring)
+# Production weights — DERIVED from the canonical source src/rerank_weights.py.
 #
-# Weighted signals (rrf through depth) are multiplied by these coefficients.
-# type_boost, mem_class_boost, and project_penalty are MULTIPLIERS applied to
-# the raw additive signal values from rerank(), not the signal values themselves.
-# At baseline (1.0), the raw values pass through unchanged. At 0.0, the signal
-# is zeroed. Production rerank() uses raw values like 0.06 (type_boost) and
-# 0.04 (mem_class_boost) — those are stored in _type_boost and _mem_class_boost.
+# The coefficient signals (rrf through depth) and reinforcement_coeff come
+# straight from the canonical module, so a weight change there propagates here
+# automatically. type_boost, mem_class_boost, project_penalty,
+# superseded_penalty, and staleness_penalty are MULTIPLIERS applied to the raw
+# additive signal values that rerank() already stored on each result
+# (_type_boost, _mem_class_boost, etc.), not the signal values themselves. At
+# baseline (1.0) the raw values pass through unchanged; at 0.0 the signal is
+# zeroed (used by the ablation/override mechanism below).
 # ---------------------------------------------------------------------------
 PRODUCTION_WEIGHTS = {
-    "rrf": 0.30,
-    "overlap": 0.18,
-    "title_overlap": 0.18,
-    "context_overlap": 0.10,
-    "recency": 0.12,
-    "length": 0.08,
-    "depth": 0.05,
+    **COEFFICIENTS,               # rrf, overlap, title_overlap, context_overlap, recency, length, depth
     "type_boost": 1.0,            # multiplier on raw _type_boost (0.0 or 0.06)
     "mem_class_boost": 1.0,       # multiplier on raw _mem_class_boost (0.0/0.02/0.04)
-    "reinforcement_coeff": 0.03,
+    "reinforcement_coeff": REINFORCEMENT_COEFF,
     "project_penalty": 1.0,       # multiplier on raw _project_penalty (0.0 or -0.15)
     "superseded_penalty": 1.0,    # multiplier on raw _superseded_penalty (0.0 or -0.20)
     "staleness_penalty": 1.0,     # multiplier on raw _staleness_penalty (0.0 to -0.05)
