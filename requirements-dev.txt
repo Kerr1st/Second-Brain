@@ -1,0 +1,5 @@
+# Development / CI-only dependencies (not required at runtime).
+# Install with:  pip install -r requirements-dev.txt
+# Run coverage:  pytest --cov=src --cov-report=term-missing
+-r requirements.txt
+pytest-cov==7.1.0

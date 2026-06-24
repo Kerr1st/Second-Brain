@@ -1,0 +1,34 @@
+# Dependencies
+__pycache__/
+*.pyc
+.venv/
+
+# Hypothesis (property-based testing)
+.hypothesis/
+
+# Golden run fixtures (contain full prompts and real memory content)
+tests/fixtures/golden_run/
+
+# Staging (transient data, not source controlled)
+staging/
+
+# Docker volumes
+docker/data/
+
+# Backup artifacts
+*.dump
+*.dump.gpg
+*.json.gpg
+
+# OS
+.DS_Store
+
+# Evaluation results (local, timestamped — query sets are committed)
+evaluations/results/
+
+# Secrets
+.backup-key
+.env
+backups/
+logs/
+.coverage

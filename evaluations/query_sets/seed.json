@@ -1,0 +1,40 @@
+[
+  {"_instructions": "Replace placeholder UUIDs (00000000-...) with real memory IDs from the production database. Run: SELECT id, title, type, mem_class FROM memories WHERE ... to find representative memories for each category. Entries with placeholder UUIDs are skipped by eval scripts.",
+   "query": "_placeholder", "expected_memory_id": "00000000-0000-0000-0000-000000000000", "category": "factual"},
+
+  {"query": "What is the spacing effect in memory research?", "expected_memory_id": "00000000-0000-0000-0000-000000000001", "category": "conceptual", "notes": "Should retrieve Bjork 1975 research grounding or design decision about spacing_bonus"},
+  {"query": "Why does the dream cycle use four evaluators?", "expected_memory_id": "00000000-0000-0000-0000-000000000002", "category": "conceptual", "notes": "Should retrieve BFT consensus design decision (Lamport 3f+1)"},
+  {"query": "What is levels of processing theory?", "expected_memory_id": "00000000-0000-0000-0000-000000000003", "category": "conceptual", "notes": "Should retrieve Craik & Lockhart 1972 reference or depth_score rationale"},
+  {"query": "How does complementary learning systems theory apply to memory consolidation?", "expected_memory_id": "00000000-0000-0000-0000-000000000004", "category": "conceptual", "notes": "Should retrieve McClelland CLS theory reference"},
+  {"query": "What is encoding specificity principle?", "expected_memory_id": "00000000-0000-0000-0000-000000000005", "category": "conceptual", "notes": "Should retrieve Tulving & Thomson 1973 or project penalty rationale"},
+
+  {"query": "What database does the second brain use?", "expected_memory_id": "00000000-0000-0000-0000-000000000006", "category": "factual", "notes": "Should retrieve PostgreSQL + pgvector design decision"},
+  {"query": "What is the RRF constant k value?", "expected_memory_id": "00000000-0000-0000-0000-000000000007", "category": "factual", "notes": "Should retrieve hybrid search implementation detail (k=60)"},
+  {"query": "What is the recency decay time constant?", "expected_memory_id": "00000000-0000-0000-0000-000000000008", "category": "factual", "notes": "Should retrieve rerank formula detail (tau=60 days)"},
+  {"query": "How many evaluators are on the consensus panel?", "expected_memory_id": "00000000-0000-0000-0000-000000000009", "category": "factual", "notes": "Should retrieve 4-evaluator BFT panel design"},
+  {"query": "What embedding model does the system use?", "expected_memory_id": "00000000-0000-0000-0000-000000000010", "category": "factual", "notes": "Should retrieve embeddings.py or Bedrock model reference"},
+
+  {"query": "How do I add a new memory type?", "expected_memory_id": "00000000-0000-0000-0000-000000000011", "category": "procedural", "notes": "Should retrieve schema or ingest pipeline documentation"},
+  {"query": "How to run the dream cycle manually?", "expected_memory_id": "00000000-0000-0000-0000-000000000012", "category": "procedural", "notes": "Should retrieve dream_cycle_run.py or scheduling docs"},
+  {"query": "How to back up the database?", "expected_memory_id": "00000000-0000-0000-0000-000000000013", "category": "procedural", "notes": "Should retrieve backup.sh or disaster recovery docs"},
+  {"query": "How to ingest a new chat transcript?", "expected_memory_id": "00000000-0000-0000-0000-000000000014", "category": "procedural", "notes": "Should retrieve ingest pipeline or chat extraction docs"},
+  {"query": "How to reject a dream cycle insight after acceptance?", "expected_memory_id": "00000000-0000-0000-0000-000000000015", "category": "procedural", "notes": "Should retrieve mark_user_rejected or feedback mechanism"},
+
+  {"query": "gridfinity baseplate design decisions", "expected_memory_id": "00000000-0000-0000-0000-000000000016", "category": "cross_project", "notes": "Should retrieve from a specific project context — test project penalty"},
+  {"query": "database migration strategy for second-brain", "expected_memory_id": "00000000-0000-0000-0000-000000000017", "category": "cross_project", "notes": "Should prefer second-brain project memories over others"},
+  {"query": "Python testing best practices", "expected_memory_id": "00000000-0000-0000-0000-000000000018", "category": "cross_project", "notes": "Should retrieve universal knowledge (no project tag)"},
+  {"query": "MCP server implementation patterns", "expected_memory_id": "00000000-0000-0000-0000-000000000019", "category": "cross_project", "notes": "Should retrieve from second-brain or kiro-memory project"},
+  {"query": "consensus algorithm comparison", "expected_memory_id": "00000000-0000-0000-0000-000000000020", "category": "cross_project", "notes": "Should retrieve BFT/PBFT discussion regardless of project"},
+
+  {"query": "latest dream cycle improvements", "expected_memory_id": "00000000-0000-0000-0000-000000000021", "category": "recent", "notes": "Should retrieve a recently created memory about dream cycle changes"},
+  {"query": "newest ingested content", "expected_memory_id": "00000000-0000-0000-0000-000000000022", "category": "recent", "notes": "Should retrieve a memory created in the last week"},
+  {"query": "recent evaluation framework work", "expected_memory_id": "00000000-0000-0000-0000-000000000023", "category": "recent", "notes": "Should retrieve recent memories about eval work"},
+  {"query": "what was added to the system this month?", "expected_memory_id": "00000000-0000-0000-0000-000000000024", "category": "recent", "notes": "Should retrieve recent additions — tests recency signal"},
+  {"query": "last chat session topics", "expected_memory_id": "00000000-0000-0000-0000-000000000025", "category": "recent", "notes": "Should retrieve recently ingested chat memories"},
+
+  {"query": "Why does spaced retrieval prevent popularity bias and how does the spacing bonus formula work?", "expected_memory_id": "00000000-0000-0000-0000-000000000026", "category": "deep", "notes": "Should retrieve a high depth_score memory with causal explanation"},
+  {"query": "What happens when the consensus panel has a split vote and why was DEFERRED removed?", "expected_memory_id": "00000000-0000-0000-0000-000000000027", "category": "deep", "notes": "Should retrieve deep design decision about BFT consensus"},
+  {"query": "Why three-speed enrichment instead of uniform LLM enrichment at ingest?", "expected_memory_id": "00000000-0000-0000-0000-000000000028", "category": "deep", "notes": "Should retrieve the three-speed enrichment design rationale"},
+  {"query": "How does the testing effect from cognitive science apply to retrieval reinforcement?", "expected_memory_id": "00000000-0000-0000-0000-000000000029", "category": "deep", "notes": "Should retrieve Roediger & Karpicke research grounding"},
+  {"query": "What is the causal mechanism behind memory classification boosting semantic over episodic?", "expected_memory_id": "00000000-0000-0000-0000-000000000030", "category": "deep", "notes": "Should retrieve Tulving taxonomy rationale with depth"}
+]

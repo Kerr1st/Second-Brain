@@ -1,0 +1,18 @@
+psycopg2-binary==2.9.11
+boto3==1.42.69
+mcp==1.26.0
+browser-cookie3==0.20.1
+requests==2.32.5
+hypothesis==6.151.9
+pytest==9.0.2
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+numpy>=2.0.0
+scipy>=1.14.0
+
+# YouTube capture (src/capture/youtube.py). curl_cffi gives yt-dlp browser
+# impersonation. yt-dlp 2026.3.17 supports ONLY curl_cffi 0.5.10 and 0.10.x-0.14.x
+# (its darwin build pins 0.13.0; 0.15.0 is rejected) — so curl_cffi is pinned
+# exactly and MUST be bumped together with yt-dlp.
+yt-dlp==2026.3.17
+curl_cffi==0.13.0
