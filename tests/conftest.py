@@ -147,6 +147,9 @@ def clean_tables(test_db):
     yield
     with db.get_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute("DELETE FROM context_receipts")
+            cur.execute("DELETE FROM dream_cycle_candidates")
+            cur.execute("DELETE FROM dream_cycle_runs")
             cur.execute("DELETE FROM memory_relationships")
             cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
             cur.execute("DELETE FROM memories")
