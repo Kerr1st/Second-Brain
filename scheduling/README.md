@@ -15,6 +15,7 @@ All plists live in this directory. Install by symlinking to `~/Library/LaunchAge
 | `com.second-brain.verify` | Sun 3:00 AM | `verify_backup.sh` | Backup verification (Google Drive) |
 | `com.second-brain.dream-cycle` | Daily 12:00 PM | `dream_cycle_scheduled.sh` | Dream cycle pipeline |
 | `com.second-brain.liveness` | Daily 9:00 AM | `verify_liveness.sh` | Per-source capture liveness check (alerts if a channel goes silent) |
+| `com.second-brain.codex-canary` | Every 3600s | `codex_capture_canary.sh` | One allowlisted Codex Task; no backfill |
 | `com.second-brain.capture-api` | Removed | `capture_api.sh` | Deprecated HTTP capture endpoint (not installed) |
 
 ## Install / Uninstall

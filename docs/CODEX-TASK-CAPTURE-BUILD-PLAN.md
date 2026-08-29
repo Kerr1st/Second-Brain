@@ -1,6 +1,6 @@
 # Codex Task Capture — Simplified Build Plan
 
-**Status:** Simplified implementation and completion gate complete; activation awaits approval
+**Status:** Vertical proof complete; one-task operational canary approved; unrestricted backfill disabled
 
 **Reference implementation:** Codex Desktop
 
@@ -168,7 +168,7 @@ positive corrections, abstention cases, adjacent-segment extension, Exact Proven
 idempotency, searchability, Express exclusion, and the unchanged `run_codex_capture` interface. A
 bounded live semantic pass must succeed before activation.
 
-### Build 2 — Steering consolidation, documented only
+### Build 2 — Steering consolidation, implemented and proven
 
 After Build 1 is proven, teach the Dream Cycle to deliberately explore Correction Episodes and
 related memories. The Thinker may propose a Steering Candidate from explicit durable direction,
@@ -268,10 +268,10 @@ Use real Codex fixtures and the isolated test database to prove only observable 
 
 ## Done
 
-The current build goal is complete when the simplified path passes the verification above with real
-Task data, including a bounded isolated-database capture and a real resumed-Task refresh. Hourly
-scheduling and the full historical backfill remain deliberately disabled until explicit approval.
-The next agent integration should be designed only after Codex is proven and activated.
+The bounded implementation goal is complete. The approved operational canary runs the same command
+hourly for one allowlisted User-Owned Task; it does not include archived history or unrestricted
+backfill. Canary evidence must pass the acceptance review before active-task coverage expands. The
+next agent integration follows the canonical [delivery roadmap](ROADMAP.md).
 
 ### Completion Evidence — 2026-07-20
 
@@ -314,3 +314,16 @@ The next agent integration should be designed only after Codex is proven and act
   reviewed publication added its managed `AGENTS.md` block, and a later Codex Task used the rule
   without correction. Correction Episodes remain valid future evidence but were not manufactured
   for this explicit project decision.
+
+### Production Canary Evidence — 2026-08-29
+
+- Migrations 012 and 013 were applied to the local production database through the idempotent
+  migration runner.
+- The first task-bounded production run captured User-Owned task
+  `01a014fd-89cf-73c0-a4ef-001e0f89d231` and retained its complete unprocessed semantic tail.
+- Bedrock embedding authentication was absent. The semantic pass failed with
+  `NoCredentialsError`, stored no partial Topic Segments or memories, and left the Semantic
+  Processing Cursor null as designed.
+- `com.second-brain.codex-canary` is loaded with a one-task allowlist and a 3600-second interval.
+  Its credential preflight records `waiting_for_embedding_credentials` with exit code zero, so it
+  neither broadens capture nor produces repeated failure notifications while awaiting login.

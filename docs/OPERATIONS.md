@@ -143,6 +143,30 @@ LaunchAgent and do not invoke an unbounded `--backfill` until explicit user appr
 Proof Gate uses `--task-id` with `DB_NAME="$TEST_DB_NAME"`; there is no separate pilot application.
 See [CODEX-TASK-CAPTURE-BUILD-PLAN.md](CODEX-TASK-CAPTURE-BUILD-PLAN.md).
 
+### One-task operational canary
+
+The approved canary uses `scheduling/com.second-brain.codex-canary.plist` and runs only the
+allowlisted User-Owned task ID in its environment. It never passes `--backfill` and never scans
+other eligible tasks for writes.
+
+```bash
+# Install the repository template for this checkout, then load it
+sed "s|/path/to/second-brain|$PWD|g" \
+  scheduling/com.second-brain.codex-canary.plist \
+  > "$HOME/Library/LaunchAgents/com.second-brain.codex-canary.plist"
+launchctl bootstrap "gui/$UID" \
+  "$HOME/Library/LaunchAgents/com.second-brain.codex-canary.plist"
+
+# Inspect status and the append-only local log
+launchctl print "gui/$UID/com.second-brain.codex-canary"
+tail -50 logs/codex-canary.log
+```
+
+The job performs an embedding-credential preflight. Without Bedrock credentials it records
+`waiting_for_embedding_credentials` and exits successfully. It does not use deterministic or
+alternate embeddings in production. Once credentials return, the next hourly run retries the
+unchanged semantic tail.
+
 ## Memory Context Broker and Steering Governance
 
 Agents request a bounded pack through `memory_context` and close its receipt through

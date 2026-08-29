@@ -37,6 +37,7 @@ guidance was followed, corrected, unused, or still unknown.
 
 ## Related
 
+- [Delivery Roadmap](ROADMAP.md)
 - [Architecture Component Index](components/index.md)
 - [ADR 0010](adr/0010-prove-capabilities-vertically-before-generalizing.md)
 - [ADR 0011](adr/0011-use-bounded-context-packs-and-outcome-receipts.md)

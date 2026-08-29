@@ -1,6 +1,6 @@
 # Capture Component
 
-> **Status: canonical component contract.** Last reviewed: 2026-07-23.
+> **Status: canonical component contract.** Last reviewed: 2026-08-29.
 
 Capture reaches external sources, decides what is eligible, preserves
 source-native identity and provenance, and normalizes material for durable
@@ -120,7 +120,7 @@ or reordered known turns are Source Drift and do not rewrite stored evidence.
 
 | Source | Current state |
 |---|---|
-| Codex Desktop | Reference Agent Task implementation; bounded live proof complete; scheduling and full backfill disabled |
+| Codex Desktop | Reference Agent Task implementation; one-task LaunchAgent canary loaded; semantic retry awaits embedding credentials; full backfill disabled |
 | YouTube | In-repository connector |
 | Quick Desktop | Working integration through several existing scripts; not yet consolidated |
 | Kiro CLI and IDE | Existing extraction and ingestion scripts; not yet migrated to the Codex Agent Task standard |
