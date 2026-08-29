@@ -46,9 +46,11 @@ duplicated** responsibilities with other components, and (5) an entry in the com
 
 ## Roadmap (incremental — keep the test suite green, commit per step, push origin+mini)
 
-**Phase A — Capture (in progress).** Per `CAPTURE-COMPONENTS.md`: extract shared `store.py` +
-`runner.py`; lift connectors (`youtube` ✅ → `kiro_chat` → `web` → `quick_desktop`); retire dead
-(`capture_api`, one-off migrations, entity-KG import); generalize `distill`.
+**Phase A — Capture (in progress).** Follow `ROADMAP.md` vertically. Operate and review the bounded
+Codex canary, prove a native Claude Code Adapter, and only then extract the shared Agent Task
+Capture seam demonstrated by both. Do not pre-build a generic `runner.py`, lift every connector, or
+claim standardization from normalized fixtures alone. Dead-code retirement remains safe independent
+work when it does not speculate about the future interface.
 
 **Phase B — Collapse the store primitive (keystone).** Make `store.py` the single writer
 (`embed→classify→depth→create_memory`); point `mcp_server.memory_create` and any HTTP writer at
@@ -67,7 +69,8 @@ Only once they're stable, consider `src/{capture,retrieval,synthesis,delivery,in
 structure visible. This is import churn for cosmetics — do it last, in one mechanical pass.
 
 ## Sequencing rationale
-- **Capture first** — it's where the entanglement and the active work (YouTube/distillation) are.
+- **Capture first** — prove one real source lifecycle at a time; Codex then Claude establish the
+  first non-hypothetical shared seam.
 - **Store primitive second** — the keystone that de-duplicates the write path across components.
 - **Retrieval/Synthesis/Delivery** mostly need *documentation + trimming*, not restructuring.
 - **Physical reorg last** — highest churn, lowest value; purely makes the existing logical
@@ -78,7 +81,8 @@ structure visible. This is import churn for cosmetics — do it last, in one mec
 - ✅ Component model defined (this doc) + capture deep-dive (`CAPTURE-COMPONENTS.md`).
 - ✅ Clean core boundaries verified (no core→capture imports); docs reconciled to ground truth.
 - ✅ `youtube` connector shipped.
-- ▢ Phase A remainder (spine extraction, other connectors, dead-code retirement, distill).
+- ▢ Phase A remainder (Codex canary, Claude proof, then evidence-backed seam extraction and later
+  source-specific vertical rollouts).
 - ▢ Phase B store-primitive collapse.
 - ▢ Phases C–E.
 
@@ -107,6 +111,7 @@ From the verify-before-cut audit (2026-06-06), still valid:
 - **Inverse-metric monitoring** — track "missed content" (searched-for but filtered) + over-consolidation rate, weekly.
 
 ## Cross-references
+- `ROADMAP.md` — canonical vertical delivery order and activation gates.
 - `components/index.md` — canonical component registry and contract navigation.
 - `CAPTURE-COMPONENTS.md` — capture deep-dive + connector contract.
 - `ARCHITECTURE.md` — current system (reconciled).

@@ -56,6 +56,7 @@ Tests require a running local PostgreSQL instance. The test fixture creates an i
 |---|---|
 | [Architecture Component Index](docs/components/index.md) | Canonical component boundaries, contracts, entry points, tests, operations, and related decisions |
 | [Project Charter](docs/PROJECT-CHARTER.md) | Canonical scope, non-goals, four planes, and vertical-slice delivery strategy |
+| [Delivery Roadmap](docs/ROADMAP.md) | Canonical execution order, proof gates, and source-readiness rules |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, database schema, search architecture, tech stack |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Scheduled jobs, backup, SSO management, monitoring |
 | [EXPRESS-PLAN.md](docs/EXPRESS-PLAN.md) | Express delivery layer: briefing, gated email push, in-context tool, feedback loop |
