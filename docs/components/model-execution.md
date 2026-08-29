@@ -118,6 +118,7 @@ Explorer from appearing successful.
 - [Architecture Component Index](index.md)
 - [Model backend architecture](../MODEL-BACKENDS.md)
 - [Backend verification](../MODEL-BACKENDS-VERIFICATION.md)
+- [ADR 0009: Codex JSONL model execution](../adr/0009-use-codex-jsonl-for-model-execution.md)
 - [MCP Interface](mcp-interface.md)
 - [Synthesis](synthesis.md)
 - [Operations](../OPERATIONS.md#model-backend-profile)

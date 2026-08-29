@@ -496,6 +496,45 @@ def test_source_provenance_refreshes_without_new_turns(
     assert content.startswith("# Renamed Codex task")
 
 
+def test_prompt_edit_without_client_id_is_source_drift_not_a_new_turn(
+    test_db, clean_tables, tmp_path, monkeypatch
+):
+    records = json.loads(json.dumps(RECORDS))
+    user_record = next(
+        record
+        for record in records
+        if record["type"] == "event_msg"
+        and record.get("payload", {}).get("type") == "user_message"
+    )
+    original_prompt = user_record["payload"]["message"]
+    user_record["payload"].pop("client_id")
+
+    home = tmp_path / ".codex"
+    home.mkdir()
+    rollout = _write_excerpt(home, MANIFEST, records)
+    _write_state_database(home, MANIFEST, rollout)
+    semantic = _SemanticScript(
+        lambda previous, turns: _one_segment(previous, turns),
+    )
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock"),
+    )
+
+    first = codex_capture.run_codex_capture(NOW, backfill=True)
+    user_record["payload"]["message"] = "Historically edited prompt text"
+    _write_excerpt(home, MANIFEST, records)
+    drifted = codex_capture.run_codex_capture(NOW, backfill=True)
+    _, content, metadata, _, _ = _task_row()
+
+    assert (first.captured, first.semantic_processed) == (1, 1)
+    assert (drifted.unchanged, drifted.semantic_processed) == (1, 0)
+    assert len(semantic.calls) == 1
+    assert len(metadata["turns"]) == len(_turn_pairs(RECORDS))
+    assert original_prompt in content
+    assert "Historically edited prompt text" not in content
+
+
 def test_semantic_failure_is_atomic_and_retries_the_same_unprocessed_tail(
     test_db, clean_tables, tmp_path, monkeypatch
 ):
