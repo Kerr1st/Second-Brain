@@ -211,6 +211,36 @@ def test_compose_resurface_suppresses_recently_surfaced(clean_tables, sample_mem
     assert not any(i["title"] == "Recently surfaced" for i in items)
 
 
+def test_compose_does_not_proactively_deliver_correction_episode(
+    clean_tables, sample_memory_factory
+):
+    episode_id = sample_memory_factory(
+        type="correction_episode",
+        title="Distinguish Amazon agent integrations",
+        content=(
+            "Misalignment: The agent documented “Amazon Quick” as “Kiro "
+            "CLI/Amazon Q,” conflating Amazon Quick, Kiro, and Amazon Q "
+            "Developer.\n\nCorrected expectation: The user indicated that "
+            "Amazon Quick, Kiro, and Amazon Q Developer are distinct and should "
+            "not be conflated."
+        ),
+        source_type="distilled_agent_task",
+        mem_class="episodic",
+    )
+    with db.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE memories SET created_at = now() - interval '90 days', "
+                "access_count = 10, last_accessed_at = NULL WHERE id = %s",
+                (episode_id,),
+            )
+        conn.commit()
+
+    items = express.compose_briefing()["items"]
+
+    assert str(episode_id) not in {item["id"] for item in items}
+
+
 # --------------------------------------------------------------------------- #
 # P2: should_push (DB-backed)
 # --------------------------------------------------------------------------- #

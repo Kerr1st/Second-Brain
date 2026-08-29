@@ -1,0 +1,17 @@
+{
+  "fixture_kind": "capture_relevant_excerpt_from_real_codex_task",
+  "id": "019f516e-8399-79a2-b22e-ec1ca23353f0",
+  "created_at": 1783777625,
+  "updated_at": 1784328829,
+  "source": "vscode",
+  "cwd": "/Users/kerrclaw/repositories/Github Repos/Second-Brain-work",
+  "title": "/goal Why don't you ask me questions about what I'm wanting to do here? My idea is that I want to add the ability to capture the content from our codex sessions, similar to what I've been able to do for both Kiro and Claude Code.",
+  "archived": 0,
+  "agent_path": null,
+  "created_at_ms": 1783777625004,
+  "updated_at_ms": 1784328829578,
+  "thread_source": "user",
+  "git_origin_url": "/Users/kerrclaw/repositories/Github Repos/second-brain.git",
+  "git_branch": "main",
+  "git_sha": "0dd78c246ffae90165c63990fe6e797cc7dd2cf5"
+}

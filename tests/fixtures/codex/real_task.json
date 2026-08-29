@@ -1,0 +1,17 @@
+{
+  "fixture_kind": "capture_relevant_excerpt_from_real_codex_task",
+  "id": "019f67ff-9539-74b3-a691-7604d190590f",
+  "created_at": 1784156231,
+  "updated_at": 1784236122,
+  "source": "vscode",
+  "cwd": "/Users/kerrclaw/repositories/Github Repos/Second-Brain-work",
+  "title": "Let's start a new Task.  in this project In fact, I think I already started one. I just don't see it on your list. Do you have all the Tasks for this project. It was about specifying a feature enhancement for capturing codex sessions.",
+  "archived": 1,
+  "agent_path": null,
+  "created_at_ms": 1784156231022,
+  "updated_at_ms": 1784236122458,
+  "thread_source": "user",
+  "git_origin_url": "/Users/kerrclaw/repositories/Github Repos/second-brain.git",
+  "git_branch": "main",
+  "git_sha": "0dd78c246ffae90165c63990fe6e797cc7dd2cf5"
+}
