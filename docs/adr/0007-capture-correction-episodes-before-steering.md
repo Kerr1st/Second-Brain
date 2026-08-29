@@ -25,14 +25,14 @@ dedicated tables, and a generic multi-integration runtime remain deferred. Codex
 implementation until a second agent integration supplies the second real adapter needed to extract
 a shared capture module.
 
-Build 2 is documented but is not implemented in this build. Build 1 passed its bounded real-data
-Proof Gate on 2026-07-23. A later build may teach the Dream Cycle to synthesize Steering Candidates
-from Correction Episodes and related memories, and its existing
-four-evaluator, three-of-four consensus remains the acceptance gate. An accepted candidate is a
-retained recommendation, not an active Steering Rule: the user must approve its wording, Authority
-Scope, and Applicability. Duplicate settled candidates are suppressed before panel work; materially
-changed or contradictory evidence creates a Supersession Candidate that is surfaced once and may
-replace an approved rule without deleting its history.
+Build 1 passed its bounded real-data Proof Gate on 2026-07-23. The Codex-first Build 2 vertical
+slice was implemented and live-proofed on 2026-08-29. The Dream Cycle can now evaluate a Steering
+Candidate from Correction Episodes or explicit durable direction through four independent roles
+and the existing three-of-four quorum. An accepted candidate is a retained recommendation, not an
+active Steering Rule: the user must separately approve its wording, Authority Scope, and
+Applicability. Duplicate settled candidates are suppressed before panel work; materially changed
+or contradictory evidence creates a versioned Supersession Candidate. Approval preserves prior
+rule history, and publication to `AGENTS.md` requires a reviewed diff and matching file digest.
 
 ## Considered Options
 
@@ -44,8 +44,9 @@ replace an approved rule without deleting its history.
 
 ## Consequences
 
-Capture records only `what_was_misaligned`, `corrected_expectation`, the containing Topic Segment,
-and supporting Agent Turn IDs. Classification, recurrence, Authority Scope, Applicability, duplicate
-resolution, rule wording, and enforcement remain later consolidation concerns. Repeated correction
-events remain separate evidence; same-Task and cross-Task recurrence are derived when the Dream
-Cycle evaluates them rather than stored as mutable counters or fixed numerical eligibility gates.
+Capture still records only `what_was_misaligned`, `corrected_expectation`, the containing Topic
+Segment, and supporting Agent Turn IDs. Classification, recurrence, Authority Scope, Applicability,
+duplicate resolution, and rule wording remain Steering Governance concerns. Repeated correction
+events remain separate evidence; same-Task and cross-Task recurrence are derived during evaluation
+rather than stored as mutable counters or fixed numerical eligibility gates. Approved rules are
+versioned memories; publication remains a separate, reversible adapter action.

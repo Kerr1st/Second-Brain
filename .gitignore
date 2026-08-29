@@ -27,6 +27,7 @@ evaluations/results/
 # Secrets
 .backup-key
 .env
+.second-brain-backups/
 .env.*
 !.env.example
 *.pem
