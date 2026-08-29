@@ -2,6 +2,20 @@
 
 Second Brain captures durable knowledge from external sources and turns it into memories that agents can retrieve and synthesize across tasks.
 
+## Delivery Strategy
+
+**Vertical Slice**:
+One capability implemented through a single real integration's complete user-visible lifecycle,
+from source evidence through processing, delivery, and outcome evaluation. A Vertical Slice is
+proven and evaluated before the capability is generalized to other integrations.
+_Avoid_: Building the shared framework or every Source Connector before proving one complete path
+
+**Reference Integration**:
+The first real integration used to prove a Vertical Slice. Codex is the default Reference
+Integration for current agent-learning work. A shared integration seam is extracted only after a
+second real adapter demonstrates what genuinely varies.
+_Avoid_: Universal adapter, hypothetical connector
+
 ## Language
 
 **Agent Task**:
