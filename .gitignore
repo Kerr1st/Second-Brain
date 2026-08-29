@@ -45,6 +45,4 @@ logs/
 *.log
 
 # Real Codex test fixtures are intentionally versionable.
-!tests/fixtures/**/*.sqlite
-!tests/fixtures/**/*.db
 !tests/fixtures/**/*.jsonl

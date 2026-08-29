@@ -107,8 +107,9 @@ def _task_ownership(
     return _TaskOwnership.UNKNOWN
 
 
-def _fallback_turn_key(task_id: str, timestamp: str, prompt: str) -> str:
-    evidence = f"{task_id}\n{timestamp}\n{prompt}".encode("utf-8")
+def _fallback_turn_key(task_id: str, timestamp: str) -> str:
+    """Derive a content-independent ID from a native event timestamp."""
+    evidence = f"{task_id}\n{timestamp}".encode("utf-8")
     return "event-" + hashlib.sha256(evidence).hexdigest()
 
 
@@ -414,15 +415,17 @@ class CodexDesktopSource:
                 )
                 client_id = payload.get("client_id")
                 prompt_timestamp = str(record.get("timestamp") or "")
-                event_key = (
-                    client_id
-                    if isinstance(client_id, str) and client_id
-                    else _fallback_turn_key(
+                if isinstance(client_id, str) and client_id:
+                    event_key = client_id
+                elif prompt_timestamp:
+                    event_key = _fallback_turn_key(
                         ref.native_task_id,
                         prompt_timestamp,
-                        raw_prompt if isinstance(raw_prompt, str) else "",
                     )
-                )
+                else:
+                    # Without either native identity signal, a later edit could
+                    # masquerade as a new turn and violate monotonic capture.
+                    continue
                 attachments = _local_image_descriptors(payload, event_key)
                 if prompt is not None or attachments:
                     pending_prompts.append(

@@ -16,6 +16,7 @@ that govern their behavior.
 | [0006](0006-combine-task-segmentation-and-distillation.md) | Combine Topic Segmentation and Task Distillation into one semantic pass | Capture; Model Execution |
 | [0007](0007-capture-correction-episodes-before-steering.md) | Capture Correction Episodes before proposing Steering Rules | Capture; Synthesis; Delivery |
 | [0008](0008-classify-task-ownership-before-capture.md) | Classify Agent Task ownership before capture | Capture |
+| [0009](0009-use-codex-jsonl-for-model-execution.md) | Use Codex JSONL as the default model-execution output | Model Execution |
 
 ## Related
 
