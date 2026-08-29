@@ -9,6 +9,10 @@ How Second Brain's components fit together and why the system is shaped the way 
 
 This page gives you a breadth-first understanding of the whole system — the five-stage data flow, the major components, and the cross-cutting design choices that bind them. For deeper dives into individual subsystems, follow the links to sibling pages.
 
+For engineering ownership, contracts, code entry points, tests, and current
+activation status, use the
+[Architecture Component Index](../components/index.md).
+
 ## The five-stage data flow
 
 Every piece of knowledge moves through five stages:
@@ -28,6 +32,7 @@ Capture → Ingest → Retrieve → Synthesize → Deliver
 ```mermaid
 flowchart TD
     subgraph Capture["Capture Channels"]
+        CD[Codex Desktop Tasks]
         KC[Kiro CLI / IDE chats]
         QD[Quick Desktop]
         YT[YouTube transcripts]
@@ -78,6 +83,7 @@ You feed content into Second Brain through several channels. Each channel has it
 
 | Channel | Connector | Notes |
 |---------|-----------|-------|
+| Codex Desktop Tasks | `src/capture/sources/codex.py` | Agent Task reference implementation; six-hour eligibility; scheduling approval-gated |
 | Kiro CLI / IDE chats | Chat parsers (`src/parsers/`) | Agents call `memory_create` directly or chats are batch-extracted |
 | Quick Desktop | QD sync scripts | Documents, chats, feed events from `knowledge_v1.db` |
 | YouTube | `src/capture/youtube.py` (yt-dlp) | Transcript extraction, in-repo |

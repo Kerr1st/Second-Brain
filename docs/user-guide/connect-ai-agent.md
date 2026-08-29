@@ -45,8 +45,6 @@ Replace `/Users/<you>/second-brain` with the actual path to your clone.
 
 ## Kiro CLI
 
-<!-- TODO: Kiro CLI MCP config path is not yet discoverable in this repo. Update when official docs confirm the location (likely ~/.kiro/settings.json or a project-level .kiro/mcp.json). -->
-
 Add the server to your Kiro CLI MCP configuration. Place the stdio block from above into your MCP settings file:
 
 ```json

@@ -1,49 +1,60 @@
 # Second Brain
 
-A personal knowledge management and ideation system powered by AI. Gives AI agents persistent memory across sessions, turning them into thinking partners that accumulate knowledge over time.
+Second Brain is a local-first persistent-memory layer for AI agents. It stores durable memories in PostgreSQL + pgvector, exposes them through an MCP server, and runs evaluation-backed retrieval, synthesis, and briefing workflows so agents can remember across sessions.
 
-~122K memories. 10 migrations. Native PostgreSQL 17 + pgvector (plus a dormant imported knowledge graph). MCP server (9 tools) for agent access. Dream cycle for autonomous synthesis. Express delivery layer (on-demand briefing, gated email push, in-session tool, feedback).
+This repository is a public technical proof artifact. The live private instance has about 122K memories; this repo contains the application code, migrations, tests, and documentation, not the private memory database.
+
+## What This Demonstrates
+
+- **Agent memory over MCP:** 9 stdio tools for create, search, read, update, relate, graph, learn, list, and brief workflows.
+- **Retrieval engineering:** hybrid full-text + vector search, RRF fusion, utility reranking, depth scoring, temporal context, and regression tests.
+- **Operational maturity:** PostgreSQL migrations, launchd job specs, backup/disaster recovery docs, smoke tests, and troubleshooting guides.
+- **AI workflow design:** a dream-cycle pipeline for autonomous synthesis plus an Express briefing layer with feedback.
+- **Reviewable security posture:** local-only assumptions, placeholder config, secret-handling docs, and localhost-bound Docker fallback.
+
+For reviewers and AI code-review tools such as CodeRabbit, the most interesting surfaces are MCP tool contracts, SQL migrations, retrieval/reranking behavior, credential boundaries, and docs-to-code setup accuracy.
 
 ## Quickstart
 
+The recommended path is native PostgreSQL 17 via Homebrew on macOS. Use Python 3.13+; the examples below use Homebrew Python 3.14.
+
 ```bash
-# PostgreSQL 17 + pgvector (native, via Homebrew) — serves localhost:5432, auto-starts at login
 brew install postgresql@17 pgvector
 brew services start postgresql@17
 
-# Create virtualenv and install dependencies
-python3 -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
-# Apply database migrations
+createuser -s memory_bank 2>/dev/null || true
+createdb -O memory_bank memory_bank 2>/dev/null || true
+psql -h localhost -U memory_bank -d memory_bank -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
 ./migrations/migrate.sh
-
-# Start the MCP server
 python -m src.mcp_server
 ```
+
+Copy `.env.example` to `.env` for local overrides. The default database credentials are development-only and assume PostgreSQL is bound to localhost.
 
 ## Running Tests
 
 ```bash
-# All tests
-.venv/bin/python -m pytest
-
-# Specific test file
-.venv/bin/python -m pytest tests/test_db.py
-
-# Quick smoke test (core modules)
+# Quick smoke test
 .venv/bin/python -m pytest tests/test_db.py tests/test_search.py tests/test_mcp_server.py -q
+
+# Full suite
+.venv/bin/python -m pytest
 ```
 
-Tests require a running PostgreSQL instance (native, on `localhost:5432`). The test fixture creates an isolated `memory_bank_test` database. Embedding calls are mocked — no Bedrock credentials needed for tests.
+Tests require a running local PostgreSQL instance. The test fixture creates an isolated `memory_bank_test` database. Embedding calls are mocked, so Bedrock credentials are not required for tests.
 
 ## Documentation
 
-**New to Second Brain? Start with the [User Guide](docs/user-guide/index.md)** — what it is, how to install and configure it, day-to-day use, and operations. The references below are deeper design and architecture docs.
+**New to Second Brain? Start with the [User Guide](docs/user-guide/index.md).** It covers installation, configuration, day-to-day use, operations, and troubleshooting. The references below are deeper design and architecture docs.
 
 | Doc | What it covers |
 |---|---|
+| [Architecture Component Index](docs/components/index.md) | Canonical component boundaries, contracts, entry points, tests, operations, and related decisions |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, database schema, search architecture, tech stack |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Scheduled jobs, backup, SSO management, monitoring |
 | [EXPRESS-PLAN.md](docs/EXPRESS-PLAN.md) | Express delivery layer: briefing, gated email push, in-context tool, feedback loop |
@@ -51,6 +62,8 @@ Tests require a running PostgreSQL instance (native, on `localhost:5432`). The t
 | [DESIGN-DECISIONS.md](docs/DESIGN-DECISIONS.md) | Why key architectural choices were made (cognitive science rationale) |
 | [QUICK-DESKTOP-INTEGRATION.md](docs/QUICK-DESKTOP-INTEGRATION.md) | Quick Desktop sync design and knowledge graph import |
 | [HYBRID-CHAT-EXTRACTION.md](docs/HYBRID-CHAT-EXTRACTION.md) | Chat ingestion pipeline spec |
+| [SECURITY.md](SECURITY.md) | Public security posture, secret handling, and reporting guidance |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, test expectations, and review focus |
 
 ## Project Structure
 
@@ -70,17 +83,17 @@ scripts/
   eval/             Evaluation framework (retrieval quality metrics)
   batch_ingest_parallel.py   Parallel batch ingest (20 workers)
   ingest_qd_chats.py         Quick Desktop chat session extractor
-migrations/         Numbered SQL migrations (000-010) + runner script
-scheduling/         macOS launchd plists (9 jobs, all installed)
-tests/              643 tests (property-based, unit, integration, E2E)
+migrations/         Numbered SQL migrations (000-012) + runner script
+scheduling/         macOS launchd plist templates for local automation
+tests/              Property-based, unit, integration, and E2E tests
 docs/               Architecture specs and runbooks
-docker/             Legacy container data dir (gitignored) — retained as migration rollback, removed in Phase 5
+docker-compose.yml  Optional local PostgreSQL fallback, bound to 127.0.0.1
 staging/            Transient pipeline data (gitignored)
 ```
 
 ## Current Status
 
-**Working:**
+**Working in the private/local deployment:**
 - Memory CRUD, hybrid search, reranking, retrieval reinforcement
 - MCP server (9 tools) connected to Kiro CLI and Claude Code
 - Quick Desktop hourly sync (memories, tags, KG, chats, feed events, Slack graph)
@@ -88,8 +101,8 @@ staging/            Transient pipeline data (gitignored)
 - Chat extraction, Crawlee ingestion, bookmark/YouTube scraping
 - Dream cycle pipeline (daily at noon; chains the Express email push)
 - Express delivery — on-demand `brief`, gated Gmail push, `memory_brief` MCP tool, feedback loop
-- All 9 LaunchAgents installed and operational
-- 643 tests (unit, property-based, integration, E2E)
+- launchd templates for local automation
+- Comprehensive unit, property-based, integration, and E2E test suite
 
 **Planned:**
 - Entity extraction on ingest (auto-populate knowledge graph from all sources)

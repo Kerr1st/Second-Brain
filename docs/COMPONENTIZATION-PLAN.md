@@ -1,8 +1,11 @@
 # Componentization Plan — Second Brain
 
-**Status: roadmap.** How we turn Second Brain into components that can be built, tested,
-scheduled, and replaced **independently**. The capture deep-dive lives in
-`CAPTURE-COMPONENTS.md`; this is the whole-system plan and sequencing.
+**Status: code-componentization roadmap; documentation spine implemented.**
+The canonical component contracts and navigation live in
+[`components/index.md`](components/index.md). This document tracks the remaining
+code-boundary work needed to make those components independently buildable,
+testable, schedulable, and replaceable. The capture deep-dive lives in
+`CAPTURE-COMPONENTS.md`.
 
 ## Goal & principles
 Make each part a component with:
@@ -39,7 +42,7 @@ core does **not** import capture). The entanglement is concentrated in **Capture
 A component is "componentized" when it has: (1) a one-paragraph **contract doc**, (2) a single
 **entry/interface module**, (3) **its own test module(s)** that pass in isolation, (4) **no
 duplicated** responsibilities with other components, and (5) an entry in the component index
-(this file's status table).
+(`docs/components/index.md`).
 
 ## Roadmap (incremental — keep the test suite green, commit per step, push origin+mini)
 
@@ -55,9 +58,9 @@ it. This cleanly separates "write a memory" from every component that produces o
 `hybrid_search`/`rerank` as the contract; decide on the inert bits (`encoding_context`,
 `schema_context`) — keep, activate, or remove.
 
-**Phase D — Document Synthesis & Delivery contracts + trim.** Already cohesive; write their
-contract docs, trim the MCP surface (only `update`/`relate` are strictly unused), and remove the
-dead schema-context read path.
+**Phase D — Synthesis & Delivery contracts + trim.** Contract documents are
+complete. Remaining work is to trim the MCP surface (only `update`/`relate` are
+strictly unused) and remove the dead schema-context read path.
 
 **Phase E — (optional, last) Physical repo reorg.** Logical boundaries + contracts matter first.
 Only once they're stable, consider `src/{capture,retrieval,synthesis,delivery,infra}/` to make the
@@ -71,6 +74,7 @@ structure visible. This is import churn for cosmetics — do it last, in one mec
   structure visible.
 
 ## Status
+- ✅ Canonical component index plus seven component contract pages.
 - ✅ Component model defined (this doc) + capture deep-dive (`CAPTURE-COMPONENTS.md`).
 - ✅ Clean core boundaries verified (no core→capture imports); docs reconciled to ground truth.
 - ✅ `youtube` connector shipped.
@@ -103,6 +107,7 @@ From the verify-before-cut audit (2026-06-06), still valid:
 - **Inverse-metric monitoring** — track "missed content" (searched-for but filtered) + over-consolidation rate, weekly.
 
 ## Cross-references
+- `components/index.md` — canonical component registry and contract navigation.
 - `CAPTURE-COMPONENTS.md` — capture deep-dive + connector contract.
 - `ARCHITECTURE.md` — current system (reconciled).
 - `AGENTIC-RETRIEVAL-PLAN.md` — why the entity KG stays deferred.
