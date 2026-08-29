@@ -9,12 +9,14 @@ Complete specifications for MCP tools, CLI commands, memory types, relationship 
 
 ## MCP Tools
 
-The MCP server exposes 9 tools. All are invoked by an agent (Kiro CLI, Claude Code) through the Model Context Protocol.
+The MCP server exposes 11 tools. All are invoked by an agent through the Model Context Protocol.
 
 | Tool | Purpose | Key arguments | Returns |
 |------|---------|---------------|---------|
 | `memory_create` | Create a memory and generate its embedding | `type`\*, `title`\*, `content`\*, `tags`, `source_type`, `source_url`, `metadata`, `project`, `encoding_context` | `str` — created ID + depth warnings |
 | `memory_search` | Hybrid semantic + keyword search with reranking | `query`\*, `type`, `limit` (default 10), `project`, `source_type`, `since_days`, `status` | `dict` — `{results, temporal_context, schema_context}` |
+| `memory_context` | Build an authority-ordered, token-bounded task context pack | `objective`\*, `project_hint`, `repository`, `budget_tokens` | `dict` — context items, conflicts, token count, and `receipt_id` |
+| `memory_context_outcome` | Close a prior recall receipt | `receipt_id`\*, `used_memory_ids`\*, `outcome`\*, `note`, `correction_episode_id` | `str` — confirmation |
 | `memory_read` | Read full content of a memory by ID | `memory_id`\* | `dict` — all fields (embedding excluded) |
 | `memory_update` | Update fields on a memory (pass only changed fields) | `memory_id`\*, `title`, `content`, `status`, `tags`, `summary`, `type` | `str` — confirmation |
 | `memory_relate` | Create a typed relationship between two memories | `source_id`\*, `target_id`\*, `relation_type`\*, `note` | `str` — confirmation |
@@ -89,6 +91,8 @@ Composes and sends a gated Gmail push. Sends **only** when a new cross-project s
 | `insight` | Aha moments, realizations |
 | `decision` | Choices made and rationale |
 | `correction_episode` | System-generated, user-attributed correction evidence; searchable and Dream Cycle-readable, but not proactively delivered or automatically applied as steering |
+| `steering_candidate` | Consensus-retained recommendation that remains inactive pending explicit approval |
+| `steering_rule` | Versioned, user-approved guidance with Authority Scope and Applicability |
 | `project` | Active project status |
 | `source` | Ingested external content |
 

@@ -123,7 +123,7 @@ Start the MCP server:
 python -m src.mcp_server
 ```
 
-The server exposes 9 tools over stdio: `memory_create`, `memory_search`, `memory_read`, `memory_update`, `memory_relate`, `memory_list`, `memory_graph`, `memory_learn`, and `memory_brief`.
+The server exposes 11 tools over stdio, adding `memory_context` and `memory_context_outcome` to the existing memory, relationship, learning, and briefing tools.
 
 To connect your MCP client, add this stdio server configuration (adjust the path to your clone):
 

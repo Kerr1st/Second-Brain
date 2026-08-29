@@ -1,6 +1,6 @@
 # Second Brain — Operations
 
-> Last updated: 2026-06-16
+> Last updated: 2026-08-29
 
 ## Model Backend Profile
 
@@ -142,6 +142,46 @@ class names when failures occur; it does not print captured prompt or answer con
 LaunchAgent and do not invoke an unbounded `--backfill` until explicit user approval. The approved
 Proof Gate uses `--task-id` with `DB_NAME="$TEST_DB_NAME"`; there is no separate pilot application.
 See [CODEX-TASK-CAPTURE-BUILD-PLAN.md](CODEX-TASK-CAPTURE-BUILD-PLAN.md).
+
+## Memory Context Broker and Steering Governance
+
+Agents request a bounded pack through `memory_context` and close its receipt through
+`memory_context_outcome`. Receipt outcomes are `followed`, `corrected`, `not_used`, or `unknown`;
+`corrected` requires a Correction Episode ID.
+
+Steering changes use a review-before-write command sequence:
+
+```bash
+# Four independent evaluators; acceptance retains an inactive candidate
+.venv/bin/python scripts/steering.py review \
+  --title "<candidate title>" \
+  --wording "<proposed rule>" \
+  --source-memory-id <evidence-id> \
+  --proposed-scope project \
+  --applicability '{"semantic_projects":["second-brain"]}'
+
+# Explicit user approval creates a versioned active rule
+.venv/bin/python scripts/steering.py approve <candidate-id> \
+  --wording "<approved rule>" \
+  --scope project \
+  --applicability '{"semantic_projects":["second-brain"]}'
+
+# Preview first; the first output line is the current-file digest
+.venv/bin/python scripts/steering.py preview-agents <rule-id> --path AGENTS.md
+
+# Publish only the exact reviewed version
+.venv/bin/python scripts/steering.py publish-agents <rule-id> --path AGENTS.md \
+  --expected-current-digest <reviewed-digest>
+```
+
+Publication accepts only an active approved Steering Rule, rejects symlinks and non-`AGENTS.md`
+targets, writes atomically, and keeps an ignored local rollback copy under
+`.second-brain-backups/`. It never installs hooks, skills, tests, or CI automatically.
+
+The 2026-08-29 Codex-first proof created context receipt
+`c15a25c2-6a0b-4304-89a7-63be33667939`, delivered four items to follow-up Codex Task
+`01a04e4c-4a73-7611-ade6-ad828caaf87b`, and recorded all four as used with outcome `followed`.
+No rule correction was proposed.
 
 ## Capture API — DEPRECATED
 

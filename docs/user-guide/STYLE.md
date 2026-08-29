@@ -157,9 +157,9 @@ Use these canonical terms consistently.
 | Canonical term | Definition | Don't use |
 |----------------|------------|-----------|
 | Second Brain | The whole system (PostgreSQL store + MCP server + scripts + jobs) | "the app", "the platform" |
-| MCP server | The Model Context Protocol server exposing the 9 tools | "the API", "the endpoint" |
+| MCP server | The Model Context Protocol server exposing the 11 tools | "the API", "the endpoint" |
 | memory | A single stored item (content + embedding + metadata + relationships) | "record", "entry", "note" |
-| memory type | One of the 10 classifications (e.g., `insight`, `decision`) | "category", "kind" |
+| memory type | An extensible classification (e.g., `insight`, `decision`, `steering_rule`) | "category", "kind" |
 | relationship | A typed, directed edge between two memories | "link", "association" |
 | dream cycle | The daily autonomous synthesis pipeline | "dream mode", "night job" |
 | Express | The briefing and delivery layer | "Express mode", "the briefer" |

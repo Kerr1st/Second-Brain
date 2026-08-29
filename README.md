@@ -1,12 +1,12 @@
 # Second Brain
 
-Second Brain is a local-first persistent-memory layer for AI agents. It stores durable memories in PostgreSQL + pgvector, exposes them through an MCP server, and runs evaluation-backed retrieval, synthesis, and briefing workflows so agents can remember across sessions.
+Second Brain is a local-first, user-controlled learning and governance layer across AI agents. It preserves provenance-rich task evidence, builds bounded context for future work, and turns validated user direction into reviewed, versioned guidance. PostgreSQL + pgvector, MCP, the Dream Cycle, and delivery adapters provide the underlying memory and synthesis substrate.
 
 This repository is a public technical proof artifact. The live private instance has about 122K memories; this repo contains the application code, migrations, tests, and documentation, not the private memory database.
 
 ## What This Demonstrates
 
-- **Agent memory over MCP:** 9 stdio tools for create, search, read, update, relate, graph, learn, list, and brief workflows.
+- **Agent memory over MCP:** 11 stdio tools for memory CRUD, search, bounded context, outcome receipts, relationships, learning, and briefings.
 - **Retrieval engineering:** hybrid full-text + vector search, RRF fusion, utility reranking, depth scoring, temporal context, and regression tests.
 - **Operational maturity:** PostgreSQL migrations, launchd job specs, backup/disaster recovery docs, smoke tests, and troubleshooting guides.
 - **AI workflow design:** a dream-cycle pipeline for autonomous synthesis plus an Express briefing layer with feedback.
@@ -55,6 +55,7 @@ Tests require a running local PostgreSQL instance. The test fixture creates an i
 | Doc | What it covers |
 |---|---|
 | [Architecture Component Index](docs/components/index.md) | Canonical component boundaries, contracts, entry points, tests, operations, and related decisions |
+| [Project Charter](docs/PROJECT-CHARTER.md) | Canonical scope, non-goals, four planes, and vertical-slice delivery strategy |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, database schema, search architecture, tech stack |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Scheduled jobs, backup, SSO management, monitoring |
 | [EXPRESS-PLAN.md](docs/EXPRESS-PLAN.md) | Express delivery layer: briefing, gated email push, in-context tool, feedback loop |
@@ -83,7 +84,7 @@ scripts/
   eval/             Evaluation framework (retrieval quality metrics)
   batch_ingest_parallel.py   Parallel batch ingest (20 workers)
   ingest_qd_chats.py         Quick Desktop chat session extractor
-migrations/         Numbered SQL migrations (000-012) + runner script
+migrations/         Numbered SQL migrations (000-013) + runner script
 scheduling/         macOS launchd plist templates for local automation
 tests/              Property-based, unit, integration, and E2E tests
 docs/               Architecture specs and runbooks
@@ -95,7 +96,7 @@ staging/            Transient pipeline data (gitignored)
 
 **Working in the private/local deployment:**
 - Memory CRUD, hybrid search, reranking, retrieval reinforcement
-- MCP server (9 tools) connected to Kiro CLI and Claude Code
+- MCP server (11 tools) connected to Kiro CLI and Claude Code
 - Quick Desktop hourly sync (memories, tags, KG, chats, feed events, Slack graph)
 - Daily encrypted backups to Google Drive + local (S3 de-scoped 2026-06-01)
 - Chat extraction, Crawlee ingestion, bookmark/YouTube scraping

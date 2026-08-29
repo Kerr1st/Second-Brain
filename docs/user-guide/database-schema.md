@@ -5,7 +5,7 @@ type: reference
 
 # Database Schema
 
-Authoritative schema for the Second Brain PostgreSQL database. The schema is defined by migrations `migrations/000_migrations_table.sql` through `migrations/012_agent_task_capture.sql` and applied by `migrations/migrate.sh`.
+Authoritative schema for the Second Brain PostgreSQL database. The schema is defined by migrations `migrations/000_migrations_table.sql` through `migrations/013_context_governance.sql` and applied by `migrations/migrate.sh`.
 
 ## `schema_migrations`
 
@@ -23,7 +23,7 @@ Primary knowledge store. Each row is one *memory* (content + embedding + metadat
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | `UUID` | **PK.** `gen_random_uuid()` |
-| `type` | `TEXT NOT NULL` | Memory kind, including `research`, `synthesis`, `idea`, `connection`, `priority`, `question`, `insight`, `decision`, `correction_episode`, `project`, and `source` |
+| `type` | `TEXT NOT NULL` | Extensible memory kind, including `research`, `synthesis`, `idea`, `connection`, `priority`, `question`, `insight`, `decision`, `correction_episode`, `steering_candidate`, `steering_rule`, `project`, and `source` |
 | `title` | `TEXT NOT NULL` | Short descriptor |
 | `content` | `TEXT NOT NULL` | Full body text |
 | `summary` | `TEXT` | Optional condensed version |
@@ -234,6 +234,31 @@ Bridge table linking memories to entities they mention.
 | `idx_memories_encoding_context` | GIN | `to_tsvector('english', coalesce(encoding_context, ''))` | Migration 006 |
 | `idx_memories_type_schema` | btree | `type` WHERE `type = 'schema'` | **INERT** — partial index for a schema-type feature with 0 rows currently matching. Migration 007 |
 | `idx_relationships_derived_from` | btree | `(relation_type, source_id)` WHERE `relation_type = 'derived_from'` | **INERT** — supports schema feature; no schema rows exist. Migration 007 |
+
+## `context_receipts`
+
+Migration 013 records every bounded context pack and its later observed outcome. A receipt stores
+the objective and scope, IDs returned, IDs actually used, token count, selected conflicts, and one
+of `pending`, `followed`, `corrected`, `not_used`, or `unknown`. A corrected outcome references its
+Correction Episode. Receipts are operational exposure evidence and do not become searchable
+memories or independent support for returned claims.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `UUID` | **PK.** `gen_random_uuid()` |
+| `objective` | `TEXT NOT NULL` | Objective supplied by the consuming Agent Task |
+| `semantic_project` | `TEXT` | Normalized Semantic Project scope |
+| `source_system` | `TEXT NOT NULL` | Consuming agent integration, initially `codex` |
+| `repository` | `TEXT` | Optional repository applicability hint |
+| `returned_memory_ids` | `UUID[]` | Ordered IDs exposed in the context pack |
+| `used_memory_ids` | `UUID[]` | Returned IDs reported as used by the later task |
+| `token_count` | `INTEGER` | Estimated packed tokens; non-negative |
+| `conflicts` | `JSONB` | Contradiction pairs selected with the pack |
+| `outcome` | `TEXT` | `pending`, `followed`, `corrected`, `not_used`, or `unknown` |
+| `outcome_note` | `TEXT` | Optional evidence about the observed result |
+| `correction_episode_id` | `UUID` | FK → `memories(id)`; application validation requires type `correction_episode` |
+| `created_at` | `TIMESTAMPTZ` | Pack creation time |
+| `evaluated_at` | `TIMESTAMPTZ` | Outcome-recording time |
 
 ## Related
 

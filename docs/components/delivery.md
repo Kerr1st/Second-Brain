@@ -1,6 +1,6 @@
 # Delivery Component
 
-> **Status: canonical component contract.** Last reviewed: 2026-07-23.
+> **Status: canonical component contract.** Last reviewed: 2026-08-29.
 
 Delivery is the Express layer. It selects stored results worth surfacing,
 composes a concise briefing, applies delivery preferences, and renders or
@@ -49,10 +49,10 @@ an on-demand briefing from being rendered.
 
 ## Delivery policy
 
-Proactive email is gated rather than unconditional. Correction Episodes are
-searchable and Dream Cycle-readable, but Build 1 excludes them from proactive
-Express delivery. A future accepted Steering Rule may have a different
-delivery policy, but that promotion path is not implemented.
+Proactive email is gated rather than unconditional. Correction Episodes are searchable and Dream
+Cycle-readable but remain excluded from proactive Express delivery. Approved Steering Rules are
+delivered through the Memory Context Broker or an explicitly reviewed publication adapter; they do
+not enter Express email merely because they were approved.
 
 Email configuration is external to the repository. When required variables
 are absent, the push command composes the output but skips sending.
@@ -80,3 +80,5 @@ are absent, the push command composes the output but skips sending.
 - [Express architecture](../ARCHITECTURE.md#express-delivery-layer)
 - [Operations](../OPERATIONS.md#express-briefing--feedback)
 - [ADR 0007: Correction Episodes before steering](../adr/0007-capture-correction-episodes-before-steering.md)
+- [Memory Context Broker](context-broker.md)
+- [Steering Governance](steering-governance.md)

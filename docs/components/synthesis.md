@@ -1,6 +1,6 @@
 # Synthesis Component
 
-> **Status: canonical component contract.** Last reviewed: 2026-07-23.
+> **Status: canonical component contract.** Last reviewed: 2026-08-29.
 
 Synthesis runs the Dream Cycle: it retrieves evidence, proposes higher-order
 insights, evaluates them independently, and persists only consensus-gated
@@ -69,8 +69,9 @@ Accepted candidates pass through duplicate detection before storage. The
 Dream Cycle may discover contradictions, but Codex Task Capture does not run a
 separate immediate contradiction planner.
 
-Correction Episodes are available as evidence to the Dream Cycle. Build 1
-does not automatically promote them into Steering Rules or automatic context.
+Correction Episodes are available as evidence to the Dream Cycle. Steering Governance can now ask
+the same four evaluator roles to retain a Steering Candidate, but no panel result automatically
+creates a Steering Rule or automatic context. User approval remains a separate interface.
 
 ## Entry points
 
@@ -107,5 +108,6 @@ push runs after a completed cycle.
 - [Dream Cycle design](../user-guide/dream-cycle-design.md)
 - [Dream Cycle architecture](../ARCHITECTURE.md#dream-cycle-pipeline)
 - [Model Execution](model-execution.md)
+- [Steering Governance](steering-governance.md)
 - [Operations](../OPERATIONS.md#scheduled-jobs)
 - [Design decisions](../DESIGN-DECISIONS.md#why-the-dream-cycle-uses-a-four-agent-pipeline)
