@@ -1,6 +1,6 @@
 # MCP Interface Component
 
-> **Status: canonical component contract.** Last reviewed: 2026-07-23.
+> **Status: canonical component contract.** Last reviewed: 2026-08-29.
 
 The MCP Interface exposes Second Brain capabilities to connected AI agents
 through one stdio Model Context Protocol server.
@@ -20,12 +20,14 @@ selection, or the internal implementation of search and delivery algorithms.
 
 ## Contract
 
-`python -m src.mcp_server` exposes nine tools:
+`python -m src.mcp_server` exposes eleven tools:
 
 | Tool | Capability |
 |---|---|
 | `memory_create` | Create and embed a memory |
 | `memory_search` | Run hybrid retrieval and return ranked previews |
+| `memory_context` | Return a token-bounded task context pack and receipt |
+| `memory_context_outcome` | Record which returned guidance was used and the task outcome |
 | `memory_read` | Read one complete memory |
 | `memory_update` | Update an existing memory |
 | `memory_relate` | Create a typed relationship |
@@ -42,7 +44,7 @@ The transport is stdio. The MCP server does not open a listening network port.
 connected agent
   → MCP tool request
   → validate and normalize arguments
-  → call Ingestion & Storage, Retrieval, or Delivery
+  → call Ingestion & Storage, Retrieval, Memory Context Broker, or Delivery
   → serialize structured result
   → return over stdio
 ```
@@ -80,4 +82,5 @@ Until that refactor lands, this direct path is documented rather than hidden.
 - [MCP tool reference](../user-guide/reference.md)
 - [Security model](../user-guide/security-model.md)
 - [Model Execution](model-execution.md)
+- [Memory Context Broker](context-broker.md)
 - [Componentization roadmap](../COMPONENTIZATION-PLAN.md)

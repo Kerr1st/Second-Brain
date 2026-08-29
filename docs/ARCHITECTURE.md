@@ -1,6 +1,6 @@
 # Second Brain — Architecture
 
-> Last updated: 2026-07-17
+> Last updated: 2026-08-29
 
 ## Overview
 
@@ -46,8 +46,8 @@ breadth-first system view; component pages provide the maintained depth.
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  MCP Server (src/mcp_server.py)                             │
-│  9 tools: create, search, read, update, relate,            │
-│           list, graph, learn, brief                         │
+│  11 tools: create, search, context, outcome, read, update, │
+│            relate, list, graph, learn, brief                │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -129,7 +129,7 @@ and captured identities remain separate.
 
 ## Database Schema
 
-The migration runner applies schema migrations `001` through `012` in order; migration `000`
+The migration runner applies schema migrations `001` through `013` in order; migration `000`
 bootstraps the version-tracking table.
 
 ### Core Tables
@@ -369,7 +369,7 @@ Implementation: `src/express.py`, `scripts/brief.py`, `scripts/express_push.py`.
 
 ```
 src/
-  mcp_server.py          MCP server (9 tools)
+  mcp_server.py          MCP server (11 tools)
   express.py             Express delivery: briefing compose/edit/render, feedback, Gmail push
   db.py                  PostgreSQL connection, memory CRUD, relationships
   search.py              Hybrid search, reranking, retrieval reinforcement

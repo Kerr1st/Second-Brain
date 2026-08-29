@@ -35,10 +35,10 @@ Alphabetical definitions of project-specific terms used throughout the Second Br
 | **ingestion** | The second pipeline stage: content is parsed, classified, chunked, embedded, stored, and auto-linked to related memories. |
 | **Kiro** | An agentic coding service with IDE, CLI, and web surfaces. It is separate from Amazon Quick and Amazon Q Developer. |
 | **launchd job** | A macOS scheduled task defined by a `.plist` file. Second Brain uses launchd for the dream cycle, Express push, backup, and sync jobs. |
-| **MCP server** | The Model Context Protocol server (`src/mcp_server.py`) exposing 9 tools that agents invoke to read and write the memory store. See [reference](reference.md). |
+| **MCP server** | The Model Context Protocol server (`src/mcp_server.py`) exposing 11 tools for memory, context, outcome, learning, and briefing workflows. See [reference](reference.md). |
 | **memory** | The atomic unit of the system: text content, a vector embedding, metadata (type, tags, source, confidence), and relationships to other memories. Stored in the `memories` table. |
 | **memory class** | One of three classifications per Tulving's taxonomy — `semantic` (facts, principles), `episodic` (raw logs, events), or `procedural` (how-to knowledge). Stored in `mem_class`. |
-| **memory type** | A label describing what a memory represents, including `research`, `synthesis`, `idea`, `connection`, `priority`, `question`, `insight`, `decision`, `correction_episode`, `project`, and `source`. See [reference](reference.md). |
+| **memory type** | An extensible label describing what a memory represents, including `research`, `synthesis`, `idea`, `connection`, `priority`, `question`, `insight`, `decision`, `correction_episode`, `steering_candidate`, `steering_rule`, `project`, and `source`. See [reference](reference.md). |
 | **Monotonic Task Refresh** | A refresh that preserves captured Agent Turns in their original order and appends only unseen complete turns. It never rewrites established task evidence. |
 | **pgvector** | A PostgreSQL extension that adds vector data types, HNSW and IVFFlat indexes, and distance operators. Enables vector similarity search on embeddings. |
 | **procedural memory** | A `mem_class` value. How-to knowledge, workflows, and step-by-step processes. Receives a +0.02 rerank boost. |

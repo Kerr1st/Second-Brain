@@ -30,7 +30,7 @@ CAPTURE ─▶ (writes) ─▶ [ memories + relationships ] ─▶ RETRIEVAL ─
 | **Retrieval** | `db`, `embeddings`, `search` (hybrid + cognitive rerank) | `hybrid_search()` / `rerank()` over `memories` | cohesive (`src/search.py`,`db.py`,`embeddings.py`) | **HIGH** |
 | **Synthesis** | dream cycle (Explorer→Thinker→panel), `dream_cycle_db`, `agent_invoker`, prompts | reads via Retrieval; writes via `dream_cycle.storage` | already a package (`src/dream_cycle/`) | **HIGH** |
 | **Delivery** | Express (`brief`/push/`memory_brief`, feedback) | reads DB; emits briefings | cohesive (`src/express.py`) | **HIGH** |
-| **Interface (MCP)** | `mcp_server.py` — exposes capture/retrieval/delivery to agents | the 9 MCP tools | cohesive but holds a duplicate store path | **MED** |
+| **Interface (MCP)** | `mcp_server.py` — exposes capture/retrieval/context/delivery to agents | the 11 MCP tools | cohesive but holds a duplicate store path | **MED** |
 | **Shared infra** | `db` (conn+CRUD), `models`, `classify`/`depth`/`project`, `embeddings` | imported by all | shared leaf utils | **HIGH** |
 
 **Key insight from the audit:** retrieval/synthesis/delivery already have clean boundaries (the

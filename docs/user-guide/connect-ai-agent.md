@@ -94,7 +94,7 @@ Start Claude Code and ask:
 
 > "What MCP tools are available?"
 
-Expected result — Claude Code lists the 9 tools. Then confirm a tool call:
+Expected result — Claude Code lists the 11 tools. Then confirm a tool call:
 
 > "Call memory_search with query 'test'."
 

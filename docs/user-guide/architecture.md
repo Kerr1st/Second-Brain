@@ -52,7 +52,7 @@ flowchart TD
     end
 
     subgraph MCP["MCP Server — stdio"]
-        T[9 tools: create, search, read,\nupdate, relate, list, graph, learn, brief]
+        T[11 tools: create, search, context, outcome,\nread, update, relate, list, graph, learn, brief]
     end
 
     subgraph Agents["Connected Agents"]
@@ -112,7 +112,7 @@ Key indexes powering retrieval:
 
 ### MCP server
 
-The MCP server (`src/mcp_server.py`) exposes nine tools over **stdio** — it opens no network port. Agents connect via the Model Context Protocol, issue tool calls, and receive structured responses. The server is the single entry point for all agent interactions with the knowledge store.
+The MCP server (`src/mcp_server.py`) exposes eleven tools over **stdio** — it opens no network port. Agents connect through memory CRUD, retrieval, bounded context, outcome receipts, learning, and briefing interfaces.
 
 ### Dream cycle
 

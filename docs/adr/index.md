@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-> **Status: canonical decision index.** Last reviewed: 2026-07-23.
+> **Status: canonical decision index.** Last reviewed: 2026-08-29.
 
 Architecture Decision Records (ADRs) preserve durable choices and their
 consequences. Component pages define current ownership and link to the ADRs
@@ -17,6 +17,8 @@ that govern their behavior.
 | [0007](0007-capture-correction-episodes-before-steering.md) | Capture Correction Episodes before proposing Steering Rules | Capture; Synthesis; Delivery |
 | [0008](0008-classify-task-ownership-before-capture.md) | Classify Agent Task ownership before capture | Capture |
 | [0009](0009-use-codex-jsonl-for-model-execution.md) | Use Codex JSONL as the default model-execution output | Model Execution |
+| [0010](0010-prove-capabilities-vertically-before-generalizing.md) | Prove capabilities vertically before generalizing across integrations | All |
+| [0011](0011-use-bounded-context-packs-and-outcome-receipts.md) | Use bounded context packs and outcome receipts for agent recall | Retrieval; MCP Interface; Steering Governance |
 
 ## Related
 

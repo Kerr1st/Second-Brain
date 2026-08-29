@@ -4,7 +4,7 @@
 
 **Reference implementation:** Codex Desktop
 
-**Last updated:** 2026-07-23
+**Last updated:** 2026-08-29
 
 ## Outcome
 
@@ -309,6 +309,8 @@ The next agent integration should be designed only after Codex is proven and act
   hybrid/MCP search visibility for Dream Cycle exploration, and exclusion from Express composition.
 - The proof used the same deterministic 1,024-dimensional embedding boundary as the existing
   capture proof so no Bedrock credentials or live memory database were required.
-- Build 2 remains documented but unimplemented. Its Steering Candidate, consensus, deduplication,
-  supersession, and user-approval behavior may be implemented in a separate build now that this
-  Proof Gate has passed.
+- Build 2 was implemented and live-proofed on 2026-08-29. Four Codex evaluators accepted one
+  candidate from explicit durable user direction; separate approval created Steering Rule v1,
+  reviewed publication added its managed `AGENTS.md` block, and a later Codex Task used the rule
+  without correction. Correction Episodes remain valid future evidence but were not manufactured
+  for this explicit project decision.

@@ -1,6 +1,6 @@
 # Architecture Component Index
 
-> **Status: canonical navigation.** Last reviewed: 2026-07-23.
+> **Status: canonical navigation.** Last reviewed: 2026-08-29.
 
 Use this index to find the contract, runtime flow, implementation entry points,
 tests, operations, and decisions for every major Second Brain component.
@@ -31,10 +31,14 @@ flowchart LR
     Store --> Retrieval["Retrieval"]
     Retrieval --> Synthesis["Synthesis / Dream Cycle"]
     Synthesis --> Delivery["Delivery / Express"]
+    Retrieval --> Context["Memory Context Broker"]
+    Synthesis --> Governance["Steering Governance"]
+    Governance --> Context
 
     MCP["MCP Interface"] <--> Store
     MCP <--> Retrieval
     MCP <--> Delivery
+    MCP <--> Context
     Models["Model Execution"] --> Capture
     Models --> Synthesis
     Models --> Delivery
@@ -54,7 +58,9 @@ stages.
 | Retrieval | Hybrid search, rank fusion, utility reranking, and retrieval reinforcement | Query plus filters returns ranked memories | Implemented and cohesive | [Retrieval](retrieval.md) |
 | Synthesis | Explorer, Thinker, evaluator panel, consensus, and accepted-memory storage | Retrieved slices become consensus-gated insights | Implemented and scheduled | [Synthesis](synthesis.md) |
 | Delivery | Briefing composition, editing, feedback, rendering, and gated push | Stored results become user-facing briefings | Implemented; proactive email remains configuration-gated | [Delivery](delivery.md) |
-| MCP Interface | Agent-facing memory, retrieval, graph, learning, and briefing tools | Nine stdio MCP tools | Implemented; one direct storage path remains | [MCP Interface](mcp-interface.md) |
+| Memory Context Broker | Authority, applicability, token packing, conflicts, and recall outcomes | `build_context` and `record_context_outcome` | Codex-first vertical slice implemented and proven | [Memory Context Broker](context-broker.md) |
+| Steering Governance | Candidate evaluation, approval, versioning, and reviewed publication | Inactive candidate → approved rule → digest-guarded AGENTS publication | Codex-first vertical slice implemented and proven | [Steering Governance](steering-governance.md) |
+| MCP Interface | Agent-facing memory, retrieval, context, outcome, learning, and briefing tools | Eleven stdio MCP tools | Implemented; one direct storage path remains | [MCP Interface](mcp-interface.md) |
 | Model Execution | Role-to-backend resolution, model invocation, tool attachment, structured output, and usage telemetry | One `Invoker` contract across supported backends | Kiro, Claude Code, and Codex implemented; direct Bedrock deferred | [Model Execution](model-execution.md) |
 
 ## Common runtime paths
@@ -78,8 +84,19 @@ hourly LaunchAgent and unrestricted historical backfill are not activated.
 ```text
 agent
   → MCP Interface
-  → Ingestion & Storage, Retrieval, or Delivery
+  → Ingestion & Storage, Retrieval, Memory Context Broker, or Delivery
   → structured MCP result
+```
+
+### Governed recall
+
+```text
+Correction Episodes or explicit durable direction
+  → Steering Governance panel and user approval
+  → active versioned Steering Rule
+  → Memory Context Broker context pack and receipt
+  → later Agent Task
+  → followed/corrected/not_used/unknown outcome
 ```
 
 ### Dream Cycle
@@ -110,6 +127,7 @@ Every component page records:
 ## Related
 
 - [System architecture](../ARCHITECTURE.md)
+- [Project charter](../PROJECT-CHARTER.md)
 - [Architecture decisions](../adr/index.md)
 - [Componentization roadmap](../COMPONENTIZATION-PLAN.md)
 - [Capture component architecture](../CAPTURE-COMPONENTS.md)
