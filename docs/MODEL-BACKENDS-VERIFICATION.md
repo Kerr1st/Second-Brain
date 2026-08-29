@@ -7,8 +7,8 @@
 >
 > Two parts, matched to what each machine has (Req 22):
 > - **Part A — Claude Code: LIVE** on the local enterprise-managed `claude` build.
-> - **Part B — Codex: MANUAL** smoke-test checklist (Codex is not installed
->   anywhere today; run this on a Codex-equipped box).
+> - **Part B — Codex: LIVE + MANUAL** smoke-test checklist on the local
+>   authenticated Codex build.
 
 ---
 
@@ -165,22 +165,24 @@ path** (consistent with Req 7's tolerate-and-warn, Req 22.3):
 
 ## Part B — Codex manual smoke-test checklist
 
-> **Codex is not installed** on any current machine, so `CodexInvoker` is
-> verified by mocked-subprocess unit tests (`tests/.../test_codex.py`, Req 22.4)
-> plus this **manual** checklist (Req 22.5). Run every step on a box where
-> `codex` is installed and authenticated, then record results inline.
+> Codex is installed and authenticated on this machine. `CodexInvoker` is
+> verified by mocked-subprocess unit tests (`tests/test_codex.py`, Req 22.4)
+> plus this **manual** checklist (Req 22.5). A bounded tool-less JSONL smoke
+> test was completed on 2026-07-23; the unchecked agentic and fallback rows
+> remain to be exercised independently.
 
 ### Pre-flight
 
-- [ ] `codex --version` prints a version; record it here: `__________`.
+- [x] `codex --version` prints a version: `codex-cli 0.145.0-alpha.30`
+      (2026-07-23).
 - [ ] `codex exec --help` confirms the documented surface used by the adapter:
       positional prompt, `-m <model>`, `-c <key=value>`, `--output-schema`,
       `--output-last-message <file>`, `--json`, `--sandbox <mode>`,
       `-c sandbox_workspace_write.network_access=…`, and
       `-c mcp_servers.<name>.{command,args,cwd,required}`. Note any flag whose
       name/spelling drifts from the adapter (`src/backends/codex.py`).
-- [ ] Auth/provider routing works out-of-band (ChatGPT sub, `OPENAI_API_KEY`,
-      or `--oss` local) — a trivial `codex exec "say hi" -m <model>` returns.
+- [x] Auth/provider routing works out-of-band — a bounded adapter call using
+      configured model `gpt-5.6-sol` returned successfully (2026-07-23).
 - [ ] Postgres and Bedrock are reachable from this box (the MCP server needs
       both): `.venv/bin/python -c "from src import db; db.get_connection()"`
       succeeds; AWS creds for embeddings are present.
@@ -220,31 +222,33 @@ that the read-only tool-less sandbox is used when `tools=False`.
 - [ ] `tools=False`: confirm the adapter emits `--sandbox read-only` and **no**
       `mcp_servers` config, and that the probe is skipped (Req 15.1–15.3).
 
-### 3. `--output-last-message` extraction (Req 11.3)
+### 3. Structured JSONL extraction and file fallback (Req 11.3)
 
-- [ ] Default `final_message_source="output-last-message"`: confirm the adapter
-      passes `--output-last-message <tmp>` and reads the final assistant text
-      back from that file (not stdout). Run a turn that returns a small JSON
-      object; confirm `_extract_raw` returns the file contents and
-      `parse_json_output` recovers the object. Record: `__________`.
-- [ ] Confirm the temp file is removed after the call (`_cleanup_temp_files`).
-- [ ] Alternate `final_message_source="json"`: construct
-      `CodexInvoker(model=…, final_message_source="json")`, run a turn, and
-      confirm the final `agent_message` is recovered from the `--json` event
-      stream. Record: `__________`.
+- [x] Default `final_message_source="json"`: run a turn that returns a small
+      JSON object and confirm the adapter passes `--json`, recovers the final
+      `agent_message` from the event stream, and `parse_json_output` recovers the
+      object. Recorded 2026-07-23: `{"ok": true}`.
+- [ ] Explicit compatibility fallback: construct
+      `CodexInvoker(model=…, final_message_source="output-last-message")`,
+      confirm the adapter passes `--output-last-message <tmp>`, and confirm
+      `_extract_raw` reads the file contents. Record: `__________`.
+- [ ] In fallback mode, confirm the temp file is removed after the call
+      (`_cleanup_temp_files`).
 
 ### 4. Usage events → real usage capture (Req 16)
 
-- [ ] With `final_message_source="json"`, confirm the `--json` stream carries a
+- [x] With the default `final_message_source="json"`, confirm the `--json` stream carries a
       usage event (`turn.completed` with `usage`, or `token_count` with
       `info.total_token_usage`) and the adapter returns **`usage_source="real"`**
       with `input_tokens`/`output_tokens` (and `total_cost_usd` if present)
-      populated and folded into the metrics line. Record token counts:
+      populated and folded into the metrics line. Recorded 2026-07-23:
+      `input_tokens=18095`, `cached_input_tokens=0`, `output_tokens=9`,
+      `reasoning_output_tokens=0`; this CLI event did not include cost.
+- [ ] With the explicit `output-last-message` fallback (no `--json` usage events
+      on stdout), confirm the adapter **tolerates-and-warns**: keeps
+      `output`/`raw`, returns `usage=None` / `usage_source="estimate"`, logs the
+      loud warning, and **does not raise** (Req 16.2, 17.1). Record:
       `__________`.
-- [ ] With the default `output-last-message` mode (no `--json` usage events on
-      stdout), confirm the adapter **tolerates-and-warns**: keeps `output`/`raw`,
-      returns `usage=None` / `usage_source="estimate"`, logs the loud warning,
-      and **does not raise** (Req 16.2, 17.1). Record: `__________`.
 
 ### 5. Failure-mode parity spot-checks (Req 17)
 
@@ -272,4 +276,4 @@ Note here any flag, config-key, sandbox, or event-shape drift from
 | `ClaudeCodeInvoker` (tool-less) | LIVE (enterprise-managed build) | ✅ Verified: `.result` parse, real usage (`usage_source="real"`), `--system-prompt-file`, fail-loud on MCP failure. |
 | `ClaudeCodeInvoker` (agentic, `tools=True`) | LIVE (enterprise-managed build) + tests | ✅ **FIXED** (spec `claude-code-stream-json-probe-fix`) — adapter uses `--output-format stream-json --verbose`, extracts `.result`/`is_error`/`usage` from the terminal `{"type":"result"}` event, and confirms the real `tool_result` via the stream events. **Finding 1** (transcript gap) and **Finding 2** (probe instruction refused as injection) both resolved. |
 | enterprise-managed auth/metering divergence | LIVE | ✅ **Finding 3** — handled tolerantly, no enterprise-managed-only code path (Req 22.3). |
-| `CodexInvoker` | MOCKED tests + MANUAL checklist (Part B) | ⏳ Checklist authored; run on a Codex-equipped box (Req 22.5). |
+| `CodexInvoker` | MOCKED tests + bounded LIVE tool-less JSONL smoke | ✅ Default JSONL final-message extraction and real token usage verified on Codex CLI 0.145.0-alpha.30 (2026-07-23); agentic and explicit file-fallback checklist rows remain. |

@@ -5,10 +5,9 @@ conformance, system-prompt delivery (native ``model_instructions_file`` /
 ``developer_instructions`` / ``instructions`` + the prepend fallback), and
 final-text extraction (``--output-last-message`` file and ``--json`` events).
 
-Codex is not installed locally, so every test mocks
-``src.backends.codex.subprocess.run`` and no live CLI is ever required
-(Req 22.6). The MCP-attach/sandbox/fail-loud (5.2) and usage/failure-mode (5.3)
-behaviors are covered by later sub-tasks.
+Every test mocks ``src.backends.codex.subprocess.run`` so CI and unit testing do
+not require a live CLI (Req 22.6). The MCP-attach/sandbox/fail-loud (5.2) and
+usage/failure-mode (5.3) behaviors are covered by later sub-tasks.
 
 Validates: Requirements 10.1, 10.2, 10.3, 10.4, 11.1, 11.2, 11.3, 11.4, 12.1,
 12.2, 12.3, 21.2
@@ -45,15 +44,15 @@ def _last_cmd(mock_run) -> list:
 
 
 def _writes_last_message(result_text: str):
-    """A subprocess.run side_effect that writes ``result_text`` to the
-    ``--output-last-message`` file (as the real codex CLI would) and returns a
-    successful completed-process mock."""
+    """Return ``result_text`` through whichever documented mode was requested."""
 
     def _side_effect(cmd, **kwargs):
-        path = cmd[cmd.index("--output-last-message") + 1]
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(result_text)
-        return _ok("")  # final text comes from the file, not stdout
+        if "--output-last-message" in cmd:
+            path = cmd[cmd.index("--output-last-message") + 1]
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(result_text)
+            return _ok("")
+        return _ok(_json_events_stream_with_usage(result_text))
 
     return _side_effect
 
@@ -68,6 +67,17 @@ def _json_events_stream(result_text: str) -> str:
         ),
     ]
     return "\n".join(lines)
+
+
+def _json_events_stream_with_usage(result_text: str) -> str:
+    """A successful JSONL turn with final text and real token usage."""
+    return "\n".join([
+        json.dumps({
+            "type": "turn.completed",
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+        }),
+        _json_events_stream(result_text),
+    ])
 
 
 class TestConstruction:
@@ -167,10 +177,7 @@ class TestSystemPromptDelivery:
             with open(path, encoding="utf-8") as f:
                 captured["contents"] = f.read()
             captured["cmd"] = cmd
-            out_path = cmd[cmd.index("--output-last-message") + 1]
-            with open(out_path, "w", encoding="utf-8") as f:
-                f.write('{"ok": 1}')
-            return _ok("")
+            return _ok(_json_events_stream_with_usage('{"ok": 1}'))
 
         mock_run.side_effect = _capture
         CodexInvoker(model="m").invoke("SYSTEM ROLE", "user data")
@@ -186,10 +193,7 @@ class TestSystemPromptDelivery:
             for tok in cmd:
                 if tok.startswith("model_instructions_file="):
                     seen["path"] = tok.split("=", 1)[1]
-            out_path = cmd[cmd.index("--output-last-message") + 1]
-            with open(out_path, "w", encoding="utf-8") as f:
-                f.write('{"ok": 1}')
-            return _ok("")
+            return _ok(_json_events_stream_with_usage('{"ok": 1}'))
 
         mock_run.side_effect = _capture
         CodexInvoker(model="m").invoke("sys", "msg")
@@ -235,16 +239,32 @@ class TestFinalTextExtraction:
     """Req 11.3 / 10.3-10.4: final text from --output-last-message or --json."""
 
     @patch("src.backends.codex.subprocess.run")
-    def test_output_last_message_default(self, mock_run):
+    def test_json_event_stream_with_real_usage_is_default(self, mock_run):
         payload = {"candidates": [{"title": "insight"}]}
-        mock_run.side_effect = _writes_last_message(json.dumps(payload))
+        stream = "\n".join([
+            json.dumps({
+                "type": "turn.completed",
+                "usage": {"input_tokens": 123, "output_tokens": 45},
+            }),
+            json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": json.dumps(payload),
+                },
+            }),
+        ])
+        mock_run.return_value = _ok(stream)
         result = CodexInvoker(model="m").invoke("sys", "msg")
 
         cmd = _last_cmd(mock_run)
-        assert "--output-last-message" in cmd
+        assert "--json" in cmd
+        assert "--output-last-message" not in cmd
         assert set(result) == {"output", "raw", "usage", "usage_source"}
         assert result["output"] == payload
         assert result["raw"] == json.dumps(payload)
+        assert result["usage"] == {"input_tokens": 123, "output_tokens": 45}
+        assert result["usage_source"] == "real"
 
     @patch("src.backends.codex.subprocess.run")
     def test_output_last_message_file_cleaned_up(self, mock_run):
@@ -258,7 +278,9 @@ class TestFinalTextExtraction:
             return _ok("")
 
         mock_run.side_effect = _capture
-        CodexInvoker(model="m").invoke("sys", "msg")
+        CodexInvoker(
+            model="m", final_message_source="output-last-message"
+        ).invoke("sys", "msg")
         assert not os.path.exists(seen["path"])
 
     @patch("src.backends.codex.subprocess.run")
@@ -266,7 +288,9 @@ class TestFinalTextExtraction:
         payload = {"verdict": "ACCEPT"}
         result_text = f"Here is my answer:\n{json.dumps(payload)}\nDone."
         mock_run.side_effect = _writes_last_message(result_text)
-        result = CodexInvoker(model="m").invoke("sys", "msg")
+        result = CodexInvoker(
+            model="m", final_message_source="output-last-message"
+        ).invoke("sys", "msg")
         assert result["output"] == payload
         assert result["raw"] == result_text
 
@@ -305,10 +329,12 @@ class TestFinalTextExtraction:
             CodexInvoker(model="m").invoke("sys", "msg")
 
     @patch("src.backends.codex.subprocess.run")
-    def test_default_usage_is_estimate(self, mock_run):
-        # Real-usage capture is task 5.3; the 5.1 default is None/"estimate".
+    def test_output_last_message_usage_is_estimate(self, mock_run):
+        # Explicit file mode has no JSONL usage events.
         mock_run.side_effect = _writes_last_message('{"ok": 1}')
-        result = CodexInvoker(model="m").invoke("sys", "msg")
+        result = CodexInvoker(
+            model="m", final_message_source="output-last-message"
+        ).invoke("sys", "msg")
         assert result["usage"] is None
         assert result["usage_source"] == "estimate"
 
@@ -335,16 +361,26 @@ def _tool_result_event() -> str:
 
 
 def _writes_last_message_with_events(result_text: str, events: str = ""):
-    """subprocess.run side_effect for tools=True + output-last-message: writes
-    the final message file (as codex does) and returns the event stream on
-    stdout (as codex prints its progress/tool events), so the probe has a tool
-    result to confirm."""
+    """Return a tool-using result through the requested Codex output mode."""
 
     def _side_effect(cmd, **kwargs):
-        path = cmd[cmd.index("--output-last-message") + 1]
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(result_text)
-        return _ok(events)
+        if "--output-last-message" in cmd:
+            path = cmd[cmd.index("--output-last-message") + 1]
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(result_text)
+            return _ok(events)
+        lines = [events] if events else []
+        lines.extend([
+            json.dumps({
+                "type": "turn.completed",
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            }),
+            json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": result_text},
+            }),
+        ])
+        return _ok("\n".join(lines))
 
     return _side_effect
 
@@ -605,12 +641,14 @@ class TestUsageCapture:
 
     @patch("src.backends.codex.subprocess.run")
     def test_missing_usage_tolerate_and_warn(self, mock_run, caplog):
-        # Default output-last-message mode emits no --json usage events on
+        # Explicit output-last-message mode emits no --json usage events on
         # stdout: keep result, usage=None/"estimate", warn, do NOT raise
         # (Req 16.2, 17.1).
         mock_run.side_effect = _writes_last_message('{"candidates": []}')
         with caplog.at_level("WARNING"):
-            result = CodexInvoker(model="m").invoke("sys", "msg")
+            result = CodexInvoker(
+                model="m", final_message_source="output-last-message"
+            ).invoke("sys", "msg")
 
         assert result["output"] == {"candidates": []}
         assert result["usage"] is None
@@ -634,7 +672,9 @@ class TestUsageCapture:
     def test_missing_usage_does_not_raise(self, mock_run):
         # Explicit: the tolerate path never routes into the failure path.
         mock_run.side_effect = _writes_last_message('{"ok": 1}')
-        result = CodexInvoker(model="m").invoke("sys", "msg")
+        result = CodexInvoker(
+            model="m", final_message_source="output-last-message"
+        ).invoke("sys", "msg")
         assert result["usage"] is None
 
 
@@ -694,8 +734,8 @@ class TestSchemaPreferredOutput:
 # --json extraction, usage capture + tolerate-and-warn, every failure-mode row,
 # and probe secondary-check/skipped-tool-less/not-cached). This final class
 # pins the Req 22.6 guarantee head-on: every invoke() is served entirely by the
-# mocked subprocess (no live Codex CLI is ever required — Codex is not installed
-# here) and each invoke() is exactly one fresh spawn, so the secondary probe is
+# mocked subprocess (no live Codex CLI is ever required for unit testing) and
+# each invoke() is exactly one fresh spawn, so the secondary probe is
 # never a second process and never cached across calls.
 # Validates: Requirements 22.4, 22.6
 

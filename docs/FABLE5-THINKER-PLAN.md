@@ -39,7 +39,7 @@
 
 Today the dream cycle is effectively **$0 in metered Bedrock**: `backends/kiro.py` (`KiroInvoker`) invokes
 `kiro-cli chat --model claude-opus-4.8`, so every Explorer / Thinker / evaluator call runs
-through the **Amazon Q service**, not this account's Bedrock. Kiro's model catalog does **not**
+through the **Kiro service**, not this account's Bedrock. Kiro's model catalog does **not**
 include `claude-fable-5` (verified — catalog is `auto, claude-opus-4.8/4.7/4.6/4.5,
 claude-sonnet-4.6/4.5/4, claude-haiku-4.5, deepseek-3.2, minimax-*, glm-5, qwen3-coder-next`).
 
