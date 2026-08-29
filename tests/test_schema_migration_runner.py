@@ -148,6 +148,7 @@ def test_real_runner_builds_fresh_database_and_reruns_cleanly() -> None:
             "010_express_feedback.sql",
             "011_backend_provenance.sql",
             "012_agent_task_capture.sql",
+            "013_context_governance.sql",
         ]
         with psycopg2.connect(**_connection_config(database)) as conn:
             with conn.cursor() as cur:
