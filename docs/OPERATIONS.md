@@ -4,7 +4,7 @@
 
 ## Model Backend Profile
 
-The dream cycle's LLM execution path is selected by a named profile in `config/backends.toml` via the `SECOND_BRAIN_PROFILE` environment variable. **Unset (the default) = the `laptop` profile**, which runs every role on `kiro-cli` → Amazon Q (Claude Opus 4.8), $0 metered — i.e. today's behavior. Other profiles (e.g. `mini`) select an alternative backend; selecting a profile whose adapter isn't built yet fails fast with a clear error. Credentials never live in the TOML. See `docs/MODEL-BACKENDS.md`.
+The dream cycle's LLM execution path is selected by a named profile in `config/backends.toml` via the `SECOND_BRAIN_PROFILE` environment variable. **Unset (the default) = the `laptop` profile**, which runs every role through Kiro CLI with Claude Opus 4.8 under the current Kiro plan — i.e. today's behavior. Other profiles (e.g. `mini`) select an alternative backend; selecting a profile whose adapter isn't built yet fails fast with a clear error. Credentials never live in the TOML. See `docs/MODEL-BACKENDS.md`.
 
 ## Scheduled Jobs
 
@@ -103,6 +103,45 @@ Hourly incremental sync from Quick Desktop's SQLite databases into PostgreSQL. T
 **State file:** `~/.quickwork/.second_brain_sync_state.json`
 
 All scripts are idempotent — safe to run repeatedly. See [QUICK-DESKTOP-INTEGRATION.md](QUICK-DESKTOP-INTEGRATION.md) for design details.
+
+## Codex Desktop Task Capture — Proof-Gate Mode
+
+Codex capture has one command and one implementation path. It is write-capable but is **not
+scheduled**, and the full historical backfill has not been run:
+
+```bash
+# Read and count eligible active Tasks without database, model, or embedding writes
+.venv/bin/python scripts/capture_codex.py --dry-run
+
+# Inspect one Task, including an archived Task, without writes
+.venv/bin/python scripts/capture_codex.py --dry-run --task-id <thread-id>
+
+# Run the narrowest real-data proof against the isolated test database
+set -a
+source .env.codex-dev
+set +a
+DB_NAME="$TEST_DB_NAME" .venv/bin/python scripts/capture_codex.py \
+  --task-id <thread-id>
+```
+
+On a machine using the bundled Codex executable for the semantic pass, add:
+
+```bash
+SECOND_BRAIN_PROFILE=codex_local \
+CODEX_CLI=/Applications/ChatGPT.app/Contents/Resources/codex \
+DB_NAME="$TEST_DB_NAME" .venv/bin/python scripts/capture_codex.py \
+  --task-id <thread-id>
+```
+
+The command applies the six-hour inactivity threshold, performs a stable rollout read, captures
+only user prompts and visible final answers, and runs the combined Task Semantic Pass immediately
+after source capture. Its JSON report contains counts plus Task IDs, failure stages, and exception
+class names when failures occur; it does not print captured prompt or answer content.
+
+`--backfill` includes archived eligible Tasks through this same path. Do not create or load a
+LaunchAgent and do not invoke an unbounded `--backfill` until explicit user approval. The approved
+Proof Gate uses `--task-id` with `DB_NAME="$TEST_DB_NAME"`; there is no separate pilot application.
+See [CODEX-TASK-CAPTURE-BUILD-PLAN.md](CODEX-TASK-CAPTURE-BUILD-PLAN.md).
 
 ## Capture API — DEPRECATED
 

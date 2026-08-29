@@ -71,7 +71,7 @@ Nine schema migrations, each a cognitive capability: `v2 columns → dream_cycle
 
 ## 3. Where it is now (June 2026)
 
-**Size:** ~25K LOC — `src` 5,035 (28 files), `scripts` 6,153, **`tests` 13,840 (37 files — ~55% of all code)**. 10 migrations, 9 specs (two were deleted in a June cleanup), ~120K memories. Capability clusters: capture, store, retrieve, synthesize, evaluate, operate — and now **deliver** (Express).
+**Size:** ~25K LOC — `src` 5,035 (28 files), `scripts` 6,153, **`tests` 13,840 (37 files — ~55% of all code)**. 11 migrations, 9 specs (two were deleted in a June cleanup), ~120K memories in the private deployment. Capability clusters: capture, store, retrieve, synthesize, evaluate, operate — and now **deliver** (Express).
 
 **Depth achieved:** an 11-signal cognitive reranker; typed memories; a relationship graph; a schema layer; and a working **4-judge Byzantine-consensus dream cycle** that — validated today — produced 10 accepted insights from 12 candidates, including a genuine cross-project principle ("every autonomous agent system needs an explicit termination contract") drawn from five separate projects.
 

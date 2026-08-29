@@ -51,6 +51,21 @@ The guide lives in `docs/user-guide/` and follows the [Diátaxis](https://diatax
 > [!NOTE]
 > v1 is a focused, flat set. As the guide grows (see the documentation roadmap), group pages by Diátaxis type into `tutorials/`, `how-to/`, `reference/`, and `explanation/` subfolders, keeping `index.md` as the hub. Consolidate rather than split until a page mixes content types or exceeds ~1,500 words.
 
+### Engineering component documents
+
+The user guide remains audience- and task-oriented. Engineering ownership
+documentation lives separately in `docs/components/`.
+
+- `docs/components/index.md` is the canonical component registry.
+- Each component has one contract page covering its boundary, contract, runtime
+  flow, failures, entry points, data, tests, operations, and related decisions.
+- Build plans and verification records link from component pages but do not
+  replace the component contract.
+- When a component boundary or activation status changes, update its contract
+  page and the registry in the same change.
+- Record durable architectural choices as ADRs under `docs/adr/` and add them to
+  `docs/adr/index.md`.
+
 ## Page template
 
 Use this skeleton for a new page. Omit sections that don't apply (reference pages skip "Steps" and "Verification").

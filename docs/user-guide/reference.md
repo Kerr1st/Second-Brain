@@ -88,6 +88,7 @@ Composes and sends a gated Gmail push. Sends **only** when a new cross-project s
 | `question` | Open threads to explore |
 | `insight` | Aha moments, realizations |
 | `decision` | Choices made and rationale |
+| `correction_episode` | System-generated, user-attributed correction evidence; searchable and Dream Cycle-readable, but not proactively delivered or automatically applied as steering |
 | `project` | Active project status |
 | `source` | Ingested external content |
 
@@ -109,7 +110,15 @@ Composes and sends a gated Gmail push. Sends **only** when a new cross-project s
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
+| `DB_HOST` | PostgreSQL host | `127.0.0.1` |
+| `DB_PORT` | PostgreSQL port | `5432` |
+| `DB_NAME` | Application database | `memory_bank` |
+| `DB_USER` | Database role | `memory_bank` |
+| `DB_PASSWORD` | Local database password | `<local-password>` |
+| `DB_POOL_MIN` / `DB_POOL_MAX` | Connection pool size | `1` / `5` |
+| `TEST_DB_NAME` | Destructive test database; must be explicitly allowlisted | `memory_bank_test` |
 | `SECOND_BRAIN_PROFILE` | Select model backend profile from `config/backends.toml` | `laptop` (default), `mini` |
+| `BEDROCK_REGION` | AWS region for Titan embeddings | `us-east-1` |
 | `EXPRESS_EMAIL_TO` | Recipient for Express Gmail push | `<your-email@example.com>` |
 | `EXPRESS_EMAIL_FROM` | Sender address for Express Gmail push | `<your-sender@gmail.com>` |
 | `GMAIL_APP_PASSWORD` | Gmail app password for Express push | `<your-app-password>` |

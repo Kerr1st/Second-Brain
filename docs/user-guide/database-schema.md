@@ -5,7 +5,7 @@ type: reference
 
 # Database Schema
 
-Authoritative schema for the Second Brain PostgreSQL database. The schema is defined by migrations `migrations/000_migrations_table.sql` through `migrations/010_express_feedback.sql` and applied by `migrations/migrate.sh`.
+Authoritative schema for the Second Brain PostgreSQL database. The schema is defined by migrations `migrations/000_migrations_table.sql` through `migrations/012_agent_task_capture.sql` and applied by `migrations/migrate.sh`.
 
 ## `schema_migrations`
 
@@ -23,7 +23,7 @@ Primary knowledge store. Each row is one *memory* (content + embedding + metadat
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | `UUID` | **PK.** `gen_random_uuid()` |
-| `type` | `TEXT NOT NULL` | One of: `research`, `synthesis`, `idea`, `connection`, `priority`, `question`, `insight`, `decision`, `project`, `source` |
+| `type` | `TEXT NOT NULL` | Memory kind, including `research`, `synthesis`, `idea`, `connection`, `priority`, `question`, `insight`, `decision`, `correction_episode`, `project`, and `source` |
 | `title` | `TEXT NOT NULL` | Short descriptor |
 | `content` | `TEXT NOT NULL` | Full body text |
 | `summary` | `TEXT` | Optional condensed version |
@@ -44,6 +44,18 @@ Primary knowledge store. Each row is one *memory* (content + embedding + metadat
 | `last_accessed_at` | `TIMESTAMPTZ` | Last retrieval timestamp (migration 002) |
 | `encoding_context` | `TEXT` | Cognitive context at creation time (migration 006) |
 
+Codex capture keeps source timestamps, capture time, ordered Agent Turns, Attachment Descriptors,
+workspace and Git provenance, and the Semantic Processing Cursor inside `metadata`. Migration 012
+adds no capture revision, content hash, or processing telemetry columns. It adds only uniqueness
+for a Captured Task's native `codex://<thread-id>` identity, uniqueness for Topic Segment order
+within that task, and permanence for `derived_from` provenance edges.
+
+Task Distillation stores decisions and insights with `mem_class='semantic'`. A
+`correction_episode` is stored with `mem_class='episodic'`, `source_type='distilled_agent_task'`,
+and `metadata.supporting_turn_ids`. Its permanent `derived_from` relationship targets the
+containing Topic Segment. The type is represented in the existing unconstrained `type` column, so
+Build 1 requires no additional schema migration.
+
 ### Trigger
 
 `trg_memories_search_vector` (BEFORE INSERT OR UPDATE OF title, content) calls `memories_search_vector_update()` which builds a weighted tsvector — title and "Questions this answers:" lines at weight A, remaining content at weight B (migration 005).
@@ -59,7 +71,7 @@ Typed directed edges between memories.
 | `relation_type` | `TEXT NOT NULL` | **PK (composite).** e.g. `supports`, `contradicts`, `derived_from` |
 | `note` | `TEXT` | Optional annotation |
 | `created_at` | `TIMESTAMPTZ` | Default `now()` |
-| `expired_at` | `TIMESTAMPTZ` | Temporal expiry (migration 003) |
+| `expired_at` | `TIMESTAMPTZ` | Temporal expiry (migration 003); must remain `NULL` for `derived_from` provenance (migration 012) |
 
 ## `dream_cycle_runs`
 

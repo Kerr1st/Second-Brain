@@ -41,9 +41,9 @@ Expected output:
 ## 2. Create a Python virtual environment
 
 ```bash
-python3 -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 Expected output (last lines):
@@ -77,7 +77,8 @@ Expected output:
 apply: 001_initial_schema.sql
 apply: 002_v2_columns.sql
 ...
-apply: 010_express_feedback.sql
+apply: 011_backend_provenance.sql
+apply: 012_agent_task_capture.sql
 done
 ```
 
@@ -138,7 +139,7 @@ To connect your MCP client, add this stdio server configuration (adjust the path
 }
 ```
 
-<!-- TODO: Update with client-specific config path (e.g. ~/.kiro/mcp.json or ~/.claude/config.json) once documented. -->
+Client-specific config file locations vary by version. See [Connect an AI agent](connect-ai-agent.md) for Kiro CLI and Claude Code notes.
 
 ## 6. Verify
 

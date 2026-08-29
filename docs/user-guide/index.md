@@ -61,3 +61,10 @@ You run your own infrastructure and are comfortable with a terminal, PostgreSQL,
 |------|-------------|
 | [Style guide](STYLE.md) | Voice, formatting, terminology, and structure conventions. |
 | [Contributing](CONTRIBUTING.md) | How to add or edit guide pages. |
+
+### Engineering architecture
+
+| Page | Description |
+|------|-------------|
+| [Architecture Component Index](../components/index.md) | Canonical ownership, contracts, runtime flows, code entry points, tests, and operational status for every component. |
+| [Architecture decisions](../adr/index.md) | Durable decisions governing capture, provenance, segmentation, testing, and Correction Episodes. |
