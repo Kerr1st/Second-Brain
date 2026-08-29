@@ -10,10 +10,12 @@ Provides:
 import hashlib
 import math
 import os
-import glob
+import subprocess
+from pathlib import Path
 
 import psycopg2
 import pytest
+from psycopg2 import sql
 
 import src.db as db
 from src.db import close_pool
@@ -42,45 +44,72 @@ def _admin_connection():
     return conn
 
 
+def _require_disposable_test_database(database: str) -> None:
+    allowed = {"memory_bank_test", "second_brain_codex_test"}
+    if database not in allowed:
+        raise RuntimeError(
+            f"refusing to recreate database {database!r}; expected one of "
+            f"{', '.join(sorted(allowed))}"
+        )
+
+
 def _create_test_db():
-    """Create the test database if it doesn't already exist."""
+    """Recreate the isolated test database for a clean migration baseline."""
+    _require_disposable_test_database(TEST_DB_NAME)
     conn = _admin_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM pg_database WHERE datname = %s", (TEST_DB_NAME,)
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (TEST_DB_NAME,),
             )
-            if not cur.fetchone():
-                cur.execute(f'CREATE DATABASE "{TEST_DB_NAME}"')
+            cur.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {}").format(
+                    sql.Identifier(TEST_DB_NAME)
+                )
+            )
+            cur.execute(
+                sql.SQL("CREATE DATABASE {}").format(sql.Identifier(TEST_DB_NAME))
+            )
     finally:
         conn.close()
 
 
-def _apply_migrations(conn):
-    """Apply all SQL migrations from migrations/ in order.
-
-    Uses savepoints so that already-applied migrations (e.g. CREATE TABLE
-    without IF NOT EXISTS) are silently skipped instead of crashing.
-    """
-    migrations_dir = os.path.join(os.path.dirname(__file__), "..", "migrations")
-    migration_files = sorted(glob.glob(os.path.join(migrations_dir, "[0-9]*.sql")))
-
-    for migration_file in migration_files:
-        with open(migration_file, "r") as f:
-            sql = f.read()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-            conn.commit()
-        except psycopg2.errors.DuplicateTable:
-            conn.rollback()
-        except psycopg2.errors.DuplicateObject:
-            conn.rollback()
+def _apply_migrations():
+    """Apply pending migrations through the production migration runner."""
+    repo_root = Path(__file__).resolve().parents[1]
+    runner = repo_root / "migrations" / "migrate.sh"
+    env = os.environ.copy()
+    env.update(
+        {
+            "DB_HOST": str(db.DB_CONFIG["host"]),
+            "DB_PORT": str(db.DB_CONFIG["port"]),
+            "DB_NAME": str(db.DB_CONFIG["dbname"]),
+            "DB_USER": str(db.DB_CONFIG["user"]),
+            "DB_PASSWORD": str(db.DB_CONFIG["password"]),
+            "PGPASSWORD": str(db.DB_CONFIG["password"]),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(runner)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "test database migration failed:\n"
+            f"{result.stdout}{result.stderr}"
+        )
 
 
 @pytest.fixture(scope="session")
 def test_db():
-    """Session-scoped fixture: create memory_bank_test DB, apply migrations, override DB_CONFIG.
+    """Session-scoped fixture: recreate test DB, apply migrations, override DB_CONFIG.
 
     Yields the overridden DB_CONFIG dict. On teardown, restores the original config.
     """
@@ -102,9 +131,8 @@ def test_db():
     # Invalidate any pool created with old config
     close_pool()
 
-    # Apply all migrations
-    with db.get_connection() as conn:
-        _apply_migrations(conn)
+    # Apply pending migrations through the same runner used outside tests.
+    _apply_migrations()
 
     yield db.DB_CONFIG
 
