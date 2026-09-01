@@ -41,7 +41,7 @@ flowchart TD
 
     subgraph Ingest["Ingestion Pipeline"]
         P[Parse & Classify]
-        E[Embed — Bedrock Titan v2, 1024-dim]
+        E[Embed — local BGE-M3, 1024-dim]
         S[Store & Discover relationships]
     end
 
@@ -83,7 +83,7 @@ You feed content into Second Brain through several channels. Each channel has it
 
 | Channel | Connector | Notes |
 |---------|-----------|-------|
-| Codex Desktop Tasks | `src/capture/sources/codex.py` | Agent Task reference implementation; six-hour eligibility; scheduling approval-gated |
+| Codex Desktop Tasks | `src/capture/codex.py` | Agent Task reference implementation; six-hour eligibility; scheduling approval-gated |
 | Kiro CLI / IDE chats | Chat parsers (`src/parsers/`) | Agents call `memory_create` directly or chats are batch-extracted |
 | Quick Desktop | QD sync scripts | Documents, chats, feed events from `knowledge_v1.db` |
 | YouTube | `src/capture/youtube.py` (yt-dlp) | Transcript extraction, in-repo |
@@ -96,7 +96,7 @@ The pipeline (`src/ingest.py`) transforms raw content into searchable, classifie
 1. **Parse** — Extract text and metadata from the source format.
 2. **Classify** — Assign a *mem_class* (semantic, episodic, or procedural) following Tulving's memory taxonomy.
 3. **Chunk** — Split large content into coherent pieces.
-4. **Embed** — Generate a 1024-dimensional vector via Amazon Bedrock (Titan v2).
+4. **Embed** — Generate a 1,024-dimensional vector through local Ollama BGE-M3.
 5. **Store** — Write to PostgreSQL with auto-populated `search_vector` (tsvector trigger).
 6. **Discover relationships** — Identify typed edges (`supports`, `extends`, `derived_from`, etc.) to existing memories.
 
@@ -106,7 +106,8 @@ A single PostgreSQL 17 instance (native, localhost-only on port 5432) holds ever
 
 Key indexes powering retrieval:
 
-- **HNSW** on the `embedding` column (vector cosine similarity)
+- **HNSW** on the active BGE-M3 `embedding` column (vector cosine similarity); preserved Titan
+  vectors remain separate in `legacy_embedding`
 - **GIN** on `search_vector` (BM25 full-text)
 - **GIN** on `tags` and `metadata` (JSONB filtering)
 

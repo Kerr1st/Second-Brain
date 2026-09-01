@@ -1,6 +1,6 @@
 # Retrieval Component
 
-> **Status: canonical component contract.** Last reviewed: 2026-07-23.
+> **Status: canonical component contract.** Last reviewed: 2026-09-01.
 
 Retrieval converts a query and optional filters into a ranked, diverse set of
 relevant memories.
@@ -11,7 +11,7 @@ Retrieval owns:
 
 - vector and PostgreSQL full-text candidate search;
 - Reciprocal Rank Fusion (RRF);
-- duplicate and per-parent result suppression;
+- exact-content duplicate suppression and source-lineage diversity;
 - cognitive and utility reranking;
 - project, type, source, status, and time filters; and
 - retrieval reinforcement through access counts and timestamps.
@@ -21,10 +21,11 @@ choose the model backend that generates a query embedding.
 
 ## Contract
 
-The internal retrieval contract is:
+The agent-facing contract remains `memory_search(...)`. Its primary internal
+retrieval contract is:
 
 ```python
-hybrid_search(
+retrieve_memories(
     query_text,
     query_embedding,
     limit=10,
@@ -36,28 +37,48 @@ hybrid_search(
 )
 ```
 
-`rerank(results, query_text, query_project=None)` then applies the utility
-model and returns the final ordering. The MCP Interface composes these calls
-behind `memory_search`.
+`hybrid_search(...)` remains a compatibility interface for evaluation scripts
+and older internal callers. It does not define the agent-facing retrieval
+policy.
 
 ## Runtime flow
 
 ```text
 query
   → generate query embedding
-  → vector candidate search
-  → PostgreSQL full-text candidate search
+  → 100 vector candidates
+  → 100 PostgreSQL full-text candidates
   → RRF fusion
-  → near-duplicate and parent-cap filtering
   → cognitive and utility reranking
-  → increment retrieval reinforcement
+  → exact-content deduplication
+  → source-lineage diversity
+  → apply the requested output limit
+  → reinforce only returned memories
   → return ranked memories and selected context
 ```
+
+The candidate population is independent of ordinary requested result limits.
+For an unchanged corpus and reinforcement state, a smaller result set is a
+prefix of a larger one. RRF and utility ties use stable native IDs as their
+final tie-breaker.
+
+Source-lineage diversity resolves Codex-derived root memories through
+`metadata.task_source_url`, then falls back to `parent_id`, `source_url`, and
+the memory ID. The first pass prefers at most two results from one lineage so a
+single Agent Task cannot crowd out related evidence. If that would leave the
+response underfilled, a second pass adds the highest-ranked suppressed results.
+Two results are retained because one task may contain independently useful
+decisions and Correction Episodes.
 
 The reranker uses lexical overlap, title overlap, recency, memory type,
 project alignment, retrieval reinforcement, memory status, and available
 encoding context. The configured coefficients live in
 `src/rerank_weights.py`.
+
+Vector candidates come only from the active `ollama:bge-m3:1024` space. Full-text candidates cover
+all memories, including rows not yet locally re-embedded, so the gradual migration degrades to
+lexical retrieval rather than mixing BGE-M3 and Titan vectors. Titan vectors remain preserved in
+`legacy_embedding` and are not queried by the active path.
 
 ## Failure behavior
 
@@ -87,6 +108,7 @@ separately.
 - `tests/test_rerank.py`
 - `tests/test_rerank_drift.py`
 - `tests/test_question_search.py`
+- `tests/test_mcp_server.py`
 - `tests/test_project_properties.py`
 - `scripts/eval/recall_check.py`
 
@@ -97,3 +119,4 @@ separately.
 - [Search architecture](../ARCHITECTURE.md#search-architecture)
 - [Agentic retrieval plan](../AGENTIC-RETRIEVAL-PLAN.md)
 - [Quality baseline](../QUALITY-BASELINE-2026-06-06.md)
+- [ADR 0012: Use local BGE-M3](../adr/0012-use-local-bge-m3-embedding-space.md)

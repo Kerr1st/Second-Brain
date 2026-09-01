@@ -395,7 +395,20 @@ def _metadata_for_snapshot(
         }.items()
         if value is not None
     }
-    return {
+    provenance = {item.key: item.value for item in snapshot.provenance}
+    native_title = {
+        key: value
+        for key, value in {
+            "value": provenance.get("native_title_value"),
+            "source": provenance.get("native_title_source"),
+            "source_updated_at": provenance.get(
+                "native_title_source_updated_at"
+            ),
+            "sqlite_title": provenance.get("sqlite_title"),
+        }.items()
+        if value is not None
+    }
+    metadata = {
         "record_kind": "captured_task",
         "native_task_id": snapshot.native_task_id,
         "native_source_type": snapshot.source_type,
@@ -410,6 +423,9 @@ def _metadata_for_snapshot(
         "turns": [_turn_dict(turn) for turn in turns],
         "semantic_cursor": semantic_cursor,
     }
+    if native_title:
+        metadata["native_title"] = native_title
+    return metadata
 
 
 def _capture_snapshot(snapshot, now, connect) -> _CapturedTask:

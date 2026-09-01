@@ -10,7 +10,12 @@ from src.db import (
     create_relationship, get_relationships, find_temporal_neighbors,
     find_schemas_for_memory, get_schema_with_constituents,
 )
-from src.search import hybrid_search, rerank, increment_access_count
+from src.search import (
+    hybrid_search,
+    increment_access_count,
+    rerank,
+    retrieve_memories,
+)
 from src.embeddings import generate_embedding
 from src.classify import classify_memory
 from src.depth import compute_depth_score
@@ -147,9 +152,16 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
     created_after = None
     if since_days is not None and since_days > 0:
         created_after = datetime.now(timezone.utc) - timedelta(days=since_days)
-    results = hybrid_search(query, embedding, limit=limit, type=type, project=project,
-                            source_type=source_type, created_after=created_after, status=status)
-    results = rerank(results, query, query_project=project)
+    results = retrieve_memories(
+        query,
+        embedding,
+        limit=limit,
+        type=type,
+        project=project,
+        source_type=source_type,
+        created_after=created_after,
+        status=status,
+    )
 
     increment_access_count([str(r["id"]) for r in results])
 

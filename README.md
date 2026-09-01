@@ -19,8 +19,10 @@ For reviewers and AI code-review tools such as CodeRabbit, the most interesting 
 The recommended path is native PostgreSQL 17 via Homebrew on macOS. Use Python 3.13+; the examples below use Homebrew Python 3.14.
 
 ```bash
-brew install postgresql@17 pgvector
+brew install postgresql@17 pgvector ollama
 brew services start postgresql@17
+brew services start ollama
+ollama pull bge-m3
 
 python3.14 -m venv .venv
 source .venv/bin/activate
@@ -46,7 +48,7 @@ Copy `.env.example` to `.env` for local overrides. The default database credenti
 .venv/bin/python -m pytest
 ```
 
-Tests require a running local PostgreSQL instance. The test fixture creates an isolated `memory_bank_test` database. Embedding calls are mocked, so Bedrock credentials are not required for tests.
+Tests require a running local PostgreSQL instance. The test fixture creates an isolated `memory_bank_test` database. Embedding calls are mocked, so Ollama does not need to be running during tests.
 
 ## Documentation
 
@@ -85,7 +87,7 @@ scripts/
   eval/             Evaluation framework (retrieval quality metrics)
   batch_ingest_parallel.py   Parallel batch ingest (20 workers)
   ingest_qd_chats.py         Quick Desktop chat session extractor
-migrations/         Numbered SQL migrations (000-013) + runner script
+migrations/         Numbered SQL migrations (000-015) + runner script
 scheduling/         macOS launchd plist templates for local automation
 tests/              Property-based, unit, integration, and E2E tests
 docs/               Architecture specs and runbooks
@@ -98,6 +100,7 @@ staging/            Transient pipeline data (gitignored)
 **Working in the private/local deployment:**
 - Memory CRUD, hybrid search, reranking, retrieval reinforcement
 - MCP server (11 tools) connected to Kiro CLI and Claude Code
+- Hourly Codex Task capture for active User-Owned Tasks after six hours of inactivity
 - Quick Desktop hourly sync (memories, tags, KG, chats, feed events, Slack graph)
 - Daily encrypted backups to Google Drive + local (S3 de-scoped 2026-06-01)
 - Chat extraction, Crawlee ingestion, bookmark/YouTube scraping

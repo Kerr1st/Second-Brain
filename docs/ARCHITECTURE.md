@@ -24,7 +24,7 @@ breadth-first system view; component pages provide the maintained depth.
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Ingestion Pipeline                                         │
-│  Parse → Classify → Chunk → Embed (Bedrock Titan 1024d)     │
+│  Parse → Classify → Chunk → Embed (local BGE-M3 1024d)      │
 │  → Store → Discover relationships                           │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
@@ -100,6 +100,13 @@ the prior tail segment as context plus those new turns. See the canonical
 [capture policy](CAPTURE-COMPONENTS.md#monotonic-capture-policy) and
 [ADR 0003](adr/0003-accumulate-captured-task-history-monotonically.md).
 
+Codex task naming is source-native presentation provenance. The connector uses
+`threads.name`, then the latest valid `session_index.jsonl` observation, then
+legacy `threads.title`. A rename refreshes the same Captured Task without
+changing its Agent Turns, semantic cursor, derived memories, or inactivity
+clock. The source and available observation timestamp are retained with the
+current captured title.
+
 For each eligible Agent Task revision, source capture commits first. The same scheduled run then
 uses one Task Semantic Pass to return Topic Segments and zero or more supported decisions or
 insights for each segment, plus a Correction Episode when a user specifically corrects a prior
@@ -129,7 +136,7 @@ and captured identities remain separate.
 
 ## Database Schema
 
-The migration runner applies schema migrations `001` through `013` in order; migration `000`
+The migration runner applies schema migrations `001` through `015` in order; migration `000`
 bootstraps the version-tracking table.
 
 ### Core Tables
@@ -142,7 +149,9 @@ CREATE TABLE memories (
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     summary TEXT,
-    embedding vector(1024),
+    legacy_embedding vector(1024),  -- preserved Titan space; never mixed with active vectors
+    embedding vector(1024),         -- active local BGE-M3 space
+    embedding_space TEXT,           -- ollama:bge-m3:1024 when embedding is present
     tags TEXT[] DEFAULT '{}',
     source_url TEXT,
     source_type TEXT,                -- youtube, article, kiro_cli_chat, kiro_ide_chat, distilled_chat, quick_desktop_doc, quick_desktop_chat, quick_desktop_feed, ... (see DB for full set)
@@ -272,11 +281,14 @@ CREATE INDEX ON memories (last_accessed_at DESC);
 Hybrid retrieval with cognitive science-grounded reranking. Implementation: `src/search.py`.
 
 1. **BM25 full-text search** — PostgreSQL `tsvector/tsquery` with GIN index
-2. **Vector cosine search** — pgvector HNSW index (1024-dim Titan embeddings)
-3. **Reciprocal Rank Fusion** — `score = 1/(k+rank_vec) + 1/(k+rank_bm25)`, k=60
-4. **Utility reranking** — weighted scoring (see below)
-5. **Retrieval reinforcement** — `access_count` incremented on retrieval, `last_accessed_at` updated
-6. **Temporal context** — top result's temporal neighbors (±24h) appended
+2. **Vector cosine search** — pgvector HNSW index (active 1024-dim local BGE-M3 embeddings)
+3. **Stable candidate population** — ordinary output limits search the same 100 candidates per channel
+4. **Reciprocal Rank Fusion** — `score = 1/(k+rank_vec) + 1/(k+rank_bm25)`, k=60
+5. **Utility reranking** — weighted scoring over the complete fused pool (see below)
+6. **Deduplication and lineage diversity** — exact-content collapse, then a soft preference for at most two results per source task
+7. **Final result limit** — applied only after ranking and diversity, preserving prefix stability for an unchanged state
+8. **Retrieval reinforcement** — `access_count` and `last_accessed_at` update only for returned results
+9. **Temporal context** — top result's temporal neighbors (±24h) appended
 
 ### Reranking Formula
 
@@ -337,7 +349,7 @@ See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale.
 | Knowledge store | PostgreSQL 17 + pgvector (native Homebrew, localhost:5432; Docker container retained as rollback pending Phase 5 decommission) |
 | Agent interface | MCP server (`src/mcp_server.py`) |
 | LLM (reasoning) | Kiro CLI (Claude Opus 4.8) under the current Kiro plan; pluggable per-machine via `config/backends.toml` (see MODEL-BACKENDS.md) |
-| Embeddings | Amazon Bedrock (Titan v2, 1024-dim) |
+| Embeddings | Local Ollama BGE-M3 (1024-dim); Titan vectors retained as legacy evidence |
 | Scheduling | macOS launchd |
 | Backup transport | rclone (Google Drive) + local + git — S3 de-scoped 2026-06-01 |
 | Backup encryption | GPG (AES-256) |
@@ -373,7 +385,7 @@ src/
   express.py             Express delivery: briefing compose/edit/render, feedback, Gmail push
   db.py                  PostgreSQL connection, memory CRUD, relationships
   search.py              Hybrid search, reranking, retrieval reinforcement
-  embeddings.py          Bedrock Titan embedding generation
+  embeddings.py          Provider-neutral Interface; local Ollama and legacy Titan Adapters
   ingest.py              Ingestion pipeline
   classify.py            Memory classifier (semantic/episodic/procedural)
   depth.py               Depth scorer (0.0–1.0)

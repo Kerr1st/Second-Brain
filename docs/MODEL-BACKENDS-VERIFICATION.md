@@ -203,9 +203,9 @@ adapter maps that to `RuntimeError` (never a silent tool-less success).
       and message: `__________`.
 - [ ] Restore the real server entry.
 
-### 2. Sandbox `network_access` path reaches Postgres/Bedrock (Req 13.4, 15)
+### 2. Sandbox `network_access` path reaches Postgres/Ollama (Req 13.4, 15)
 
-Goal: prove the agentic sandbox lets the MCP server reach the DB/Bedrock, and
+Goal: prove the agentic sandbox lets the MCP server reach PostgreSQL and the local Ollama runtime, and
 that the read-only tool-less sandbox is used when `tools=False`.
 
 - [ ] `tools=True`: confirm the adapter emits `--sandbox workspace-write` **and**
@@ -213,10 +213,10 @@ that the read-only tool-less sandbox is used when `tools=False`.
       `_tool_and_sandbox_args`, or `codex exec` argv). Run a real `tools=True`
       turn that asks the model to `memory_search` for a known term; confirm a
       **tool result with real rows** comes back (proves the sandboxed server
-      reached Postgres, and embeddings reached Bedrock). Record row count:
+      reached PostgreSQL and local BGE-M3). Record row count:
       `______`.
 - [ ] Negative control: rerun with `network_access` **off** (or `--sandbox
-      read-only`) and confirm the server's DB/Bedrock call is blocked → the
+      read-only`) and confirm the server's database/Ollama call is blocked → the
       `MCP_Startup_Probe` raises `RuntimeError` (the secondary
       sandbox-reachability check, Req 14.2/14.3). Record behavior: `__________`.
 - [ ] `tools=False`: confirm the adapter emits `--sandbox read-only` and **no**

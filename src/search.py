@@ -30,16 +30,17 @@ from src.rerank_weights import (
 
 # --- Hybrid Search (BM25 + Vector + RRF) ---
 
-def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None, project=None,
-                  source_type=None, created_after=None):
-    """Combine pgvector cosine search + PostgreSQL full-text search via RRF.
+DEFAULT_CANDIDATE_LIMIT = 100
+DEFAULT_RESULTS_PER_LINEAGE = 2
 
-    Returns list of dicts with 'rrf_score' field, sorted by fused rank.
-    """
+
+def _hybrid_candidates(query_text, query_embedding, *, candidate_limit, type=None,
+                       status=None, project=None, source_type=None,
+                       created_after=None):
+    """Return one deterministic RRF-fused candidate population."""
     k = 60  # RRF constant
-    prefetch = limit * 4  # fetch more candidates for fusion
 
-    conditions = [sql.SQL("embedding IS NOT NULL")]
+    conditions = []
     params_base = []
     if type:
         conditions.append(sql.SQL("type = %s"))
@@ -56,7 +57,8 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
     if created_after:
         conditions.append(sql.SQL("created_at >= %s"))
         params_base.append(created_after)
-    where = sql.SQL("WHERE ") + sql.SQL(" AND ").join(conditions)
+    vector_conditions = [sql.SQL("embedding IS NOT NULL"), *conditions]
+    vector_where = sql.SQL("WHERE ") + sql.SQL(" AND ").join(vector_conditions)
     # Any WHERE filter post-filters the HNSW result and can make it under-return;
     # iterative scan keeps scanning until `limit` rows satisfy the filter (pgvector >=0.8).
     filtered = bool(type or status or project or source_type or created_after)
@@ -67,24 +69,25 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
                 cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
             # Vector search
             emb_str = str(query_embedding)
-            vec_params = [emb_str] + params_base + [emb_str, prefetch]
+            vec_params = [emb_str] + params_base + [emb_str, candidate_limit]
             vec_query = sql.SQL(
                 "SELECT id, 1 - (embedding <=> %s::vector) AS similarity"
                 " FROM memories {where}"
-                " ORDER BY embedding <=> %s::vector LIMIT %s"
-            ).format(where=where)
+                " ORDER BY embedding <=> %s::vector, id LIMIT %s"
+            ).format(where=vector_where)
             cur.execute(vec_query, vec_params)
             vec_results = {str(r["id"]): i + 1 for i, r in enumerate(cur.fetchall())}
 
             # Full-text search
             ts_query = " | ".join(re.sub(r"[^\w\s]", "", query_text).split())
             if ts_query.strip():
-                fts_params = [ts_query] + params_base + [prefetch]
-                fts_where = where + sql.SQL(" AND search_vector IS NOT NULL")
+                fts_params = [ts_query] + params_base + [candidate_limit]
+                fts_conditions = [*conditions, sql.SQL("search_vector IS NOT NULL")]
+                fts_where = sql.SQL("WHERE ") + sql.SQL(" AND ").join(fts_conditions)
                 fts_query = sql.SQL(
                     "SELECT id, ts_rank(search_vector, to_tsquery('english', %s)) AS rank"
                     " FROM memories {where}"
-                    " ORDER BY rank DESC LIMIT %s"
+                    " ORDER BY rank DESC, id LIMIT %s"
                 ).format(where=fts_where)
                 cur.execute(fts_query, fts_params)
                 fts_results = {str(r["id"]): i + 1 for i, r in enumerate(cur.fetchall())}
@@ -94,42 +97,76 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
             # RRF fusion
             all_ids = set(vec_results) | set(fts_results)
             scored = []
-            absent_rank = prefetch + 1
+            absent_rank = candidate_limit + 1
             for mid in all_ids:
                 vec_rank = vec_results.get(mid, absent_rank)
                 fts_rank = fts_results.get(mid, absent_rank)
                 rrf = 1.0 / (k + vec_rank) + 1.0 / (k + fts_rank)
                 scored.append((mid, rrf))
-            scored.sort(key=lambda x: x[1], reverse=True)
+            scored.sort(key=lambda item: (-item[1], item[0]))
 
-            # Fetch a candidate pool (larger than `limit`) so near-duplicate
-            # results can be dropped while still returning `limit` distinct rows.
-            cand_ids = [s[0] for s in scored[:prefetch]]
+            cand_ids = [item[0] for item in scored[:candidate_limit]]
             if not cand_ids:
                 return []
             cur.execute("SELECT * FROM memories WHERE id = ANY(%s::uuid[])", (cand_ids,))
             row_by_id = {str(r["id"]): r for r in cur.fetchall()}
 
-        # Dedup (P2): collapse near-identical content and cap results per parent
-        # so raw chat/doc chunks and the dual-scheme imports stop flooding results.
-        out, seen_content, per_parent = [], set(), {}
-        for mid, score in scored[:prefetch]:
+        out = []
+        for mid, score in scored[:candidate_limit]:
             row = row_by_id.get(mid)
-            if row is None:
-                continue
-            ckey = re.sub(r"\s+", " ", (row.get("content") or "")).strip().lower()[:300]
-            if ckey and ckey in seen_content:
-                continue
-            pkey = str(row.get("parent_id") or mid)
-            if per_parent.get(pkey, 0) >= 2:
-                continue
-            seen_content.add(ckey)
-            per_parent[pkey] = per_parent.get(pkey, 0) + 1
-            row["rrf_score"] = score
-            out.append(row)
-            if len(out) >= limit:
-                break
+            if row is not None:
+                row["rrf_score"] = score
+                out.append(row)
         return out
+
+
+def _content_key(memory):
+    return re.sub(
+        r"\s+", " ", (memory.get("content") or "")
+    ).strip().lower()[:300]
+
+
+def _exact_content_key(memory):
+    return re.sub(
+        r"\s+", " ", (memory.get("content") or "")
+    ).strip().lower()
+
+
+def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None, project=None,
+                  source_type=None, created_after=None):
+    """Compatibility search returning fused, deduplicated candidates.
+
+    User-facing retrieval uses :func:`retrieve_memories`, which reranks a
+    stable candidate population before applying the requested output size.
+    """
+    candidates = _hybrid_candidates(
+        query_text,
+        query_embedding,
+        candidate_limit=max(limit, limit * 4),
+        type=type,
+        status=status,
+        project=project,
+        source_type=source_type,
+        created_after=created_after,
+    )
+
+    # Preserve established direct-call behavior for evaluation scripts and
+    # older internal callers while memory_search uses the deeper interface.
+    out, seen_content, per_parent = [], set(), {}
+    for row in candidates:
+        ckey = _content_key(row)
+        if ckey and ckey in seen_content:
+            continue
+        pkey = str(row.get("parent_id") or row["id"])
+        if per_parent.get(pkey, 0) >= DEFAULT_RESULTS_PER_LINEAGE:
+            continue
+        if ckey:
+            seen_content.add(ckey)
+        per_parent[pkey] = per_parent.get(pkey, 0) + 1
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def compute_spacing_bonus(last_accessed_at, now=None):
@@ -268,8 +305,92 @@ def rerank(results, query_text, query_project=None):
             + staleness_penalty
         )
 
-    results.sort(key=lambda r: r["rerank_score"], reverse=True)
+    def stable_rank_key(memory):
+        created = memory.get("created_at")
+        created_timestamp = (
+            created.timestamp() if hasattr(created, "timestamp") else 0.0
+        )
+        return (
+            -float(memory.get("rerank_score", 0.0)),
+            -float(memory.get("rrf_score", 0.0)),
+            -created_timestamp,
+            str(memory.get("id", "")),
+        )
+
+    results.sort(key=stable_rank_key)
     return results
+
+
+def _metadata(memory):
+    metadata = memory.get("metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            import json
+
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError):
+            return {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _lineage_key(memory):
+    """Resolve the source evidence family used for result diversity."""
+    metadata = _metadata(memory)
+    return str(
+        metadata.get("task_source_url")
+        or memory.get("parent_id")
+        or memory.get("source_url")
+        or memory["id"]
+    )
+
+
+def _select_diverse_results(ranked, limit):
+    """Deduplicate and prefer two results per lineage, then fill overflow."""
+    if limit <= 0:
+        return []
+
+    unique = []
+    seen_content = set()
+    for memory in ranked:
+        ckey = _exact_content_key(memory)
+        if ckey and ckey in seen_content:
+            continue
+        if ckey:
+            seen_content.add(ckey)
+        unique.append(memory)
+
+    selected = []
+    overflow = []
+    per_lineage = {}
+    for memory in unique:
+        lineage = _lineage_key(memory)
+        if per_lineage.get(lineage, 0) < DEFAULT_RESULTS_PER_LINEAGE:
+            selected.append(memory)
+            per_lineage[lineage] = per_lineage.get(lineage, 0) + 1
+        else:
+            overflow.append(memory)
+        if len(selected) >= limit:
+            return selected[:limit]
+
+    selected.extend(overflow[: max(0, limit - len(selected))])
+    return selected[:limit]
+
+
+def retrieve_memories(query_text, query_embedding, limit=10, type=None, status=None,
+                      project=None, source_type=None, created_after=None):
+    """Retrieve a stable, utility-ranked, provenance-diverse result set."""
+    candidates = _hybrid_candidates(
+        query_text,
+        query_embedding,
+        candidate_limit=max(DEFAULT_CANDIDATE_LIMIT, limit),
+        type=type,
+        status=status,
+        project=project,
+        source_type=source_type,
+        created_after=created_after,
+    )
+    ranked = rerank(candidates, query_text, query_project=project)
+    return _select_diverse_results(ranked, limit)
 
 
 def increment_access_count(memory_ids):

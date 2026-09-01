@@ -19,8 +19,9 @@
 > Full suite **green** on the `laptop` profile (default, all-Kiro —
 > zero behavior change; the ~688 pre-feature baseline is unchanged) and the
 > adapter/resolver/probe suites pass under the `claude_code` (`mini`) profile
-> against the mocked adapters. The embedding path (Bedrock Titan, `src/embeddings.py`)
-> is **untouched** (Req 20.3). Per-environment verification is recorded in
+> against the mocked adapters. The later local-embedding Vertical Slice replaced the active
+> Bedrock Titan path with Ollama BGE-M3 under ADR 0012; the backend resolver remains independent
+> from embedding selection. Per-environment verification is recorded in
 > **`docs/MODEL-BACKENDS-VERIFICATION.md`**.
 >
 > > **Agentic Claude Code path (tools=True) — FIXED (spec `claude-code-stream-json-probe-fix`).**
@@ -274,9 +275,8 @@ Set per machine from what's installed + authenticated there.
 
 ### Mini notes (corrected from the earlier draft)
 
-- **AWS Bedrock creds are required on the Mini regardless of agent backend** — embeddings
-  (`src/embeddings.py`, Titan) always call Bedrock directly. This *favors* Claude Code on Bedrock:
-  one credential set serves both embeddings and the agent calls.
+- **AWS Bedrock credentials are optional for embeddings.** `src/embeddings.py` uses local Ollama
+  BGE-M3. Credentials are needed only when the selected reasoning backend itself uses Bedrock.
 - **Unattended credentials (the corrected story).** `CLAUDE_CODE_USE_BEDROCK=1` + `awsAuthRefresh`
   gives **mostly-unattended** operation: token refresh is silent *within the SSO session window*
   (days–weeks if the session is configured for it), then a human must re-auth (`aws sso login` is

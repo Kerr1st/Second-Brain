@@ -15,11 +15,15 @@ Every time you start a new session with an AI agent, it begins with a blank slat
 
 ### 1. Capture
 
-Content enters the system from multiple channels: Kiro CLI chats, Kiro IDE chats, Quick Desktop documents and chats, feed events, Slack threads, YouTube transcripts, and web articles. You don't manually file anything — capture happens automatically through scheduled sync jobs and agent interactions.
+Content enters the system from multiple channels: active User-Owned Codex Tasks, Kiro CLI chats,
+Kiro IDE chats, Quick Desktop documents and chats, feed events, Slack threads, YouTube transcripts,
+and web articles. You don't manually file anything—capture happens automatically through scheduled
+sync jobs and agent interactions. Codex Tasks become eligible after six hours of inactivity;
+archived-history backfill remains separately controlled.
 
 ### 2. Ingest
 
-Captured content is parsed, classified by *memory class* (semantic, episodic, or procedural), assigned a depth score, chunked, embedded using Amazon Bedrock Titan v2 (1024 dimensions), and stored in PostgreSQL with pgvector. The pipeline also auto-discovers typed relationships between the new memory and existing ones.
+Captured content is parsed, classified by *memory class* (semantic, episodic, or procedural), assigned a depth score, chunked, embedded locally using Ollama BGE-M3 (1,024 dimensions), and stored in PostgreSQL with pgvector. The pipeline also auto-discovers typed relationships between the new memory and existing ones.
 
 ### 3. Retrieve
 

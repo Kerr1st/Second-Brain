@@ -110,7 +110,7 @@ Common issues and fixes:
 | "No module named src" | `cwd` is wrong | Set `cwd` to the repo root (the directory containing `src/`) |
 | "ModuleNotFoundError: No module named 'mcp'" | `command` points to system Python, not the venv | Use the full path: `/Users/<you>/second-brain/.venv/bin/python` |
 | "connection refused" on port 5432 | PostgreSQL not running | Run `brew services start postgresql@17` |
-| Bedrock / embedding errors | Expired AWS SSO session | Run `aws sso login --profile default` |
+| Ollama / embedding errors | Local runtime or BGE-M3 unavailable | Run `brew services start ollama` and `ollama pull bge-m3` |
 
 For additional diagnostics, see [Troubleshooting](troubleshoot.md).
 

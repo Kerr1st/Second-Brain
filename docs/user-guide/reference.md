@@ -122,11 +122,13 @@ Composes and sends a gated Gmail push. Sends **only** when a new cross-project s
 | `DB_POOL_MIN` / `DB_POOL_MAX` | Connection pool size | `1` / `5` |
 | `TEST_DB_NAME` | Destructive test database; must be explicitly allowlisted | `memory_bank_test` |
 | `SECOND_BRAIN_PROFILE` | Select model backend profile from `config/backends.toml` | `laptop` (default), `mini` |
-| `BEDROCK_REGION` | AWS region for Titan embeddings | `us-east-1` |
+| `EMBEDDING_PROVIDER` | Active embedding Adapter; production accepts local Ollama | `ollama` |
+| `OLLAMA_BASE_URL` | Local Ollama endpoint | `http://127.0.0.1:11434` |
+| `OLLAMA_EMBEDDING_MODEL` | Active 1,024-dimension model | `bge-m3` |
 | `EXPRESS_EMAIL_TO` | Recipient for Express Gmail push | `<your-email@example.com>` |
 | `EXPRESS_EMAIL_FROM` | Sender address for Express Gmail push | `<your-sender@gmail.com>` |
 | `GMAIL_APP_PASSWORD` | Gmail app password for Express push | `<your-app-password>` |
-| AWS profile (`default`) | SSO credentials for Bedrock (embeddings + LLM) | Configured via `aws sso login` |
+| AWS profile (`default`) | Optional SSO credentials for Bedrock-backed reasoning profiles | Configured via `aws sso login` |
 
 > [!NOTE]
 > Email variables are set on the LaunchAgent that runs `express_push.py`. Until set, the push composes but skips sending (benign exit 0).

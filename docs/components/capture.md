@@ -1,6 +1,6 @@
 # Capture Component
 
-> **Status: canonical component contract.** Last reviewed: 2026-08-29.
+> **Status: canonical component contract.** Last reviewed: 2026-09-01.
 
 Capture reaches external sources, decides what is eligible, preserves
 source-native identity and provenance, and normalizes material for durable
@@ -84,7 +84,7 @@ ownership evidence remains unspecified.
 flowchart TD
     A["scripts/capture_codex.py"] --> B["run_codex_capture()"]
     B --> C["Codex Desktop Source Connector"]
-    C --> D["Read state_5.sqlite and rollout JSONL"]
+    C --> D["Read state_5.sqlite, session_index.jsonl, and rollout JSONL"]
     D --> E{"Task inactive for at least six hours?"}
     E -->|"No"| F["Skip"]
     E -->|"Yes"| G["Normalize complete Agent Turns and attachments"]
@@ -105,6 +105,29 @@ A resumed Codex Task remains the same source task. After another six hours of
 inactivity, a later run appends only unseen complete turns. Changed, missing,
 or reordered known turns are Source Drift and do not rewrite stored evidence.
 
+## Codex native title resolution
+
+The Codex Source Connector exposes the latest available native sidebar title,
+not the initial prompt commonly retained in SQLite's legacy `threads.title`
+field. It resolves titles in this order:
+
+1. non-blank `state_5.sqlite` `threads.name`;
+2. the latest valid `session_index.jsonl` `thread_name` observation; and
+3. `state_5.sqlite` `threads.title` as the compatibility fallback.
+
+The selected value, source, available title-observation timestamp, and SQLite
+fallback are retained in the Captured Task's `metadata.native_title`. The
+session index is read once per enumeration; missing files, unreadable files,
+invalid records, and an in-progress partial final append never block prompt and
+outcome capture.
+
+A later native rename refreshes the existing Captured Task's title, rendered
+heading, and title provenance only. It does not append an Agent Turn, move the
+Semantic Processing Cursor, invoke the Task Semantic Pass, rename existing
+Topic Segments or derived memories, or affect the six-hour inactivity clock.
+Second Brain stores the current title observation rather than duplicating
+Codex's append-only title history.
+
 ## Entry points
 
 | Purpose | Entry point |
@@ -120,7 +143,7 @@ or reordered known turns are Source Drift and do not rewrite stored evidence.
 
 | Source | Current state |
 |---|---|
-| Codex Desktop | Reference Agent Task implementation; one-task LaunchAgent canary loaded; semantic retry awaits embedding credentials; full backfill disabled |
+| Codex Desktop | Reference Agent Task implementation; hourly active User-Owned Task capture enabled with local embeddings; archived backfill disabled |
 | YouTube | In-repository connector |
 | Quick Desktop | Working integration through several existing scripts; not yet consolidated |
 | Kiro CLI and IDE | Existing extraction and ingestion scripts; not yet migrated to the Codex Agent Task standard |
@@ -139,6 +162,7 @@ Every agentic-assistant connector must pass the same behavioral contract:
 - only user prompts and visible final outcomes become Agent Turns;
 - source identity is stable and integration-namespaced;
 - Task Refresh is monotonic and preserves Exact Provenance; and
+- native title changes refresh presentation provenance without semantic work;
 - source-specific native record fixtures exercise the connector's ownership
   evidence rather than only an already-normalized representation.
 
@@ -155,9 +179,9 @@ should be extracted only when the second connector demonstrates the real seam.
 
 ## Operations
 
-Codex capture is write-capable but approval-gated. Dry runs and task-bounded
-proofs use the same command as future automation. Do not install a Codex
-LaunchAgent or run an unrestricted `--backfill` without explicit approval.
+Codex capture runs hourly for active User-Owned Tasks. Dry runs and task-bounded proofs use the
+same command. The production job passes neither `--task-id` nor `--backfill`; archived historical
+backfill still requires separate explicit approval.
 
 ## Related
 

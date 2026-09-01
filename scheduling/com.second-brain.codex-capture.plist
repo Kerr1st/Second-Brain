@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.second-brain.codex-capture</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/path/to/second-brain/scripts/jobs/codex_capture.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SECOND_BRAIN_PROFILE</key>
+        <string>codex_local</string>
+        <key>CODEX_CLI</key>
+        <string>/Applications/ChatGPT.app/Contents/Resources/codex</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/path/to/second-brain/logs/codex-capture.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/second-brain/logs/codex-capture.log</string>
+</dict>
+</plist>
