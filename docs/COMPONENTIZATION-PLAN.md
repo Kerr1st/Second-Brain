@@ -46,8 +46,8 @@ duplicated** responsibilities with other components, and (5) an entry in the com
 
 ## Roadmap (incremental — keep the test suite green, commit per step, push origin+mini)
 
-**Phase A — Capture (in progress).** Follow `ROADMAP.md` vertically. Operate and review the bounded
-Codex canary, prove a native Claude Code Adapter, and only then extract the shared Agent Task
+**Phase A — Capture (in progress).** Follow `ROADMAP.md` vertically. Operate and review hourly
+active-task Codex capture, prove a native Claude Code Adapter, and only then extract the shared Agent Task
 Capture seam demonstrated by both. Do not pre-build a generic `runner.py`, lift every connector, or
 claim standardization from normalized fixtures alone. Dead-code retirement remains safe independent
 work when it does not speculate about the future interface.
@@ -81,7 +81,7 @@ structure visible. This is import churn for cosmetics — do it last, in one mec
 - ✅ Component model defined (this doc) + capture deep-dive (`CAPTURE-COMPONENTS.md`).
 - ✅ Clean core boundaries verified (no core→capture imports); docs reconciled to ground truth.
 - ✅ `youtube` connector shipped.
-- ▢ Phase A remainder (Codex canary, Claude proof, then evidence-backed seam extraction and later
+- ▢ Phase A remainder (Codex active-task operations, Claude proof, then evidence-backed seam extraction and later
   source-specific vertical rollouts).
 - ▢ Phase B store-primitive collapse.
 - ▢ Phases C–E.

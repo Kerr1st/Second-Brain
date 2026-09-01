@@ -149,6 +149,8 @@ def test_real_runner_builds_fresh_database_and_reruns_cleanly() -> None:
             "011_backend_provenance.sql",
             "012_agent_task_capture.sql",
             "013_context_governance.sql",
+            "014_local_embedding_space.sql",
+            "015_enforce_active_embedding_space.sql",
         ]
         with psycopg2.connect(**_connection_config(database)) as conn:
             with conn.cursor() as cur:
@@ -156,9 +158,29 @@ def test_real_runner_builds_fresh_database_and_reruns_cleanly() -> None:
                 applied_versions = [row[0] for row in cur.fetchall()]
                 cur.execute("SHOW hnsw.ef_search")
                 ef_search = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'memories'
+                      AND column_name IN ('embedding', 'legacy_embedding', 'embedding_space')
+                    ORDER BY column_name
+                    """
+                )
+                embedding_columns = [row[0] for row in cur.fetchall()]
+                cur.execute(
+                    """
+                    SELECT pg_get_constraintdef(oid)
+                    FROM pg_constraint
+                    WHERE conname = 'memories_active_embedding_space'
+                    """
+                )
+                active_space_constraint = cur.fetchone()[0]
 
         assert applied_versions == expected_versions
         assert ef_search == "200"
+        assert embedding_columns == ["embedding", "embedding_space", "legacy_embedding"]
+        assert "ollama:bge-m3:1024" in active_space_constraint
 
         second = _run_runner(database, MIGRATIONS_DIR)
         assert second.returncode == 0, second.stdout + second.stderr

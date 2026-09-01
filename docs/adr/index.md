@@ -19,6 +19,7 @@ that govern their behavior.
 | [0009](0009-use-codex-jsonl-for-model-execution.md) | Use Codex JSONL as the default model-execution output | Model Execution |
 | [0010](0010-prove-capabilities-vertically-before-generalizing.md) | Prove capabilities vertically before generalizing across integrations | All |
 | [0011](0011-use-bounded-context-packs-and-outcome-receipts.md) | Use bounded context packs and outcome receipts for agent recall | Retrieval; MCP Interface; Steering Governance |
+| [0012](0012-use-local-bge-m3-embedding-space.md) | Use local BGE-M3 as the active embedding space | Ingestion & Storage; Retrieval; Model Execution |
 
 ## Related
 

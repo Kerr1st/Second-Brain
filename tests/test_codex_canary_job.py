@@ -56,7 +56,7 @@ def test_canary_job_invokes_capture_for_only_the_allowlisted_task(tmp_path: Path
     ]
 
 
-def test_canary_job_waits_without_noise_when_embedding_credentials_are_absent(
+def test_canary_job_waits_without_noise_when_local_embedding_is_unavailable(
     tmp_path: Path,
 ):
     calls = tmp_path / "calls"
@@ -84,5 +84,5 @@ def test_canary_job_waits_without_noise_when_embedding_credentials_are_absent(
     )
 
     assert result.returncode == 0
-    assert "waiting_for_embedding_credentials" in result.stdout
+    assert "waiting_for_local_embedding" in result.stdout
     assert not calls.exists()

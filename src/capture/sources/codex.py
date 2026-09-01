@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import mimetypes
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
@@ -26,6 +28,7 @@ from src.capture.agent_tasks import (
 
 
 SOURCE_TYPE = "codex_desktop"
+logger = logging.getLogger(__name__)
 
 _REQUIRED_THREAD_COLUMNS = frozenset(
     {
@@ -56,6 +59,13 @@ class CodexSourceParseError(RuntimeError):
 
 class CodexSourceChangedDuringRead(RuntimeError):
     """A Codex rollout changed while it was being read and must be retried."""
+
+
+@dataclass(frozen=True, slots=True)
+class _TitleObservation:
+    title: str
+    updated_at: datetime
+    line_number: int
 
 
 class _TaskOwnership(str, Enum):
@@ -123,6 +133,57 @@ def _record_timestamp(value: object) -> datetime | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
     return parsed.astimezone(UTC)
+
+
+def _load_sidebar_titles(path: Path) -> dict[str, _TitleObservation]:
+    """Replay valid native sidebar-title observations from Codex's index."""
+    try:
+        with path.open(encoding="utf-8") as index_file:
+            lines = index_file.readlines()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        logger.warning("cannot read Codex session index %s: %s", path, exc)
+        return {}
+
+    observations: dict[str, _TitleObservation] = {}
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            is_partial_tail = (
+                line_number == len(lines) and not line.endswith(("\n", "\r"))
+            )
+            if not is_partial_tail:
+                logger.warning(
+                    "invalid Codex session-index record at line %s", line_number
+                )
+            continue
+        if not isinstance(record, dict):
+            continue
+        task_id = record.get("id")
+        title = record.get("thread_name")
+        updated_at = _record_timestamp(record.get("updated_at"))
+        if not (
+            isinstance(task_id, str)
+            and task_id
+            and isinstance(title, str)
+            and title.strip()
+            and updated_at is not None
+        ):
+            continue
+        observation = _TitleObservation(
+            title=title.strip(),
+            updated_at=updated_at,
+            line_number=line_number,
+        )
+        previous = observations.get(task_id)
+        if previous is None or (
+            observation.updated_at,
+            observation.line_number,
+        ) > (previous.updated_at, previous.line_number):
+            observations[task_id] = observation
+    return observations
 
 
 def _rollout_records(source_locator: str):
@@ -284,6 +345,7 @@ class CodexDesktopSource:
         self._observed_at: datetime | None = None
         self.skipped_delegated = 0
         self.skipped_unknown_ownership = 0
+        self._title_provenance: dict[str, tuple[ProvenanceField, ...]] = {}
 
     def enumerate_tasks(self, now: datetime) -> Iterable[AgentTaskRef]:
         """Enumerate user-owned task references from Codex's local index."""
@@ -292,6 +354,10 @@ class CodexDesktopSource:
         self._observed_at = now.astimezone(UTC)
         self.skipped_delegated = 0
         self.skipped_unknown_ownership = 0
+        self._title_provenance = {}
+        sidebar_titles = _load_sidebar_titles(
+            self.codex_home / "session_index.jsonl"
+        )
 
         uri = f"file:{self._state_path}?mode=ro"
         with sqlite3.connect(uri, uri=True) as conn:
@@ -302,8 +368,12 @@ class CodexDesktopSource:
                 "thread_spawn_edges",
                 _REQUIRED_SPAWN_EDGE_COLUMNS,
             )
+            thread_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(threads)")
+            }
+            name_selection = "t.name" if "name" in thread_columns else "NULL"
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     t.id,
                     t.rollout_path,
@@ -312,6 +382,7 @@ class CodexDesktopSource:
                     t.source,
                     t.cwd,
                     t.title,
+                    {name_selection} AS name,
                     t.archived,
                     t.agent_path,
                     t.created_at_ms,
@@ -340,6 +411,34 @@ class CodexDesktopSource:
                 self.skipped_unknown_ownership += 1
                 continue
             task_id = row["id"]
+            sqlite_title = row["title"]
+            sqlite_name = row["name"]
+            title_observation = sidebar_titles.get(task_id)
+            if isinstance(sqlite_name, str) and sqlite_name.strip():
+                effective_title = sqlite_name.strip()
+                title_source = "sqlite_name"
+                title_updated_at = None
+            elif title_observation is not None:
+                effective_title = title_observation.title
+                title_source = "session_index"
+                title_updated_at = title_observation.updated_at
+            else:
+                effective_title = sqlite_title
+                title_source = "sqlite_title"
+                title_updated_at = None
+            title_provenance = [
+                ProvenanceField("native_title_source", title_source),
+                ProvenanceField("native_title_value", effective_title),
+                ProvenanceField("sqlite_title", sqlite_title),
+            ]
+            if title_updated_at is not None:
+                title_provenance.append(
+                    ProvenanceField(
+                        "native_title_source_updated_at",
+                        title_updated_at.isoformat(),
+                    )
+                )
+            self._title_provenance[task_id] = tuple(title_provenance)
             sqlite_activity = _utc_timestamp(
                 row["updated_at_ms"], row["updated_at"]
             )
@@ -349,7 +448,7 @@ class CodexDesktopSource:
                     native_task_id=task_id,
                     source_identity=f"codex://{task_id}",
                     source_locator=row["rollout_path"],
-                    title=row["title"],
+                    title=effective_title,
                     source_created_at=_utc_timestamp(
                         row["created_at_ms"], row["created_at"]
                     ),
@@ -513,5 +612,6 @@ class CodexDesktopSource:
                     key="incomplete_turn_count",
                     value="1" if pending_prompts else "0",
                 ),
+                *self._title_provenance.get(ref.native_task_id, ()),
             ),
         )

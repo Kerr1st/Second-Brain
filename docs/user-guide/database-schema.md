@@ -27,7 +27,9 @@ Primary knowledge store. Each row is one *memory* (content + embedding + metadat
 | `title` | `TEXT NOT NULL` | Short descriptor |
 | `content` | `TEXT NOT NULL` | Full body text |
 | `summary` | `TEXT` | Optional condensed version |
-| `embedding` | `vector(1024)` | Amazon Bedrock Titan v2 embedding |
+| `legacy_embedding` | `vector(1024)` | Preserved Amazon Titan vector space; never mixed with active vectors |
+| `embedding` | `vector(1024)` | Active local BGE-M3 vector |
+| `embedding_space` | `TEXT` | Active identity; `ollama:bge-m3:1024` when `embedding` is present |
 | `tags` | `TEXT[]` | Default `'{}'` |
 | `source_url` | `TEXT` | Origin URL if applicable |
 | `source_type` | `TEXT` | Capture channel (e.g. `youtube`, `kiro_cli_chat`, `quick_desktop_doc`) |

@@ -53,7 +53,7 @@ stages.
 
 | Component | Owns | Primary contract | Status | Canonical page |
 |---|---|---|---|---|
-| Capture | Source access, eligibility, source identity, and normalization | Source-native content becomes normalized evidence | Implemented unevenly by source; Codex Task Capture is proven but not scheduled | [Capture](capture.md) |
+| Capture | Source access, eligibility, source identity, and normalization | Source-native content becomes normalized evidence | Implemented unevenly by source; Codex active-task capture runs hourly | [Capture](capture.md) |
 | Ingestion & Storage | Classification, chunking, embeddings, transactional persistence, and relationships | Normalized evidence becomes durable memories and relationships | Implemented; write paths are not yet fully unified | [Ingestion & Storage](ingestion-storage.md) |
 | Retrieval | Hybrid search, rank fusion, utility reranking, and retrieval reinforcement | Query plus filters returns ranked memories | Implemented and cohesive | [Retrieval](retrieval.md) |
 | Synthesis | Explorer, Thinker, evaluator panel, consensus, and accepted-memory storage | Retrieved slices become consensus-gated insights | Implemented and scheduled | [Synthesis](synthesis.md) |
@@ -76,8 +76,8 @@ scheduled command
   → Delivery may surface accepted results
 ```
 
-Scheduling is source-specific. Codex Task Capture follows this path but its
-hourly LaunchAgent and unrestricted historical backfill are not activated.
+Scheduling is source-specific. Codex Task Capture follows this path hourly for active User-Owned
+Tasks. Archived historical backfill is not activated.
 
 ### Interactive agent request
 

@@ -1,6 +1,6 @@
 # Ingestion & Storage Component
 
-> **Status: canonical component contract.** Last reviewed: 2026-07-23.
+> **Status: canonical component contract.** Last reviewed: 2026-08-29.
 
 Ingestion & Storage turns normalized evidence into durable memories,
 relationships, embeddings, and transactional processing state in PostgreSQL.
@@ -70,6 +70,11 @@ keeps no partial semantic result.
 The migration runner records applied versions and is safe to rerun. Tests must
 use the isolated test database configured by `TEST_DB_NAME`.
 
+The embedding Interface is provider-neutral; the active Adapter is local Ollama BGE-M3. Migration
+014 freezes the former Titan vectors in `legacy_embedding` and creates a separate active
+`embedding`/`embedding_space` pair. It is an invariant that incompatible vector spaces are never
+compared. `scripts/reembed_memories.py` fills the active space in committed, resumable batches.
+
 ## Current physical seams
 
 The logical component boundary is clearer than the current code boundary:
@@ -90,6 +95,7 @@ implemented and proven.
 | Generic ingestion | `src/ingest.py::ingest_content` |
 | Database CRUD | `src/db.py` |
 | Embeddings | `src/embeddings.py::generate_embedding` |
+| Resumable local vector fill | `scripts/reembed_memories.py` |
 | Classification | `src/classify.py::classify_memory` |
 | Depth scoring | `src/depth.py::compute_depth_score` |
 | Project normalization | `src/project.py::normalize_project_tag` |
@@ -107,6 +113,8 @@ entity knowledge-graph tables are retained but dormant.
 - `tests/test_db.py`
 - `tests/test_migration.py`
 - `tests/test_schema_migration_runner.py`
+- `tests/test_embeddings.py`
+- `tests/test_reembed_memories.py`
 - `tests/test_agent_task_schema.py`
 - `tests/test_test_database_safety.py`
 
@@ -118,3 +126,4 @@ entity knowledge-graph tables are retained but dormant.
 - [Componentization roadmap](../COMPONENTIZATION-PLAN.md)
 - [ADR 0001: Store captured tasks in memories](../adr/0001-store-captured-tasks-in-memories.md)
 - [ADR 0005: Use real Agent Task data in tests](../adr/0005-use-real-agent-task-data-throughout-testing.md)
+- [ADR 0012: Use local BGE-M3](../adr/0012-use-local-bge-m3-embedding-space.md)

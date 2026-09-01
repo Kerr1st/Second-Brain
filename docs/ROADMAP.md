@@ -13,27 +13,29 @@ Codex Desktop proved Task Ownership filtering, six-hour eligibility, monotonic T
 combined Task Semantic Pass, Correction Episodes, Steering Governance, bounded context delivery,
 reviewed `AGENTS.md` publication, and a later-task outcome receipt.
 
-## 2. Codex operational canary — active, semantic retry waiting
+## 2. Codex operations — active-task capture enabled; raw-source vector fill active
 
-Run the production capture command hourly for one explicitly allowlisted User-Owned Codex Task.
-Keep archived history and unrestricted backfill disabled. After the task becomes inactive for six
-hours, inspect capture, semantic processing, retry behavior, Exact Provenance, and logs. Expansion
-beyond the allowlist requires the acceptance review below.
+The one-task production canary proved capture, semantic processing, retry behavior, Exact
+Provenance, and local embeddings. The hourly production job now scans all active Codex Tasks and
+captures only User-Owned Tasks that have been inactive for six hours. Delegated and
+Unknown-Ownership Tasks remain excluded and reported. Archived history and unrestricted backfill
+remain disabled pending a separate explicit decision.
 
-The LaunchAgent is loaded for task `01a014fd-89cf-73c0-a4ef-001e0f89d231`. Its first production
-run captured the source task and correctly retained a null Semantic Processing Cursor after the
-embedding provider returned `NoCredentialsError`. The job now exits cleanly with
-`waiting_for_embedding_credentials` until Bedrock credentials are restored, then retries the same
-unprocessed tail automatically.
+The canary for task `01a014fd-89cf-73c0-a4ef-001e0f89d231` first retained a null Semantic
+Processing Cursor after Titan returned `NoCredentialsError`. Local Ollama BGE-M3 then retried that
+exact tail successfully, created one provenance-complete topic segment, and advanced the cursor
+without task recapture or a duplicate. The canary was replaced by
+`com.second-brain.codex-capture` after acceptance. Every preserved derived memory now has a local
+vector. A low-priority hourly LaunchAgent is gradually filling the remaining raw-source rows.
 
-## 3. Codex acceptance review — blocked on embedding authentication
+## 3. Codex acceptance review — local path accepted; Titan retirement deferred
 
-Use real canary evidence rather than a synthetic scoring harness. Fix only observed defects. Record
-whether the task was captured correctly, whether derived memories were independently useful, and
-whether later recall was followed, corrected, unused, or still unknown. Decide full active-task
-coverage and historical backfill separately.
+Real canary evidence accepted local BGE-M3 for new ingestion and retrieval. HNSW recall passed; a
+small relevance inspection exposed two genuine misses that remain evaluation inputs. Titan stays
+preserved until the raw-source fill completes and those real queries are rerun. See
+[Local Embedding and Codex Canary Evidence](LOCAL-EMBEDDING-CANARY-2026-08-29.md).
 
-## 4. Claude Code second adapter
+## 4. Claude Code second adapter — next proof after local fill review
 
 Establish native Claude Code task identity, parent/subagent evidence, timestamps, resumptions, and
 visible prompt/outcome records before implementing capture. Prove one real Claude Code task through

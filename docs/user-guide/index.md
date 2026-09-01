@@ -24,7 +24,7 @@ You run your own infrastructure and are comfortable with a terminal, PostgreSQL,
 
 | Page | Description |
 |------|-------------|
-| [Getting started](getting-started.md) | Install PostgreSQL + pgvector, configure Bedrock, start the MCP server, and verify. |
+| [Getting started](getting-started.md) | Install PostgreSQL, pgvector, and local Ollama BGE-M3; start the MCP server; and verify. |
 | [Connect an AI agent](connect-ai-agent.md) | Register the MCP server with Kiro CLI or Claude Code. |
 | [Your first memory](first-memory.md) | A guided walkthrough: create, search, read, update, and relate a memory. |
 

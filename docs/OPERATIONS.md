@@ -18,6 +18,8 @@ All jobs use macOS launchd. Plists live in `scheduling/`. Most use `scripts/jobs
 | Daily 2:30 AM | Chat extraction | `chat_extract.py` | `com.second-brain.chat-extract` | Working |
 | Daily 3:00 AM | Staged ingestion | `ingest_staged.sh` | `com.second-brain.ingest` | Working |
 | Hourly | QD sync | `qd_sync.sh` | `com.second-brain.qd-sync` | Working |
+| Hourly | Codex Task capture | `codex_capture.sh` | `com.second-brain.codex-capture` | Working; active User-Owned Tasks only |
+| Hourly | Local vector fill | `reembed_local.sh` | `com.second-brain.reembed-local` | Temporary; resumable backfill |
 | Sun 3:00 AM | Backup verify | `verify_backup.sh` | `com.second-brain.verify` | Working |
 | (see plist) | Dream cycle | `dream_cycle_scheduled.sh` | `com.second-brain.dream-cycle` | Working |
 | Removed | Capture API | `capture_api.sh` | Not installed | Deprecated endpoint retained only for historical reference |
@@ -59,15 +61,51 @@ Daily at 2 AM. Full details in [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md).
 
 **AWS S3 was de-scoped on 2026-06-01** (brittle overnight SSO). Durable copies are now Google Drive + local (code/config also in git on `origin`/`mini`). `scripts/jobs/backup.sh` no longer uploads to S3. The JSON exports still include `entities`/`edges`/`memory_entities` (the now-dormant KG tables) pending cleanup.
 
-## AWS SSO Management
+## Local Embedding Runtime
 
-Bedrock embedding/generation calls depend on AWS SSO credentials. (The S3 backup leg was de-scoped 2026-06-01, so backups no longer depend on SSO — only embedding and the dream cycle's LLM calls do.)
+The active embedding space is local Ollama BGE-M3 (`ollama:bge-m3:1024`). Install and verify it
+once on each machine:
 
 ```bash
-# Check token status
-aws sts get-caller-identity
+brew install ollama
+brew services start ollama
+ollama pull bge-m3
 
-# Refresh (opens browser for authorization)
+# Verify runtime, model, dimension, and active space
+curl -sS http://127.0.0.1:11434/api/version
+ollama list
+.venv/bin/python -c \
+  'from src.embeddings import generate_embedding, active_embedding_space; v=generate_embedding("health check"); print(active_embedding_space(), len(v))'
+```
+
+Expected final output is `ollama:bge-m3:1024 1024`. The Titan Adapter is retained in code for
+explicit legacy diagnostics but cannot be selected through the active embedding Interface; this
+fails closed before incompatible vectors can enter the local space.
+
+After migration 014, Titan vectors remain in `memories.legacy_embedding`; active local vectors use
+`memories.embedding` with `memories.embedding_space`. Fill the local space incrementally:
+
+```bash
+# Count eligible preserved rows without writes
+.venv/bin/python scripts/reembed_memories.py --dry-run
+
+# Prove a small resumable batch, then continue in bounded runs
+.venv/bin/python scripts/reembed_memories.py --limit 100 --batch-size 32
+.venv/bin/python scripts/reembed_memories.py --limit 5000 --batch-size 32
+```
+
+Each batch commits independently. Re-running skips completed rows. Do not drop
+`legacy_embedding` until the retrieval evaluation passes and retirement is explicitly approved.
+The command prioritizes decisions, insights, syntheses, and other derived memories before raw
+`source` rows so useful semantic recall recovers early in a gradual migration.
+
+## AWS SSO Management
+
+AWS SSO is no longer required for embeddings or backups. It remains relevant only for a model
+execution profile explicitly configured to call Bedrock.
+
+```bash
+aws sts get-caller-identity
 aws sso login --profile default
 
 # Profile: default → SSO session <sso-session-name>
@@ -76,7 +114,8 @@ aws sso login --profile default
 ```
 
 SSO tokens expire after 8-12 hours. When expired:
-- Bedrock embedding/generation calls fail (affects ingestion, `memory_search`, the dream cycle, integration tests)
+- Bedrock-backed model generation fails for profiles that select it
+- local embedding, ingestion, and `memory_search` remain available through Ollama
 - Backups are unaffected (Google Drive + local; S3 de-scoped)
 
 ## Quick Desktop Sync
@@ -104,10 +143,12 @@ Hourly incremental sync from Quick Desktop's SQLite databases into PostgreSQL. T
 
 All scripts are idempotent — safe to run repeatedly. See [QUICK-DESKTOP-INTEGRATION.md](QUICK-DESKTOP-INTEGRATION.md) for design details.
 
-## Codex Desktop Task Capture — Proof-Gate Mode
+## Codex Desktop Task Capture
 
-Codex capture has one command and one implementation path. It is write-capable but is **not
-scheduled**, and the full historical backfill has not been run:
+Codex capture has one command and one implementation path. The hourly
+`com.second-brain.codex-capture` LaunchAgent runs it for every active User-Owned Task. Delegated
+Tasks and Unknown-Ownership Tasks are skipped and reported. Archived history remains excluded, and
+the full historical backfill has not been run:
 
 ```bash
 # Read and count eligible active Tasks without database, model, or embedding writes
@@ -138,34 +179,34 @@ only user prompts and visible final answers, and runs the combined Task Semantic
 after source capture. Its JSON report contains counts plus Task IDs, failure stages, and exception
 class names when failures occur; it does not print captured prompt or answer content.
 
-`--backfill` includes archived eligible Tasks through this same path. Do not create or load a
-LaunchAgent and do not invoke an unbounded `--backfill` until explicit user approval. The approved
-Proof Gate uses `--task-id` with `DB_NAME="$TEST_DB_NAME"`; there is no separate pilot application.
-See [CODEX-TASK-CAPTURE-BUILD-PLAN.md](CODEX-TASK-CAPTURE-BUILD-PLAN.md).
+`--backfill` includes archived eligible Tasks through this same path. Do not invoke an unbounded
+`--backfill` until explicit user approval. Task-bounded proof runs still use `--task-id` with
+`DB_NAME="$TEST_DB_NAME"`; there is no separate pilot application. See
+[CODEX-TASK-CAPTURE-BUILD-PLAN.md](CODEX-TASK-CAPTURE-BUILD-PLAN.md).
 
-### One-task operational canary
+### Hourly active-task capture
 
-The approved canary uses `scheduling/com.second-brain.codex-canary.plist` and runs only the
-allowlisted User-Owned task ID in its environment. It never passes `--backfill` and never scans
-other eligible tasks for writes.
+The production job uses `scheduling/com.second-brain.codex-capture.plist`. It passes neither
+`--task-id` nor `--backfill`, so the normal six-hour and Task Ownership policies select all and only
+eligible active Tasks.
 
 ```bash
 # Install the repository template for this checkout, then load it
 sed "s|/path/to/second-brain|$PWD|g" \
-  scheduling/com.second-brain.codex-canary.plist \
-  > "$HOME/Library/LaunchAgents/com.second-brain.codex-canary.plist"
+  scheduling/com.second-brain.codex-capture.plist \
+  > "$HOME/Library/LaunchAgents/com.second-brain.codex-capture.plist"
 launchctl bootstrap "gui/$UID" \
-  "$HOME/Library/LaunchAgents/com.second-brain.codex-canary.plist"
+  "$HOME/Library/LaunchAgents/com.second-brain.codex-capture.plist"
 
 # Inspect status and the append-only local log
-launchctl print "gui/$UID/com.second-brain.codex-canary"
-tail -50 logs/codex-canary.log
+launchctl print "gui/$UID/com.second-brain.codex-capture"
+tail -50 logs/codex-capture.log
 ```
 
-The job performs an embedding-credential preflight. Without Bedrock credentials it records
-`waiting_for_embedding_credentials` and exits successfully. It does not use deterministic or
-alternate embeddings in production. Once credentials return, the next hourly run retries the
-unchanged semantic tail.
+The job checks the local Ollama runtime and required BGE-M3 model. If either is unavailable it
+records `waiting_for_local_embedding` and exits successfully. Once the local runtime returns, the
+next hourly run retries eligible captures and unchanged semantic tails. The former one-task canary
+is retained as proof evidence but is not loaded alongside the production job.
 
 ## Memory Context Broker and Steering Governance
 

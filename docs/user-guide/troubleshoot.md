@@ -95,7 +95,8 @@ brew services restart postgresql@17
 
 ## AWS SSO token expired
 
-**Symptom:** `memory_search`, embedding, ingestion, or the *dream cycle* (the daily autonomous synthesis pipeline) fails with `ExpiredTokenException` or `UnauthorizedSSOTokenError`.
+**Symptom:** A Bedrock-backed *dream cycle* model profile fails with `ExpiredTokenException` or
+`UnauthorizedSSOTokenError`.
 
 **Likely cause:** SSO tokens expire after 8–12 hours.
 
@@ -122,7 +123,8 @@ Expected output:
 ```
 
 > [!TIP]
-> Run `aws sso login --profile default` each morning (or after wake from sleep) to avoid mid-day failures. Backups are unaffected — they use Google Drive, not AWS.
+> Refresh SSO only when using a Bedrock-backed reasoning profile. Local embedding, search,
+> ingestion, and backups are unaffected.
 
 ## MCP server won't connect from the agent
 
@@ -154,25 +156,37 @@ ls /Users/<you>/second-brain/src/mcp_server.py
 > [!NOTE]
 > The `command` must be the absolute path to the `.venv` Python — not a system Python. The `cwd` must be the project root so relative imports resolve. See [Connect an AI agent](connect-ai-agent.md) for full setup instructions.
 
-## Embedding / Bedrock failures
+## Local embedding failures
 
-**Symptom:** `memory_create` or `memory_search` fails with Bedrock errors (e.g., `ValidationException`, `ModelNotReadyException`, or throttling errors).
+**Symptom:** `memory_create` or `memory_search` reports a connection error for
+`127.0.0.1:11434`, a missing `bge-m3` model, or an invalid vector dimension.
 
-**Likely cause:** AWS SSO expired (most common), the Bedrock model is unavailable in your region, or you hit a rate limit.
+**Likely cause:** Ollama is stopped, BGE-M3 has not been pulled, or the configured local model does
+not match the required 1,024-dimension active space.
 
 **Fix:**
 
-1. Refresh SSO (see [AWS SSO token expired](#aws-sso-token-expired) above).
-2. If SSO is valid, check that your profile targets a region with Titan v2 access:
+1. Start Ollama and ensure the model is present:
 
 ```bash
-aws sts get-caller-identity
+brew services start ollama
+ollama pull bge-m3
+ollama list
 ```
 
-3. For throttling, wait 30–60 seconds and retry. The system uses exponential backoff internally.
+2. Verify the Interface directly:
+
+```bash
+.venv/bin/python -c \
+  'from src.embeddings import generate_embedding, active_embedding_space; v=generate_embedding("health check"); print(active_embedding_space(), len(v))'
+```
+
+3. Expect `ollama:bge-m3:1024 1024`. Remove conflicting `EMBEDDING_PROVIDER`,
+`OLLAMA_EMBEDDING_MODEL`, or `OLLAMA_BASE_URL` overrides if the result differs.
 
 > [!WARNING]
-> If Bedrock is persistently unavailable, embedding and search degrade but existing memories remain intact in PostgreSQL. The system recovers automatically once Bedrock access is restored.
+> Do not select Titan as the active provider or copy preserved Titan vectors into `embedding`.
+> Legacy vectors remain isolated in `legacy_embedding`; mixing spaces invalidates cosine search.
 
 ## A launchd job is failing
 

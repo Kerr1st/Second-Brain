@@ -1,6 +1,6 @@
 # Codex Task Capture — Simplified Build Plan
 
-**Status:** Vertical proof complete; one-task operational canary approved; unrestricted backfill disabled
+**Status:** Hourly active-task capture enabled; archived historical backfill disabled
 
 **Reference implementation:** Codex Desktop
 
@@ -10,8 +10,9 @@
 
 Second Brain automatically captures Codex Tasks after six hours without activity, preserves their
 user prompts and visible final answers, groups those Agent Turns into Topic Segments, and creates
-any genuine decisions, insights, or Correction Episodes supported by the segments. Existing Codex
-history is backfilled through the same path. A resumed Codex Task refreshes the same Captured Task.
+any genuine decisions, insights, or Correction Episodes supported by the segments. Existing active
+history enters through the hourly path; archived history can be backfilled through the same path
+after separate approval. A resumed Codex Task refreshes the same Captured Task.
 
 Codex proves this simple path before Kiro, Quick Desktop, Amazon Quick, Amazon Q Developer, Claude
 Code, or another integration is changed.
@@ -220,7 +221,7 @@ Follow one sequential implementation stream:
 7. Delete obsolete modules and tests after the replacement path passes.
 8. Run a bounded live capture in the isolated test database and inspect the results. Enabling the
    hourly schedule and running the full backfill are separate activation steps requiring explicit
-   user approval.
+   user approval. The hourly schedule is now approved and active; archived backfill remains off.
 
 ### Deleted Superseded Implementation
 
@@ -268,10 +269,10 @@ Use real Codex fixtures and the isolated test database to prove only observable 
 
 ## Done
 
-The bounded implementation goal is complete. The approved operational canary runs the same command
-hourly for one allowlisted User-Owned Task; it does not include archived history or unrestricted
-backfill. Canary evidence must pass the acceptance review before active-task coverage expands. The
-next agent integration follows the canonical [delivery roadmap](ROADMAP.md).
+The bounded implementation goal and one-task canary are complete. After the local embedding
+acceptance review, the hourly production job expanded to every eligible active User-Owned Task. It
+does not include archived history or unrestricted backfill. The next agent integration follows the
+canonical [delivery roadmap](ROADMAP.md).
 
 ### Completion Evidence — 2026-07-20
 
@@ -325,5 +326,25 @@ next agent integration follows the canonical [delivery roadmap](ROADMAP.md).
   `NoCredentialsError`, stored no partial Topic Segments or memories, and left the Semantic
   Processing Cursor null as designed.
 - `com.second-brain.codex-canary` is loaded with a one-task allowlist and a 3600-second interval.
-  Its credential preflight records `waiting_for_embedding_credentials` with exit code zero, so it
-  neither broadens capture nor produces repeated failure notifications while awaiting login.
+  Its original credential preflight recorded `waiting_for_embedding_credentials` with exit code
+  zero, so it neither broadened capture nor produced repeated failure notifications while awaiting
+  resolution.
+- ADR 0012 replaced the external embedding dependency with local Ollama BGE-M3 while preserving
+  every Titan vector in a separate legacy column. The same canary retried the exact pending tail,
+  created one Exact-Provenance Topic Segment with an active local vector, and advanced the cursor
+  without recapture or duplication. The job now preflights the local runtime and reports
+  `waiting_for_local_embedding` if BGE-M3 is unavailable.
+
+### Active-Task Activation Evidence — 2026-08-29
+
+- `com.second-brain.codex-capture` replaced the loaded one-task canary after explicit user approval.
+- The hourly job invokes the same public command without `--task-id` or `--backfill`; source-native
+  ownership and six-hour inactivity determine eligibility.
+- Delegated Tasks, Unknown-Ownership Tasks, and archived historical Tasks remain excluded and
+  reported. Archived backfill remains a separate explicit decision.
+- The production job retains the local Ollama readiness gate and `codex_local` semantic backend.
+- The first general production run completed with exit code 0: 79 Tasks enumerated, 43 eligible,
+  41 newly captured, 2 unchanged, 42 semantic passes completed including one retry, and 0 failures.
+  It reported 150 delegated exclusions, 6 Unknown-Ownership exclusions, 15 archived exclusions, 7
+  recent exclusions, and 14 incomplete Tasks. The resulting production corpus held 43 Captured
+  Tasks, 85 Topic Segments, 37 decisions, 46 insights, and 9 Correction Episodes.

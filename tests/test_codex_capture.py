@@ -160,6 +160,16 @@ def _real_codex_home(tmp_path: Path, turn_indexes=(0, 1, 2)) -> Path:
     return codex_home
 
 
+def _write_session_index(codex_home: Path, *records, partial_tail: str = "") -> None:
+    content = "".join(
+        json.dumps(record, ensure_ascii=False) + "\n" for record in records
+    )
+    (codex_home / "session_index.jsonl").write_text(
+        content + partial_tail,
+        encoding="utf-8",
+    )
+
+
 def _insert_ownership_task(
     codex_home: Path,
     *,
@@ -349,6 +359,72 @@ def test_task_is_eligible_at_exactly_six_hours_of_inactivity(
     assert semantic.calls == []
 
 
+def test_codex_source_prefers_sqlite_sidebar_name_with_title_provenance(
+    tmp_path,
+):
+    home = _real_codex_home(tmp_path)
+    with sqlite3.connect(home / "state_5.sqlite") as connection:
+        connection.execute("ALTER TABLE threads ADD COLUMN name TEXT")
+        connection.execute(
+            "UPDATE threads SET name = ? WHERE id = ?",
+            ("Add Codex task captures", TASK_ID),
+        )
+    _write_session_index(
+        home,
+        {
+            "id": TASK_ID,
+            "thread_name": "Older session-index title",
+            "updated_at": "2026-07-15T23:05:23.359665Z",
+        },
+    )
+
+    source = CodexDesktopSource(home)
+    ref = next(iter(source.enumerate_tasks(NOW)))
+    snapshot = source.fetch_task(ref)
+    provenance = {item.key: item.value for item in snapshot.provenance}
+
+    assert ref.title == "Add Codex task captures"
+    assert provenance["native_title_source"] == "sqlite_name"
+    assert provenance["native_title_value"] == "Add Codex task captures"
+    assert provenance["sqlite_title"] == MANIFEST["title"]
+
+
+def test_codex_source_uses_latest_valid_session_index_title_for_legacy_task(
+    tmp_path,
+):
+    home = _real_codex_home(tmp_path)
+    _write_session_index(
+        home,
+        {
+            "id": TASK_ID,
+            "thread_name": "Add Codex session capture",
+            "updated_at": "2026-07-11T13:48:28.747349Z",
+        },
+        {
+            "id": "different-task",
+            "thread_name": "Unrelated task title",
+            "updated_at": "2026-07-16T10:00:00Z",
+        },
+        {
+            "id": TASK_ID,
+            "thread_name": "Add Codex task captures",
+            "updated_at": "2026-07-15T23:05:23.359665Z",
+        },
+        partial_tail='{"id":"unfinished",',
+    )
+
+    source = CodexDesktopSource(home)
+    ref = next(iter(source.enumerate_tasks(NOW)))
+    snapshot = source.fetch_task(ref)
+    provenance = {item.key: item.value for item in snapshot.provenance}
+
+    assert ref.title == "Add Codex task captures"
+    assert provenance["native_title_source"] == "session_index"
+    assert provenance["native_title_source_updated_at"] == (
+        "2026-07-15T23:05:23.359665+00:00"
+    )
+
+
 def test_native_ownership_evidence_excludes_delegated_and_unknown_tasks(
     test_db, clean_tables, tmp_path, monkeypatch
 ):
@@ -494,6 +570,53 @@ def test_source_provenance_refreshes_without_new_turns(
     assert metadata["workspace_history"][-1].endswith("Second-Brain-renamed")
     assert metadata["git"]["branch"] == "codex/codex-task-capture"
     assert content.startswith("# Renamed Codex task")
+
+
+def test_sidebar_rename_refreshes_title_provenance_without_semantic_work(
+    test_db, clean_tables, tmp_path, monkeypatch
+):
+    home = _real_codex_home(tmp_path)
+    initial_title = {
+        "id": TASK_ID,
+        "thread_name": "Add Codex session capture",
+        "updated_at": "2026-07-11T13:48:28.747349Z",
+    }
+    renamed_title = {
+        "id": TASK_ID,
+        "thread_name": "Add Codex task captures",
+        "updated_at": "2026-07-15T23:05:23.359665Z",
+    }
+    _write_session_index(home, initial_title)
+    semantic = _SemanticScript(
+        lambda previous, turns: _one_segment(previous, turns),
+    )
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock"),
+    )
+
+    first = codex_capture.run_codex_capture(NOW, backfill=True)
+    _, initial_content, initial_metadata, _, _ = _task_row()
+
+    _write_session_index(home, initial_title, renamed_title)
+    refreshed = codex_capture.run_codex_capture(NOW, backfill=True)
+    _, content, metadata, _, _ = _task_row()
+
+    assert (first.captured, first.semantic_processed) == (1, 1)
+    assert (refreshed.refreshed, refreshed.semantic_processed) == (1, 0)
+    assert len(semantic.calls) == 1
+    assert initial_content.startswith("# Add Codex session capture")
+    assert content.startswith("# Add Codex task captures")
+    assert metadata["native_title"] == {
+        "value": "Add Codex task captures",
+        "source": "session_index",
+        "source_updated_at": "2026-07-15T23:05:23.359665+00:00",
+        "sqlite_title": MANIFEST["title"],
+    }
+    assert metadata["turns"] == initial_metadata["turns"]
+    assert metadata["semantic_cursor"] == initial_metadata["semantic_cursor"]
+    assert metadata["captured_at"] == initial_metadata["captured_at"]
+    assert metadata["source_updated_at"] == initial_metadata["source_updated_at"]
 
 
 def test_prompt_edit_without_client_id_is_source_drift_not_a_new_turn(

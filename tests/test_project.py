@@ -324,34 +324,27 @@ class TestMcpMemoryCreateNormalizesProject:
 
 
 class TestMcpMemorySearchNormalizesProject:
-    """memory_search normalizes the project parameter before passing to hybrid_search and rerank.
+    """memory_search normalizes project before the retrieval boundary.
 
     Validates: Requirement 8.8
     """
 
     @patch("src.mcp_server.get_memory", return_value=None)
     @patch("src.mcp_server.increment_access_count")
-    @patch("src.mcp_server.rerank", return_value=[])
-    @patch("src.mcp_server.hybrid_search", return_value=[])
+    @patch("src.mcp_server.retrieve_memories", return_value=[])
     @patch("src.mcp_server.generate_embedding", return_value=[0.0] * 1024)
     def test_memory_search_normalizes_project(
-        self, mock_embed, mock_search, mock_rerank, mock_inc, mock_get
+        self, mock_embed, mock_search, mock_inc, mock_get
     ):
         from src.mcp_server import memory_search
 
         memory_search(query="test", project="  RetailStore  ")
 
-        # Verify hybrid_search received normalized project
+        # Verify the deep retrieval interface received normalized project.
         mock_search.assert_called_once()
         search_kwargs = mock_search.call_args
         assert search_kwargs.kwargs.get("project") == "retailstore" or \
             (search_kwargs[1].get("project") == "retailstore")
-
-        # Verify rerank received normalized project
-        mock_rerank.assert_called_once()
-        rerank_kwargs = mock_rerank.call_args
-        assert rerank_kwargs.kwargs.get("query_project") == "retailstore" or \
-            (rerank_kwargs[1].get("query_project") == "retailstore")
 
 
 # ---------------------------------------------------------------------------
