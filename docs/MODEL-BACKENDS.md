@@ -1,6 +1,9 @@
 # Model Backends — pluggable execution paths (agentic CLIs + direct APIs)
 
-> **Status: IMPLEMENTED (uncommitted).** Built + wired into the orchestrator; full suite green (685). Date: 2026-06-15 (status updated 2026-06-16).
+> Canonical component ownership and entry points:
+> [Model Execution](components/model-execution.md).
+
+> **Status: IMPLEMENTED.** Built and wired into the orchestrator; the full regression suite is green. Date: 2026-06-15 (status updated 2026-07-23).
 >
 > **Adapter status (2026-06-16, spec `model-backend-adapters`).** The two
 > agentic-CLI adapters are now **implemented and registered**:
@@ -9,15 +12,16 @@
 >   `claude_code`. **Live-verified** (tool-less path) on the local enterprise-managed build.
 > - **`CodexInvoker`** (`src/backends/codex.py`, `codex exec`) — built on the
 >   same base, registered as `codex`. Verified by **mocked-subprocess unit
->   tests** plus a **manual smoke-test checklist** (Codex is not installed
->   anywhere today). Checklist location: **`docs/MODEL-BACKENDS-VERIFICATION.md`
->   Part B** — run it on a Codex-equipped box.
+>   tests** plus a bounded **live tool-less JSONL smoke test** on Codex CLI
+>   0.145.0-alpha.30 (2026-07-23). The remaining manual checks are in
+>   **`docs/MODEL-BACKENDS-VERIFICATION.md` Part B**.
 >
-> Full suite **green (814 passed)** on the `laptop` profile (default, all-Kiro —
+> Full suite **green** on the `laptop` profile (default, all-Kiro —
 > zero behavior change; the ~688 pre-feature baseline is unchanged) and the
 > adapter/resolver/probe suites pass under the `claude_code` (`mini`) profile
-> against the mocked adapters. The embedding path (Bedrock Titan, `src/embeddings.py`)
-> is **untouched** (Req 20.3). Per-environment verification is recorded in
+> against the mocked adapters. The later local-embedding Vertical Slice replaced the active
+> Bedrock Titan path with Ollama BGE-M3 under ADR 0012; the backend resolver remains independent
+> from embedding selection. Per-environment verification is recorded in
 > **`docs/MODEL-BACKENDS-VERIFICATION.md`**.
 >
 > > **Agentic Claude Code path (tools=True) — FIXED (spec `claude-code-stream-json-probe-fix`).**
@@ -68,7 +72,7 @@
 - **One `Invoker` interface, two backend *families*:**
   - **Agentic CLI backends** — shell to a coding-agent CLI that runs non-interactively, **speaks
     MCP**, selects a model, returns parseable output. Adapters: **`KiroInvoker`** (today; `kiro-cli`
-    → Amazon Q, **$0 metered**), **`ClaudeCodeInvoker`** (`claude -p`), **`CodexInvoker`**
+    under the configured Kiro plan), **`ClaudeCodeInvoker`** (`claude -p`), **`CodexInvoker`**
     (`codex exec`).
   - **Direct API backends** — one **tool-less, single-shot** call. Adapter: **`BedrockInvoker`**
     (`bedrock-runtime` `InvokeModel`, metered). `AnthropicInvoker`/`OpenAIInvoker` possible later.
@@ -111,10 +115,10 @@
 
 | Agent | Live tools (MCP)? | Today runs via | Eligible backends |
 |---|---|---|---|
-| **Explorer** | **Yes** (agentic search) | Kiro → Amazon Q | Any agentic CLI — **but each new CLI is a validation-gated port, not a drop-in** (crown-jewel risk). Never Direct-API (= B1). |
-| **Thinker** | Yes today; **No with the packet** | Kiro → Amazon Q | Any agentic CLI; **+ Direct-API** once fed a pre-fetched packet |
-| **Evaluators ×4** | **No** (already tool-less) | Kiro → Amazon Q | **All** — any agentic CLI *or* Direct-API (drop-in) |
-| *(Express)* **Editor** | No | Kiro → Amazon Q | All (delivery layer) |
+| **Explorer** | **Yes** (agentic search) | Kiro CLI | Any agentic CLI — **but each new CLI is a validation-gated port, not a drop-in** (crown-jewel risk). Never Direct-API (= B1). |
+| **Thinker** | Yes today; **No with the packet** | Kiro CLI | Any agentic CLI; **+ Direct-API** once fed a pre-fetched packet |
+| **Evaluators ×4** | **No** (already tool-less) | Kiro CLI | **All** — any agentic CLI *or* Direct-API (drop-in) |
+| *(Express)* **Editor** | No | Kiro CLI | All (delivery layer) |
 
 The split falls out of **tool use**: only the Explorer needs a live tool-loop. Tool-less stages port
 freely; the Explorer's *capability* eligibility is broad but its *behavioral* equivalence per CLI is
@@ -134,7 +138,7 @@ not assumed.
 | Real token `usage` | ❌ (char/4 estimate) | ✅ envelope (`usage`,`total_cost_usd`) | ✅ `--json` events | ✅ response |
 | Fail-loud if MCP didn't attach | `--require-mcp-startup` (exit 3) — **strong** | envelope `is_error`/tool-use check — **weaker** | `mcp_servers.<n>.required=true` — **strong** | n/a |
 | Cost cap knob | — | `--max-budget-usd`, `--max-turns` | per-call `usage` + budget | per-call `usage` + budget |
-| Auth / metering | Amazon Q login — **$0 metered** | Claude sub (flat) / API (`ANTHROPIC_API_KEY`) / **Bedrock** / Vertex / Mantle | ChatGPT (flat) / `OPENAI_API_KEY` / custom / `--oss` local ($0) | AWS creds — **metered** |
+| Auth / metering | Kiro account; usage governed by the configured Kiro plan | Claude sub (flat) / API (`ANTHROPIC_API_KEY`) / **Bedrock** / Vertex / Mantle | ChatGPT (flat) / `OPENAI_API_KEY` / custom / `--oss` local ($0) | AWS creds — **metered** |
 | Sandbox caveat | — | permission modes; `--bare` faster scripted start | **sandboxes by default** — needs `--sandbox workspace-write` + `network_access=true` so the MCP server reaches Postgres/Bedrock | — |
 
 > **Build-time verification still required.** These are from the official references (Claude Code CLI
@@ -197,7 +201,9 @@ extraction, the effort flag, and **failure-mode mapping**.
   a real `tool_result` in the stream events via the `MCP_Startup_Probe` (no exact
   `--require-mcp-startup` analog — weaker).
 - **`CodexInvoker`.** Tool-less: `codex exec "<msg>" -m <id> -c model_reasoning_effort="high"
-  -c developer_instructions="<role>" --sandbox read-only --output-last-message <out>.txt`. With tools:
+  -c model_instructions_file="<role-file>" --sandbox read-only --json`. The JSONL
+  stream supplies both the final `agent_message` and real token usage;
+  `--output-last-message <out>.txt` remains an explicit compatibility fallback. With tools:
   config `[mcp_servers.second_brain] command=<py> args=["-m","src.mcp_server"] cwd=<repo>
   required=true`, `--full-auto --sandbox workspace-write` + `sandbox_workspace_write.network_access
   =true`. `required=true` = the clean `--require-mcp-startup` analog.
@@ -260,7 +266,7 @@ Set per machine from what's installed + authenticated there.
 
 | Machine | What it has | Recommended map |
 |---|---|---|
-| **This laptop** (enterprise-managed) | `kiro-cli` + Amazon Q | All-Kiro / Opus 4.8 — **today's default, $0** |
+| **This laptop** (enterprise-managed) | `kiro-cli` | All-Kiro / Opus 4.8 — today's default under the configured Kiro plan |
 | **Mac Mini** (always-on) | AWS creds; install Claude Code (enterprise-managed `claude` present here) | **Whole instance on Claude Code → Bedrock, one model** (Opus-class). Per-role cost tiering (cheap evaluators) is deferred. See *Mini notes*. |
 | **Box with a Claude Max sub** | `claude` (flat) | Claude Code everywhere — flat cost; the **instance model** can be `fable` if desired |
 | **Box with ChatGPT/OpenAI** | `codex` | Codex everywhere; or **Codex `--oss`** local for offline/$0 (one model for the whole instance) |
@@ -269,9 +275,8 @@ Set per machine from what's installed + authenticated there.
 
 ### Mini notes (corrected from the earlier draft)
 
-- **AWS Bedrock creds are required on the Mini regardless of agent backend** — embeddings
-  (`src/embeddings.py`, Titan) always call Bedrock directly. This *favors* Claude Code on Bedrock:
-  one credential set serves both embeddings and the agent calls.
+- **AWS Bedrock credentials are optional for embeddings.** `src/embeddings.py` uses local Ollama
+  BGE-M3. Credentials are needed only when the selected reasoning backend itself uses Bedrock.
 - **Unattended credentials (the corrected story).** `CLAUDE_CODE_USE_BEDROCK=1` + `awsAuthRefresh`
   gives **mostly-unattended** operation: token refresh is silent *within the SSO session window*
   (days–weeks if the session is configured for it), then a human must re-auth (`aws sso login` is
@@ -340,8 +345,9 @@ second backend.
 - **Step 3 — validate the Explorer port** (the Mini critical path): stratified/crown-jewel replay
   (reuse the Fable 1a harness) confirming Claude Code produces comparable slices before it's the
   scheduled Explorer.
-- **Defer `CodexInvoker`** until a box needs it (not installed anywhere today), and **`BedrockInvoker`**
-  to its own metered step (Fable Phase 1b; gated by the data-sharing decision).
+- ~~**Defer `CodexInvoker`** until a box needs it~~ (**implemented and
+  live-verified on the tool-less JSONL path**); defer **`BedrockInvoker`** to its
+  own metered step (Fable Phase 1b; gated by the data-sharing decision).
 
 > **Open decision:** ship the abstraction now (decoupled) vs. couple it to the Mini (Step 2). I lean
 > **couple** — minimal/surgical cuts both ways: don't build adapters speculatively *and* don't
@@ -411,7 +417,7 @@ second backend.
 
 ### Decision — the Mini is the motivating first consumer (migration specified separately)
 
-- The first real deployment that needs a non-Kiro backend is the **Mac Mini** (no Kiro/Amazon Q
+- The first real deployment that needs a non-Kiro backend is the **Mac Mini** (no Kiro
   there). The migration itself — DB continuity, capture locality, cutover/rollback, the other jobs —
   is owned by the private host-migration runbook, not here.
 - **The seam this doc owns:** even a "same data, same model" move crosses **Kiro →
@@ -430,8 +436,8 @@ second backend.
 
 ### Decision — default-preserving at every step
 
-- Until the role→backend map is edited, every role stays **all-Kiro / Opus 4.8**, and the existing
-  **685-test suite must pass unchanged** after the refactor. The live cycle cannot regress while the
+- Until the role→backend map is edited, every role stays **all-Kiro / Opus 4.8**, and the full
+  regression suite must pass unchanged after the refactor. The live cycle cannot regress while the
   abstraction lands.
 
 ### Decision — parity is the MVP; diversity is deferred

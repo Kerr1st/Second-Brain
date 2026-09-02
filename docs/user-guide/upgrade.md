@@ -146,7 +146,8 @@ Expected output:
 ... passed
 ```
 
-Tests run against an isolated `memory_bank_test` database and mock Bedrock calls — no AWS credentials needed.
+Tests run against an isolated `memory_bank_test` database and mock Ollama calls — the local model
+does not need to run during tests.
 
 ## Related
 

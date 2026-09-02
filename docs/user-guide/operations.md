@@ -15,6 +15,7 @@ All jobs run as macOS *launchd agents* (user-level scheduled tasks defined by `.
 |-----|----------|--------------|-------|
 | Bookmark scrape | Sat 1:00 AM | Captures new browser bookmarks | `com.second-brain.bookmarks` |
 | YouTube capture | Daily 1:30 AM | Downloads and transcribes new YouTube videos | `com.second-brain.youtube` |
+| Codex Task capture | Hourly | Captures active User-Owned Tasks after six hours of inactivity | `com.second-brain.codex-capture` |
 | Backup | Daily 2:00 AM | Encrypts and uploads pg_dump + JSON to Google Drive + local | `com.second-brain.backup` |
 | Chat extraction | Daily 2:30 AM | Extracts Kiro/IDE chat sessions into staged files | `com.second-brain.chat-extract` |
 | Staged ingestion | Daily 3:00 AM | Parses, classifies, embeds, and stores staged captures | `com.second-brain.ingest` |
@@ -84,10 +85,13 @@ For the complete step-by-step procedure, see [Disaster Recovery](../DISASTER-REC
 
 ## AWS SSO refresh
 
-Second Brain uses Amazon Bedrock (via AWS SSO) for embeddings and LLM calls. SSO tokens expire after approximately 8–12 hours.
+Second Brain uses local Ollama BGE-M3 for embeddings. AWS SSO is relevant only when the selected
+reasoning profile explicitly uses Amazon Bedrock; those tokens expire after approximately 8–12
+hours.
 
 **When tokens expire:**
-- Embedding, search, ingestion, and the dream cycle fail.
+- The Bedrock-backed reasoning stages fail.
+- Local embedding, search, and ingestion remain available.
 - Backups are **unaffected** (they use Google Drive + local, not AWS).
 
 **To refresh:**

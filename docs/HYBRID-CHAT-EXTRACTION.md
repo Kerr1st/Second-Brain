@@ -13,7 +13,7 @@ Phase 1: Script (launchd, 2:30 AM)       Phase 2: Kiro headless (launchd, 3:00 A
 ├── Structural stripping                  ├── kiro-cli --no-interactive --model claude-opus-4.8
 ├── Size filtering                        ├── Chunk by topic (LLM)
 ├── Content filtering                     ├── Extract metadata (LLM)
-└── Write cleaned chats to staging/       ├── Generate embeddings (Bedrock)
+└── Write cleaned chats to staging/       ├── Generate embeddings (local BGE-M3)
                                           └── Store in PostgreSQL
 ```
 
@@ -187,7 +187,7 @@ for chat_file in staging/chats/*.md; do
   log "Processing: $FILENAME"
 
   kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.8 \
-    "Process the staged chat at ~/second-brain/$chat_file. Read the file, chunk it by topic shifts, extract metadata (topics, decisions, action items, project, files discussed), generate embeddings via Bedrock, and store in the Second Brain PostgreSQL database. After successful storage, delete the staging file." \
+    "Process the staged chat at ~/second-brain/$chat_file. Read the file, chunk it by topic shifts, extract metadata (topics, decisions, action items, project, files discussed), generate embeddings via the configured local embedding Interface, and store in the Second Brain PostgreSQL database. After successful storage, delete the staging file." \
     >> "$LOGFILE" 2>&1
 
   EXIT_CODE=$?
@@ -250,7 +250,7 @@ Stored in the `metadata` JSONB column.
 
 ### Step 6: Embed + Store
 
-- Generate embedding per chunk via Bedrock Titan/Cohere
+- Generate one local BGE-M3 embedding per chunk
 - Store parent record: `type: source`, `source_type: kiro_cli_chat` or `kiro_ide_chat`, `source_url: {conversation_id}`, `content: full cleaned chat`
 - Store child records: one per chunk, `parent_id` referencing the parent, each with its own embedding and metadata
 
@@ -331,6 +331,6 @@ If `failed_files` is growing over time, something systemic is wrong (database do
 | Phase 1 (script) | File I/O, regex, string operations | Free (runs locally) |
 | Phase 2 chunking | Kiro headless + Opus 4.6-1m, ~5–50KB per chat | Kiro credits (reasoning tokens) |
 | Phase 2 metadata | Opus 4.6-1m extracts structured data per chunk | Kiro credits (reasoning tokens) |
-| Phase 2 embedding | Bedrock Titan/Cohere per chunk | Bedrock API calls |
+| Phase 2 embedding | Local Ollama BGE-M3 per chunk | Local runtime calls |
 
 Phase 1 is free. Phase 2 cost scales with the number of chats that survive filtering and the number of chunks produced. The staging directory lets you control the pace — process 50 chats today, 50 tomorrow, rather than all at once.

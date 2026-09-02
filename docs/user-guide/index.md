@@ -24,7 +24,7 @@ You run your own infrastructure and are comfortable with a terminal, PostgreSQL,
 
 | Page | Description |
 |------|-------------|
-| [Getting started](getting-started.md) | Install PostgreSQL + pgvector, configure Bedrock, start the MCP server, and verify. |
+| [Getting started](getting-started.md) | Install PostgreSQL, pgvector, and local Ollama BGE-M3; start the MCP server; and verify. |
 | [Connect an AI agent](connect-ai-agent.md) | Register the MCP server with Kiro CLI or Claude Code. |
 | [Your first memory](first-memory.md) | A guided walkthrough: create, search, read, update, and relate a memory. |
 
@@ -61,3 +61,10 @@ You run your own infrastructure and are comfortable with a terminal, PostgreSQL,
 |------|-------------|
 | [Style guide](STYLE.md) | Voice, formatting, terminology, and structure conventions. |
 | [Contributing](CONTRIBUTING.md) | How to add or edit guide pages. |
+
+### Engineering architecture
+
+| Page | Description |
+|------|-------------|
+| [Architecture Component Index](../components/index.md) | Canonical ownership, contracts, runtime flows, code entry points, tests, and operational status for every component. |
+| [Architecture decisions](../adr/index.md) | Durable decisions governing capture, provenance, segmentation, testing, and Correction Episodes. |

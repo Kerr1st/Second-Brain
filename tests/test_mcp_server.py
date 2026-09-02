@@ -62,6 +62,110 @@ class TestMemorySearchReturnsList:
         assert isinstance(response["temporal_context"], list)
 
 
+class TestMemorySearchStableCandidateSelection:
+    """The requested output size must not change the candidate population."""
+
+    def test_smaller_limit_is_a_prefix_of_larger_limit(
+        self, test_db, clean_tables
+    ):
+        from src.mcp_server import memory_search
+
+        query = "monotonic codex capture provenance"
+        query_vector = [1.0, *([0.0] * 1023)]
+        decoy_vector = [0.99, 0.1410673598, *([0.0] * 1022)]
+
+        target_id = _db.create_memory(
+            type="decision",
+            title=query,
+            content="Preserve an Agent Task's durable lifecycle policy.",
+            embedding=str(query_vector),
+        )
+        for index in range(6):
+            _db.create_memory(
+                type="source",
+                title=f"Lexical candidate {index}",
+                content=f"{query} transient candidate number {index}",
+                embedding=str(decoy_vector),
+            )
+
+        # Independently place the target outside lexical retrieval. Its exact
+        # title match should win utility reranking once the candidate reaches it.
+        with _db.get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE memories SET search_vector = to_tsvector('english', 'durable lifecycle') "
+                "WHERE id = %s",
+                (target_id,),
+            )
+            connection.commit()
+
+        with patch("src.mcp_server.generate_embedding", return_value=query_vector):
+            larger = memory_search(query=query, limit=10)
+
+        # memory_search reinforces returned rows, so restore the same search
+        # state before comparing the second observation.
+        with _db.get_connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE memories SET access_count = 0, last_accessed_at = NULL"
+            )
+            connection.commit()
+
+        with patch("src.mcp_server.generate_embedding", return_value=query_vector):
+            smaller = memory_search(query=query, limit=3)
+
+        larger_ids = [item["id"] for item in larger["results"]]
+        smaller_ids = [item["id"] for item in smaller["results"]]
+        assert larger_ids[0] == target_id
+        assert smaller_ids == larger_ids[:3]
+
+    def test_root_memories_are_diversified_by_agent_task_provenance(
+        self, test_db, clean_tables
+    ):
+        from src.mcp_server import memory_search
+
+        query = "codex task capture lifecycle"
+        query_vector = [1.0, *([0.0] * 1023)]
+        other_vector = [0.8, 0.6, *([0.0] * 1022)]
+        crowded_source = "codex://crowded-task"
+
+        crowded_ids = {
+            _db.create_memory(
+                type="decision",
+                title=f"Capture lifecycle decision {index}",
+                content=f"{query} primary evidence variant {index}",
+                embedding=str(query_vector),
+                source_type="distilled_agent_task",
+                metadata={"task_source_url": crowded_source},
+            )
+            for index in range(5)
+        }
+        other_ids = {
+            _db.create_memory(
+                type="insight",
+                title=f"Related task evidence {index}",
+                content=f"Independent supporting evidence from task {index}",
+                embedding=str(other_vector),
+                source_type="distilled_agent_task",
+                metadata={"task_source_url": f"codex://other-task-{index}"},
+            )
+            for index in range(2)
+        }
+
+        with patch("src.mcp_server.generate_embedding", return_value=query_vector):
+            response = memory_search(query=query, limit=4)
+
+        result_ids = [item["id"] for item in response["results"]]
+        assert len(crowded_ids.intersection(result_ids)) == 2
+        assert other_ids.issubset(result_ids)
+        assert all(
+            _db.get_memory(memory_id)["access_count"] == 1
+            for memory_id in result_ids
+        )
+        assert all(
+            _db.get_memory(memory_id)["access_count"] == 0
+            for memory_id in crowded_ids.difference(result_ids)
+        )
+
+
 class TestMemoryCreateDepthWarning:
     """Shallow content triggers depth warning."""
 

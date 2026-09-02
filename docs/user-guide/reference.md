@@ -9,12 +9,14 @@ Complete specifications for MCP tools, CLI commands, memory types, relationship 
 
 ## MCP Tools
 
-The MCP server exposes 9 tools. All are invoked by an agent (Kiro CLI, Claude Code) through the Model Context Protocol.
+The MCP server exposes 11 tools. All are invoked by an agent through the Model Context Protocol.
 
 | Tool | Purpose | Key arguments | Returns |
 |------|---------|---------------|---------|
 | `memory_create` | Create a memory and generate its embedding | `type`\*, `title`\*, `content`\*, `tags`, `source_type`, `source_url`, `metadata`, `project`, `encoding_context` | `str` — created ID + depth warnings |
 | `memory_search` | Hybrid semantic + keyword search with reranking | `query`\*, `type`, `limit` (default 10), `project`, `source_type`, `since_days`, `status` | `dict` — `{results, temporal_context, schema_context}` |
+| `memory_context` | Build an authority-ordered, token-bounded task context pack | `objective`\*, `project_hint`, `repository`, `budget_tokens` | `dict` — context items, conflicts, token count, and `receipt_id` |
+| `memory_context_outcome` | Close a prior recall receipt | `receipt_id`\*, `used_memory_ids`\*, `outcome`\*, `note`, `correction_episode_id` | `str` — confirmation |
 | `memory_read` | Read full content of a memory by ID | `memory_id`\* | `dict` — all fields (embedding excluded) |
 | `memory_update` | Update fields on a memory (pass only changed fields) | `memory_id`\*, `title`, `content`, `status`, `tags`, `summary`, `type` | `str` — confirmation |
 | `memory_relate` | Create a typed relationship between two memories | `source_id`\*, `target_id`\*, `relation_type`\*, `note` | `str` — confirmation |
@@ -88,6 +90,9 @@ Composes and sends a gated Gmail push. Sends **only** when a new cross-project s
 | `question` | Open threads to explore |
 | `insight` | Aha moments, realizations |
 | `decision` | Choices made and rationale |
+| `correction_episode` | System-generated, user-attributed correction evidence; searchable and Dream Cycle-readable, but not proactively delivered or automatically applied as steering |
+| `steering_candidate` | Consensus-retained recommendation that remains inactive pending explicit approval |
+| `steering_rule` | Versioned, user-approved guidance with Authority Scope and Applicability |
 | `project` | Active project status |
 | `source` | Ingested external content |
 
@@ -109,11 +114,21 @@ Composes and sends a gated Gmail push. Sends **only** when a new cross-project s
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
+| `DB_HOST` | PostgreSQL host | `127.0.0.1` |
+| `DB_PORT` | PostgreSQL port | `5432` |
+| `DB_NAME` | Application database | `memory_bank` |
+| `DB_USER` | Database role | `memory_bank` |
+| `DB_PASSWORD` | Local database password | `<local-password>` |
+| `DB_POOL_MIN` / `DB_POOL_MAX` | Connection pool size | `1` / `5` |
+| `TEST_DB_NAME` | Destructive test database; must be explicitly allowlisted | `memory_bank_test` |
 | `SECOND_BRAIN_PROFILE` | Select model backend profile from `config/backends.toml` | `laptop` (default), `mini` |
+| `EMBEDDING_PROVIDER` | Active embedding Adapter; production accepts local Ollama | `ollama` |
+| `OLLAMA_BASE_URL` | Local Ollama endpoint | `http://127.0.0.1:11434` |
+| `OLLAMA_EMBEDDING_MODEL` | Active 1,024-dimension model | `bge-m3` |
 | `EXPRESS_EMAIL_TO` | Recipient for Express Gmail push | `<your-email@example.com>` |
 | `EXPRESS_EMAIL_FROM` | Sender address for Express Gmail push | `<your-sender@gmail.com>` |
 | `GMAIL_APP_PASSWORD` | Gmail app password for Express push | `<your-app-password>` |
-| AWS profile (`default`) | SSO credentials for Bedrock (embeddings + LLM) | Configured via `aws sso login` |
+| AWS profile (`default`) | Optional SSO credentials for Bedrock-backed reasoning profiles | Configured via `aws sso login` |
 
 > [!NOTE]
 > Email variables are set on the LaunchAgent that runs `express_push.py`. Until set, the push composes but skips sending (benign exit 0).

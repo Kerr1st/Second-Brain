@@ -15,6 +15,9 @@ All plists live in this directory. Install by symlinking to `~/Library/LaunchAge
 | `com.second-brain.verify` | Sun 3:00 AM | `verify_backup.sh` | Backup verification (Google Drive) |
 | `com.second-brain.dream-cycle` | Daily 12:00 PM | `dream_cycle_scheduled.sh` | Dream cycle pipeline |
 | `com.second-brain.liveness` | Daily 9:00 AM | `verify_liveness.sh` | Per-source capture liveness check (alerts if a channel goes silent) |
+| `com.second-brain.codex-capture` | Every 3600s | `codex_capture.sh` | All eligible active User-Owned Codex Tasks; no archived backfill |
+| `com.second-brain.codex-canary` | Not loaded | `codex_capture_canary.sh` | Retained one-task production proof |
+| `com.second-brain.reembed-local` | Every 3600s | `reembed_local.sh` | Up to 5,000 preserved rows per resumable local BGE-M3 batch |
 | `com.second-brain.capture-api` | Removed | `capture_api.sh` | Deprecated HTTP capture endpoint (not installed) |
 
 ## Install / Uninstall

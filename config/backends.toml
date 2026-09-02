@@ -35,3 +35,14 @@ skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opu
 advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+
+# Opt-in local profile for machines with the Codex CLI. It is used by the
+# bounded Codex Task capture proof without changing the default Dream Cycle
+# backend for existing operations.
+[profiles.codex_local]
+explorer       = { backend = "codex", model = "gpt-5.6-sol", effort = "high" }
+thinker        = { backend = "codex", model = "gpt-5.6-sol", effort = "max" }
+skeptic        = { backend = "codex", model = "gpt-5.6-sol", effort = "high" }
+advocate       = { backend = "codex", model = "gpt-5.6-sol", effort = "high" }
+epistemologist = { backend = "codex", model = "gpt-5.6-sol", effort = "high" }
+methodologist  = { backend = "codex", model = "gpt-5.6-sol", effort = "high" }

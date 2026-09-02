@@ -10,14 +10,72 @@ from src.db import (
     create_relationship, get_relationships, find_temporal_neighbors,
     find_schemas_for_memory, get_schema_with_constituents,
 )
-from src.search import hybrid_search, rerank, increment_access_count
+from src.search import (
+    hybrid_search,
+    increment_access_count,
+    rerank,
+    retrieve_memories,
+)
 from src.embeddings import generate_embedding
 from src.classify import classify_memory
 from src.depth import compute_depth_score
 from src.project import normalize_project_tag
 from src import express
+from src.context_broker import (
+    ContextRequest,
+    build_context,
+    record_context_outcome,
+)
 
 mcp = FastMCP("Second Brain")
+
+
+@mcp.tool()
+def memory_context(
+    objective: str,
+    project_hint: str | None = None,
+    repository: str | None = None,
+    budget_tokens: int = 1800,
+) -> dict:
+    """Build a bounded, provenance-rich context pack for the current Codex task.
+
+    Approved applicable Steering Rules are returned before inferred knowledge and
+    source evidence. The response includes a receipt_id; report the task outcome
+    with memory_context_outcome so Second Brain can measure whether recall helped.
+    """
+    return build_context(
+        ContextRequest(
+            objective=objective,
+            project_hint=project_hint,
+            source_system="codex",
+            repository=repository,
+            budget_tokens=budget_tokens,
+        )
+    ).to_dict()
+
+
+@mcp.tool()
+def memory_context_outcome(
+    receipt_id: str,
+    used_memory_ids: list[str],
+    outcome: str,
+    note: str | None = None,
+    correction_episode_id: str | None = None,
+) -> str:
+    """Record whether a prior context pack was followed, corrected, or unused.
+
+    outcome: followed, corrected, not_used, or unknown. A corrected outcome must
+    cite the resulting Correction Episode so injected guidance never becomes
+    self-corroborating evidence.
+    """
+    record_context_outcome(
+        receipt_id,
+        used_memory_ids=used_memory_ids,
+        outcome=outcome,
+        note=note,
+        correction_episode_id=correction_episode_id,
+    )
+    return f"Recorded context outcome for {receipt_id}"
 
 
 @mcp.tool()
@@ -94,9 +152,16 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
     created_after = None
     if since_days is not None and since_days > 0:
         created_after = datetime.now(timezone.utc) - timedelta(days=since_days)
-    results = hybrid_search(query, embedding, limit=limit, type=type, project=project,
-                            source_type=source_type, created_after=created_after, status=status)
-    results = rerank(results, query, query_project=project)
+    results = retrieve_memories(
+        query,
+        embedding,
+        limit=limit,
+        type=type,
+        project=project,
+        source_type=source_type,
+        created_after=created_after,
+        status=status,
+    )
 
     increment_access_count([str(r["id"]) for r in results])
 

@@ -15,11 +15,15 @@ Every time you start a new session with an AI agent, it begins with a blank slat
 
 ### 1. Capture
 
-Content enters the system from multiple channels: Kiro CLI chats, Kiro IDE chats, Quick Desktop documents and chats, feed events, Slack threads, YouTube transcripts, and web articles. You don't manually file anything — capture happens automatically through scheduled sync jobs and agent interactions.
+Content enters the system from multiple channels: active User-Owned Codex Tasks, Kiro CLI chats,
+Kiro IDE chats, Quick Desktop documents and chats, feed events, Slack threads, YouTube transcripts,
+and web articles. You don't manually file anything—capture happens automatically through scheduled
+sync jobs and agent interactions. Codex Tasks become eligible after six hours of inactivity;
+archived-history backfill remains separately controlled.
 
 ### 2. Ingest
 
-Captured content is parsed, classified by *memory class* (semantic, episodic, or procedural), assigned a depth score, chunked, embedded using Amazon Bedrock Titan v2 (1024 dimensions), and stored in PostgreSQL with pgvector. The pipeline also auto-discovers typed relationships between the new memory and existing ones.
+Captured content is parsed, classified by *memory class* (semantic, episodic, or procedural), assigned a depth score, chunked, embedded locally using Ollama BGE-M3 (1,024 dimensions), and stored in PostgreSQL with pgvector. The pipeline also auto-discovers typed relationships between the new memory and existing ones.
 
 ### 3. Retrieve
 
@@ -47,7 +51,10 @@ Knowledge compounds. The dream cycle finds connections you missed. Express tells
 : A single stored item — text content, a vector embedding, metadata (type, tags, source, confidence), and relationships to other memories. The atomic unit of the system.
 
 *Memory type*
-: A classification that describes what a memory represents. The 10 types are: `research`, `synthesis`, `idea`, `connection`, `priority`, `question`, `insight`, `decision`, `project`, and `source`.
+: A classification that describes what a memory represents. The documented types are `research`,
+  `synthesis`, `idea`, `connection`, `priority`, `question`, `insight`, `decision`,
+  `correction_episode`, `steering_candidate`, `steering_rule`, `project`, and `source`. The database
+  intentionally leaves the type column extensible for capture-specific records.
 
 *Relationship*
 : A typed, directed edge between two memories (e.g., memory A `supports` memory B). The 9 relationship types are: `supports`, `contradicts`, `extends`, `inspires`, `blocks`, `requires`, `derived_from`, `related_to`, and `superseded_by`.
@@ -59,7 +66,7 @@ Knowledge compounds. The dream cycle finds connections you missed. Express tells
 : The delivery subsystem that surfaces synthesized knowledge to you — via CLI briefing, email push, in-session MCP tool, and feedback.
 
 *MCP server*
-: The Model Context Protocol server that exposes 9 tools (`memory_create`, `memory_search`, `memory_read`, `memory_update`, `memory_relate`, `memory_list`, `memory_graph`, `memory_learn`, `memory_brief`) so AI agents can read and write your memory.
+: The Model Context Protocol server that exposes 11 tools, including bounded `memory_context` recall and `memory_context_outcome` receipts, so agents can use knowledge and report whether it helped.
 
 ## Next steps
 

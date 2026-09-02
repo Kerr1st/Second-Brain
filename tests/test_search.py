@@ -34,6 +34,21 @@ class TestHybridSearchReturnsResults:
         assert len(results) >= 1
         assert any(r["title"] == "Quantum Cryptography" for r in results)
 
+    def test_full_text_search_covers_rows_awaiting_local_embedding(
+        self, test_db, clean_tables, mock_embedding
+    ):
+        content = "monotonic codex capture provenance sentinel"
+        db.create_memory(
+            type="source",
+            title="Unembedded source evidence",
+            content=content,
+            embedding=None,
+        )
+
+        results = hybrid_search(content, mock_embedding(content), limit=5)
+
+        assert any(r["title"] == "Unembedded source evidence" for r in results)
+
 
 class TestRerankPreservesOrderForExactMatch:
     """Exact title match ranks first after reranking."""

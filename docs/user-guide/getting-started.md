@@ -13,7 +13,6 @@ Install Second Brain, configure its dependencies, and verify your first memory r
 > Before you begin, ensure you have:
 > - macOS with [Homebrew](https://brew.sh) installed
 > - Python 3.13+ (3.14 recommended)
-> - An AWS account with Amazon Bedrock access and the AWS CLI configured for SSO
 > - An MCP client — [Kiro CLI](https://kiro.dev) or [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 
 ## 1. Install PostgreSQL 17 + pgvector
@@ -41,9 +40,9 @@ Expected output:
 ## 2. Create a Python virtual environment
 
 ```bash
-python3 -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 Expected output (last lines):
@@ -77,42 +76,43 @@ Expected output:
 apply: 001_initial_schema.sql
 apply: 002_v2_columns.sql
 ...
-apply: 010_express_feedback.sql
+apply: 011_backend_provenance.sql
+apply: 012_agent_task_capture.sql
+apply: 013_context_governance.sql
+apply: 014_local_embedding_space.sql
+apply: 015_enforce_active_embedding_space.sql
 done
 ```
 
 Migrations that were already applied are skipped: `skip: <version> (already applied)`.
 
-## 4. Configure AWS / Bedrock
+## 4. Install the local embedding runtime
 
-Second Brain uses Amazon Bedrock for two purposes: generating vector embeddings (Titan Text Embeddings v2, 1024 dimensions) and powering the *dream cycle* — a nightly autonomous synthesis pipeline that discovers connections across your memories.
-
-Authenticate your AWS SSO session:
+Second Brain uses local Ollama BGE-M3 for 1,024-dimension embeddings. Install the runtime, start it
+at login, and pull the model:
 
 ```bash
-aws sso login --profile default
+brew install ollama
+brew services start ollama
+ollama pull bge-m3
 ```
 
-This opens your browser for authorization. Verify the session:
+Verify the active space:
 
 ```bash
-aws sts get-caller-identity
+.venv/bin/python -c \
+  'from src.embeddings import generate_embedding, active_embedding_space; v=generate_embedding("health check"); print(active_embedding_space(), len(v))'
 ```
 
 Expected output:
 
-```json
-{
-    "UserId": "AROA...:you@example.com",
-    "Account": "<aws-account-id>",
-    "Arn": "arn:aws:sts::<aws-account-id>:assumed-role/..."
-}
+```text
+ollama:bge-m3:1024 1024
 ```
 
 > [!NOTE]
-> SSO tokens expire after 8–12 hours. When expired, embedding and search calls fail. Re-run `aws sso login --profile default` to refresh.
->
-> The model backend profile defaults to `laptop` (set via `SECOND_BRAIN_PROFILE` env var; see `config/backends.toml`).
+> AWS credentials are needed only if you explicitly select a Bedrock-backed reasoning profile.
+> The active embedding path and backups do not require AWS.
 
 ## 5. Start the MCP server and connect an agent
 
@@ -122,7 +122,7 @@ Start the MCP server:
 python -m src.mcp_server
 ```
 
-The server exposes 9 tools over stdio: `memory_create`, `memory_search`, `memory_read`, `memory_update`, `memory_relate`, `memory_list`, `memory_graph`, `memory_learn`, and `memory_brief`.
+The server exposes 11 tools over stdio, adding `memory_context` and `memory_context_outcome` to the existing memory, relationship, learning, and briefing tools.
 
 To connect your MCP client, add this stdio server configuration (adjust the path to your clone):
 
@@ -138,7 +138,7 @@ To connect your MCP client, add this stdio server configuration (adjust the path
 }
 ```
 
-<!-- TODO: Update with client-specific config path (e.g. ~/.kiro/mcp.json or ~/.claude/config.json) once documented. -->
+Client-specific config file locations vary by version. See [Connect an AI agent](connect-ai-agent.md) for Kiro CLI and Claude Code notes.
 
 ## 6. Verify
 
@@ -178,7 +178,8 @@ Expected output:
 ... passed
 ```
 
-Tests run against an isolated `memory_bank_test` database and mock Bedrock calls — no AWS credentials needed.
+Tests run against an isolated `memory_bank_test` database and mock Ollama calls — the local model
+does not need to run during tests.
 
 ## Next steps
 

@@ -8,6 +8,11 @@
 > Apply Claude Fable 5 to the Second Brain **surgically and cost-consciously**, targeting
 > only the dream-cycle **Thinker** agent. Fable work is gated on **B2** (the Thinker context
 > packet), built only when pursuing Fable.
+>
+> **Embedding update (2026-08-29):** ADR 0012 replaced the active Titan embedding path with local
+> Ollama BGE-M3. References below to reusing `src/embeddings.py` as a Bedrock pattern are historical;
+> a future direct-Bedrock reasoning Adapter must use the backend Module, not the active embedding
+> Interface.
 
 ## TL;DR
 
@@ -39,7 +44,7 @@
 
 Today the dream cycle is effectively **$0 in metered Bedrock**: `backends/kiro.py` (`KiroInvoker`) invokes
 `kiro-cli chat --model claude-opus-4.8`, so every Explorer / Thinker / evaluator call runs
-through the **Amazon Q service**, not this account's Bedrock. Kiro's model catalog does **not**
+through the **Kiro service**, not this account's Bedrock. Kiro's model catalog does **not**
 include `claude-fable-5` (verified — catalog is `auto, claude-opus-4.8/4.7/4.6/4.5,
 claude-sonnet-4.6/4.5/4, claude-haiku-4.5, deepseek-3.2, minimax-*, glm-5, qwen3-coder-next`).
 
@@ -99,8 +104,7 @@ so worst-case spend stays bounded regardless.
 
 ## Architecture changes (minimal, 3)
 
-1. **Add a direct-Bedrock Fable 5 backend.** Reuse the boto3 pattern already in
-   `src/embeddings.py` (this account is on Bedrock / us-west-2 today). Use
+1. **Add a direct-Bedrock Fable 5 backend.** Implement it in the model-backend Module. Use
    `bedrock-runtime` `InvokeModel` with inference-profile ID **`global.anthropic.claude-fable-5`**
    (bare IDs are unsupported; CRIS/inference-profile only). Bake in the Fable 5 constraints
    (see below) and capture `usage` for per-call cost logging.

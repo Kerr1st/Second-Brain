@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.second-brain.codex-canary</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/path/to/second-brain/scripts/jobs/codex_capture_canary.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CODEX_CAPTURE_CANARY_TASK_ID</key>
+        <string>01a014fd-89cf-73c0-a4ef-001e0f89d231</string>
+        <key>SECOND_BRAIN_PROFILE</key>
+        <string>codex_local</string>
+        <key>CODEX_CLI</key>
+        <string>/Applications/ChatGPT.app/Contents/Resources/codex</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/path/to/second-brain/logs/codex-canary.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/second-brain/logs/codex-canary.log</string>
+</dict>
+</plist>

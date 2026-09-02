@@ -3,8 +3,6 @@ boto3==1.42.69
 mcp==1.26.0
 browser-cookie3==0.20.1
 requests==2.32.5
-hypothesis==6.151.9
-pytest==9.0.2
 fastapi>=0.115.0
 uvicorn[standard]>=0.34.0
 numpy>=2.0.0
