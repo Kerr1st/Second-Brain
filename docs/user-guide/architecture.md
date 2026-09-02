@@ -9,6 +9,10 @@ How Second Brain's components fit together and why the system is shaped the way 
 
 This page gives you a breadth-first understanding of the whole system — the five-stage data flow, the major components, and the cross-cutting design choices that bind them. For deeper dives into individual subsystems, follow the links to sibling pages.
 
+For engineering ownership, contracts, code entry points, tests, and current
+activation status, use the
+[Architecture Component Index](../components/index.md).
+
 ## The five-stage data flow
 
 Every piece of knowledge moves through five stages:
@@ -28,6 +32,7 @@ Capture → Ingest → Retrieve → Synthesize → Deliver
 ```mermaid
 flowchart TD
     subgraph Capture["Capture Channels"]
+        CD[Codex Desktop Tasks]
         KC[Kiro CLI / IDE chats]
         QD[Quick Desktop]
         YT[YouTube transcripts]
@@ -36,7 +41,7 @@ flowchart TD
 
     subgraph Ingest["Ingestion Pipeline"]
         P[Parse & Classify]
-        E[Embed — Bedrock Titan v2, 1024-dim]
+        E[Embed — local BGE-M3, 1024-dim]
         S[Store & Discover relationships]
     end
 
@@ -47,7 +52,7 @@ flowchart TD
     end
 
     subgraph MCP["MCP Server — stdio"]
-        T[9 tools: create, search, read,\nupdate, relate, list, graph, learn, brief]
+        T[11 tools: create, search, context, outcome,\nread, update, relate, list, graph, learn, brief]
     end
 
     subgraph Agents["Connected Agents"]
@@ -78,6 +83,7 @@ You feed content into Second Brain through several channels. Each channel has it
 
 | Channel | Connector | Notes |
 |---------|-----------|-------|
+| Codex Desktop Tasks | `src/capture/codex.py` | Agent Task reference implementation; six-hour eligibility; scheduling approval-gated |
 | Kiro CLI / IDE chats | Chat parsers (`src/parsers/`) | Agents call `memory_create` directly or chats are batch-extracted |
 | Quick Desktop | QD sync scripts | Documents, chats, feed events from `knowledge_v1.db` |
 | YouTube | `src/capture/youtube.py` (yt-dlp) | Transcript extraction, in-repo |
@@ -90,7 +96,7 @@ The pipeline (`src/ingest.py`) transforms raw content into searchable, classifie
 1. **Parse** — Extract text and metadata from the source format.
 2. **Classify** — Assign a *mem_class* (semantic, episodic, or procedural) following Tulving's memory taxonomy.
 3. **Chunk** — Split large content into coherent pieces.
-4. **Embed** — Generate a 1024-dimensional vector via Amazon Bedrock (Titan v2).
+4. **Embed** — Generate a 1,024-dimensional vector through local Ollama BGE-M3.
 5. **Store** — Write to PostgreSQL with auto-populated `search_vector` (tsvector trigger).
 6. **Discover relationships** — Identify typed edges (`supports`, `extends`, `derived_from`, etc.) to existing memories.
 
@@ -100,13 +106,14 @@ A single PostgreSQL 17 instance (native, localhost-only on port 5432) holds ever
 
 Key indexes powering retrieval:
 
-- **HNSW** on the `embedding` column (vector cosine similarity)
+- **HNSW** on the active BGE-M3 `embedding` column (vector cosine similarity); preserved Titan
+  vectors remain separate in `legacy_embedding`
 - **GIN** on `search_vector` (BM25 full-text)
 - **GIN** on `tags` and `metadata` (JSONB filtering)
 
 ### MCP server
 
-The MCP server (`src/mcp_server.py`) exposes nine tools over **stdio** — it opens no network port. Agents connect via the Model Context Protocol, issue tool calls, and receive structured responses. The server is the single entry point for all agent interactions with the knowledge store.
+The MCP server (`src/mcp_server.py`) exposes eleven tools over **stdio** — it opens no network port. Agents connect through memory CRUD, retrieval, bounded context, outcome receipts, learning, and briefing interfaces.
 
 ### Dream cycle
 

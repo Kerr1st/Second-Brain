@@ -1,5 +1,9 @@
 # Quick Desktop Integration — Design Decisions & Learnings
 
+> **Product boundary:** Quick Desktop is a desktop application and is not Amazon Quick, the
+> web-based agent platform. Both use the term “session,” but their storage locations, connectors,
+> and source identity namespaces are separate.
+
 **Date:** 2026-04-21
 **Branch:** `quick_desktop_integration`
 

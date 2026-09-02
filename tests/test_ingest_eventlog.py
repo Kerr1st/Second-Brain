@@ -160,7 +160,7 @@ def test_db():
     DB_CONFIG = {
         "host": os.environ.get("DB_HOST", "localhost"),
         "port": int(os.environ.get("DB_PORT", "5432")),
-        "dbname": "memory_bank_test",
+        "dbname": os.environ.get("TEST_DB_NAME", "memory_bank_test"),
         "user": os.environ.get("DB_USER", "memory_bank"),
         "password": os.environ.get("DB_PASSWORD", "memory_bank"),
     }

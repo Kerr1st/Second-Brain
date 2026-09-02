@@ -1,24 +1,30 @@
 # Second Brain — Architecture
 
-> Last updated: 2026-06-16
+> Last updated: 2026-08-29
 
 ## Overview
 
 A personal knowledge system that gives AI agents persistent memory across sessions. PostgreSQL + pgvector stores memories and their typed relationships. An MCP server exposes this to Kiro CLI, Claude Code, and other agents. A dream cycle pipeline autonomously surfaces connections and insights. (An entity knowledge graph was imported from Quick Desktop but is currently **dormant** — unused by retrieval/synthesis; see below.)
+
+## Component Documentation
+
+The [Architecture Component Index](components/index.md) is the canonical
+navigation layer for component ownership, contracts, runtime flows, code entry
+points, tests, operations, and related decisions. This document remains the
+breadth-first system view; component pages provide the maintained depth.
 
 ## System Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Capture Channels                                           │
-│  Kiro CLI · Kiro IDE chats · Quick Desktop (docs, chats,    │
-│  feed events) · YouTube (yt-dlp, src/capture/youtube.py)    │
-│  · Web articles (Crawlee, ~/Work/Tools/Crawlee)             │
+│  Codex Tasks · Kiro CLI · Kiro IDE chats · Quick Desktop    │
+│  (docs, chats, feed events) · YouTube · Web articles        │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Ingestion Pipeline                                         │
-│  Parse → Classify → Chunk → Embed (Bedrock Titan 1024d)     │
+│  Parse → Classify → Chunk → Embed (local BGE-M3 1024d)      │
 │  → Store → Discover relationships                           │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
@@ -40,13 +46,13 @@ A personal knowledge system that gives AI agents persistent memory across sessio
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  MCP Server (src/mcp_server.py)                             │
-│  9 tools: create, search, read, update, relate,            │
-│           list, graph, learn, brief                         │
+│  11 tools: create, search, context, outcome, read, update, │
+│            relate, list, graph, learn, brief                │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Agents: Kiro CLI · Claude Code · Dream Cycle Pipeline      │
-│  LLM: kiro-cli → Amazon Q (Opus 4.8), backend-selectable    │
+│  LLM: Kiro CLI (Opus 4.8), backend-selectable              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -59,9 +65,79 @@ A personal knowledge system that gives AI agents persistent memory across sessio
 5. **Deliver (Express)** — surfaces synthesized output to the user: on-demand `brief`, a gated Gmail push chained after the noon dream cycle, and the `memory_brief` MCP tool; shaped by delivery preferences (`express_feedback`, migration 010)
 6. **Backup** — Daily encrypted pg_dump + JSON exports to Google Drive (+ local + git). **S3 was de-scoped 2026-06-01** (brittle overnight SSO).
 
+### Agentic-assistant capture standard
+
+All agentic-assistant integrations follow one accepted source model: a stable Agent Task contains
+ordered Agent Turns, and each turn preserves the user's prompt plus the agent's visible outcome.
+Complete turns are grouped into semantic Topic Segments using distinct purpose, coherence, and
+independent search or distillation value. All qualifying segments remain searchable, including
+segments that yield no immediate decision, insight, or Correction Episode.
+
+Before eligibility, each Source Connector classifies Task Ownership from native evidence as
+`user-owned`, `delegated`, or `unknown`. Only User-Owned Tasks continue. Delegated Tasks and
+Unknown-Ownership Tasks are skipped and reported, with delegation evidence taking precedence over
+conflicting user markers. Codex is the reference implementation; each later connector must
+document and fixture-test its own evidence before activation. Shared runtime code is extracted only
+after a second connector proves the seam. See
+[ADR 0008](adr/0008-classify-task-ownership-before-capture.md).
+
+Exact Provenance is the direct chain from a derived memory to its supporting Agent Turns, Topic
+Segment, Captured Task, and native Agent Task identity. Processing diagnostics such as model
+versions, hashes, timing, and usage are not part of provenance. See the canonical
+[capture definition](CAPTURE-COMPONENTS.md#exact-provenance).
+
+Native project, workspace, and repository context remain source provenance; they never become the
+semantic `memories.project` value automatically. A semantic project is assigned only when the task
+content clearly establishes the subject. See
+[ADR 0004](adr/0004-separate-source-provenance-from-semantic-project.md).
+Codex Build 1 preserves the provenance fields but deliberately defers content-based semantic
+project classification, so its records currently leave `project` unset.
+
+Captured Task history grows monotonically. Once stored, an Agent Turn is immutable; a refresh
+appends only unseen complete turns. Changed, missing, or reordered known turns are Source Drift and
+are ignored without recording additional capture state. When new turns append, semantic processing receives
+the prior tail segment as context plus those new turns. See the canonical
+[capture policy](CAPTURE-COMPONENTS.md#monotonic-capture-policy) and
+[ADR 0003](adr/0003-accumulate-captured-task-history-monotonically.md).
+
+Codex task naming is source-native presentation provenance. The connector uses
+`threads.name`, then the latest valid `session_index.jsonl` observation, then
+legacy `threads.title`. A rename refreshes the same Captured Task without
+changing its Agent Turns, semantic cursor, derived memories, or inactivity
+clock. The source and available observation timestamp are retained with the
+current captured title.
+
+For each eligible Agent Task revision, source capture commits first. The same scheduled run then
+uses one Task Semantic Pass to return Topic Segments and zero or more supported decisions or
+insights for each segment, plus a Correction Episode when a user specifically corrects a prior
+visible agent outcome. A Correction Episode is stored as episodic, user-attributed evidence. It is
+searchable and available to the Dream Cycle, but is not a Steering Rule and is excluded from
+automatic steering context and proactive Express delivery. Topic Segmentation and Task
+Distillation remain distinct concepts but are not separate model calls, and segments do not
+require summaries. The Dream Cycle remains
+separate from capture and, on its own schedule, performs evaluator-gated, higher-order synthesis
+across memories, including contradiction discovery; Codex v1 has no immediate contradiction
+planner. Express delivers selected results. Source-specific connectors may differ in access and
+eligibility rules, but not in this downstream model. See
+[ADR 0002](adr/0002-standardize-agent-task-capture.md) and
+[ADR 0006](adr/0006-combine-task-segmentation-and-distillation.md). The deferred
+Correction Episode promotion path is specified in
+[ADR 0007](adr/0007-capture-correction-episodes-before-steering.md).
+
+The combined semantic result stores atomically. Failure leaves the source capture intact, stores no
+partial semantic output, and leaves one Semantic Processing Cursor at the last successfully
+processed Agent Turn. The next capture invocation retries the whole unprocessed tail; once hourly
+scheduling is approved, that is normally the next hourly run. There are no stage-specific
+semantic retries.
+
+Integration names also define identity namespaces. Amazon Quick is a web source and Quick Desktop
+is a separate desktop source; although both call their units sessions, their storage, connectors,
+and captured identities remain separate.
+
 ## Database Schema
 
-11 migrations applied in order (`migrations/000` through `010`).
+The migration runner applies schema migrations `001` through `015` in order; migration `000`
+bootstraps the version-tracking table.
 
 ### Core Tables
 
@@ -69,11 +145,13 @@ A personal knowledge system that gives AI agents persistent memory across sessio
 -- memories: The primary knowledge store
 CREATE TABLE memories (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    type TEXT NOT NULL,              -- idea, synthesis, research, insight, question, decision, priority, project, connection, source
+    type TEXT NOT NULL,              -- idea, synthesis, research, insight, question, decision, correction_episode, priority, project, connection, source
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     summary TEXT,
-    embedding vector(1024),
+    legacy_embedding vector(1024),  -- preserved Titan space; never mixed with active vectors
+    embedding vector(1024),         -- active local BGE-M3 space
+    embedding_space TEXT,           -- ollama:bge-m3:1024 when embedding is present
     tags TEXT[] DEFAULT '{}',
     source_url TEXT,
     source_type TEXT,                -- youtube, article, kiro_cli_chat, kiro_ide_chat, distilled_chat, quick_desktop_doc, quick_desktop_chat, quick_desktop_feed, ... (see DB for full set)
@@ -203,11 +281,14 @@ CREATE INDEX ON memories (last_accessed_at DESC);
 Hybrid retrieval with cognitive science-grounded reranking. Implementation: `src/search.py`.
 
 1. **BM25 full-text search** — PostgreSQL `tsvector/tsquery` with GIN index
-2. **Vector cosine search** — pgvector HNSW index (1024-dim Titan embeddings)
-3. **Reciprocal Rank Fusion** — `score = 1/(k+rank_vec) + 1/(k+rank_bm25)`, k=60
-4. **Utility reranking** — weighted scoring (see below)
-5. **Retrieval reinforcement** — `access_count` incremented on retrieval, `last_accessed_at` updated
-6. **Temporal context** — top result's temporal neighbors (±24h) appended
+2. **Vector cosine search** — pgvector HNSW index (active 1024-dim local BGE-M3 embeddings)
+3. **Stable candidate population** — ordinary output limits search the same 100 candidates per channel
+4. **Reciprocal Rank Fusion** — `score = 1/(k+rank_vec) + 1/(k+rank_bm25)`, k=60
+5. **Utility reranking** — weighted scoring over the complete fused pool (see below)
+6. **Deduplication and lineage diversity** — exact-content collapse, then a soft preference for at most two results per source task
+7. **Final result limit** — applied only after ranking and diversity, preserving prefix stability for an unchanged state
+8. **Retrieval reinforcement** — `access_count` and `last_accessed_at` update only for returned results
+9. **Temporal context** — top result's temporal neighbors (±24h) appended
 
 ### Reranking Formula
 
@@ -243,6 +324,7 @@ See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale.
 | `question` | Open threads to explore |
 | `insight` | Aha moments, realizations |
 | `decision` | Choices made and rationale |
+| `correction_episode` | User-attributed evidence that a prior visible agent outcome was misaligned and what the user expected instead |
 | `project` | Active project status |
 | `source` | Ingested external content |
 
@@ -266,8 +348,8 @@ See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale.
 |---|---|
 | Knowledge store | PostgreSQL 17 + pgvector (native Homebrew, localhost:5432; Docker container retained as rollback pending Phase 5 decommission) |
 | Agent interface | MCP server (`src/mcp_server.py`) |
-| LLM (reasoning) | kiro-cli → Amazon Q (Claude Opus 4.8), $0 metered; pluggable per-machine via `config/backends.toml` (see MODEL-BACKENDS.md) |
-| Embeddings | Amazon Bedrock (Titan v2, 1024-dim) |
+| LLM (reasoning) | Kiro CLI (Claude Opus 4.8) under the current Kiro plan; pluggable per-machine via `config/backends.toml` (see MODEL-BACKENDS.md) |
+| Embeddings | Local Ollama BGE-M3 (1024-dim); Titan vectors retained as legacy evidence |
 | Scheduling | macOS launchd |
 | Backup transport | rclone (Google Drive) + local + git — S3 de-scoped 2026-06-01 |
 | Backup encryption | GPG (AES-256) |
@@ -299,11 +381,11 @@ Implementation: `src/express.py`, `scripts/brief.py`, `scripts/express_push.py`.
 
 ```
 src/
-  mcp_server.py          MCP server (9 tools)
+  mcp_server.py          MCP server (11 tools)
   express.py             Express delivery: briefing compose/edit/render, feedback, Gmail push
   db.py                  PostgreSQL connection, memory CRUD, relationships
   search.py              Hybrid search, reranking, retrieval reinforcement
-  embeddings.py          Bedrock Titan embedding generation
+  embeddings.py          Provider-neutral Interface; local Ollama and legacy Titan Adapters
   ingest.py              Ingestion pipeline
   classify.py            Memory classifier (semantic/episodic/procedural)
   depth.py               Depth scorer (0.0–1.0)
@@ -313,7 +395,7 @@ src/
   agent_invoker.py       Backward-compat shim → re-exports backends.kiro.KiroInvoker
   backends/              Pluggable model-backend layer (see MODEL-BACKENDS.md)
     base.py              Invoker Protocol, BackendCapabilities, capability table
-    kiro.py              KiroInvoker — kiro-cli → Amazon Q (the default adapter)
+    kiro.py              KiroInvoker — Kiro CLI (the default adapter)
     resolver.py          Resolves an Invoker per role from config/backends.toml
   parsers/               Chat and content parsers
   prompts/               Agent prompt templates

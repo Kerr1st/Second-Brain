@@ -5,7 +5,7 @@ type: reference
 
 # Database Schema
 
-Authoritative schema for the Second Brain PostgreSQL database. The schema is defined by migrations `migrations/000_migrations_table.sql` through `migrations/010_express_feedback.sql` and applied by `migrations/migrate.sh`.
+Authoritative schema for the Second Brain PostgreSQL database. The schema is defined by migrations `migrations/000_migrations_table.sql` through `migrations/013_context_governance.sql` and applied by `migrations/migrate.sh`.
 
 ## `schema_migrations`
 
@@ -23,11 +23,13 @@ Primary knowledge store. Each row is one *memory* (content + embedding + metadat
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | `UUID` | **PK.** `gen_random_uuid()` |
-| `type` | `TEXT NOT NULL` | One of: `research`, `synthesis`, `idea`, `connection`, `priority`, `question`, `insight`, `decision`, `project`, `source` |
+| `type` | `TEXT NOT NULL` | Extensible memory kind, including `research`, `synthesis`, `idea`, `connection`, `priority`, `question`, `insight`, `decision`, `correction_episode`, `steering_candidate`, `steering_rule`, `project`, and `source` |
 | `title` | `TEXT NOT NULL` | Short descriptor |
 | `content` | `TEXT NOT NULL` | Full body text |
 | `summary` | `TEXT` | Optional condensed version |
-| `embedding` | `vector(1024)` | Amazon Bedrock Titan v2 embedding |
+| `legacy_embedding` | `vector(1024)` | Preserved Amazon Titan vector space; never mixed with active vectors |
+| `embedding` | `vector(1024)` | Active local BGE-M3 vector |
+| `embedding_space` | `TEXT` | Active identity; `ollama:bge-m3:1024` when `embedding` is present |
 | `tags` | `TEXT[]` | Default `'{}'` |
 | `source_url` | `TEXT` | Origin URL if applicable |
 | `source_type` | `TEXT` | Capture channel (e.g. `youtube`, `kiro_cli_chat`, `quick_desktop_doc`) |
@@ -44,6 +46,18 @@ Primary knowledge store. Each row is one *memory* (content + embedding + metadat
 | `last_accessed_at` | `TIMESTAMPTZ` | Last retrieval timestamp (migration 002) |
 | `encoding_context` | `TEXT` | Cognitive context at creation time (migration 006) |
 
+Codex capture keeps source timestamps, capture time, ordered Agent Turns, Attachment Descriptors,
+workspace and Git provenance, and the Semantic Processing Cursor inside `metadata`. Migration 012
+adds no capture revision, content hash, or processing telemetry columns. It adds only uniqueness
+for a Captured Task's native `codex://<thread-id>` identity, uniqueness for Topic Segment order
+within that task, and permanence for `derived_from` provenance edges.
+
+Task Distillation stores decisions and insights with `mem_class='semantic'`. A
+`correction_episode` is stored with `mem_class='episodic'`, `source_type='distilled_agent_task'`,
+and `metadata.supporting_turn_ids`. Its permanent `derived_from` relationship targets the
+containing Topic Segment. The type is represented in the existing unconstrained `type` column, so
+Build 1 requires no additional schema migration.
+
 ### Trigger
 
 `trg_memories_search_vector` (BEFORE INSERT OR UPDATE OF title, content) calls `memories_search_vector_update()` which builds a weighted tsvector — title and "Questions this answers:" lines at weight A, remaining content at weight B (migration 005).
@@ -59,7 +73,7 @@ Typed directed edges between memories.
 | `relation_type` | `TEXT NOT NULL` | **PK (composite).** e.g. `supports`, `contradicts`, `derived_from` |
 | `note` | `TEXT` | Optional annotation |
 | `created_at` | `TIMESTAMPTZ` | Default `now()` |
-| `expired_at` | `TIMESTAMPTZ` | Temporal expiry (migration 003) |
+| `expired_at` | `TIMESTAMPTZ` | Temporal expiry (migration 003); must remain `NULL` for `derived_from` provenance (migration 012) |
 
 ## `dream_cycle_runs`
 
@@ -222,6 +236,31 @@ Bridge table linking memories to entities they mention.
 | `idx_memories_encoding_context` | GIN | `to_tsvector('english', coalesce(encoding_context, ''))` | Migration 006 |
 | `idx_memories_type_schema` | btree | `type` WHERE `type = 'schema'` | **INERT** — partial index for a schema-type feature with 0 rows currently matching. Migration 007 |
 | `idx_relationships_derived_from` | btree | `(relation_type, source_id)` WHERE `relation_type = 'derived_from'` | **INERT** — supports schema feature; no schema rows exist. Migration 007 |
+
+## `context_receipts`
+
+Migration 013 records every bounded context pack and its later observed outcome. A receipt stores
+the objective and scope, IDs returned, IDs actually used, token count, selected conflicts, and one
+of `pending`, `followed`, `corrected`, `not_used`, or `unknown`. A corrected outcome references its
+Correction Episode. Receipts are operational exposure evidence and do not become searchable
+memories or independent support for returned claims.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `UUID` | **PK.** `gen_random_uuid()` |
+| `objective` | `TEXT NOT NULL` | Objective supplied by the consuming Agent Task |
+| `semantic_project` | `TEXT` | Normalized Semantic Project scope |
+| `source_system` | `TEXT NOT NULL` | Consuming agent integration, initially `codex` |
+| `repository` | `TEXT` | Optional repository applicability hint |
+| `returned_memory_ids` | `UUID[]` | Ordered IDs exposed in the context pack |
+| `used_memory_ids` | `UUID[]` | Returned IDs reported as used by the later task |
+| `token_count` | `INTEGER` | Estimated packed tokens; non-negative |
+| `conflicts` | `JSONB` | Contradiction pairs selected with the pack |
+| `outcome` | `TEXT` | `pending`, `followed`, `corrected`, `not_used`, or `unknown` |
+| `outcome_note` | `TEXT` | Optional evidence about the observed result |
+| `correction_episode_id` | `UUID` | FK → `memories(id)`; application validation requires type `correction_episode` |
+| `created_at` | `TIMESTAMPTZ` | Pack creation time |
+| `evaluated_at` | `TIMESTAMPTZ` | Outcome-recording time |
 
 ## Related
 

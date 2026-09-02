@@ -1,8 +1,11 @@
 # Componentization Plan — Second Brain
 
-**Status: roadmap.** How we turn Second Brain into components that can be built, tested,
-scheduled, and replaced **independently**. The capture deep-dive lives in
-`CAPTURE-COMPONENTS.md`; this is the whole-system plan and sequencing.
+**Status: code-componentization roadmap; documentation spine implemented.**
+The canonical component contracts and navigation live in
+[`components/index.md`](components/index.md). This document tracks the remaining
+code-boundary work needed to make those components independently buildable,
+testable, schedulable, and replaceable. The capture deep-dive lives in
+`CAPTURE-COMPONENTS.md`.
 
 ## Goal & principles
 Make each part a component with:
@@ -27,7 +30,7 @@ CAPTURE ─▶ (writes) ─▶ [ memories + relationships ] ─▶ RETRIEVAL ─
 | **Retrieval** | `db`, `embeddings`, `search` (hybrid + cognitive rerank) | `hybrid_search()` / `rerank()` over `memories` | cohesive (`src/search.py`,`db.py`,`embeddings.py`) | **HIGH** |
 | **Synthesis** | dream cycle (Explorer→Thinker→panel), `dream_cycle_db`, `agent_invoker`, prompts | reads via Retrieval; writes via `dream_cycle.storage` | already a package (`src/dream_cycle/`) | **HIGH** |
 | **Delivery** | Express (`brief`/push/`memory_brief`, feedback) | reads DB; emits briefings | cohesive (`src/express.py`) | **HIGH** |
-| **Interface (MCP)** | `mcp_server.py` — exposes capture/retrieval/delivery to agents | the 9 MCP tools | cohesive but holds a duplicate store path | **MED** |
+| **Interface (MCP)** | `mcp_server.py` — exposes capture/retrieval/context/delivery to agents | the 11 MCP tools | cohesive but holds a duplicate store path | **MED** |
 | **Shared infra** | `db` (conn+CRUD), `models`, `classify`/`depth`/`project`, `embeddings` | imported by all | shared leaf utils | **HIGH** |
 
 **Key insight from the audit:** retrieval/synthesis/delivery already have clean boundaries (the
@@ -39,13 +42,15 @@ core does **not** import capture). The entanglement is concentrated in **Capture
 A component is "componentized" when it has: (1) a one-paragraph **contract doc**, (2) a single
 **entry/interface module**, (3) **its own test module(s)** that pass in isolation, (4) **no
 duplicated** responsibilities with other components, and (5) an entry in the component index
-(this file's status table).
+(`docs/components/index.md`).
 
 ## Roadmap (incremental — keep the test suite green, commit per step, push origin+mini)
 
-**Phase A — Capture (in progress).** Per `CAPTURE-COMPONENTS.md`: extract shared `store.py` +
-`runner.py`; lift connectors (`youtube` ✅ → `kiro_chat` → `web` → `quick_desktop`); retire dead
-(`capture_api`, one-off migrations, entity-KG import); generalize `distill`.
+**Phase A — Capture (in progress).** Follow `ROADMAP.md` vertically. Operate and review hourly
+active-task Codex capture, prove a native Claude Code Adapter, and only then extract the shared Agent Task
+Capture seam demonstrated by both. Do not pre-build a generic `runner.py`, lift every connector, or
+claim standardization from normalized fixtures alone. Dead-code retirement remains safe independent
+work when it does not speculate about the future interface.
 
 **Phase B — Collapse the store primitive (keystone).** Make `store.py` the single writer
 (`embed→classify→depth→create_memory`); point `mcp_server.memory_create` and any HTTP writer at
@@ -55,26 +60,29 @@ it. This cleanly separates "write a memory" from every component that produces o
 `hybrid_search`/`rerank` as the contract; decide on the inert bits (`encoding_context`,
 `schema_context`) — keep, activate, or remove.
 
-**Phase D — Document Synthesis & Delivery contracts + trim.** Already cohesive; write their
-contract docs, trim the MCP surface (only `update`/`relate` are strictly unused), and remove the
-dead schema-context read path.
+**Phase D — Synthesis & Delivery contracts + trim.** Contract documents are
+complete. Remaining work is to trim the MCP surface (only `update`/`relate` are
+strictly unused) and remove the dead schema-context read path.
 
 **Phase E — (optional, last) Physical repo reorg.** Logical boundaries + contracts matter first.
 Only once they're stable, consider `src/{capture,retrieval,synthesis,delivery,infra}/` to make the
 structure visible. This is import churn for cosmetics — do it last, in one mechanical pass.
 
 ## Sequencing rationale
-- **Capture first** — it's where the entanglement and the active work (YouTube/distillation) are.
+- **Capture first** — prove one real source lifecycle at a time; Codex then Claude establish the
+  first non-hypothetical shared seam.
 - **Store primitive second** — the keystone that de-duplicates the write path across components.
 - **Retrieval/Synthesis/Delivery** mostly need *documentation + trimming*, not restructuring.
 - **Physical reorg last** — highest churn, lowest value; purely makes the existing logical
   structure visible.
 
 ## Status
+- ✅ Canonical component index plus seven component contract pages.
 - ✅ Component model defined (this doc) + capture deep-dive (`CAPTURE-COMPONENTS.md`).
 - ✅ Clean core boundaries verified (no core→capture imports); docs reconciled to ground truth.
 - ✅ `youtube` connector shipped.
-- ▢ Phase A remainder (spine extraction, other connectors, dead-code retirement, distill).
+- ▢ Phase A remainder (Codex active-task operations, Claude proof, then evidence-backed seam extraction and later
+  source-specific vertical rollouts).
 - ▢ Phase B store-primitive collapse.
 - ▢ Phases C–E.
 
@@ -103,6 +111,8 @@ From the verify-before-cut audit (2026-06-06), still valid:
 - **Inverse-metric monitoring** — track "missed content" (searched-for but filtered) + over-consolidation rate, weekly.
 
 ## Cross-references
+- `ROADMAP.md` — canonical vertical delivery order and activation gates.
+- `components/index.md` — canonical component registry and contract navigation.
 - `CAPTURE-COMPONENTS.md` — capture deep-dive + connector contract.
 - `ARCHITECTURE.md` — current system (reconciled).
 - `AGENTIC-RETRIEVAL-PLAN.md` — why the entity KG stays deferred.

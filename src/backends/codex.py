@@ -9,16 +9,16 @@ the Codex-specific hooks; the subprocess mechanics (spawn, timeout/exit mapping,
 metrics JSONL, raw-debug dump, temp-config cleanup, and the ``parse_json_output``
 backstop) are inherited unchanged so failure-mode parity is structural (Req 17).
 
-Codex is **not installed locally**, so this adapter is built against the
-*documented* ``codex exec`` surface and verified by mocked-subprocess tests plus
-a manual smoke checklist (Req 22.4/22.5) — never a live CLI in CI.
+This adapter is built against the documented ``codex exec`` surface, verified by
+mocked-subprocess tests in CI, and can be verified separately with a bounded live
+CLI smoke test (Req 22.4/22.5).
 
 This sub-task (5.1) implements **command construction, Invoker conformance,
 system-prompt delivery, and final-text extraction**:
 
 * Command surface (Req 11): ``codex exec <user_message> -m <id>``,
   ``[-c model_reasoning_effort=<level>]``, final text via
-  ``--output-last-message <file>`` (preferred) or the ``--json`` event stream,
+  the ``--json`` event stream (preferred) or ``--output-last-message <file>``,
   ``[--output-schema <file>]`` where schema-constrained output is required. The
   ``codex`` binary path is configurable via ``CODEX_CLI`` (default ``codex``),
   mirroring ``KiroInvoker``'s ``KIRO_CLI`` and ``ClaudeCodeInvoker``'s
@@ -28,8 +28,8 @@ system-prompt delivery, and final-text extraction**:
   ``developer_instructions``, or ``instructions`` (both inline ``-c`` config
   values), with a prepend-to-user-message fallback. Selectable at construction
   via ``system_prompt_delivery``.
-* Final-text extraction (Req 11.3): the ``--output-last-message`` file
-  (preferred) or the final ``agent_message`` event from the ``--json`` stream,
+* Final-text extraction (Req 11.3): the final ``agent_message`` event from the
+  ``--json`` stream (preferred) or the ``--output-last-message`` file,
   then parsed with the shared ``parse_json_output`` backstop (Req 18.1).
 
 Later sub-tasks complete the adapter on top of this command surface:
@@ -48,8 +48,8 @@ fallback, failure-mode parity, and parser reuse** via the base
   ``token_count`` / ``turn.completed`` usage events are parsed (via the
   :meth:`_events_from` helper) to populate ``usage`` and set
   ``usage_source="real"``, and the real token counts are folded into the metrics
-  line. With the default ``final_message_source="output-last-message"`` the
-  ``--json`` stream is not on stdout, so no usage events are available.
+  line. The default ``final_message_source="json"`` provides both final text and
+  usage from one structured event stream.
 * Tolerate-and-warn (Req 16.2, 17.1): no usage events ⇒ keep ``output``/``raw``,
   return ``usage=None`` / ``usage_source="estimate"`` (the char/4 fallback), emit
   a loud warning, and never raise.
@@ -123,11 +123,11 @@ _VALID_DELIVERY = (
 )
 
 # Where the final assistant text comes from (Req 11.3):
-#   "output-last-message" (preferred) — pass ``--output-last-message <file>`` and
-#       read the final message back from that file.
-#   "json" — pass ``--json`` and recover the last ``agent_message`` event from
-#       the emitted event stream.
-_VALID_FINAL_SOURCE = ("output-last-message", "json")
+#   "json" (preferred) — pass ``--json``, recover the last ``agent_message``,
+#       and collect structured token-usage events from the same stream.
+#   "output-last-message" — explicit compatibility fallback: pass
+#       ``--output-last-message <file>`` and read the final message from it.
+_VALID_FINAL_SOURCE = ("json", "output-last-message")
 
 __all__ = ["CodexInvoker", "CODEX_CLI"]
 
@@ -148,9 +148,10 @@ class CodexInvoker(AgenticCliInvoker):
             ``"developer_instructions"`` / ``"instructions"`` (inline ``-c``
             config values), or ``"prepend"`` (fold the system prompt into the
             user message — the fallback for Req 12.3).
-        final_message_source: One of ``"output-last-message"`` (default,
-            ``--output-last-message <temp file>``) or ``"json"`` (recover the
-            final ``agent_message`` from the ``--json`` event stream).
+        final_message_source: One of ``"json"`` (default; recover the final
+            ``agent_message`` and real usage from the structured event stream)
+            or ``"output-last-message"`` (explicit compatibility fallback using
+            ``--output-last-message <temp file>``).
     """
 
     BACKEND_NAME = "codex"
@@ -165,7 +166,7 @@ class CodexInvoker(AgenticCliInvoker):
         model: str | None = None,
         *,
         system_prompt_delivery: str = "model_instructions_file",
-        final_message_source: str = "output-last-message",
+        final_message_source: str = "json",
     ):
         super().__init__(model)
         # Metered backend: a blank model id would silently bill an unintended
@@ -320,10 +321,11 @@ class CodexInvoker(AgenticCliInvoker):
     def _final_text_args(self, name: str) -> list:
         """Final-text source flags (Req 11.3).
 
-        ``output-last-message`` (preferred) writes the final assistant message to
-        a temp file (tracked for cleanup) and reads it back in
-        :meth:`_extract_raw`; ``json`` emits the event stream that
-        :meth:`_extract_raw` scans for the final ``agent_message``.
+        ``json`` (preferred) emits the structured event stream that
+        :meth:`_extract_raw` scans for the final ``agent_message`` and
+        :meth:`_extract_usage` scans for token counts. ``output-last-message`` is
+        an explicit compatibility fallback that writes the final assistant
+        message to a tracked temp file.
         """
         if self._final_message_source == "output-last-message":
             path = self._last_message_path(name)
@@ -385,12 +387,13 @@ class CodexInvoker(AgenticCliInvoker):
         report ``usage_source="real"`` (Req 16.1) — Codex is a metered backend
         that reports real counts, unlike Kiro's char/4 estimate.
 
-        With the default ``final_message_source="output-last-message"`` the
-        ``--json`` event stream is **not** on stdout (the final text rides a temp
-        file instead), so no usage events are available. That is a metering gap,
-        not an infrastructure failure: keep ``output``/``raw``, return
-        ``usage=None`` / ``usage_source="estimate"`` (the char/4 fallback), emit a
-        loud warning, and **never raise, discard the result, or route into the
+        With the explicit ``final_message_source="output-last-message"``
+        compatibility fallback, the ``--json`` event stream is **not** on stdout
+        (the final text rides a temp file instead), so no usage events are
+        available. That is a metering gap, not an infrastructure failure: keep
+        ``output``/``raw``, return ``usage=None`` /
+        ``usage_source="estimate"`` (the char/4 fallback), emit a loud warning,
+        and **never raise, discard the result, or route into the
         failure/retry/abort path** (Req 16.2, 17.1). That cardinal split
         (telemetry gap ≠ infrastructure failure) is what preserves the
         failure-mode parity of Req 17.
@@ -412,8 +415,8 @@ class CodexInvoker(AgenticCliInvoker):
 
         # Tolerate-and-warn: a parseable payload reached this point (the base
         # already raised ValueError if no JSON was recoverable), so the turn
-        # succeeded — only the telemetry is missing (e.g. the default
-        # output-last-message mode emits no --json usage events on stdout).
+        # succeeded — only the telemetry is missing (e.g. the explicit
+        # output-last-message fallback emits no --json usage events on stdout).
         logger.warning(
             "CodexInvoker: backend %r is metered and real token usage was "
             "expected, but no '--json' usage events were present on stdout "

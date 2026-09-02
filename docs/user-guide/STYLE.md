@@ -51,6 +51,21 @@ The guide lives in `docs/user-guide/` and follows the [Diátaxis](https://diatax
 > [!NOTE]
 > v1 is a focused, flat set. As the guide grows (see the documentation roadmap), group pages by Diátaxis type into `tutorials/`, `how-to/`, `reference/`, and `explanation/` subfolders, keeping `index.md` as the hub. Consolidate rather than split until a page mixes content types or exceeds ~1,500 words.
 
+### Engineering component documents
+
+The user guide remains audience- and task-oriented. Engineering ownership
+documentation lives separately in `docs/components/`.
+
+- `docs/components/index.md` is the canonical component registry.
+- Each component has one contract page covering its boundary, contract, runtime
+  flow, failures, entry points, data, tests, operations, and related decisions.
+- Build plans and verification records link from component pages but do not
+  replace the component contract.
+- When a component boundary or activation status changes, update its contract
+  page and the registry in the same change.
+- Record durable architectural choices as ADRs under `docs/adr/` and add them to
+  `docs/adr/index.md`.
+
 ## Page template
 
 Use this skeleton for a new page. Omit sections that don't apply (reference pages skip "Steps" and "Verification").
@@ -142,9 +157,9 @@ Use these canonical terms consistently.
 | Canonical term | Definition | Don't use |
 |----------------|------------|-----------|
 | Second Brain | The whole system (PostgreSQL store + MCP server + scripts + jobs) | "the app", "the platform" |
-| MCP server | The Model Context Protocol server exposing the 9 tools | "the API", "the endpoint" |
+| MCP server | The Model Context Protocol server exposing the 11 tools | "the API", "the endpoint" |
 | memory | A single stored item (content + embedding + metadata + relationships) | "record", "entry", "note" |
-| memory type | One of the 10 classifications (e.g., `insight`, `decision`) | "category", "kind" |
+| memory type | An extensible classification (e.g., `insight`, `decision`, `steering_rule`) | "category", "kind" |
 | relationship | A typed, directed edge between two memories | "link", "association" |
 | dream cycle | The daily autonomous synthesis pipeline | "dream mode", "night job" |
 | Express | The briefing and delivery layer | "Express mode", "the briefer" |

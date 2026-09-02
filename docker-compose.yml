@@ -4,10 +4,12 @@ services:
     container_name: second-brain-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: memory_bank
-      POSTGRES_PASSWORD: memory_bank
-      POSTGRES_DB: memory_bank
+      POSTGRES_USER: ${DB_USER:-memory_bank}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-memory_bank}
+      POSTGRES_DB: ${DB_NAME:-memory_bank}
     ports:
-      - "5432:5432"
+      # Local development only. Keep PostgreSQL bound to loopback unless you
+      # add network-level controls and rotate the default development password.
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
       - ./docker/data:/var/lib/postgresql/data

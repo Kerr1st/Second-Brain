@@ -45,8 +45,6 @@ Replace `/Users/<you>/second-brain` with the actual path to your clone.
 
 ## Kiro CLI
 
-<!-- TODO: Kiro CLI MCP config path is not yet discoverable in this repo. Update when official docs confirm the location (likely ~/.kiro/settings.json or a project-level .kiro/mcp.json). -->
-
 Add the server to your Kiro CLI MCP configuration. Place the stdio block from above into your MCP settings file:
 
 ```json
@@ -96,7 +94,7 @@ Start Claude Code and ask:
 
 > "What MCP tools are available?"
 
-Expected result — Claude Code lists the 9 tools. Then confirm a tool call:
+Expected result — Claude Code lists the 11 tools. Then confirm a tool call:
 
 > "Call memory_search with query 'test'."
 
@@ -112,7 +110,7 @@ Common issues and fixes:
 | "No module named src" | `cwd` is wrong | Set `cwd` to the repo root (the directory containing `src/`) |
 | "ModuleNotFoundError: No module named 'mcp'" | `command` points to system Python, not the venv | Use the full path: `/Users/<you>/second-brain/.venv/bin/python` |
 | "connection refused" on port 5432 | PostgreSQL not running | Run `brew services start postgresql@17` |
-| Bedrock / embedding errors | Expired AWS SSO session | Run `aws sso login --profile default` |
+| Ollama / embedding errors | Local runtime or BGE-M3 unavailable | Run `brew services start ollama` and `ollama pull bge-m3` |
 
 For additional diagnostics, see [Troubleshooting](troubleshoot.md).
 

@@ -12,7 +12,9 @@ This page explains how Second Brain stores and retrieves your memories — and w
 
 ## From text to meaning: embeddings
 
-When you store a memory, Second Brain converts its text into a 1024-dimensional vector using Amazon Bedrock's Titan v2 embedding model. Each dimension captures one facet of the text's meaning — topic, intent, abstraction level, domain vocabulary — in a way that positions semantically similar texts close together in vector space.
+When you store a memory, Second Brain converts its text into a 1,024-dimensional vector using local
+Ollama BGE-M3. The vector positions semantically similar texts close together in one named active
+space. Preserved Titan vectors occupy a separate legacy column and are never compared with BGE-M3.
 
 This matters because keyword matching fails when you phrase a question differently from how you originally wrote the answer. The query "how do I prevent duplicate records?" should surface a memory titled "idempotent migration strategy" even though no words overlap. Vectors make this possible: both texts occupy nearby coordinates because they encode similar *meaning*.
 
@@ -29,7 +31,7 @@ This mirrors Tulving's (1972) dual-process model of human memory: you recall thi
 Second Brain runs two searches in parallel against the same PostgreSQL database:
 
 1. **BM25 full-text** — PostgreSQL's native `tsvector/tsquery` with a GIN index. Fast, exact, zero external dependencies.
-2. **Vector cosine similarity** — pgvector's HNSW index over 1024-dim Titan v2 embeddings.
+2. **Vector cosine similarity** — pgvector's HNSW index over active 1,024-dimension BGE-M3 embeddings.
 
 Each search returns a ranked list of candidates. The two lists are fused into a single ranking using *Reciprocal Rank Fusion*.
 
