@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 import src.db as db
 from src.capture import codex as codex_capture
@@ -974,3 +977,182 @@ def test_zero_memory_segment_is_searchable_but_dream_cycle_ignores_child_source(
     assert segment_id in {str(item["id"]) for item in retrieved}
     with patch("src.dream_cycle.storage.generate_embedding", return_value=VECTOR):
         assert check_duplicate("Codex task capture project attribution") is None
+
+
+CURRENT_MANIFEST = json.loads((FIXTURE_DIR / "real_current_task.json").read_text())
+CURRENT_RECORDS = tuple(
+    json.loads(line)
+    for line in (FIXTURE_DIR / "real_current_task.jsonl").read_text().splitlines()
+)
+CURRENT_NOW = datetime(2026, 9, 10, tzinfo=UTC)
+
+
+def _current_home(tmp_path, records=CURRENT_RECORDS):
+    home = tmp_path / ".codex"
+    home.mkdir()
+    rollout = _write_excerpt(home, CURRENT_MANIFEST, records)
+    _write_state_database(home, CURRENT_MANIFEST, rollout)
+    return home
+
+
+def _current_snapshot(home):
+    source = CodexDesktopSource(home)
+    ref = source.enumerate_tasks(CURRENT_NOW)[0]
+    return source.fetch_task(ref)
+
+
+def test_current_native_authored_message_is_captured(tmp_path):
+    snapshot = _current_snapshot(_current_home(tmp_path))
+    assert len(snapshot.turns) == 1
+    turn = snapshot.turns[0]
+    assert turn.turn_id == CURRENT_RECORDS[1]["payload"]["id"]
+    assert turn.prompt_parts == (CURRENT_RECORDS[1]["payload"]["content"][0]["text"],)
+    assert turn.visible_outcome == CURRENT_RECORDS[2]["payload"]["content"][0]["text"]
+    assert turn.attachments == ()
+
+
+@pytest.mark.parametrize("mutation", [
+    "no_metadata", "unknown_kind", "no_message_id", "no_turn_id",
+    "mixed_image", "non_text", "wrong_turn", "empty_text",
+])
+def test_current_unknown_prompt_shapes_are_not_authored_text(tmp_path, mutation):
+    records = deepcopy(CURRENT_RECORDS)
+    prompt = records[1]["payload"]
+    metadata = prompt["internal_chat_message_metadata_passthrough"]
+    if mutation == "no_metadata":
+        del prompt["internal_chat_message_metadata_passthrough"]
+    elif mutation == "unknown_kind":
+        metadata["content_item_kinds"] = ["unknown"]
+    elif mutation == "no_message_id":
+        del prompt["id"]
+    elif mutation == "no_turn_id":
+        del metadata["turn_id"]
+    elif mutation == "mixed_image":
+        metadata["content_item_kinds"] = ["user.text", "user.image"]
+    elif mutation == "non_text":
+        prompt["content"] = [{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]
+    elif mutation == "wrong_turn":
+        metadata["turn_id"] = "different-execution"
+    elif mutation == "empty_text":
+        prompt["content"][0]["text"] = " "
+    assert _current_snapshot(_current_home(tmp_path, records)).turns == ()
+
+
+@pytest.mark.parametrize("native_context_metadata", [False, True])
+def test_current_context_tools_commentary_and_duplicate_prompt_are_excluded(tmp_path, native_context_metadata):
+    # Deliberate mutations of the real excerpt model non-authored records and
+    # duplicate delivery; the public fixture itself remains exact source text.
+    context = deepcopy(CURRENT_RECORDS[1])
+    del context["payload"]["internal_chat_message_metadata_passthrough"]
+    context["payload"]["content"][0]["text"] = "Injected workspace instructions"
+    if native_context_metadata:
+        metadata = deepcopy(CURRENT_MANIFEST["injected_context_metadata"])
+        metadata["turn_id"] = CURRENT_RECORDS[0]["payload"]["turn_id"]
+        context["payload"]["internal_chat_message_metadata_passthrough"] = metadata
+    commentary = deepcopy(CURRENT_RECORDS[2])
+    commentary["payload"]["phase"] = "commentary"
+    records = (CURRENT_RECORDS[0], context, CURRENT_RECORDS[1],
+               CURRENT_RECORDS[1], commentary,
+               {"type": "response_item", "payload": {"type": "function_call_output", "output": "tool data"}},
+               *CURRENT_RECORDS[2:])
+    snapshot = _current_snapshot(_current_home(tmp_path, records))
+    assert len(snapshot.turns) == 1
+    assert snapshot.turns[0].prompt_parts == (CURRENT_RECORDS[1]["payload"]["content"][0]["text"],)
+    assert snapshot.turns[0].visible_outcome == CURRENT_RECORDS[2]["payload"]["content"][0]["text"]
+
+
+def test_current_steered_prompts_keep_order_and_first_message_identity(tmp_path):
+    steering = deepcopy(CURRENT_RECORDS[1])
+    steering["payload"]["id"] += "-steering"
+    steering["payload"]["content"][0]["text"] = "Include the earlier evidence."
+    records = (*CURRENT_RECORDS[:2], steering, *CURRENT_RECORDS[2:])
+    turn, = _current_snapshot(_current_home(tmp_path, records)).turns
+    assert turn.turn_id == CURRENT_RECORDS[1]["payload"]["id"]
+    assert turn.prompt_parts == (
+        CURRENT_RECORDS[1]["payload"]["content"][0]["text"],
+        "Include the earlier evidence.",
+    )
+
+
+@pytest.mark.parametrize("ending", ["missing_final", "commentary", "mismatched_final"])
+def test_current_requires_matching_visible_final(tmp_path, ending):
+    records = list(deepcopy(CURRENT_RECORDS))
+    if ending == "missing_final":
+        del records[2]
+    elif ending == "commentary":
+        records[2]["payload"]["phase"] = "commentary"
+    else:
+        records[2]["payload"]["internal_chat_message_metadata_passthrough"]["turn_id"] = "other"
+    # task_complete.last_agent_message must not replace a missing visible final.
+    assert _current_snapshot(_current_home(tmp_path, records)).turns == ()
+
+
+def test_current_incomplete_execution_does_not_attach_to_later_final(tmp_path):
+    unfinished = deepcopy(CURRENT_RECORDS[:2])
+    for record in unfinished:
+        payload = record["payload"]
+        if payload["type"] == "task_started":
+            payload["turn_id"] = "unfinished"
+        else:
+            payload["id"] = "unfinished-prompt"
+            payload["internal_chat_message_metadata_passthrough"]["turn_id"] = "unfinished"
+    home = _current_home(tmp_path, (*unfinished, *CURRENT_RECORDS))
+    turn, = _current_snapshot(home).turns
+    assert turn.turn_id == CURRENT_RECORDS[1]["payload"]["id"]
+    assert len(turn.prompt_parts) == 1
+
+
+def test_current_and_legacy_mirrors_keep_legacy_identity(tmp_path):
+    legacy = deepcopy(_turn_pairs()[0][0])
+    legacy["payload"]["message"] = CURRENT_RECORDS[1]["payload"]["content"][0]["text"]
+    records = (*CURRENT_RECORDS[:2], legacy, *CURRENT_RECORDS[2:])
+    home = _current_home(tmp_path, records)
+    with_mirror = _current_snapshot(home)
+    _write_excerpt(home, CURRENT_MANIFEST, (CURRENT_RECORDS[0], legacy, *CURRENT_RECORDS[2:]))
+    legacy_only = _current_snapshot(home)
+    assert with_mirror.turns == legacy_only.turns
+    assert len(with_mirror.turns) == 1
+
+
+def test_old_history_resumed_in_current_format_preserves_turns(tmp_path):
+    home = _current_home(tmp_path, RECORDS)
+    old = _current_snapshot(home)
+    _write_excerpt(home, CURRENT_MANIFEST, (*RECORDS, *CURRENT_RECORDS))
+    resumed = _current_snapshot(home)
+    assert resumed.turns[:-1] == old.turns
+    assert resumed.turns[-1].turn_id == CURRENT_RECORDS[1]["payload"]["id"]
+
+
+def test_current_capture_stores_source_and_repeated_run_is_unchanged(
+    test_db, clean_tables, tmp_path, monkeypatch,
+):
+    home = _current_home(tmp_path)
+    semantic = _SemanticScript(lambda previous, turns: TaskSemanticResult(
+        segments=(TopicSegment(title="Approval logic discussion", turn_ids=tuple(t.turn_id for t in turns)),),
+        memories=(),
+    ))
+    services = _services(home, semantic, tmp_path / "current-capture.lock")
+    _install_services(monkeypatch, services)
+    task_id = CURRENT_MANIFEST["id"]
+    first = codex_capture.run_codex_capture(CURRENT_NOW, task_id=task_id)
+    repeat = codex_capture.run_codex_capture(CURRENT_NOW, task_id=task_id)
+    assert (first.captured, first.semantic_processed, first.failed) == (1, 1, 0)
+    assert (repeat.unchanged, repeat.semantic_processed, repeat.failed) == (1, 0, 0)
+    with db.get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT content, metadata, project FROM memories WHERE source_url=%s AND parent_id IS NULL",
+                    (f"codex://{task_id}",))
+        content, metadata, project = cur.fetchone()
+    assert CURRENT_RECORDS[1]["payload"]["content"][0]["text"] in content
+    assert CURRENT_RECORDS[2]["payload"]["content"][0]["text"] in content
+    assert len(metadata["turns"]) == 1
+    assert metadata["turns"][0]["turn_id"] == CURRENT_RECORDS[1]["payload"]["id"]
+    assert project is None
+
+
+def test_current_unsupported_followup_does_not_capture_partial_prompt(tmp_path):
+    unsupported = deepcopy(CURRENT_RECORDS[1])
+    unsupported["payload"]["id"] += "-attachment"
+    unsupported["payload"]["internal_chat_message_metadata_passthrough"]["content_item_kinds"] = ["user.image"]
+    unsupported["payload"]["content"] = [{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]
+    records = (*CURRENT_RECORDS[:2], unsupported, *CURRENT_RECORDS[2:])
+    assert _current_snapshot(_current_home(tmp_path, records)).turns == ()

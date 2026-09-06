@@ -1,0 +1,33 @@
+{
+  "id": "01a071c7-d0fd-76d3-ad85-0dd5ba4eec1d",
+  "created_at": 1788615315,
+  "updated_at": 1788706700,
+  "source": "vscode",
+  "cwd": "/Users/kerrclaw/repositories/Github Repos/Second-Brain-work",
+  "title": "Explore",
+  "archived": 0,
+  "agent_path": null,
+  "created_at_ms": 1788615315733,
+  "updated_at_ms": 1788706700386,
+  "thread_source": "user",
+  "git_origin_url": "git@github.com:Kerr1st/Second-Brain.git",
+  "git_branch": "codex/codex-task-capture",
+  "git_sha": "5335d808dba21821e79e283111058f19f0e3c25c",
+  "fixture_kind": "capture_relevant_excerpt_from_real_codex_task",
+  "excerpt_ordinals": [
+    212,
+    214,
+    217,
+    220
+  ],
+  "injected_context_metadata": {
+    "turn_id": "01a071c7-e66d-7550-9145-ba5d549d3ef0",
+    "create_time": 1788615321.810071,
+    "content_item_kinds": [
+      "plugins.recommendations",
+      "agents_md.instructions",
+      "environments.environment_context"
+    ]
+  },
+  "injected_context_metadata_ordinal": 5
+}
