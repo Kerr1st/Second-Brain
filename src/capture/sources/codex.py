@@ -112,6 +112,10 @@ def _task_ownership(
         parsed = None
     if isinstance(parsed, dict) and "subagent" in parsed:
         return _TaskOwnership.DELEGATED
+    # Non-interactive exec sets thread_source=user even for internal model
+    # calls. It does not establish human task ownership. Fail closed.
+    if source == "exec":
+        return _TaskOwnership.UNKNOWN
     if thread_source == "user":
         return _TaskOwnership.USER_OWNED
     return _TaskOwnership.UNKNOWN

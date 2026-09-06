@@ -122,3 +122,66 @@ def test_corrected_outcome_requires_an_actual_correction_episode(
             outcome="corrected",
             correction_episode_id=memory_id,
         )
+
+
+def _topic_history(*, later_content='The user removed the earlier restriction.'):
+    """Small database case for the observed older-decision/later-correction pattern."""
+    from src.db import create_relationship
+    segment = create_memory(type='source', title='One topic', content='Original ordered turns',
+        source_type='codex_task', metadata={'record_kind':'topic_segment','turn_ids':['first','second','third'], 'task_source_url':'codex://one'})
+    ids = []
+    for kind, title, content, turn in (
+        ('decision','Earlier plan','Keep the original restriction.', 'first'),
+        ('correction_episode','User correction',later_content, 'second'),
+        ('insight','Status update','The user completed the action.', 'third'),
+    ):
+        mid = create_memory(type=kind,title=title,content=content,embedding=VECTOR,
+            source_type='distilled_agent_task', metadata={'record_kind':'task_memory',
+                'task_source_url':'codex://one','supporting_turn_ids':[turn]})
+        create_relationship(mid,segment,'derived_from')
+        ids.append(mid)
+    return segment,ids
+
+
+def test_old_search_hit_delivers_later_topic_evidence_first(test_db, clean_tables):
+    from src.context_broker import ContextRequest, build_context
+    from src.db import get_memory
+    _, (old, correction, completed) = _topic_history()
+    # Force the same retrieval boundary as production: only the old summary hit.
+    with patch('src.context_broker.generate_embedding',return_value=VECTOR), \
+         patch('src.context_broker.retrieve_memories',return_value=[get_memory(old)]):
+        pack=build_context(ContextRequest('Continue the earlier plan',budget_tokens=700))
+    assert [i.memory_id for i in pack.items] == [completed,correction,old]
+    assert [i.authority for i in pack.items] == ['inferred','evidence','inferred']
+    assert 'historical' in pack.items[-1].retrieval_reason.lower()
+
+
+def test_cannot_pack_old_claim_after_skipping_large_later_correction(test_db, clean_tables):
+    from src.context_broker import ContextRequest, build_context
+    from src.db import get_memory
+    _, (old, correction, completed) = _topic_history(later_content='Correction evidence. '*200)
+    with patch('src.context_broker.generate_embedding',return_value=VECTOR), \
+         patch('src.context_broker.retrieve_memories',return_value=[get_memory(old)]):
+        pack=build_context(ContextRequest('Continue the earlier plan',budget_tokens=150))
+    assert old not in [i.memory_id for i in pack.items]
+    assert pack.token_count <= 150
+
+
+def test_topic_expansion_respects_status_project_and_exact_segment(test_db, clean_tables):
+    from src.context_broker import ContextRequest, build_context
+    from src.db import create_relationship, get_memory, update_memory
+    segment, (old, correction, completed) = _topic_history()
+    update_memory(correction,status='superseded')
+    update_memory(completed,project='different-project')
+    unrelated=create_memory(type='insight',title='Another topic in the same task',
+        content='A distinct topic must not be pulled in through workspace or task identity.',
+        source_type='distilled_agent_task',metadata={'record_kind':'task_memory',
+        'task_source_url':'codex://one','supporting_turn_ids':['another']})
+    another_segment=create_memory(type='source',title='Other topic',content='Other topic',
+        source_type='codex_task',metadata={'record_kind':'topic_segment',
+        'turn_ids':['another'],'task_source_url':'codex://one'})
+    create_relationship(unrelated,another_segment,'derived_from')
+    with patch('src.context_broker.generate_embedding',return_value=VECTOR), \
+         patch('src.context_broker.retrieve_memories',return_value=[get_memory(old)]):
+        pack=build_context(ContextRequest('Continue the plan',project_hint='second-brain'))
+    assert [i.memory_id for i in pack.items] == [old]
