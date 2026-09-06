@@ -17,7 +17,7 @@ from psycopg2.extras import RealDictCursor
 from src.db import get_connection, get_memory, get_relationships, list_memories
 from src.embeddings import generate_embedding
 from src.project import normalize_project_tag
-from src.search import hybrid_search, increment_access_count, rerank
+from src.search import DEFAULT_CANDIDATE_LIMIT, retrieve_memories, increment_access_count, rerank
 
 
 _AUTHORITIES = ("approved", "inferred", "evidence")
@@ -125,7 +125,13 @@ def _context_item(memory: dict, authority: str, reason: str) -> ContextItem:
     metadata = memory.get("metadata") or {}
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
-    observed = metadata.get("observed_at") or memory.get("created_at")
+    observed = metadata.get("observed_at")
+    # Codex rows are created during capture/distillation, potentially long after
+    # their supporting turns. Do not present processing time as source recency.
+    if observed is None and memory.get("source_type") not in {
+        "codex_task", "distilled_agent_task"
+    }:
+        observed = memory.get("created_at")
     if hasattr(observed, "isoformat"):
         observed = observed.isoformat()
     source_task_id = metadata.get("native_task_id") or metadata.get("task_source_url")
@@ -205,8 +211,64 @@ def _store_receipt(request: ContextRequest, project: str | None, items, conflict
     return str(receipt_id)
 
 
+def _topic_groups(relevant: list[dict], project: str | None) -> dict[str, list[dict]]:
+    """Follow exact derivation links, never workspace or whole-task similarity.
+
+    A search hit on an older task memory must not hide later evidence from its
+    Topic Segment. Order by supporting Agent Turns, not database insertion time.
+    This is evidence delivery; it does not decide contradictions or supersede
+    records. Only the three task-distillation kinds can enter these groups.
+    """
+    ids = [str(memory["id"]) for memory in relevant]
+    if not ids:
+        return {}
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            WITH segments AS (
+                SELECT s.id, s.metadata
+                FROM memories s
+                WHERE s.status = 'active' AND s.source_type = 'codex_task'
+                  AND s.metadata->>'record_kind' = 'topic_segment'
+                  AND (s.id = ANY(%s::uuid[]) OR EXISTS (
+                      SELECT 1 FROM memory_relationships r
+                      WHERE r.target_id = s.id AND r.relation_type = 'derived_from'
+                        AND r.source_id = ANY(%s::uuid[])))
+            )
+            SELECT m.*, s.id AS context_segment_id,
+                   s.metadata->'turn_ids' AS context_turn_ids
+            FROM segments s
+            JOIN memory_relationships r ON r.target_id = s.id
+                 AND r.relation_type = 'derived_from'
+            JOIN memories m ON m.id = r.source_id
+            WHERE m.status = 'active' AND m.source_type = 'distilled_agent_task'
+              AND m.metadata->>'record_kind' = 'task_memory'
+              AND m.type IN ('decision', 'insight', 'correction_episode')
+              AND m.metadata->>'task_source_url' = s.metadata->>'task_source_url'
+              AND (%s IS NULL OR m.project IS NULL OR m.project = %s)
+            """,
+            (ids, ids, project, project),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+    by_segment: dict[str, list[dict]] = {}
+    for row in rows:
+        positions = {turn: index for index, turn in enumerate(row['context_turn_ids'] or [])}
+        support = (row.get('metadata') or {}).get('supporting_turn_ids') or []
+        if not support or not set(support) <= positions.keys():
+            continue
+        row['_source_position'] = max(positions[turn] for turn in support)
+        by_segment.setdefault(str(row['context_segment_id']), []).append(row)
+    groups: dict[str, list[dict]] = {}
+    for segment, memories in by_segment.items():
+        memories.sort(key=lambda m: (-m['_source_position'], str(m['id'])))
+        groups[segment] = memories
+        for memory in memories:
+            groups[str(memory['id'])] = memories
+    return groups
+
+
 def build_context(request: ContextRequest) -> ContextPack:
-    """Return the highest-authority applicable context within one token budget."""
+    """Pack approved rules, then topic evidence with its later source updates."""
     project = normalize_project_tag(request.project_hint)
     query_embedding = generate_embedding(request.objective)
 
@@ -217,47 +279,59 @@ def build_context(request: ContextRequest) -> ContextPack:
     ]
     approved = rerank(approved, request.objective, query_project=project)
 
-    relevant = hybrid_search(
+    relevant = retrieve_memories(
         request.objective,
         query_embedding,
-        limit=max(request.limit * 3, 20),
+        limit=DEFAULT_CANDIDATE_LIMIT,
         status="active",
         project=project,
     )
     relevant = rerank(relevant, request.objective, query_project=project)
 
-    ordered: list[ContextItem] = []
+    # Approved governing rules retain priority. Among ordinary memories, a
+    # topic's later evidence travels ahead of its older inferred claims.
+    groups = _topic_groups(relevant, project)
+    ordered = sorted(relevant, key=lambda m: _AUTHORITIES.index(_authority(m)))
     seen: set[str] = set()
-    for memory in approved:
-        mid = str(memory["id"])
-        if mid in seen:
-            continue
-        seen.add(mid)
-        ordered.append(
-            _context_item(
-                memory,
-                "approved",
-                f"approved rule applicable to {request.source_system}",
-            )
-        )
-    for memory in relevant:
-        mid = str(memory["id"])
-        if mid in seen or memory.get("type") in {"steering_candidate", "steering_rule"}:
-            continue
-        seen.add(mid)
-        ordered.append(_context_item(memory, _authority(memory), "hybrid task relevance"))
-
-    ordered.sort(key=lambda item: _AUTHORITIES.index(item.authority))
     packed: list[ContextItem] = []
     token_count = 0
-    for item in ordered:
-        item_tokens = _estimate_item_tokens(item)
-        if token_count + item_tokens > request.budget_tokens:
-            continue
-        packed.append(item)
-        token_count += item_tokens
+    approved_ids = {str(memory["id"]) for memory in approved}
+    packed_ids: set[str] = set()
+    for memory in [*approved, *ordered]:
         if len(packed) >= request.limit:
             break
+        mid = str(memory['id'])
+        if mid in seen:
+            continue
+        is_rule = memory.get('type') == 'steering_rule'
+        if memory.get('type') == 'steering_candidate' or (is_rule and mid not in approved_ids):
+            continue
+        group = [memory] if is_rule else groups.get(mid, [memory])
+        # Mark the whole group even if its newer evidence cannot fit. Otherwise
+        # another search hit could reintroduce an older claim by itself.
+        seen.add(mid)
+        seen.update(str(member['id']) for member in group)
+        for index, member in enumerate(group):
+            if str(member["id"]) in packed_ids:
+                continue
+            if len(packed) >= request.limit:
+                break
+            reason = 'hybrid task relevance'
+            if is_rule:
+                reason = f'approved rule applicable to {request.source_system}'
+            elif mid in groups:
+                reason = ('Later evidence from the same Topic Segment; read together, '
+                          'source order does not establish approval or supersession')
+                if index:
+                    reason = ('Historical task memory; later same-topic evidence is included. '
+                              'Read together, not as an independent current-state claim')
+            item = _context_item(member, 'approved' if is_rule else _authority(member), reason)
+            item_tokens = _estimate_item_tokens(item)
+            if token_count + item_tokens > request.budget_tokens:
+                break
+            packed.append(item)
+            packed_ids.add(item.memory_id)
+            token_count += item_tokens
 
     conflicts = _discover_conflicts(packed)
     receipt_id = _store_receipt(request, project, packed, conflicts, token_count)
