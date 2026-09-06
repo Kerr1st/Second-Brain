@@ -125,7 +125,13 @@ def _context_item(memory: dict, authority: str, reason: str) -> ContextItem:
     metadata = memory.get("metadata") or {}
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
-    observed = metadata.get("observed_at") or memory.get("created_at")
+    observed = metadata.get("observed_at")
+    # Codex rows are created during capture/distillation, potentially long after
+    # their supporting turns. Do not present processing time as source recency.
+    if observed is None and memory.get("source_type") not in {
+        "codex_task", "distilled_agent_task"
+    }:
+        observed = memory.get("created_at")
     if hasattr(observed, "isoformat"):
         observed = observed.isoformat()
     source_task_id = metadata.get("native_task_id") or metadata.get("task_source_url")

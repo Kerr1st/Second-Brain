@@ -32,3 +32,7 @@ Historical content, approval, and the Dream Cycle are not rewritten. Cross-topic
 or cross-task contradictions, missing distillation, and over-broad topic
 segmentation remain limitations. The private original example and an untuned
 second job-search query are retained as evaluation evidence, not public fixtures.
+
+For Codex source and distilled-task records, `observed_at` is returned only when
+explicitly present in provenance. Database creation time records processing, not
+when a supporting turn occurred; absent source timestamps remain unknown.

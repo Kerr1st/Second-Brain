@@ -185,3 +185,14 @@ def test_topic_expansion_respects_status_project_and_exact_segment(test_db, clea
          patch('src.context_broker.retrieve_memories',return_value=[get_memory(old)]):
         pack=build_context(ContextRequest('Continue the plan',project_hint='second-brain'))
     assert [i.memory_id for i in pack.items] == [old]
+
+
+def test_processing_time_is_not_presented_as_source_observation_time(test_db, clean_tables):
+    from src.context_broker import ContextRequest, build_context
+    from src.db import get_memory
+    _, (old, _, _) = _topic_history()
+    with patch('src.context_broker.generate_embedding',return_value=VECTOR), \
+         patch('src.context_broker.retrieve_memories',return_value=[get_memory(old)]):
+        pack=build_context(ContextRequest('Continue the earlier plan'))
+    # The database just created these rows, but their source turns have no date.
+    assert all(item.observed_at is None for item in pack.items)
