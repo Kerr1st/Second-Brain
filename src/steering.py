@@ -8,13 +8,15 @@ import json
 import re
 from typing import Any
 
+from psycopg2.extras import RealDictCursor
+
 from src import dream_cycle_db
 from src.db import (
     create_memory,
     create_relationship,
+    get_connection,
     get_memory,
     list_memories,
-    update_memory,
 )
 from src.dream_cycle.consensus import tally_consensus
 from src.embeddings import generate_embedding
@@ -287,67 +289,95 @@ def approve_steering_candidate(
     applicability: dict[str, list[str]],
     approved_by: str = "user",
 ) -> ApprovedSteeringRule:
-    """Create a versioned active rule from one accepted, inactive candidate."""
+    """Atomically approve a candidate, serializing competing approvals.
+
+    Embedding runs before row locks. Candidate and predecessor state is checked
+    under those locks, and every governance write commits on one connection.
+    """
     if authority_scope not in _SCOPES:
         raise ValueError("authority_scope must be project, personal, or system")
-    candidate = get_memory(candidate_id)
-    if candidate is None or candidate.get("type") != "steering_candidate":
-        raise ValueError("approval requires a Steering Candidate")
-    candidate_metadata = _metadata(candidate)
-    if candidate_metadata.get("lifecycle") != "proposed":
-        raise ValueError("only a proposed Steering Candidate can be approved")
     if not wording.strip():
         raise ValueError("an approved rule needs wording")
 
-    supersedes = candidate_metadata.get("supersedes_rule_id")
-    version = 1
-    if supersedes:
-        previous = get_memory(supersedes)
-        if (
-            previous is None
-            or previous.get("type") != "steering_rule"
-            or previous.get("status") != "active"
-        ):
-            raise ValueError("supersession requires an active Steering Rule")
-        previous_metadata = _metadata(previous)
-        version = int(previous_metadata.get("rule_version", 1)) + 1
-
-    now = datetime.now(UTC).isoformat()
-    rule_metadata = {
-        "authority": "approved",
-        "lifecycle": "active",
-        "authority_scope": authority_scope,
-        "applicability": applicability,
-        "rule_version": version,
-        "approved_by": approved_by,
-        "approved_at": now,
-        "candidate_id": candidate_id,
-        "source_memory_ids": candidate_metadata.get("source_memory_ids", []),
-        "supersedes_rule_id": supersedes,
-    }
-    rule_id = create_memory(
-        type="steering_rule",
-        title=candidate.get("title") or "Approved Steering Rule",
-        content=wording,
-        embedding=generate_embedding(wording),
-        tags=["steering", "approved"],
-        source_type="steering_governance",
-        status="active",
-        mem_class="procedural",
-        project=normalize_project_tag(
-            (applicability.get("semantic_projects") or [None])[0]
-        ),
-        metadata=rule_metadata,
+    project = normalize_project_tag(
+        (applicability.get("semantic_projects") or [None])[0]
     )
-    create_relationship(rule_id, candidate_id, "derived_from")
-    if supersedes:
-        update_memory(supersedes, status="superseded")
-        create_relationship(supersedes, rule_id, "superseded_by")
+    embedding = generate_embedding(wording)
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Lock candidates first, then their predecessor rules. A second
+            # approval must recheck the lifecycle after the first commits.
+            cur.execute("SELECT * FROM memories WHERE id = %s FOR UPDATE", (candidate_id,))
+            candidate = cur.fetchone()
+            if candidate is None or candidate.get("type") != "steering_candidate":
+                raise ValueError("approval requires a Steering Candidate")
+            candidate_metadata = _metadata(candidate)
+            if candidate_metadata.get("lifecycle") != "proposed":
+                raise ValueError("only a proposed Steering Candidate can be approved")
 
-    candidate_metadata.update(
-        {"lifecycle": "approved", "approved_rule_id": rule_id, "approved_at": now}
-    )
-    update_memory(candidate_id, status="explored", metadata=candidate_metadata)
+            supersedes = candidate_metadata.get("supersedes_rule_id")
+            version = 1
+            if supersedes:
+                # Different candidates can propose replacing the same rule.
+                # Locking that rule prevents two active successor versions.
+                cur.execute("SELECT * FROM memories WHERE id = %s FOR UPDATE", (supersedes,))
+                previous = cur.fetchone()
+                if (
+                    previous is None
+                    or previous.get("type") != "steering_rule"
+                    or previous.get("status") != "active"
+                ):
+                    raise ValueError("supersession requires an active Steering Rule")
+                version = int(_metadata(previous).get("rule_version", 1)) + 1
+
+            now = datetime.now(UTC).isoformat()
+            rule_metadata = {
+                "authority": "approved",
+                "lifecycle": "active",
+                "authority_scope": authority_scope,
+                "applicability": applicability,
+                "rule_version": version,
+                "approved_by": approved_by,
+                "approved_at": now,
+                "candidate_id": candidate_id,
+                "source_memory_ids": candidate_metadata.get("source_memory_ids", []),
+                "supersedes_rule_id": supersedes,
+            }
+            # The generic CRUD helpers each commit independently; approval must
+            # keep rule, provenance, supersession, and candidate on this cursor.
+            cur.execute("""
+                INSERT INTO memories (
+                    type, title, content, embedding, tags, source_type,
+                    status, mem_class, project, metadata
+                ) VALUES ('steering_rule', %s, %s, %s, %s, 'steering_governance',
+                          'active', 'procedural', %s, %s)
+                RETURNING id
+            """, (candidate.get("title") or "Approved Steering Rule", wording,
+                  embedding, ["steering", "approved"], project, json.dumps(rule_metadata)))
+            rule_id = str(cur.fetchone()["id"])
+            cur.execute("""
+                INSERT INTO memory_relationships (source_id, target_id, relation_type)
+                VALUES (%s, %s, 'derived_from')
+            """, (rule_id, candidate_id))
+            if supersedes:
+                cur.execute("""
+                    UPDATE memories SET status = 'superseded', updated_at = now()
+                    WHERE id = %s
+                """, (supersedes,))
+                cur.execute("""
+                    INSERT INTO memory_relationships (source_id, target_id, relation_type)
+                    VALUES (%s, %s, 'superseded_by')
+                """, (supersedes, rule_id))
+
+            candidate_metadata.update(
+                {"lifecycle": "approved", "approved_rule_id": rule_id, "approved_at": now}
+            )
+            cur.execute("""
+                UPDATE memories SET status = 'explored', metadata = %s, updated_at = now()
+                WHERE id = %s
+            """, (json.dumps(candidate_metadata), candidate_id))
+        conn.commit()
+
     return ApprovedSteeringRule(
         rule_id=rule_id,
         candidate_id=candidate_id,
