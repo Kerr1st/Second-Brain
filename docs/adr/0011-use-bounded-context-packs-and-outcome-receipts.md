@@ -27,3 +27,8 @@ MCP exposes separate `memory_context` and `memory_context_outcome` tools. Automa
 post-compaction injection remains optional until explicit recall demonstrates useful outcomes with
 acceptable latency, token cost, and cross-project leakage. Receipt state is operational evidence,
 not a new memory and not independent support for the memories it returned.
+
+[ADR 0013](0013-deliver-later-topic-evidence-with-task-memories.md) refines ordinary
+item ordering: later evidence within the same Topic Segment accompanies older
+task memories before inferred/evidence priority is applied elsewhere. Approved
+applicable Steering Rules retain priority; item authority remains unchanged.

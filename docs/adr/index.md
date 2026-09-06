@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-> **Status: canonical decision index.** Last reviewed: 2026-08-29.
+> **Status: canonical decision index.** Last reviewed: 2026-09-06.
 
 Architecture Decision Records (ADRs) preserve durable choices and their
 consequences. Component pages define current ownership and link to the ADRs
@@ -20,6 +20,8 @@ that govern their behavior.
 | [0010](0010-prove-capabilities-vertically-before-generalizing.md) | Prove capabilities vertically before generalizing across integrations | All |
 | [0011](0011-use-bounded-context-packs-and-outcome-receipts.md) | Use bounded context packs and outcome receipts for agent recall | Retrieval; MCP Interface; Steering Governance |
 | [0012](0012-use-local-bge-m3-embedding-space.md) | Use local BGE-M3 as the active embedding space | Ingestion & Storage; Retrieval; Model Execution |
+
+| [0013](0013-deliver-later-topic-evidence-with-task-memories.md) | Deliver later topic evidence with task memories | Retrieval; MCP Interface |
 
 ## Related
 

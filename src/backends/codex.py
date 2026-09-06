@@ -257,7 +257,7 @@ class CodexInvoker(AgenticCliInvoker):
         ``[--output-last-message <file> | --json]`` ``[<tool/sandbox flags>]``.
         """
         prompt_input = self._prompt_input(system_prompt, user_message, needs_tools)
-        cmd = [CODEX_CLI, "exec", prompt_input, "-m", self.model]
+        cmd = [CODEX_CLI, "exec", prompt_input, "-m", self.model, "--ephemeral"]
 
         # System-prompt delivery (Req 12.1): native config flags, or nothing for
         # the prepend fallback (already folded into prompt_input).

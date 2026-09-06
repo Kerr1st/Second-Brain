@@ -115,6 +115,7 @@ class TestCommandConstruction:
 
         assert cmd[0] == "codex"
         assert cmd[1] == "exec"
+        assert "--ephemeral" in cmd
         # user message is the positional prompt input, distinct from system prompt
         assert cmd[2] == "hello"
         assert "-m" in cmd and cmd[cmd.index("-m") + 1] == "gpt-5-codex"

@@ -465,6 +465,10 @@ def test_native_ownership_evidence_excludes_delegated_and_unknown_tasks(
         thread_source="user",
         spawned_child=True,
     )
+    # Observed processing sessions have source=exec and thread_source=user.
+    # The latter is a CLI default, not evidence of a human-authored task.
+    _insert_ownership_task(home, task_id="exec-processing-task", source="exec",
+                           thread_source="user")
     semantic = _SemanticScript()
     _install_services(
         monkeypatch,
@@ -475,7 +479,7 @@ def test_native_ownership_evidence_excludes_delegated_and_unknown_tasks(
 
     assert report.enumerated == 1
     assert report.skipped_delegated == 4
-    assert report.skipped_unknown_ownership == 1
+    assert report.skipped_unknown_ownership == 2
     assert report.eligible == 1
     assert semantic.calls == []
 
