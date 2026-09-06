@@ -47,3 +47,36 @@ information as a September 6 observation because the broker used memory creation
 time. Codex records now leave `observed_at` unknown when no explicit source
 observation time exists. That query became diagnostic evidence for this change
 and is no longer an untouched holdout for the final combined patch.
+
+## Completed validation
+
+- Final full suite: **912 passed**, one existing Starlette/httpx deprecation warning.
+- Frozen source/candidate replay: both later supporting turns delivered.
+- Fresh consumers, same question and instructions: the old pack led to preparing
+  an unsent draft and raising the removed concern; the repaired pack correctly
+  used sent/awaiting-response state and the user's correction. These are single
+  model responses, not statistical estimates or independent human grading.
+- Final deployed Snorkel recall: seven items, 1,140 estimated tokens; its repair
+  validation outcome is `followed`, explicitly limited to this delivery check.
+- Reversible live repair: 227 previously captured non-interactive exec records
+  quarantined, comprising 164 source rows, 35 insights, and 28 decisions. Their
+  content and derivation links remain; original status/metadata have a private
+  rollback backup. No external dependent memories or governing rules were found.
+- Normal capture after installation: 29 eligible tasks, 29 unchanged captures,
+  one successful semantic retry, zero failures. The successful retry was a
+  previously rejected model response for another task; no semantic validation
+  was weakened and this retry is not evidence of a new semantic-quality fix.
+
+## Unresolved normal-work result
+
+A final untouched Anthropic CSM Tech handoff check failed to recover an already
+approved application package and suggested repeating preparation. It is recorded
+as `not_used`. The exact role task was created at the user's explicit request,
+but its native `agent_created_thread` label also occurs on a legacy delegated
+research task. Neither has a spawn edge or agent path. The existing source
+contract therefore cannot distinguish them from that label alone.
+
+No blanket inclusion, task-ID exception, or forced capture was added to make
+that check pass. This is a concrete remaining coverage issue requiring stronger
+ownership provenance or an auditable reviewed-enrollment mechanism. Freshness
+across different Topic Segments/tasks and retrieval relevance also remain open.
