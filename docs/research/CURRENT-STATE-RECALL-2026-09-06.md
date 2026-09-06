@@ -41,3 +41,9 @@ Private evaluation files, corpus audit, and reversible repair backups live under
 They are ignored by Git. The original failed briefing and its `not_used` receipt
 remain unchanged. Passing this repair check establishes improved delivery for
 this pattern, not broad usefulness or automatic startup integration.
+
+The second query exposed a further provenance defect: a consumer described old
+information as a September 6 observation because the broker used memory creation
+time. Codex records now leave `observed_at` unknown when no explicit source
+observation time exists. That query became diagnostic evidence for this change
+and is no longer an untouched holdout for the final combined patch.
