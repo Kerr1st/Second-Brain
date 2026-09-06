@@ -1,6 +1,6 @@
 # Capture Component
 
-> **Status: canonical component contract.** Last reviewed: 2026-09-01.
+> **Status: canonical component contract.** Last reviewed: 2026-09-06.
 
 Capture reaches external sources, decides what is eligible, preserves
 source-native identity and provenance, and normalizes material for durable
@@ -104,6 +104,46 @@ Processing Cursor causes a later invocation to retry the full tail.
 A resumed Codex Task remains the same source task. After another six hours of
 inactivity, a later run appends only unseen complete turns. Changed, missing,
 or reordered known turns are Source Drift and do not rewrite stored evidence.
+
+## Codex prompt formats and compatibility
+
+Older rollouts expose authored prompts as `event_msg.user_message`. The connector
+continues to use their `client_id` (or the existing task/timestamp-derived key)
+and `local_images` descriptors. Previously, these were the only prompt records
+recognized: current Desktop rollouts containing completed exchanges could
+therefore produce zero Agent Turns.
+
+Current Desktop text prompts arrive as `response_item.message` with `role=user`.
+That role alone does not establish authorship: injected workspace instructions
+also use it. The connector accepts the verified shape only when
+`internal_chat_message_metadata_passthrough.content_item_kinds` is
+`["user.text"]`, native message and turn IDs are present, and all content blocks
+are `input_text`. It preserves the prompt text and uses the first native message
+ID as the Agent Turn identity. Further authored text messages in the same native
+execution remain ordered prompt parts; repeated message IDs are ignored.
+
+A current-format prompt is paired only with an assistant `final_answer` carrying
+the same native turn ID. Commentary and `task_complete.last_agent_message` are
+not substitutes for the visible final. A new native execution or abort clears
+unfinished current-format prompts, so they cannot attach to another execution's
+answer. When legacy prompt events accompany a final, they take precedence over
+current-format mirrors to preserve already-captured identities and attachments.
+Tasks can retain old-format history and append current-format exchanges.
+
+This is a bounded text-format extension. New-format multimodal inputs and
+unrecognized authorship shapes remain unsupported; no attachment bytes are
+retained. A known user-authored unsupported input prevents capture of a partial
+text-only prompt for that execution. Non-authored context kinds are excluded
+without invalidating an otherwise supported exchange. Legacy image descriptors
+remain supported through the original event path. The eligibility clock,
+Task Ownership policy, semantic prompt, persistence, and approval rules do not
+change.
+
+The exact real excerpt in `tests/fixtures/codex/real_current_task.jsonl` anchors
+the regression. Its manifest records native ordinals and the observed injected
+context metadata. Tests additionally mutate that excerpt to exercise missing
+metadata, mismatched finals, interrupted executions, mirrors, and unknown input
+shapes; those mutations are robustness cases, not claimed source observations.
 
 ## Codex native title resolution
 
