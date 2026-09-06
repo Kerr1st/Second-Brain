@@ -20,3 +20,11 @@ Each connector documents the native fields or relationships that establish owner
 Codex Desktop is the reference implementation. Its ownership evidence includes `thread_source`, `thread_spawn_edges`, `agent_path`, and structured `source` metadata. Kiro, Claude Code, Quick Desktop, Amazon Quick, Amazon Q Developer, and later integrations must establish their own evidence before activation; an existing content heuristic is not automatically accepted as ownership proof.
 
 This decision standardizes behavior, not a premature source-neutral runtime. Codex keeps its concrete implementation until a second connector proves which interface and implementation should be shared. Only then may common code be extracted at the demonstrated seam.
+
+## Non-interactive Codex sessions
+
+Live inspection on September 6 established that `source=exec` sessions use
+`thread_source=user` even for Second Brain model calls. This combination is
+unknown ownership, not proof of a User-Owned Task. The connector skips and
+reports it; explicit delegated evidence still takes precedence. The backend
+runs ephemeral sessions so new processing calls do not enter the capture pool.

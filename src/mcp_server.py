@@ -40,7 +40,9 @@ def memory_context(
     """Build a bounded, provenance-rich context pack for the current Codex task.
 
     Approved applicable Steering Rules are returned before inferred knowledge and
-    source evidence. The response includes a receipt_id; report the task outcome
+    source evidence. Task memories include later same-topic evidence before
+    historical claims; read these together without treating source order as
+    approval or automatic supersession. The response includes a receipt_id; report the task outcome
     with memory_context_outcome so Second Brain can measure whether recall helped.
     """
     return build_context(
