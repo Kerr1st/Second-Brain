@@ -221,31 +221,13 @@ class TestMergeTagsProperties:
 # Integration / E2E Tests (require running PostgreSQL)
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def test_db():
-    """Ensure test database exists with schema. Session-scoped would be better
-    but keeping function-scoped for isolation."""
-    import psycopg2
-    DB_CONFIG = {
-        "host": os.environ.get("DB_HOST", "localhost"),
-        "port": int(os.environ.get("DB_PORT", "5432")),
-        "dbname": os.environ.get("TEST_DB_NAME", "memory_bank_test"),
-        "user": os.environ.get("DB_USER", "memory_bank"),
-        "password": os.environ.get("DB_PASSWORD", "memory_bank"),
-    }
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        conn.autocommit = True
-        yield conn
-        conn.close()
-    except psycopg2.OperationalError:
-        pytest.skip("PostgreSQL not available")
+
 
 
 @pytest.fixture
-def seeded_memories(test_db):
+def seeded_memories(db_connection):
     """Insert QD-style memories into test DB and return their IDs."""
-    with test_db.cursor() as cur:
+    with db_connection.cursor() as cur:
         cur.execute("DELETE FROM memories WHERE source_url LIKE 'qd://memory/test_%'")
         ids = []
         for i in range(1, 4):
@@ -266,7 +248,7 @@ def seeded_memories(test_db):
 class TestEnrichmentE2E:
     """End-to-end tests that verify enrichment against real PostgreSQL."""
 
-    def test_enrichment_adds_tags_to_existing_memories(self, test_db, seeded_memories, qd_db_with_tags):
+    def test_enrichment_adds_tags_to_existing_memories(self, db_connection, seeded_memories, qd_db_with_tags):
         from scripts.migrate.enrich_qd_tags import enrich_memories
 
         # Map test QD IDs to our seeded memory source_urls
@@ -280,19 +262,19 @@ class TestEnrichmentE2E:
         assert stats["tags_enriched"] > 0
 
         # Verify tags were actually added
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             sb_id = seeded_memories[0][0]
             cur.execute("SELECT tags FROM memories WHERE id = %s", (sb_id,))
             tags = cur.fetchone()[0]
             assert "people" in tags or "css-team" in tags
 
-    def test_enrichment_dry_run_changes_nothing(self, test_db, seeded_memories, qd_db_with_tags):
+    def test_enrichment_dry_run_changes_nothing(self, db_connection, seeded_memories, qd_db_with_tags):
         from scripts.migrate.enrich_qd_tags import enrich_memories
 
         qd_to_sb = {i: sb_id for sb_id, i in seeded_memories}
 
         # Get tags before
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             sb_id = seeded_memories[0][0]
             cur.execute("SELECT tags FROM memories WHERE id = %s", (sb_id,))
             tags_before = cur.fetchone()[0]
@@ -303,12 +285,12 @@ class TestEnrichmentE2E:
                 stats = enrich_memories(dry_run=True)
 
         # Tags unchanged
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             cur.execute("SELECT tags FROM memories WHERE id = %s", (sb_id,))
             tags_after = cur.fetchone()[0]
         assert tags_before == tags_after
 
-    def test_enrichment_is_idempotent(self, test_db, seeded_memories, qd_db_with_tags):
+    def test_enrichment_is_idempotent(self, db_connection, seeded_memories, qd_db_with_tags):
         from scripts.migrate.enrich_qd_tags import enrich_memories
 
         qd_to_sb = {i: sb_id for sb_id, i in seeded_memories}

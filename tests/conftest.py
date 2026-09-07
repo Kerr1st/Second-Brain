@@ -11,6 +11,7 @@ import hashlib
 import math
 import os
 import subprocess
+import socket
 from pathlib import Path
 
 import psycopg2
@@ -19,6 +20,37 @@ from psycopg2 import sql
 
 import src.db as db
 from src.db import close_pool
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items):
+    """Classify by the shared database dependency; explicit markers handle exceptions.
+
+    Fixture closure includes indirect dependencies, so mixed modules remain selectable
+    without duplicating markers on every database test. Run before pytest's -m filter.
+    """
+    for item in items:
+        requires_db = "test_db" in item.fixturenames
+        integration = requires_db or item.get_closest_marker("integration") is not None
+        if integration and item.get_closest_marker("behavior") is not None:
+            raise pytest.UsageError(f"{item.nodeid}: behavior test requires integration")
+        item.add_marker(pytest.mark.integration if integration else pytest.mark.behavior)
+
+
+@pytest.fixture(autouse=True)
+def isolated_services(request, monkeypatch):
+    """No accidental HTTP/model calls; behavior tests also cannot open PostgreSQL.
+
+    PostgreSQL's native driver does not use Python sockets. Integration tests retain
+    that access through the guarded fixture; tests of external adapters mock calls.
+    """
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Tests must replace external network services at the boundary")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(socket.socket, "connect_ex", forbidden)
+    if request.node.get_closest_marker("integration") is None:
+        monkeypatch.setattr(psycopg2, "connect", forbidden)
 
 
 # ---------------------------------------------------------------------------
@@ -128,17 +160,24 @@ def test_db():
         "password": os.environ.get("DB_PASSWORD", "memory_bank"),
     })
 
-    # Invalidate any pool created with old config
-    close_pool()
+    try:
+        close_pool()
+        _apply_migrations()
+        yield db.DB_CONFIG
+    finally:
+        close_pool()
+        db.DB_CONFIG.update(original_config)
 
-    # Apply pending migrations through the same runner used outside tests.
-    _apply_migrations()
 
-    yield db.DB_CONFIG
-
-    # Restore original config
-    db.DB_CONFIG.update(original_config)
-    close_pool()
+@pytest.fixture()
+def db_connection(test_db, clean_tables):
+    """Autocommit connection to the same guarded database used by application code."""
+    connection = psycopg2.connect(**test_db)
+    connection.autocommit = True
+    try:
+        yield connection
+    finally:
+        connection.close()
 
 
 @pytest.fixture()

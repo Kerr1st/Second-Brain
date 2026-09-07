@@ -1,0 +1,60 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  behavior:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: scripts/test.sh behavior
+        env:
+          SECOND_BRAIN_PYTHON: python
+          AWS_EC2_METADATA_DISABLED: 'true'
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: memory_bank
+          POSTGRES_PASSWORD: memory_bank
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - run: scripts/test.sh integration
+        env:
+          SECOND_BRAIN_PYTHON: python
+          TEST_DB_NAME: second_brain_codex_test
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_USER: memory_bank
+          DB_PASSWORD: memory_bank
+          AWS_EC2_METADATA_DISABLED: 'true'
