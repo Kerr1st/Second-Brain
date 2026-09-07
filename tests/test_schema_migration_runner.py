@@ -13,6 +13,9 @@ import uuid
 from pathlib import Path
 
 import psycopg2
+import pytest
+
+pytestmark = pytest.mark.integration
 from psycopg2 import sql
 
 

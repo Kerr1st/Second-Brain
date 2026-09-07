@@ -137,15 +137,6 @@ class TestDocChunkProperties:
         assert url.startswith("qd-doc://")
         assert str(node_id) in url
 
-    @given(
-        text=st.text(min_size=1, max_size=500),
-        extension=st.sampled_from([".pdf", ".docx", ".pptx", ".md", ".xlsx"]),
-        folder=st.text(min_size=1, max_size=100),
-    )
-    def test_content_never_empty_after_format(self, text, extension, folder):
-        """Formatted content should never be empty if text_content is non-empty."""
-        # The script uses text_content directly as content
-        assert len(text.strip()) >= 0  # text itself may be whitespace
         # But we filter empty chunks in the script
 
 
@@ -153,33 +144,14 @@ class TestDocChunkProperties:
 # E2E Integration Tests
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def test_db():
-    """Connect to test database."""
-    import psycopg2
-    DB_CONFIG = {
-        "host": os.environ.get("DB_HOST", "localhost"),
-        "port": int(os.environ.get("DB_PORT", "5432")),
-        "dbname": os.environ.get("TEST_DB_NAME", "memory_bank_test"),
-        "user": os.environ.get("DB_USER", "memory_bank"),
-        "password": os.environ.get("DB_PASSWORD", "memory_bank"),
-    }
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        conn.autocommit = True
-        yield conn
-        conn.close()
-    except psycopg2.OperationalError:
-        pytest.skip("PostgreSQL not available")
-
 
 class TestDocChunksE2E:
     """End-to-end tests for document chunk ingestion."""
 
-    def test_ingest_creates_memories(self, test_db, sqlite_db):
+    def test_ingest_creates_memories(self, db_connection, sqlite_db):
         from scripts.migrate.ingest_doc_chunks import ingest_doc_chunks
 
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             cur.execute("DELETE FROM memories WHERE source_url LIKE 'qd-doc://%'")
 
         with patch("scripts.migrate.ingest_doc_chunks.generate_embedding", return_value=[0.1] * 1024):
@@ -188,14 +160,14 @@ class TestDocChunksE2E:
         assert stats["processed"] == 3
         assert stats["failed"] == 0
 
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             cur.execute("SELECT count(*) FROM memories WHERE source_type = 'quick_desktop_doc'")
             assert cur.fetchone()[0] == 3
 
-    def test_ingest_is_idempotent(self, test_db, sqlite_db):
+    def test_ingest_is_idempotent(self, db_connection, sqlite_db):
         from scripts.migrate.ingest_doc_chunks import ingest_doc_chunks
 
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             cur.execute("DELETE FROM memories WHERE source_url LIKE 'qd-doc://%'")
 
         with patch("scripts.migrate.ingest_doc_chunks.generate_embedding", return_value=[0.1] * 1024):
@@ -206,10 +178,10 @@ class TestDocChunksE2E:
         assert stats2["processed"] == 0
         assert stats2["skipped"] == 3
 
-    def test_dry_run_creates_nothing(self, test_db, sqlite_db):
+    def test_dry_run_creates_nothing(self, db_connection, sqlite_db):
         from scripts.migrate.ingest_doc_chunks import ingest_doc_chunks
 
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             cur.execute("DELETE FROM memories WHERE source_url LIKE 'qd-doc://%'")
 
         with patch("scripts.migrate.ingest_doc_chunks.generate_embedding", return_value=[0.1] * 1024):
@@ -217,6 +189,6 @@ class TestDocChunksE2E:
 
         assert stats["processed"] == 3
 
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             cur.execute("SELECT count(*) FROM memories WHERE source_type = 'quick_desktop_doc'")
             assert cur.fetchone()[0] == 0

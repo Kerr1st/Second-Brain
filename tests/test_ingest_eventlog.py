@@ -153,34 +153,17 @@ class TestEventProperties:
 # E2E Integration Tests
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def test_db():
-    """Connect to test database."""
-    import psycopg2
-    DB_CONFIG = {
-        "host": os.environ.get("DB_HOST", "localhost"),
-        "port": int(os.environ.get("DB_PORT", "5432")),
-        "dbname": os.environ.get("TEST_DB_NAME", "memory_bank_test"),
-        "user": os.environ.get("DB_USER", "memory_bank"),
-        "password": os.environ.get("DB_PASSWORD", "memory_bank"),
-    }
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        conn.autocommit = True
-        yield conn
-        conn.close()
-    except psycopg2.OperationalError:
-        pytest.skip("PostgreSQL not available")
+
 
 
 class TestEventlogE2E:
     """End-to-end tests for eventlog ingestion."""
 
-    def test_ingest_events_creates_memories(self, test_db, eventlog_file):
+    def test_ingest_events_creates_memories(self, db_connection, eventlog_file):
         from scripts.migrate.ingest_eventlog import ingest_eventlog
 
         # Clean up any previous test data
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             cur.execute("DELETE FROM memories WHERE source_url LIKE 'qd-feed://evt_0000%'")
 
         with patch("scripts.migrate.ingest_eventlog.EVENTLOG_PATH", eventlog_file):
@@ -191,11 +174,11 @@ class TestEventlogE2E:
         assert stats["failed"] == 0
 
         # Verify in DB
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             cur.execute("SELECT count(*) FROM memories WHERE source_url LIKE 'qd-feed://evt_0000%'")
             assert cur.fetchone()[0] == 3
 
-    def test_ingest_is_idempotent(self, test_db, eventlog_file):
+    def test_ingest_is_idempotent(self, db_connection, eventlog_file):
         from scripts.migrate.ingest_eventlog import ingest_eventlog
 
         with patch("scripts.migrate.ingest_eventlog.EVENTLOG_PATH", eventlog_file):
@@ -206,10 +189,10 @@ class TestEventlogE2E:
         assert stats2["processed"] == 0
         assert stats2["skipped"] == 3
 
-    def test_dry_run_creates_nothing(self, test_db, eventlog_file):
+    def test_dry_run_creates_nothing(self, db_connection, eventlog_file):
         from scripts.migrate.ingest_eventlog import ingest_eventlog
 
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             cur.execute("DELETE FROM memories WHERE source_url LIKE 'qd-feed://evt_0000%'")
 
         with patch("scripts.migrate.ingest_eventlog.EVENTLOG_PATH", eventlog_file):
@@ -217,6 +200,6 @@ class TestEventlogE2E:
 
         assert stats["processed"] == 3
 
-        with test_db.cursor() as cur:
+        with db_connection.cursor() as cur:
             cur.execute("SELECT count(*) FROM memories WHERE source_url LIKE 'qd-feed://evt_0000%'")
             assert cur.fetchone()[0] == 0
