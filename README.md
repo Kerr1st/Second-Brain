@@ -40,15 +40,15 @@ Copy `.env.example` to `.env` for local overrides. The default database credenti
 
 ## Running Tests
 
-```bash
-# Quick smoke test
-.venv/bin/python -m pytest tests/test_db.py tests/test_search.py tests/test_mcp_server.py -q
+Use three layers: behavior, integration, and real AI outcomes. Install `requirements-dev.txt` first.
 
-# Full suite
-.venv/bin/python -m pytest
+```bash
+scripts/test.sh behavior     # No database or live model needed
+scripts/test.sh integration  # Disposable PostgreSQL/pgvector
+scripts/test.sh all          # Both deterministic layers
 ```
 
-Tests require a running local PostgreSQL instance. The test fixture creates an isolated `memory_bank_test` database. Embedding calls are mocked, so Ollama does not need to be running during tests.
+Integration tests recreate the allowlisted `second_brain_codex_test` database by default. Python network calls are blocked; model and embedding boundaries are scripted. The full [testing guide](docs/TESTING.md) explains configuration, markers, CI, and the separate [AI outcome protocol](evaluations/OUTCOMES.md).
 
 ## Documentation
 
