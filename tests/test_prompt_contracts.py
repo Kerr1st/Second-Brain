@@ -1,14 +1,6 @@
-"""Prompt contract tests — verify agents receive well-formed, complete context.
+"""Prompt documentation and Explorer feedback formatting contracts.
 
-These tests verify the structural contracts between the orchestrator and
-the agent prompts, using realistic (not synthetic) data shapes. They catch
-prompt regressions where template changes break interpolation or drop
-required context.
-
-Gap coverage:
-- Thinker receives memory slice JSON with all MemorySlice fields
-- Explorer feedback injection is structurally correct with realistic
-  rejection data (evaluator roles, reasoning, cycle dates, dissent sections)
+Actual agent invocation/payload coverage lives in test_agent_invocation.py.
 """
 
 from __future__ import annotations
@@ -20,111 +12,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 from hypothesis import given, settings, strategies as st
 
-from src.models import MemorySlice
 from src.prompts import get_explorer_prompt, get_thinker_prompt
 
 
 # ---------------------------------------------------------------------------
-# Thinker prompt contract: memory slice JSON completeness
+# Thinker documented output contract
 # ---------------------------------------------------------------------------
 
-class TestThinkerPromptReceivesMemorySlice:
-    """Verify the Thinker's user message contains a well-formed memory slice
-    with all MemorySlice fields present and correctly serialized."""
-
-    def _build_thinker_user_message(self, slice_obj: MemorySlice) -> str:
-        """Replicate the orchestrator's invoke_thinker payload construction."""
-        payload = {
-            "memory_slice": {
-                "name": slice_obj.name,
-                "strategy": slice_obj.strategy,
-                "memory_ids": slice_obj.memory_ids,
-                "memory_titles": slice_obj.memory_titles,
-                "hypothesis": slice_obj.hypothesis,
-            },
-        }
-        return json.dumps(payload)
-
-    def test_realistic_slice_produces_valid_json_with_all_fields(self):
-        """A realistic memory slice serializes to valid JSON containing
-        all five MemorySlice fields."""
-        slice_obj = MemorySlice(
-            name="Cross-project database migration patterns",
-            strategy="cross_project_collision",
-            memory_ids=[
-                "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-                "b2c3d4e5-f6a7-8901-bcde-f12345678901",
-                "c3d4e5f6-a7b8-9012-cdef-123456789012",
-            ],
-            memory_titles=[
-                "DB Migration: Project Alpha uses Flyway",
-                "DB Migration: Project Beta switched to Liquibase",
-                "Decision: Standardize on declarative migrations",
-            ],
-            hypothesis="Projects share implicit migration conventions that could be named as a principle",
-        )
-
-        user_message = self._build_thinker_user_message(slice_obj)
-        parsed = json.loads(user_message)
-
-        assert "memory_slice" in parsed
-        ms = parsed["memory_slice"]
-        assert ms["name"] == slice_obj.name
-        assert ms["strategy"] == slice_obj.strategy
-        assert ms["memory_ids"] == slice_obj.memory_ids
-        assert ms["memory_titles"] == slice_obj.memory_titles
-        assert ms["hypothesis"] == slice_obj.hypothesis
-        assert len(ms["memory_ids"]) == 3
-
-    def test_empty_slice_fields_serialize_correctly(self):
-        """A slice with empty optional fields still produces valid JSON."""
-        slice_obj = MemorySlice(
-            name="Minimal slice",
-            strategy="orphan_archaeology",
-            memory_ids=[],
-            memory_titles=[],
-            hypothesis="",
-        )
-
-        user_message = self._build_thinker_user_message(slice_obj)
-        parsed = json.loads(user_message)
-
-        ms = parsed["memory_slice"]
-        assert ms["memory_ids"] == []
-        assert ms["memory_titles"] == []
-        assert ms["hypothesis"] == ""
-
-    @given(
-        name=st.text(min_size=1, max_size=100),
-        strategy=st.sampled_from([
-            "temporal_juxtaposition", "cross_project_collision",
-            "orphan_archaeology", "pattern_emergence",
-            "contradiction_hunting", "stale_synthesis_check",
-        ]),
-        num_memories=st.integers(min_value=1, max_value=20),
-    )
-    @settings(max_examples=50)
-    def test_any_valid_slice_round_trips_through_json(self, name, strategy, num_memories):
-        """For any valid slice parameters, the JSON round-trip preserves all fields."""
-        memory_ids = [f"mem-{i:04d}" for i in range(num_memories)]
-        memory_titles = [f"Memory Title {i}" for i in range(num_memories)]
-
-        slice_obj = MemorySlice(
-            name=name,
-            strategy=strategy,
-            memory_ids=memory_ids,
-            memory_titles=memory_titles,
-            hypothesis=f"Hypothesis for {strategy}",
-        )
-
-        user_message = self._build_thinker_user_message(slice_obj)
-        parsed = json.loads(user_message)
-
-        ms = parsed["memory_slice"]
-        assert ms["name"] == name
-        assert ms["strategy"] == strategy
-        assert len(ms["memory_ids"]) == num_memories
-        assert len(ms["memory_titles"]) == num_memories
+class TestThinkerPromptDocumentation:
+    """Keep the documented output contract available to the agent."""
 
     def test_thinker_system_prompt_contains_output_schema_fields(self):
         """The Thinker system prompt documents all CandidateInsight fields

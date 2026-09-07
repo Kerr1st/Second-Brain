@@ -196,3 +196,33 @@ def test_processing_time_is_not_presented_as_source_observation_time(test_db, cl
         pack=build_context(ContextRequest('Continue the earlier plan'))
     # The database just created these rows, but their source turns have no date.
     assert all(item.observed_at is None for item in pack.items)
+
+
+@pytest.mark.parametrize("applicability,repository,expected", [
+    ({}, None, True),
+    ({"integrations": ["codex"], "semantic_projects": ["second-brain"]}, None, True),
+    ({"integrations": ["kiro"]}, None, False),
+    ({"semantic_projects": ["job-search"]}, None, False),
+    ({"repositories": ["/approved/repo"]}, "/other/repo", False),
+    ({"repositories": ["/approved/repo"]}, None, False),
+    ({"repositories": ["/approved/repo"]}, "/approved/repo", True),
+    ({"topics": ["unrelated-topic"]}, None, False),
+    ({"topics": ["capture"]}, None, True),
+    ("malformed-scope", None, False),
+], ids=["unrestricted", "matching", "other-integration", "other-project", "other-repo",
+        "unknown-repo", "matching-repo", "other-topic", "matching-topic", "malformed"])
+def test_guidance_delivery_respects_approved_applicability(
+    test_db, clean_tables, applicability, repository, expected,
+):
+    from src.context_broker import ContextRequest, build_context
+
+    rule = create_memory(
+        type="steering_rule", title="Capture guidance", content="Preserve exact provenance.",
+        embedding=VECTOR, project="second-brain",
+        metadata={"authority": "approved", "applicability": applicability},
+    )
+    with patch("src.context_broker.generate_embedding", return_value=VECTOR):
+        pack = build_context(ContextRequest(
+            objective="Plan capture", project_hint="second-brain", repository=repository,
+        ))
+    assert (rule in [item.memory_id for item in pack.items]) is expected

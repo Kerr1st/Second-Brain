@@ -854,6 +854,33 @@ def test_real_user_correction_persists_neutral_episode_with_exact_provenance(
     }
 
 
+    # Complete the reference lifecycle through real context delivery and its receipt.
+    # Scripted semantics prove plumbing; this does not rate live AI usefulness.
+    from src.context_broker import (
+        ContextRequest, build_context, get_context_receipt, record_context_outcome,
+    )
+    with patch("src.context_broker.generate_embedding", return_value=VECTOR):
+        pack = build_context(ContextRequest(
+            objective="Amazon Quick separate from Kiro and Amazon Q Developer",
+        ))
+    delivered = next(item for item in pack.items if item.memory_id == str(episode[0]))
+    assert delivered.source_task_id == f"codex://{CORRECTION_TASK_ID}"
+    assert delivered.supporting_turn_ids == (
+        "ee442a21-8919-4145-b3df-b454fd987cd7",
+        "b0a21672-118f-433e-a1e7-3b206baed324",
+    )
+    assert delivered.authority == "evidence"
+    assert "are distinct and should not be conflated" in delivered.content
+    record_context_outcome(
+        pack.receipt_id, used_memory_ids=[], outcome="unknown",
+        note="Deterministic delivery proof; live AI usefulness not evaluated.",
+    )
+    receipt = get_context_receipt(pack.receipt_id)
+    assert str(episode[0]) in receipt["returned_memory_ids"]
+    assert receipt["outcome"] == "unknown"
+    assert receipt["evaluated_at"] is not None
+
+
 def test_resumed_task_extends_adjacent_segment_to_capture_correction(
     test_db, clean_tables, tmp_path, monkeypatch
 ):

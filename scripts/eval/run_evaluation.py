@@ -16,6 +16,7 @@ import argparse
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -74,6 +75,17 @@ TIER_RUNNERS = {
 }
 
 
+def evaluated_query_count(tier: str, summary: dict) -> int:
+    """Normalize existing benchmark summaries without treating an empty run as a pass."""
+    if tier == "cold_warm":
+        return min(summary.get("warm", {}).get("total", 0),
+                   summary.get("cold", {}).get("total", 0))
+    if tier == "ablation":
+        return summary.get("baseline", {}).get("total", 0)
+    key = "total" if tier == "curated" else "total_queries"
+    return summary.get(key, 0)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Unified evaluation runner.")
     parser.add_argument("--tier", choices=ALL_TIERS, default=None, help="Run a single tier.")
@@ -93,27 +105,45 @@ def main() -> int:
         return 0
 
     all_results = {}
+    exit_status = 0
     for tier in tiers:
         print(f"\n{'=' * 60}")
         print(f"  Tier: {tier}")
         print(f"{'=' * 60}")
         start = time.time()
         try:
-            all_results[tier] = TIER_RUNNERS[tier](args.limit)
+            summary = dict(TIER_RUNNERS[tier](args.limit))
+            if "error" in summary:
+                summary["status"] = "failed"
+                exit_status = 1
+            elif tier == "trends":
+                summary["status"] = "reported"  # History display is not a benchmark.
+            else:
+                count = evaluated_query_count(tier, summary)
+                summary["evaluated_queries"] = count
+                summary["status"] = "completed" if count > 0 else "insufficient_evidence"
+                if count <= 0 and exit_status != 1:
+                    exit_status = 2
+            all_results[tier] = summary
         except Exception as exc:
             logger.error("Tier %s failed: %s", tier, exc)
-            all_results[tier] = {"error": str(exc)}
+            all_results[tier] = {"status": "failed", "error": str(exc)}
+            exit_status = 1
         elapsed = time.time() - start
-        print(f"  [{tier} completed in {elapsed:.1f}s]")
+        print(f"  [{tier}: {all_results[tier].get('status', 'completed')} in {elapsed:.1f}s]")
 
     # Write consolidated report (only if running multiple tiers)
     if len(tiers) > 1:
-        write_results("full_eval", all_results, [])
+        write_results("full_eval", all_results, [], metadata={
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "corpus_size": None,
+            "note": "Aggregate report; corpus metadata belongs to individual tier reports.",
+        })
 
     print(f"\n{'=' * 60}")
-    print("  Evaluation complete.")
+    print(f"  Evaluation finished (exit status {exit_status}).")
     print(f"{'=' * 60}")
-    return 0
+    return exit_status
 
 
 if __name__ == "__main__":
