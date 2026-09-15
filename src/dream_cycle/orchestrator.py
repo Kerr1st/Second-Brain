@@ -564,15 +564,16 @@ class DreamCycleOrchestrator:
             },
         }
 
-        # A tool-capable Thinker (agentic CLI) reads the memories itself over MCP.
-        # A tool-less one (Direct-API / Bedrock) cannot, so deliver the slice
-        # contents in the prompt — the "B2 context packet" — and remember them
-        # so the evaluators can ground against the same text.
+        # The evaluators are always tool-less, so cache the slice contents for
+        # their grounding checks regardless of how the Thinker reads memories.
+        # A tool-capable Thinker (agentic CLI) reads them itself over MCP; a
+        # tool-less one (Direct-API / Bedrock) additionally gets the contents in
+        # its prompt — the "B2 context packet".
         thinker_has_tools = self._role_has_tools("thinker")
+        memories = load_memories_by_ids(slice.memory_ids)
+        for memory in memories:
+            self._slice_memory_cache[str(memory.get("id"))] = memory
         if not thinker_has_tools:
-            memories = load_memories_by_ids(slice.memory_ids)
-            for memory in memories:
-                self._slice_memory_cache[str(memory.get("id"))] = memory
             payload["memory_slice"]["memories"] = build_packet(memories)
             payload["note"] = TOOLLESS_NOTE
             if len(memories) < len(slice.memory_ids):

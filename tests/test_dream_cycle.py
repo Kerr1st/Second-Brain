@@ -2533,7 +2533,10 @@ class TestToollessThinkerPacketAndSpendGuard:
 
     def test_tool_capable_thinker_path_is_unchanged(self):
         """Kiro / Claude Code / Codex Thinkers keep tools=True and read memories
-        themselves; no packet is built and no DB loader is called."""
+        themselves; no packet goes into their prompt. The slice contents are
+        still loaded into the cache so the evaluators — which are always
+        tool-less — can ground against source text (hybrid profile: Kiro
+        Thinker, Astra evaluators)."""
         orch = _make_orchestrator()  # default laptop profile: kiro
         captured = {}
 
@@ -2541,13 +2544,15 @@ class TestToollessThinkerPacketAndSpendGuard:
             captured.update(user_message=user_message, tools=tools)
             return {"output": [], "raw": "[]"}
 
-        with patch("src.dream_cycle.orchestrator.load_memories_by_ids") as loader:
+        with patch("src.dream_cycle.orchestrator.load_memories_by_ids", return_value=self._fake_memories()) as loader:
             orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
             orch.invoke_thinker(self._slice())
 
-        loader.assert_not_called()
+        loader.assert_called_once_with([self.MEM_A, self.MEM_B])
         assert captured["tools"] is True
-        assert "memories" not in json.loads(captured["user_message"])["memory_slice"]
+        payload = json.loads(captured["user_message"])
+        assert "memories" not in payload["memory_slice"] and "note" not in payload
+        assert orch._slice_memory_cache[self.MEM_A]["title"] == "Focus block"
 
     def test_evaluator_prompt_includes_cached_source_contents(self):
         orch = _make_orchestrator()

@@ -13,6 +13,23 @@ fi
 
 PY=/Users/kerrfir/second-brain/.venv/bin/python
 
+# Model backends for the nightly run (see config/backends.toml):
+#   hybrid = Claude roles on Kiro (credits), only the two GPT-6 Astra evaluator
+#   seats metered on Bedrock (≈ $2.30/run measured). Bedrock auth is the CLI
+#   `default` profile (kiro-admin-session SSO; boto3 refreshes the token).
+# Cost controls, two layers:
+#   - Real-time (here): SECOND_BRAIN_RUN_COST_CAP_USD is a runaway guard only —
+#     ~6x a typical run, 2x the worst observed night — and BEDROCK_MAX_TOKENS
+#     bounds a single Astra call at ~$0.90 (4x its largest observed output).
+#   - Monthly (AWS Budgets, emailed): `second-brain-bedrock-monthly` $100 with
+#     alerts at 50/80/100% + forecast; `account-monthly-total` $175; Cost
+#     Anomaly Detection subscription for anomalies ≥ $10.
+#   Emergency stop: SECOND_BRAIN_KILL_SWITCH=1 refuses to start a run.
+export SECOND_BRAIN_PROFILE="${SECOND_BRAIN_PROFILE:-hybrid}"
+export SECOND_BRAIN_RUN_COST_CAP_USD="${SECOND_BRAIN_RUN_COST_CAP_USD:-15}"
+export BEDROCK_MAX_TOKENS="${BEDROCK_MAX_TOKENS:-16384}"
+export BEDROCK_REGION="${BEDROCK_REGION:-us-east-1}"
+
 # 1. The dream cycle (synthesis).
 "$PY" /Users/kerrfir/second-brain/scripts/dream_cycle_run.py --run-type scheduled
 dc_status=$?

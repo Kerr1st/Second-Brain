@@ -58,3 +58,20 @@ skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",
 advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
 epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
 methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
+
+[profiles.hybrid]
+# Everything Claude runs on Kiro (credits, no metered bill); only the two
+# GPT-6 Astra evaluator seats are metered, on Bedrock. Keeps the cross-family
+# consensus guarantee for ≈ $2.30/run (measured 2026-09-14: 18 Astra calls,
+# avg $0.128) instead of ≈ $7.50 for the all-Bedrock profile.
+#
+# Deliberately Opus 5 rather than Kiro's `claude-fable-5.1` for the Thinker:
+# Kiro lists Fable as an internal preview "NOT FOR CUSTOMER DATA, ITAR OR PII",
+# and this workload is the personal corpus. Fable is available à la carte via
+# the `bedrock` profile.
+explorer       = { backend = "kiro",    model = "claude-opus-5",              effort = "high" }
+thinker        = { backend = "kiro",    model = "claude-opus-5",              effort = "max" }
+skeptic        = { backend = "bedrock", model = "global.openai.gpt-6-astra",   effort = "high" }
+advocate       = { backend = "kiro",    model = "claude-sonnet-5",            effort = "high" }
+epistemologist = { backend = "bedrock", model = "global.openai.gpt-6-astra",   effort = "high" }
+methodologist  = { backend = "kiro",    model = "claude-sonnet-5",            effort = "high" }

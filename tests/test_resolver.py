@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.backends.base import BACKEND_CAPABILITIES
 from src.backends.claude_code import ClaudeCodeInvoker
 from src.backends.codex import CodexInvoker
 from src.backends.kiro import KiroInvoker
@@ -48,6 +49,18 @@ class TestLoadProfiles:
         panel_models = {p[r].model for r in ("skeptic", "advocate", "epistemologist", "methodologist")}
         assert any("openai." in m for m in panel_models) and any("anthropic." in m for m in panel_models)
         Resolver(p)  # eager Explorer guard passes
+
+    def test_hybrid_profile_meters_only_the_astra_seats(self):
+        """`hybrid`: Claude roles on Kiro (credits), only the two Astra evaluator
+        seats on Bedrock. Never Kiro's internal Fable preview for this workload."""
+        profiles, _ = load_profiles()
+        p = profiles["hybrid"]
+        metered = {r for r in VALID_ROLES if BACKEND_CAPABILITIES[p[r].backend].metered}
+        assert metered == {"skeptic", "epistemologist"}
+        assert all(p[r].model == "global.openai.gpt-6-astra" for r in metered)
+        assert all(p[r].backend == "kiro" for r in VALID_ROLES if r not in metered)
+        assert not any("fable" in p[r].model for r in VALID_ROLES)
+        Resolver(p)
 
     def test_laptop_profile_reproduces_today(self):
         """Default-preserving: laptop = all-Kiro/Opus; explorer+evaluators high, thinker max."""
