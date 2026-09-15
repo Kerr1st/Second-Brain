@@ -15,10 +15,7 @@
     <string>/Users/kerrfir/Library/Logs/second-brain/capture-api-stdout.log</string>
     <key>StandardErrorPath</key>
     <string>/Users/kerrfir/Library/Logs/second-brain/capture-api-stderr.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>CAPTURE_API_TOKEN</key>
-        <string>REPLACE_WITH_ACTUAL_TOKEN</string>
-    </dict>
+    <!-- Secrets are deliberately NOT in this file (it is tracked in git).
+         CAPTURE_API_TOKEN is read from the gitignored .env by capture_api.sh. -->
 </dict>
 </plist>
