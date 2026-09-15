@@ -2388,6 +2388,10 @@ class TestFinalOrchestratorMethodSet:
             "_invoker_for",
             "_backend_provenance",
             "_capture",
+            # Coordination glue for metered / tool-less backends: capability lookup
+            # and delegation to SpendTracker (pricing itself lives in backends/cost.py).
+            "_role_has_tools",
+            "_record_spend",
         }
 
         actual_methods = {
@@ -2462,3 +2466,199 @@ class TestPublicAPIPreservation:
 
         assert hasattr(pkg, "__all__")
         assert "DreamCycleOrchestrator" in pkg.__all__
+
+
+# ---------------------------------------------------------------------------
+# Direct-API (tool-less) Thinker packet + metered-spend guardrails
+# ---------------------------------------------------------------------------
+
+class TestToollessThinkerPacketAndSpendGuard:
+    """When the Thinker runs on a tool-less Direct-API backend (Bedrock) it
+    cannot read memories over MCP, so the orchestrator must deliver the slice
+    contents in the prompt (the "B2 context packet"). Every metered call is
+    priced; breaching the per-run cap aborts the run without retries.
+    """
+
+    MEM_A = "11111111-1111-4111-8111-111111111111"
+    MEM_B = "22222222-2222-4222-8222-222222222222"
+
+    def _bedrock_resolver(self):
+        from src.backends.resolver import Resolver, RoleBackend
+        return Resolver({
+            "explorer": RoleBackend("explorer", "claude_code", "global.anthropic.claude-opus-5", "high"),
+            "thinker": RoleBackend("thinker", "bedrock", "global.anthropic.claude-fable-5-1", "high"),
+            "skeptic": RoleBackend("skeptic", "bedrock", "global.openai.gpt-6-astra", "high"),
+            "advocate": RoleBackend("advocate", "bedrock", "global.anthropic.claude-sonnet-5", "high"),
+            "epistemologist": RoleBackend("epistemologist", "bedrock", "global.openai.gpt-6-astra", "high"),
+            "methodologist": RoleBackend("methodologist", "bedrock", "global.anthropic.claude-sonnet-5", "high"),
+        })
+
+    def _slice(self):
+        return MemorySlice(
+            name="Morning focus", strategy="pattern_emergence",
+            memory_ids=[self.MEM_A, self.MEM_B], memory_titles=["Focus block", "Calendar note"],
+            hypothesis="Deep work clusters in the morning",
+        )
+
+    def _fake_memories(self):
+        return [
+            {"id": self.MEM_A, "title": "Focus block", "type": "notes", "content": "7am focus block, phone off.",
+             "created_at": "2026-03-01T07:00:00+00:00", "tags": ["focus"], "project": "self"},
+            {"id": self.MEM_B, "title": "Calendar note", "type": "notes", "content": "Blocked 7-9am for deep work.",
+             "created_at": "2026-03-08T07:00:00+00:00", "tags": [], "project": None},
+        ]
+
+    def test_toolless_thinker_gets_slice_contents_and_no_tools(self):
+        orch = _make_orchestrator()
+        orch.resolver = self._bedrock_resolver()
+        captured = {}
+
+        def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
+            captured.update(system_prompt=system_prompt, user_message=user_message, tools=tools, **kwargs)
+            return {"output": [], "raw": "[]", "usage": None}
+
+        with patch("src.dream_cycle.orchestrator.load_memories_by_ids", return_value=self._fake_memories()) as loader:
+            orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
+            orch.invoke_thinker(self._slice())
+
+        loader.assert_called_once_with([self.MEM_A, self.MEM_B])
+        assert captured["tools"] is False, "a Direct-API backend rejects tools=True"
+        payload = json.loads(captured["user_message"])
+        memories = payload["memory_slice"]["memories"]
+        assert [m["id"] for m in memories] == [self.MEM_A, self.MEM_B]
+        assert memories[0]["content"] == "7am focus block, phone off."
+        assert "not available" in payload["note"].lower() and "search" in payload["note"].lower()
+        # Contents are cached so evaluators can ground against the same sources.
+        assert orch._slice_memory_cache[self.MEM_B]["title"] == "Calendar note"
+
+    def test_tool_capable_thinker_path_is_unchanged(self):
+        """Kiro / Claude Code / Codex Thinkers keep tools=True and read memories
+        themselves; no packet is built and no DB loader is called."""
+        orch = _make_orchestrator()  # default laptop profile: kiro
+        captured = {}
+
+        def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
+            captured.update(user_message=user_message, tools=tools)
+            return {"output": [], "raw": "[]"}
+
+        with patch("src.dream_cycle.orchestrator.load_memories_by_ids") as loader:
+            orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
+            orch.invoke_thinker(self._slice())
+
+        loader.assert_not_called()
+        assert captured["tools"] is True
+        assert "memories" not in json.loads(captured["user_message"])["memory_slice"]
+
+    def test_evaluator_prompt_includes_cached_source_contents(self):
+        orch = _make_orchestrator()
+        orch._slice_memory_cache = {m["id"]: m for m in self._fake_memories()}
+        candidate = CandidateInsight(
+            title="Morning deep work", type="insight", operation="CREATE",
+            content="The user protects mornings for deep work.",
+            source_memories=[self.MEM_A], relationships=[], strategy_that_found_it="pattern_emergence",
+        )
+        captured = {}
+
+        def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
+            captured["system_prompt"] = system_prompt
+            return {"output": {"verdict": "ACCEPT", "reasoning": "ok"}, "raw": "{}"}
+
+        orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
+        orch.invoke_evaluator(candidate, "skeptic")
+
+        prompt = captured["system_prompt"]
+        assert f"Source memories: {[self.MEM_A]}" in prompt  # existing line preserved
+        assert "7am focus block, phone off." in prompt  # ...and the Skeptic can now see the source
+        assert "Blocked 7-9am" not in prompt  # only cited sources, not the whole slice
+
+    def test_toolless_evaluator_requests_schema_constrained_verdict(self):
+        """Sonnet 5 on the Methodologist seat answered with ~3.5K tokens of markdown
+        followed by JSON; unescaped quotes broke the text backstop 4 times in the
+        first live run. On a Direct-API backend the orchestrator must ask for
+        schema-constrained tool output instead of JSON-in-prose."""
+        orch = _make_orchestrator()
+        orch.resolver = self._bedrock_resolver()
+        candidate = CandidateInsight(
+            title="q", type="insight", operation="CREATE", content="c",
+            source_memories=[], relationships=[], strategy_that_found_it="pattern_emergence",
+        )
+        captured = {}
+
+        def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
+            captured.update(kwargs)
+            return {"output": {"verdict": "ACCEPT", "reasoning": "ok"}, "raw": "{}"}
+
+        orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
+        orch.invoke_evaluator(candidate, "methodologist")
+
+        schema = captured["schema"]
+        assert schema["properties"]["verdict"]["enum"] == ["ACCEPT", "REJECT"]
+        assert set(schema["required"]) == {"verdict", "reasoning"}
+
+    def test_tool_capable_evaluator_gets_no_schema_option(self):
+        """Kiro's invoke() has a fixed signature; never pass it unknown kwargs."""
+        orch = _make_orchestrator()  # laptop profile: kiro
+        candidate = CandidateInsight(
+            title="q", type="insight", operation="CREATE", content="c",
+            source_memories=[], relationships=[], strategy_that_found_it="pattern_emergence",
+        )
+        captured = {}
+
+        def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
+            captured.update(kwargs)
+            return {"output": {"verdict": "ACCEPT", "reasoning": "ok"}, "raw": "{}"}
+
+        orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
+        orch.invoke_evaluator(candidate, "skeptic")
+        assert "schema" not in captured
+
+    def test_spend_cap_breach_aborts_run_without_retry(self, monkeypatch):
+        monkeypatch.setenv("SECOND_BRAIN_RUN_COST_CAP_USD", "0.01")
+        monkeypatch.delenv("SECOND_BRAIN_KILL_SWITCH", raising=False)
+        orch = _make_orchestrator()
+        orch.resolver = self._bedrock_resolver()
+        test_slice = self._slice()
+        candidate = CandidateInsight(
+            title="Expensive", type="insight", operation="CREATE", content="c",
+            source_memories=[self.MEM_A], relationships=[], strategy_that_found_it="pattern_emergence",
+        )
+        # One Astra evaluator call reporting 100K in / 100K out ≈ $6 — far over the cap.
+        expensive = MagicMock(invoke=MagicMock(return_value={
+            "output": {"verdict": "ACCEPT", "reasoning": "ok"}, "raw": "{}",
+            "usage": {"inputTokens": 100_000, "outputTokens": 100_000, "totalTokens": 200_000},
+            "usage_source": "real",
+        }))
+
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch("src.dream_cycle.orchestrator.time.sleep"), \
+             patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
+             patch.object(orch, "invoke_thinker", return_value=[candidate]), \
+             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
+             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
+            mock_db.create_run.return_value = "run-cap"
+            mock_db.get_memory_stats.return_value = {
+                "total_count": 100, "recent_activity": 5,
+                "date_range": {"min": None, "max": None}, "type_distribution": {},
+            }
+            mock_db.get_previous_run_id.return_value = None
+            mock_db.store_candidate.return_value = "cand-id"
+            orch._invoker_for = lambda role: expensive
+
+            result = orch.run(run_type="scheduled")
+
+        assert result.aborted_early is True
+        assert result.candidates_accepted == 0 and result.candidates_rejected == 0
+        assert expensive.invoke.call_count == 1, "a cap breach must not be retried"
+        mock_db.complete_run.assert_called_once()  # run record is closed, not left dangling
+        assert orch._spend.total_usd > 0.01
+
+    def test_kill_switch_aborts_before_any_llm_call(self, monkeypatch):
+        monkeypatch.setenv("SECOND_BRAIN_KILL_SWITCH", "1")
+        orch = _make_orchestrator()
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "invoke_explorer") as explorer:
+            result = orch.run(run_type="scheduled")
+
+        explorer.assert_not_called()
+        mock_db.create_run.assert_not_called()
+        assert result.aborted_early is True

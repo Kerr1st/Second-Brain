@@ -19,6 +19,7 @@ import tomllib
 from dataclasses import dataclass
 
 from src.backends.base import BACKEND_CAPABILITIES, Invoker, assert_backend_supports_role
+from src.backends.bedrock import BedrockInvoker
 from src.backends.claude_code import ClaudeCodeInvoker
 from src.backends.codex import CodexInvoker
 from src.backends.kiro import KiroInvoker
@@ -28,13 +29,14 @@ _REPO_ROOT = os.path.dirname(
 )
 DEFAULT_CONFIG_PATH = os.path.join(_REPO_ROOT, "config", "backends.toml")
 
-# backend name -> adapter class. Adapters are registered as they are implemented
-# (priority order: kiro today; claude_code / codex landed here; bedrock in a
-# later step).
+# backend name -> adapter class. The three agentic CLIs speak MCP and can run
+# any role; `bedrock` is the tool-less Direct-API family (Thinker/evaluators
+# only — the Explorer guard below rejects it).
 DEFAULT_ADAPTERS: dict[str, type] = {
     "kiro": KiroInvoker,
     "claude_code": ClaudeCodeInvoker,
     "codex": CodexInvoker,
+    "bedrock": BedrockInvoker,
 }
 
 VALID_ROLES = (

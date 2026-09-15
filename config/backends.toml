@@ -4,8 +4,9 @@
 # SECOND_BRAIN_PROFILE env var; unset => `default_profile` below.
 #
 # The `laptop` profile reproduces today's behavior exactly (all-Kiro / Opus 4.8,
-# $0 metered). The `mini` profile targets the Mac Mini (Claude Code on Bedrock);
-# its adapter lands in a later step, so selecting it errors until then.
+# $0 metered). The `mini` profile targets the Mac Mini (Claude Code on Bedrock).
+# The `bedrock` profile runs the Thinker and all four evaluators on the direct
+# Bedrock Converse API (metered; see the spend cap below).
 #
 # Credentials are NOT stored here — they stay out-of-band / gitignored.
 # See docs/MODEL-BACKENDS.md.
@@ -35,3 +36,25 @@ skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opu
 advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+
+[profiles.bedrock]
+# Direct Bedrock Converse API for every tool-less role; the Explorer needs the
+# live MCP tool-loop, so it stays on Claude Code (also Bedrock-billed).
+#
+# Model ids are cross-region inference profiles, confirmed ACTIVE in the
+# account on 2026-09-14 (us-east-1 and us-west-2). Two model families sit on
+# the evaluator panel on purpose: with the 3-of-4 consensus rule, no insight is
+# accepted unless both Claude and GPT-6 Astra vote for it.
+#
+# All of this is metered. Guardrails (src/backends/cost.py):
+#   SECOND_BRAIN_RUN_COST_CAP_USD  per-run hard stop, default 5.00
+#   SECOND_BRAIN_KILL_SWITCH=1     refuse to start a run
+#   BEDROCK_MAX_TOKENS             output budget per call (default 32768;
+#                                  adaptive thinking is billed as output)
+# Estimated ≈ $1.60/run from the June token counts, before thinking tokens.
+explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-5",    effort = "high" }
+thinker        = { backend = "bedrock",     model = "global.anthropic.claude-fable-5-1", effort = "high" }
+skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
+advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
+epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
+methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }

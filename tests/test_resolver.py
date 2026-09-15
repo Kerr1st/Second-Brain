@@ -32,8 +32,22 @@ class TestLoadProfiles:
     def test_committed_config_parses_with_laptop_default(self):
         profiles, default_profile = load_profiles()  # real config/backends.toml
         assert default_profile == "laptop"
-        assert {"laptop", "mini"} <= set(profiles)
+        assert {"laptop", "mini", "bedrock"} <= set(profiles)
         assert set(profiles["laptop"]) >= set(VALID_ROLES)
+
+    def test_bedrock_profile_is_direct_api_with_mixed_panel(self):
+        """The committed `bedrock` profile: Thinker + evaluators on the direct
+        Bedrock API, Explorer on a tool-capable backend (the resolver guard), and
+        both model families on the panel so 3-of-4 needs cross-family agreement."""
+        profiles, _ = load_profiles()
+        p = profiles["bedrock"]
+        assert p["explorer"].backend == "claude_code"
+        for role in ("thinker", "skeptic", "advocate", "epistemologist", "methodologist"):
+            assert p[role].backend == "bedrock"
+        assert p["thinker"].model == "global.anthropic.claude-fable-5-1"
+        panel_models = {p[r].model for r in ("skeptic", "advocate", "epistemologist", "methodologist")}
+        assert any("openai." in m for m in panel_models) and any("anthropic." in m for m in panel_models)
+        Resolver(p)  # eager Explorer guard passes
 
     def test_laptop_profile_reproduces_today(self):
         """Default-preserving: laptop = all-Kiro/Opus; explorer+evaluators high, thinker max."""
@@ -90,9 +104,21 @@ class TestResolver:
         with pytest.raises(ValueError):
             Resolver(profile)
 
-    def test_unimplemented_backend_raises(self):
-        profile = {"thinker": RoleBackend("thinker", "bedrock", "claude-opus-4.8", "max")}
-        r = Resolver(profile)  # bedrock adapter not implemented yet
+    def test_bedrock_role_resolves_to_adapter(self):
+        """A profile selecting bedrock resolves to BedrockInvoker with the model id
+        preserved (the metered adapter rejects a blank id, so a real id is used)."""
+        from src.backends.bedrock import BedrockInvoker
+
+        profile = {"thinker": RoleBackend("thinker", "bedrock", "global.anthropic.claude-fable-5-1", "high")}
+        r = Resolver(profile)
+        inv = r.invoker_for("thinker")
+        assert isinstance(inv, BedrockInvoker)
+        assert inv.model == "global.anthropic.claude-fable-5-1"
+
+    def test_backend_without_adapter_raises(self):
+        """A backend name with no registered adapter fails loudly at resolution."""
+        profile = {"thinker": RoleBackend("thinker", "bedrock", "global.anthropic.claude-fable-5-1", "max")}
+        r = Resolver(profile, adapters={})
         with pytest.raises(NotImplementedError):
             r.invoker_for("thinker")
 
@@ -167,6 +193,11 @@ class TestNewAdaptersRegistered:
     def test_default_adapters_map_codex(self):
         # Req 19.2
         assert DEFAULT_ADAPTERS["codex"] is CodexInvoker
+
+    def test_default_adapters_map_bedrock(self):
+        from src.backends.bedrock import BedrockInvoker
+
+        assert DEFAULT_ADAPTERS["bedrock"] is BedrockInvoker
 
     def test_claude_code_role_resolves_to_adapter(self):
         """A profile selecting claude_code resolves to ClaudeCodeInvoker, not

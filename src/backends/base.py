@@ -21,9 +21,38 @@ See ``docs/MODEL-BACKENDS.md``.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Literal, Optional, Protocol, TypedDict, runtime_checkable
+
+logger = logging.getLogger(__name__)
+
+# --- Phase 0 LLM-call instrumentation (backend-agnostic) -----------------------
+# These live here (not in any adapter) because every backend family — both
+# agentic-CLI and direct-API — writes metrics via the same helper. The repo root
+# is dirname THREE times from src/backends/base.py.
+_REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+METRICS_DIR = os.environ.get(
+    "KIRO_LLM_METRICS_DIR", os.path.join(_REPO_ROOT, "logs", "llm_metrics")
+)
+
+
+def _write_metrics_line(metrics: dict, run_id: str | None, metrics_dir: str) -> None:
+    """Append one JSONL record of an LLM call's metrics to ``metrics_dir``.
+
+    Never raises — instrumentation must not break a run.
+    """
+    try:
+        os.makedirs(metrics_dir, exist_ok=True)
+        fname = f"{run_id}.jsonl" if run_id else "adhoc.jsonl"
+        with open(os.path.join(metrics_dir, fname), "a", encoding="utf-8") as f:
+            f.write(json.dumps(metrics) + "\n")
+    except Exception:
+        logger.debug("Failed to record LLM call metrics", exc_info=True)
 
 
 class InvocationResult(TypedDict):

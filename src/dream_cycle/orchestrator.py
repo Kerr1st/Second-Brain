@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 
 import psycopg2
 
+from src.backends.base import BACKEND_CAPABILITIES
+from src.backends.cost import SpendCapExceeded, SpendTracker, kill_switch_engaged
 from src.backends.resolver import VALID_ROLES, default_resolver
 from src.models import (
     CandidateInsight,
@@ -30,6 +32,13 @@ from src.dream_cycle.consensus import tally_consensus
 from src.dream_cycle.storage import store_accepted, check_duplicate
 from src.dream_cycle.digest import generate_digest
 from src.dream_cycle.feedback import build_feedback_injection
+from src.dream_cycle.packet import (
+    EVALUATOR_VERDICT_SCHEMA,
+    TOOLLESS_NOTE,
+    build_packet,
+    format_sources_for_evaluator,
+    load_memories_by_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +63,37 @@ class DreamCycleOrchestrator:
         self.resolver = default_resolver()
         self._capture_dir: str | None = None
         self._current_run_id: str | None = None
+        # Metered-spend guard (reset per run) and the slice contents delivered to
+        # a tool-less Thinker, kept so evaluators can ground against the same text.
+        self._spend = SpendTracker.from_env()
+        self._slice_memory_cache: dict[str, dict] = {}
 
     def _invoker_for(self, role: str):
         """Resolve the Invoker for a role from the active backend profile."""
         return self.resolver.invoker_for(role)
+
+    def _role_has_tools(self, role: str) -> bool:
+        """Whether the role's backend can attach MCP tools (agentic CLIs can;
+        the Direct-API family cannot and must be fed a context packet)."""
+        backend = self.resolver.spec_for(role).backend
+        caps = BACKEND_CAPABILITIES.get(backend)
+        return caps.supports_mcp if caps is not None else True
+
+    def _record_spend(self, role: str, result) -> None:
+        """Price a call's real usage against the per-run cap.
+
+        Raises :class:`SpendCapExceeded` (not a RuntimeError, so the evaluator
+        retry loop cannot swallow it) once the cap is breached.
+        """
+        usage = result.get("usage") if isinstance(result, dict) else None
+        if not isinstance(usage, dict):
+            return
+        cost = self._spend.record(self.resolver.spec_for(role).model, usage)
+        if cost:
+            logger.info(
+                "Metered call %s: $%.4f (run total $%.4f of $%.2f cap)",
+                role, cost, self._spend.total_usd, self._spend.cap_usd,
+            )
 
     def _backend_provenance(self) -> dict:
         """Snapshot the active profile's (backend, model, effort) per role.
@@ -135,6 +171,15 @@ class DreamCycleOrchestrator:
         started_at = datetime.now(timezone.utc)
         logger.info("Starting dream cycle: run_type=%s, scope=%s", run_type, scope)
 
+        # Kill switch: refuse to spend anything, before any record or LLM call.
+        if kill_switch_engaged():
+            logger.warning("SECOND_BRAIN_KILL_SWITCH is set — dream cycle run refused")
+            return self._aborted_result("", run_type, started_at)
+
+        # Fresh per-run spend accounting and slice-content cache.
+        self._spend = SpendTracker.from_env()
+        self._slice_memory_cache = {}
+
         # Session-start frequency cap: check before creating a run record
         if run_type == "session_start" and not dream_cycle_db.should_run_briefing():
             logger.info("Session-start briefing skipped: frequency cap not met")
@@ -159,6 +204,15 @@ class DreamCycleOrchestrator:
             logger.error(
                 "Database unreachable during pipeline execution (run_id=%s)", run_id
             )
+            return self._aborted_result(run_id, run_type, started_at)
+        except SpendCapExceeded as exc:
+            # Hard stop: no more metered calls, no fabricated verdicts. Close the
+            # run record so the abort is auditable, then report aborted_early.
+            logger.error("Dream cycle aborted (run_id=%s): %s", run_id, exc)
+            try:
+                dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
+            except Exception:
+                logger.error("Failed to complete run record after spend-cap abort")
             return self._aborted_result(run_id, run_type, started_at)
         except Exception:
             logger.exception(
@@ -444,6 +498,7 @@ class DreamCycleOrchestrator:
             stage="explorer",
             run_id=self._current_run_id,
         )
+        self._record_spend("explorer", result)
 
         self._capture("explorer", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
 
@@ -509,24 +564,42 @@ class DreamCycleOrchestrator:
             },
         }
 
-        user_message = json.dumps(payload)
+        # A tool-capable Thinker (agentic CLI) reads the memories itself over MCP.
+        # A tool-less one (Direct-API / Bedrock) cannot, so deliver the slice
+        # contents in the prompt — the "B2 context packet" — and remember them
+        # so the evaluators can ground against the same text.
+        thinker_has_tools = self._role_has_tools("thinker")
+        if not thinker_has_tools:
+            memories = load_memories_by_ids(slice.memory_ids)
+            for memory in memories:
+                self._slice_memory_cache[str(memory.get("id"))] = memory
+            payload["memory_slice"]["memories"] = build_packet(memories)
+            payload["note"] = TOOLLESS_NOTE
+            if len(memories) < len(slice.memory_ids):
+                logger.warning(
+                    "Thinker packet: loaded %d of %d slice memories for %s",
+                    len(memories), len(slice.memory_ids), slice.name,
+                )
+
+        user_message = json.dumps(payload, default=str)
 
         # Get the static Thinker prompt
         prompt = get_thinker_prompt()
 
         logger.info(
-            "Invoking Thinker agent (slice=%s)",
-            slice.name,
+            "Invoking Thinker agent (slice=%s, tools=%s)",
+            slice.name, thinker_has_tools,
         )
         result = self._invoker_for("thinker").invoke(
             system_prompt=prompt,
             user_message=user_message,
-            tools=True,
+            tools=thinker_has_tools,
             timeout=600,
             effort=self.resolver.spec_for("thinker").effort,
             stage="thinker",
             run_id=self._current_run_id,
         )
+        self._record_spend("thinker", result)
 
         safe_name = slice.name.replace(" ", "_").replace("/", "_")[:50]
         self._capture(f"thinker_{safe_name}", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
@@ -593,6 +666,14 @@ class DreamCycleOrchestrator:
         source_memories_content = (
             f"Source memories: {candidate.source_memories}"
         )
+        # When this run's Thinker was fed a context packet, the same texts are
+        # cached — give the evaluator the cited sources' actual content so
+        # "factual grounding" can be checked against the text, not UUIDs.
+        sources_text = format_sources_for_evaluator(
+            self._slice_memory_cache, candidate.source_memories
+        )
+        if sources_text:
+            source_memories_content += "\n" + sources_text
 
         prompt = get_evaluator_prompt(
             role=role,
@@ -606,13 +687,19 @@ class DreamCycleOrchestrator:
         )
 
         logger.info("Invoking evaluator: role=%s, candidate=%s", role, candidate.title)
+        # Direct-API backends accept a JSON schema and return the verdict as a
+        # tool call — immune to the quote-escaping failures of JSON-in-prose.
+        # Agentic CLIs (Kiro's invoke() has a fixed signature) get no extra option.
+        extra: dict = {} if self._role_has_tools(role) else {"schema": EVALUATOR_VERDICT_SCHEMA}
         result = self._invoker_for(role).invoke(
             system_prompt=prompt,
             user_message=user_message,
             effort=self.resolver.spec_for(role).effort,
             stage=f"evaluator:{role}",
             run_id=self._current_run_id,
+            **extra,
         )
+        self._record_spend(role, result)
 
         safe_title = candidate.title.replace(" ", "_").replace("/", "_")[:40]
         self._capture(f"evaluator_{role}_{safe_title}", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
