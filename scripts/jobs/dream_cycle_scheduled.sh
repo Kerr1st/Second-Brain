@@ -18,15 +18,18 @@ PY=/Users/kerrfir/second-brain/.venv/bin/python
 #   seats metered on Bedrock (≈ $2.30/run measured). Bedrock auth is the CLI
 #   `default` profile (kiro-admin-session SSO; boto3 refreshes the token).
 # Cost controls, two layers:
-#   - Real-time (here): SECOND_BRAIN_RUN_COST_CAP_USD is a runaway guard only —
-#     ~6x a typical run, 2x the worst observed night — and BEDROCK_MAX_TOKENS
-#     bounds a single Astra call at ~$0.90 (4x its largest observed output).
-#   - Monthly (AWS Budgets, emailed): `second-brain-bedrock-monthly` $100 with
-#     alerts at 50/80/100% + forecast; `account-monthly-total` $175; Cost
-#     Anomaly Detection subscription for anomalies ≥ $10.
+#   - Real-time (here): SECOND_BRAIN_RUN_COST_CAP_USD=6 is the per-run budget
+#     (≈ 2.6x a typical $2.30 run; a p95 night is ≈ $5). Exceeding it aborts
+#     the rest of the panel — candidates already accepted are kept, the digest
+#     is skipped. BEDROCK_MAX_TOKENS bounds a single Astra call at ~$0.90.
+#   - Monthly/daily (AWS Budgets, emailed): `second-brain-bedrock-daily` $6/day,
+#     `second-brain-bedrock-monthly` $100 with alerts at 50/80/100% + forecast,
+#     `account-monthly-total` $175; Cost Anomaly Detection for anomalies ≥ $10.
+#     Billing data lags 8–24h, so the daily email is next-day confirmation of
+#     a cap trip, not the thing that stops it.
 #   Emergency stop: SECOND_BRAIN_KILL_SWITCH=1 refuses to start a run.
 export SECOND_BRAIN_PROFILE="${SECOND_BRAIN_PROFILE:-hybrid}"
-export SECOND_BRAIN_RUN_COST_CAP_USD="${SECOND_BRAIN_RUN_COST_CAP_USD:-15}"
+export SECOND_BRAIN_RUN_COST_CAP_USD="${SECOND_BRAIN_RUN_COST_CAP_USD:-6}"
 export BEDROCK_MAX_TOKENS="${BEDROCK_MAX_TOKENS:-16384}"
 export BEDROCK_REGION="${BEDROCK_REGION:-us-east-1}"
 
