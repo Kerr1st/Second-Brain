@@ -358,3 +358,40 @@ class TestMemoryBrief:
         out = memory_brief(use_llm=False)
         assert isinstance(out, str)
         assert "quiet" in out.lower()
+
+
+class TestMemorySearchSchemaContext:
+    """memory_search surfaces the schemas that its top results belong to: one batched
+    lookup, deduplicated across results, newest first per result, capped at three."""
+
+    def test_schema_context_deduped_and_capped(self, test_db, clean_tables):
+        import src.db as db
+        from src.mcp_server import memory_search
+
+        base = "distributed consensus protocols and leader election"
+        constituents = [
+            db.create_memory(type="idea", title=f"Consensus {i}", content=f"{base} variant {i}",
+                             embedding=str(_deterministic_embedding(f"{base} variant {i}")))
+            for i in range(3)
+        ]
+        # Schemas carry no embedding, so they never appear as search results themselves.
+        schemas = [db.create_memory(type="schema", title=f"Schema {j}", content=f"schema body {j}")
+                   for j in range(4)]
+        for s in schemas:  # every schema covers constituent 0 ...
+            db.create_relationship(s, constituents[0], "derived_from")
+        db.create_relationship(schemas[1], constituents[1], "derived_from")  # ... schema 1 also covers 1 and 2
+        db.create_relationship(schemas[1], constituents[2], "derived_from")
+
+        with patch("src.mcp_server.generate_embedding", side_effect=_deterministic_embedding), \
+             patch("src.mcp_server.find_schemas_for_memories", wraps=db.find_schemas_for_memories) as batched:
+            response = memory_search(query=base, limit=5)
+
+        assert {r["title"] for r in response["results"]} == {"Consensus 0", "Consensus 1", "Consensus 2"}
+        ctx = response["schema_context"]
+        assert len(ctx) == 3, "capped at three schemas"
+        ids = [c["id"] for c in ctx]
+        assert len(ids) == len(set(ids)), "a schema shared by several results appears once"
+        assert set(ids) <= set(schemas)
+        assert all(c["type"] == "schema" and c["title"] and c["content"] for c in ctx)
+        # One round trip for all top results, not one per result.
+        assert batched.call_count == 1

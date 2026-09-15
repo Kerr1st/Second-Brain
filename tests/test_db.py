@@ -145,3 +145,64 @@ class TestEmbeddingMockDeterminism:
         # Same input produces identical output (determinism)
         result2 = _deterministic_embedding(text)
         assert result == result2
+
+
+class TestFindSchemasForMemories:
+    """find_schemas_for_memories batches find_schemas_for_memory: one query for many
+    constituents, grouped per constituent, newest schema first, and byte-for-byte the
+    same rows the single-id lookup returns."""
+
+    def test_groups_schemas_by_constituent_newest_first(self, test_db, clean_tables):
+        a = db.create_memory(type="idea", title="A", content="constituent a")
+        b = db.create_memory(type="idea", title="B", content="constituent b")
+        orphan = db.create_memory(type="idea", title="Orphan", content="belongs to no schema")
+
+        older = db.create_memory(type="schema", title="Older schema", content="s1")
+        newer = db.create_memory(type="schema", title="Newer schema", content="s2")
+        not_a_schema = db.create_memory(type="synthesis", title="Synthesis", content="x")
+
+        # Schemas point at their constituents via derived_from (schema -> constituent).
+        db.create_relationship(older, a, "derived_from")
+        db.create_relationship(newer, a, "derived_from")
+        db.create_relationship(newer, b, "derived_from")
+        # Wrong relation type / wrong source type must be ignored, as in the single lookup.
+        db.create_relationship(not_a_schema, a, "derived_from")
+        db.create_relationship(older, b, "supports")
+
+        # Force a strict created_at ordering between the two schemas.
+        with db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE memories SET created_at = now() - interval '1 day' WHERE id = %s", (older,))
+            conn.commit()
+
+        grouped = db.find_schemas_for_memories([a, b, orphan])
+
+        assert set(grouped) == {a, b}, "only constituents with at least one schema appear"
+        assert [s["title"] for s in grouped[a]] == ["Newer schema", "Older schema"]
+        assert [s["title"] for s in grouped[b]] == ["Newer schema"]
+        assert "constituent_id" not in grouped[a][0], "grouping key is not leaked into rows"
+
+        # Parity with the single-id lookup.
+        assert [s["id"] for s in grouped[a]] == [s["id"] for s in db.find_schemas_for_memory(a)]
+        assert [s["id"] for s in grouped[b]] == [s["id"] for s in db.find_schemas_for_memory(b)]
+
+    def test_empty_input_short_circuits(self, test_db):
+        assert db.find_schemas_for_memories([]) == {}
+
+
+class TestGetMemoriesByIds:
+    """Batched fetch for context packets: one query, requested order, no vectors."""
+
+    def test_preserves_order_skips_missing_and_omits_vectors(self, test_db, clean_tables):
+        a = db.create_memory(type="idea", title="A", content="alpha", embedding=str([0.1] * 1024))
+        b = db.create_memory(type="idea", title="B", content="beta")
+        missing = str(uuid.uuid4())
+
+        rows = db.get_memories_by_ids([b, missing, a])
+
+        assert [r["title"] for r in rows] == ["B", "A"]
+        assert all("embedding" not in r and "search_vector" not in r for r in rows)
+        assert rows[1]["content"] == "alpha"
+
+    def test_empty_input(self, test_db):
+        assert db.get_memories_by_ids([]) == []

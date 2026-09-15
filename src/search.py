@@ -30,6 +30,17 @@ from src.rerank_weights import (
 
 # --- Hybrid Search (BM25 + Vector + RRF) ---
 
+# Columns materialised for search candidates: every scalar column of `memories`,
+# deliberately excluding `embedding` (1024-dim vector) and `search_vector` (tsvector).
+# Nothing downstream of hybrid_search reads either, and fetching them for the whole
+# candidate pool dominated the per-search payload. Keep in sync with migrations/.
+_CANDIDATE_COLUMNS = sql.SQL(", ").join(sql.Identifier(c) for c in (
+    "id", "type", "title", "content", "summary", "tags", "source_url", "source_type",
+    "metadata", "status", "confidence", "parent_id", "created_at", "updated_at",
+    "access_count", "mem_class", "project", "last_accessed_at", "encoding_context",
+))
+
+
 def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None, project=None,
                   source_type=None, created_after=None):
     """Combine pgvector cosine search + PostgreSQL full-text search via RRF.
@@ -79,8 +90,11 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
             # Full-text search
             ts_query = " | ".join(re.sub(r"[^\w\s]", "", query_text).split())
             if ts_query.strip():
-                fts_params = [ts_query] + params_base + [prefetch]
-                fts_where = where + sql.SQL(" AND search_vector IS NOT NULL")
+                # `search_vector @@ to_tsquery(...)` restricts the leg to rows that
+                # actually match and lets the planner use the GIN index; ts_rank alone
+                # would return every row (non-matches ranked 0) via a full seq scan.
+                fts_params = [ts_query] + params_base + [ts_query, prefetch]
+                fts_where = where + sql.SQL(" AND search_vector @@ to_tsquery('english', %s)")
                 fts_query = sql.SQL(
                     "SELECT id, ts_rank(search_vector, to_tsquery('english', %s)) AS rank"
                     " FROM memories {where}"
@@ -107,7 +121,10 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
             cand_ids = [s[0] for s in scored[:prefetch]]
             if not cand_ids:
                 return []
-            cur.execute("SELECT * FROM memories WHERE id = ANY(%s::uuid[])", (cand_ids,))
+            cur.execute(
+                sql.SQL("SELECT {cols} FROM memories WHERE id = ANY(%s::uuid[])").format(cols=_CANDIDATE_COLUMNS),
+                (cand_ids,),
+            )
             row_by_id = {str(r["id"]): r for r in cur.fetchall()}
 
         # Dedup (P2): collapse near-identical content and cap results per parent

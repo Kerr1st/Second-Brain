@@ -773,7 +773,10 @@ class TestClaudeIntegrationRoundTrip:
     """Parse → ingest → verify records → re-run → verify no duplicates."""
 
     def test_ingest_and_dedup(self, test_db, clean_tables, tmp_path, monkeypatch):
-        monkeypatch.setattr("src.embeddings.generate_embedding", lambda text: [0.1] * 1024)
+        # Patch the name src.ingest bound at import time (`from src.embeddings import
+        # generate_embedding`), not the origin module — otherwise the mock misses and
+        # ingest makes a live Bedrock call.
+        monkeypatch.setattr("src.ingest.generate_embedding", lambda text: [0.1] * 1024)
 
         _write_claude_export(tmp_path, [_make_claude_conversation(uuid="int-test-1")])
 
@@ -805,7 +808,10 @@ class TestChatgptIntegrationRoundTrip:
     """Parse → ingest → verify records → re-run → verify no duplicates."""
 
     def test_ingest_and_dedup(self, test_db, clean_tables, tmp_path, monkeypatch):
-        monkeypatch.setattr("src.embeddings.generate_embedding", lambda text: [0.1] * 1024)
+        # Patch the name src.ingest bound at import time (`from src.embeddings import
+        # generate_embedding`), not the origin module — otherwise the mock misses and
+        # ingest makes a live Bedrock call.
+        monkeypatch.setattr("src.ingest.generate_embedding", lambda text: [0.1] * 1024)
 
         _write_chatgpt_export(tmp_path, [_make_chatgpt_conversation(conv_id="int-test-2")])
 
@@ -833,7 +839,10 @@ class TestNotionIntegrationRoundTrip:
     """Parse → ingest → verify records → re-run → verify no duplicates."""
 
     def test_ingest_and_dedup(self, test_db, clean_tables, tmp_path, monkeypatch):
-        monkeypatch.setattr("src.embeddings.generate_embedding", lambda text: [0.1] * 1024)
+        # Patch the name src.ingest bound at import time (`from src.embeddings import
+        # generate_embedding`), not the origin module — otherwise the mock misses and
+        # ingest makes a live Bedrock call.
+        monkeypatch.setattr("src.ingest.generate_embedding", lambda text: [0.1] * 1024)
 
         (tmp_path / "Test Page.md").write_text("x" * 300)
 

@@ -412,3 +412,64 @@ class TestHybridSearchEmptyFtsQuery:
         # "!!! ??? ..." strips to an empty FTS query -> exercises the vector-only branch
         results = hybrid_search("!!! ??? ...", mock_embedding(content), limit=5)
         assert isinstance(results, list)  # no crash; vector side still returns candidates
+
+
+class TestFtsOnlyRanksLexicalMatches:
+    """The full-text leg of hybrid search must only rank rows whose search_vector
+    actually matches the query. Without a `@@` predicate every row is returned with
+    ts_rank = 0 and fused as if it had matched, and the GIN index is never used."""
+
+    @staticmethod
+    def _rebuild_vector_index():
+        """The shared test DB's HNSW graph degrades after a suite's worth of
+        insert/delete churn and can under-return on approximate scans. This test
+        needs the vector leg to see both rows, so rebuild the (tiny) index first."""
+        with db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("REINDEX INDEX idx_memories_embedding")
+            conn.commit()
+
+    def test_lexical_match_outranks_vector_only_neighbor(self, test_db, clean_tables, mock_embedding):
+        self._rebuild_vector_index()
+        lexical = "Zebrafish regeneration of cardiac tissue after injury"
+        unrelated = "Granite countertop installation and sealing guide"
+
+        db.create_memory(type="idea", title="Zebrafish hearts", content=lexical,
+                         embedding=str(mock_embedding(lexical)))
+        db.create_memory(type="idea", title="Countertops", content=unrelated,
+                         embedding=str(mock_embedding(unrelated)))
+
+        # The query embedding IS the unrelated memory's vector, so it wins the vector
+        # leg outright (rank 1) while only the zebrafish memory matches the query text.
+        results = hybrid_search("zebrafish", mock_embedding(unrelated), limit=10)
+        by_title = {r["title"]: r for r in results}
+        assert {"Zebrafish hearts", "Countertops"} <= set(by_title)
+
+        # The unrelated row must be ABSENT from the FTS leg (absent-rank penalty), so
+        # the lexical match fuses strictly higher instead of tying on mirrored ranks.
+        assert by_title["Zebrafish hearts"]["rrf_score"] > by_title["Countertops"]["rrf_score"]
+        assert results[0]["title"] == "Zebrafish hearts"
+
+
+class TestSearchRowsExcludeVectorColumns:
+    """Candidate rows carry the memory's scalar columns but not the 1024-dim
+    embedding or the tsvector: nothing downstream of hybrid_search reads them and
+    they dominate the per-search payload."""
+
+    def test_rows_omit_embedding_and_search_vector(self, test_db, clean_tables, mock_embedding):
+        content = "Photosynthesis light-dependent reactions in the thylakoid membrane"
+        db.create_memory(type="idea", title="Photosynthesis", content=content,
+                         embedding=str(mock_embedding(content)), tags=["bio"],
+                         project="biology", encoding_context="reading textbook")
+
+        results = hybrid_search(content, mock_embedding(content), limit=5)
+        assert len(results) == 1
+        row = results[0]
+
+        assert "embedding" not in row
+        assert "search_vector" not in row
+        # Everything rerank() and memory_search read must still be present.
+        for key in ("id", "type", "title", "content", "tags", "source_type", "metadata",
+                    "status", "parent_id", "created_at", "access_count", "mem_class",
+                    "project", "last_accessed_at", "encoding_context", "rrf_score"):
+            assert key in row, key

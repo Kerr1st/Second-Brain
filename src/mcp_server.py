@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from src.db import (
     create_memory, get_memory, update_memory, list_memories,
     create_relationship, get_relationships, find_temporal_neighbors,
-    find_schemas_for_memory, get_schema_with_constituents,
+    find_schemas_for_memories, get_schema_with_constituents,
 )
 from src.search import hybrid_search, rerank, increment_access_count
 from src.embeddings import generate_embedding
@@ -130,10 +130,11 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
     # Schema context: if any top results belong to schemas, surface the schema
     schema_context = []
     if results:
+        top_ids = [str(r["id"]) for r in results[:5]]  # check top 5 results
+        schemas_by_memory = find_schemas_for_memories(top_ids)  # one round trip, not one per result
         seen_schemas = set()
-        for r in results[:5]:  # check top 5 results
-            schemas = find_schemas_for_memory(str(r["id"]))
-            for s in schemas:
+        for mid in top_ids:
+            for s in schemas_by_memory.get(mid, []):
                 sid = str(s["id"])
                 if sid not in seen_schemas:
                     seen_schemas.add(sid)

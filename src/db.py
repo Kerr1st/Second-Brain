@@ -114,6 +114,30 @@ def get_memory(memory_id):
             return cur.fetchone()
 
 
+def get_memories_by_ids(memory_ids):
+    """Fetch several memories in one query, preserving the requested order.
+
+    Returns the scalar columns only (no ``embedding`` / ``search_vector``); ids
+    that don't exist are simply absent from the result.
+    """
+    ids = list(memory_ids)
+    if not ids:
+        return []
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, type, title, content, summary, tags, source_url, source_type,
+                       metadata, status, confidence, parent_id, created_at, updated_at,
+                       access_count, mem_class, project, last_accessed_at, encoding_context
+                FROM memories WHERE id = ANY(%s::uuid[])
+                """,
+                (ids,),
+            )
+            by_id = {str(r["id"]): r for r in cur.fetchall()}
+    return [by_id[i] for i in ids if i in by_id]
+
+
 ALLOWED_UPDATE_FIELDS = {
     "title", "content", "summary", "embedding", "tags", "source_url",
     "source_type", "metadata", "status", "confidence", "type",
@@ -297,3 +321,29 @@ def find_schemas_for_memory(memory_id):
                 ORDER BY m.created_at DESC
             """, (memory_id,))
             return cur.fetchall()
+
+
+def find_schemas_for_memories(memory_ids):
+    """Batched find_schemas_for_memory: one query for many constituents.
+
+    Returns {memory_id (str): [schema dicts, newest first]}. Only constituents that
+    belong to at least one schema appear as keys.
+    """
+    if not memory_ids:
+        return {}
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT r.target_id AS constituent_id, m.*
+                FROM memories m
+                JOIN memory_relationships r ON r.source_id = m.id
+                WHERE r.target_id = ANY(%s::uuid[])
+                  AND r.relation_type = 'derived_from'
+                  AND m.type = 'schema'
+                ORDER BY m.created_at DESC
+            """, (list(memory_ids),))
+            grouped = {}
+            for row in cur.fetchall():
+                constituent_id = str(row.pop("constituent_id"))
+                grouped.setdefault(constituent_id, []).append(row)
+            return grouped
