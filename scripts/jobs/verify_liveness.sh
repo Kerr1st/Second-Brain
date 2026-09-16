@@ -39,6 +39,9 @@ CHANNELS=(
   "web_articles|source_type = 'article'|9"
   "cli_chat|source_type = 'kiro_cli_chat'|4"
   "youtube|source_type = 'youtube'|9"
+  "outlook_email|source_type = 'outlook_email'|3"
+  "outlook_calendar|source_type = 'outlook_calendar'|5"
+  "slack|source_type = 'slack'|4"
 )
 
 if ! pg_isready -h 127.0.0.1 -p 5432 -U "$DB_USER" &>/dev/null; then
