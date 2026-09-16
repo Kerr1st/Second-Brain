@@ -2,7 +2,7 @@
 """Distill chat sessions into durable decision/insight memories (Refactor P1).
 
 Each chat session's full text lives in its parent memory (parent_id IS NULL).
-For each undistilled session we run ONE LLM pass via AgentInvoker to extract
+For each undistilled session we run ONE LLM pass via the Kiro backend to extract
 crisp, self-contained decisions/insights and store them as retrievable
 type=decision|insight memories. Raw chat chunks are left untouched.
 
@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.db import get_connection, create_memory, get_processed_source_urls, create_relationship
 from src.embeddings import generate_embedding
 from src.search import hybrid_search, rerank
-from src.agent_invoker import AgentInvoker
+from src.backends.kiro import KiroInvoker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -33,6 +33,17 @@ SOURCE_TYPE = "distilled_chat"
 DISTILL_TYPES = {"decision", "insight"}
 MAX_CHARS = 100000
 DEFAULT_SOURCES = ("kiro_cli_chat", "quick_desktop_chat")
+
+# Extraction, not reasoning: Sonnet 5 at medium effort is plenty and several
+# times faster than Opus. kiro-cli alone costs ~35s of startup per call, and a
+# 100K-char transcript on Opus 4.8 routinely exceeded the old 300s ceiling —
+# that timeout is why the nightly job was disabled (see logs/distill-20260908).
+DISTILL_MODEL = os.environ.get("DISTILL_MODEL", "claude-sonnet-5")
+DISTILL_EFFORT = os.environ.get("DISTILL_EFFORT", "medium")
+DISTILL_TIMEOUT = int(os.environ.get("DISTILL_TIMEOUT", "600"))
+# Nightly batch bound: sessions are fetched newest-first, so the backlog drains
+# from the most relevant end without one run holding the machine for hours.
+DEFAULT_LIMIT = int(os.environ.get("DISTILL_LIMIT", "40"))
 
 # Item cap raised 5->8 (2026-06-04): 65% of distilled sessions were hitting the old
 # cap of 5 exactly, i.e. it was binding and truncating durable items. 8 gives headroom
@@ -124,7 +135,8 @@ def detect_and_link_contradiction(invoker, new_id, title, content, embedding, ne
         f"NEW decision:\nTitle: {title}\n{content[:1500]}\n\n"
         f"PRIOR decision:\nTitle: {cand.get('title') or ''}\n{(cand.get('content') or '')[:1500]}"
     )
-    res = invoker.invoke(CONTRADICTION_SYSTEM_PROMPT, user)
+    res = invoker.invoke(CONTRADICTION_SYSTEM_PROMPT, user,
+                         timeout=DISTILL_TIMEOUT, effort="low", stage="distill_contradiction")
     out = res.get("output") if isinstance(res, dict) else None
     if isinstance(out, dict) and out.get("contradicts") is True:
         reason = str(out.get("reason") or "").strip()[:300] or "distiller-detected contradiction"
@@ -134,17 +146,19 @@ def detect_and_link_contradiction(invoker, new_id, title, content, embedding, ne
     return None
 
 
-def distill(dry_run=False, limit=0, source_types=DEFAULT_SOURCES, detect_contradictions=True):
-    invoker = AgentInvoker()
+def distill(dry_run=False, limit=DEFAULT_LIMIT, source_types=DEFAULT_SOURCES, detect_contradictions=True):
+    invoker = KiroInvoker(model=DISTILL_MODEL)
     already = get_processed_source_urls(SOURCE_TYPE)
     already_sessions = {u.rsplit("#", 1)[0] for u in already}
     sessions = fetch_sessions(source_types, limit, already_sessions)
-    log.info("Distilling %d sessions (sources=%s, dry_run=%s)", len(sessions), source_types, dry_run)
+    log.info("Distilling %d sessions (sources=%s, model=%s, dry_run=%s)",
+             len(sessions), source_types, DISTILL_MODEL, dry_run)
 
     stats = {"sessions": 0, "memories": 0, "empty": 0, "failed": 0, "contradictions": 0}
     for source_url, st, content in sessions:
         try:
-            res = invoker.invoke(SYSTEM_PROMPT, build_user_message(content))
+            res = invoker.invoke(SYSTEM_PROMPT, build_user_message(content),
+                                 timeout=DISTILL_TIMEOUT, effort=DISTILL_EFFORT, stage="distill")
             items = res["output"] if isinstance(res["output"], list) else []
         except Exception as e:
             stats["failed"] += 1
@@ -198,7 +212,8 @@ def distill(dry_run=False, limit=0, source_types=DEFAULT_SOURCES, detect_contrad
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
+                    help=f"Max sessions per run, newest first (default {DEFAULT_LIMIT}; 0 = all)")
     ap.add_argument("--source-type", action="append", dest="source_types")
     ap.add_argument("--skip-contradictions", action="store_true",
                     help="Disable distill-time contradiction detection (e.g. for large backfills)")

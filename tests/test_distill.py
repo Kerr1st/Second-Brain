@@ -115,7 +115,7 @@ class TestDistillRunsContradictionForDecisionsOnly:
             {"type": "insight", "title": "I", "content": "insight body"},
         ]}
         detector = Mock(return_value=None)
-        with patch.object(ds, "AgentInvoker", return_value=invoker), \
+        with patch.object(ds, "KiroInvoker", return_value=invoker), \
              patch.object(ds, "get_processed_source_urls", return_value=set()), \
              patch.object(ds, "fetch_sessions", return_value=[("sessX", "kiro_cli_chat", "transcript")]), \
              patch.object(ds, "generate_embedding", return_value=[0.1]), \
@@ -130,7 +130,7 @@ class TestDistillRunsContradictionForDecisionsOnly:
         invoker = Mock()
         invoker.invoke.return_value = {"output": [{"type": "decision", "title": "D", "content": "body"}]}
         detector = Mock(return_value=None)
-        with patch.object(ds, "AgentInvoker", return_value=invoker), \
+        with patch.object(ds, "KiroInvoker", return_value=invoker), \
              patch.object(ds, "get_processed_source_urls", return_value=set()), \
              patch.object(ds, "fetch_sessions", return_value=[("sessX", "kiro_cli_chat", "t")]), \
              patch.object(ds, "generate_embedding", return_value=[0.1]), \
@@ -138,3 +138,30 @@ class TestDistillRunsContradictionForDecisionsOnly:
              patch.object(ds, "detect_and_link_contradiction", detector):
             ds.distill(detect_contradictions=False)
         detector.assert_not_called()
+
+
+class TestDistillInvokerSettings:
+    """The nightly job died on 300s Opus timeouts; pin the settings that fixed it."""
+
+    def test_invokes_extraction_model_with_bounded_timeout(self):
+        invoker = Mock()
+        invoker.invoke.return_value = {"output": []}
+        with patch.object(ds, "KiroInvoker", return_value=invoker) as ctor, \
+             patch.object(ds, "get_processed_source_urls", return_value=set()), \
+             patch.object(ds, "fetch_sessions", return_value=[("sessX", "kiro_cli_chat", "transcript")]):
+            ds.distill()
+        ctor.assert_called_once_with(model=ds.DISTILL_MODEL)
+        kwargs = invoker.invoke.call_args.kwargs
+        assert kwargs["timeout"] == ds.DISTILL_TIMEOUT >= 600
+        assert kwargs["effort"] == ds.DISTILL_EFFORT
+        assert ds.DISTILL_MODEL != "claude-opus-4.8"          # extraction does not need Opus
+
+    def test_nightly_batch_is_bounded_newest_first(self):
+        assert 0 < ds.DEFAULT_LIMIT <= 100
+        sessions = [(f"s{i}", "kiro_cli_chat", "c") for i in range(5)]
+        with patch.object(ds, "get_connection") as gc:
+            cur = gc.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+            cur.fetchall.return_value = [(u, st, c) for u, st, c in sessions]
+            out = ds.fetch_sessions(("kiro_cli_chat",), 2, set())
+        assert [u for u, _, _ in out] == ["s0", "s1"]
+        assert "ORDER BY created_at DESC" in cur.execute.call_args[0][0]

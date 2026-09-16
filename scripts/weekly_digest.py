@@ -19,7 +19,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.db import get_connection, create_memory, get_processed_source_urls
 from src.embeddings import generate_embedding
-from src.agent_invoker import AgentInvoker
+from src.backends.kiro import KiroInvoker
+
+# Small prompt, but kiro-cli startup alone is ~35s and Opus 4.8 at the old 300s
+# ceiling timed out (logs/weekly-digest-20260907). Sonnet 5 is ample for a digest.
+DIGEST_MODEL = os.environ.get("DIGEST_MODEL", "claude-sonnet-5")
+DIGEST_TIMEOUT = int(os.environ.get("DIGEST_TIMEOUT", "600"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -87,7 +92,9 @@ def run(days=7, dry_run=False):
         log.info("No activity in window, nothing to digest")
         return None
 
-    res = AgentInvoker().invoke(SYSTEM_PROMPT, build_user_message(days, tags, projects, sources, decisions))
+    res = KiroInvoker(model=DIGEST_MODEL).invoke(
+        SYSTEM_PROMPT, build_user_message(days, tags, projects, sources, decisions),
+        timeout=DIGEST_TIMEOUT, effort="medium", stage="weekly_digest")
     out = res["output"] if isinstance(res["output"], dict) else {}
     summary = (out.get("summary") or "").strip()
     title = (out.get("title") or f"Weekly digest {url}").strip()[:200]
