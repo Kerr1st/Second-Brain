@@ -42,6 +42,7 @@ CHANNELS=(
   "outlook_email|source_type = 'outlook_email'|3"
   "outlook_calendar|source_type = 'outlook_calendar'|5"
   "slack|source_type = 'slack'|4"
+  "browser_history|source_type = 'browser_history'|4"
 )
 
 if ! pg_isready -h 127.0.0.1 -p 5432 -U "$DB_USER" &>/dev/null; then
