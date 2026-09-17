@@ -3,6 +3,12 @@
 # Runs hourly via LaunchAgent, imports new QD memories and KG entities since last sync
 
 set -euo pipefail
+# Unattended jobs use a least-privilege IAM user (Bedrock InvokeModel only), not the
+# interactive SSO session: the 8h Identity Center session is what silently killed
+# every job on 2026-09-08. Override by exporting AWS_PROFILE before invoking.
+export AWS_PROFILE="${AWS_PROFILE:-second-brain-jobs}"
+# Re-exec under caffeinate so the hourly sync is not suspended by battery idle-sleep.
+if [ -z "${SB_CAFFEINATED:-}" ]; then export SB_CAFFEINATED=1; exec /usr/bin/caffeinate -i "$0" "$@"; fi
 export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")/../.."
 

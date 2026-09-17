@@ -7,6 +7,10 @@ set -uo pipefail
 
 # launchd uses a minimal PATH — ensure Homebrew binaries are available
 export PATH="/opt/homebrew/bin:$PATH"
+# Unattended jobs use a least-privilege IAM user (Bedrock InvokeModel only), not the
+# interactive SSO session: the 8h Identity Center session is what silently killed
+# every job on 2026-09-08. Override by exporting AWS_PROFILE before invoking.
+export AWS_PROFILE="${AWS_PROFILE:-second-brain-jobs}"
 
 # PostgreSQL runs natively (Homebrew postgresql@17); per-job scripts ensure it is up.
 # (Removed the legacy Docker Desktop auto-start — unused since the native-Postgres
@@ -21,10 +25,13 @@ mkdir -p "$(dirname "$LOGFILE")"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting $JOB_NAME" >> "$LOGFILE"
 # Run Python scripts under the project venv (deps live there); shell scripts run directly.
+# caffeinate -i holds a "prevent idle sleep" assertion for the job's lifetime. On
+# battery this Mac sleeps after 1 idle minute and only surfaces for ~45s Power Nap
+# slices; on 2026-09-17 every nightly job was suspended mid-run that way.
 if [[ "$SCRIPT" == *.py ]]; then
-  /Users/kerrfir/second-brain/.venv/bin/python "$SCRIPT" >> "$LOGFILE" 2>&1
+  /usr/bin/caffeinate -i /Users/kerrfir/second-brain/.venv/bin/python "$SCRIPT" >> "$LOGFILE" 2>&1
 else
-  "$SCRIPT" >> "$LOGFILE" 2>&1
+  /usr/bin/caffeinate -i "$SCRIPT" >> "$LOGFILE" 2>&1
 fi
 EXIT_CODE=$?
 
