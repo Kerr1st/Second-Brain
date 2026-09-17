@@ -31,44 +31,25 @@ import json
 import logging
 import os
 import subprocess
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.backends.base import parse_json_output as _parse_json_output
+from src.backends.base import (
+    METRICS_DIR as METRICS_DIR,
+    _write_metrics_line as _write_metrics_line,
+    parse_json_output as _parse_json_output,
+)
 
 logger = logging.getLogger(__name__)
 
 # --- Phase 0 LLM-call instrumentation (see docs/FABLE5-THINKER-PLAN.md) ---
-# Hoisted here from kiro.py so every agentic-CLI adapter shares one metrics
-# writer. kiro.py re-exports these names for back-compat (the agent_invoker shim
-# and the test-suite import them from src.backends.kiro). The path computation
-# resolves to the repo root (dirname THREE times from src/backends/*.py) so the
-# default metrics location is repo-root logs/llm_metrics — matching the original
-# src/agent_invoker.py. (The earlier two-dirname form stopped at src/ after the
-# writer was hoisted one level deeper into src/backends/, misdirecting metrics to
-# src/logs/llm_metrics.)
-_REPO_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
-METRICS_DIR = os.environ.get(
-    "KIRO_LLM_METRICS_DIR", os.path.join(_REPO_ROOT, "logs", "llm_metrics")
-)
-
-
-def _write_metrics_line(metrics: dict, run_id: str | None, metrics_dir: str) -> None:
-    """Append one JSONL record of an LLM call's metrics to ``metrics_dir``.
-
-    Never raises — instrumentation must not break a run.
-    """
-    try:
-        os.makedirs(metrics_dir, exist_ok=True)
-        fname = f"{run_id}.jsonl" if run_id else "adhoc.jsonl"
-        with open(os.path.join(metrics_dir, fname), "a", encoding="utf-8") as f:
-            f.write(json.dumps(metrics) + "\n")
-    except Exception:
-        logger.debug("Failed to record LLM call metrics", exc_info=True)
+# Canonical definitions now live in src.backends.base (backend-agnostic).
+# METRICS_DIR is re-exported above so existing monkeypatch targets
+# (src.backends.agentic_cli.METRICS_DIR) keep working — tests for Claude Code and
+# Codex patch this module-level name. _write_metrics_line is likewise re-exported.
 
 
 def _record_call_metrics(metrics: dict, run_id: str | None) -> None:
@@ -195,6 +176,7 @@ class AgenticCliInvoker:
                 break
 
             self._check_returncode(result, metrics)
+            self._note_model_honored(result, metrics)
 
             raw = self._extract_raw(result)
             metrics["output_chars"] = len(raw)
@@ -248,6 +230,22 @@ class AgenticCliInvoker:
             raise TimeoutError(
                 f"Agent subprocess timed out after {timeout}s: {stderr}"
             ) from exc
+
+    # Emitted by kiro-cli >= 2.22 (observed 2026-09-17) when the server ignores
+    # --model and picks one itself ("Auto"). The call still succeeds, but the
+    # model recorded in provenance is then a request, not a fact.
+    _MODEL_NOT_HONORED_RE = re.compile(r"failed to set model '([^']*)'", re.I)
+
+    def _note_model_honored(self, result, metrics: dict) -> None:
+        stderr = getattr(result, "stderr", "") or ""
+        m = self._MODEL_NOT_HONORED_RE.search(stderr)
+        metrics["model_honored"] = m is None
+        if m is not None:
+            logger.warning(
+                "%s backend did not honor model '%s' (server-selected model used); "
+                "provenance for this call is the requested model, not the served one",
+                self.BACKEND_NAME, m.group(1),
+            )
 
     def _check_returncode(self, result, metrics: dict) -> None:
         """Map a non-zero exit to :class:`RuntimeError`. Shared failure mode."""

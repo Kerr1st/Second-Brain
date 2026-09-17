@@ -544,3 +544,29 @@ class TestMcpStartupRetry:
             )
         assert mock_run.call_count == 1
         assert mock_sleep.call_count == 0
+
+
+class TestModelHonoredProvenance:
+    """kiro-cli 2.22 (2026-09-17) may ignore --model and warn on stderr; provenance must say so."""
+
+    @patch("src.backends.kiro.subprocess.run")
+    def test_flag_false_and_warning_when_backend_ignores_model(self, mock_run, caplog, tmp_path, monkeypatch):
+        import src.backends.kiro as kiro
+        monkeypatch.setattr(kiro, "METRICS_DIR", str(tmp_path))
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout='{"ok": true}',
+            stderr="[warn] failed to set model 'claude-opus-5': Method not found\n")
+        with caplog.at_level("WARNING"):
+            AgentInvoker(model="claude-opus-5").invoke("sys", "user", run_id="run-x")
+        assert "did not honor model 'claude-opus-5'" in caplog.text
+        rec = json.loads((tmp_path / "run-x.jsonl").read_text().splitlines()[-1])
+        assert rec["model"] == "claude-opus-5" and rec["model_honored"] is False
+
+    @patch("src.backends.kiro.subprocess.run")
+    def test_flag_true_when_no_warning(self, mock_run, tmp_path, monkeypatch):
+        import src.backends.kiro as kiro
+        monkeypatch.setattr(kiro, "METRICS_DIR", str(tmp_path))
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"ok": true}', stderr="")
+        AgentInvoker(model="claude-sonnet-5").invoke("sys", "user", run_id="run-y")
+        rec = json.loads((tmp_path / "run-y.jsonl").read_text().splitlines()[-1])
+        assert rec["model_honored"] is True
