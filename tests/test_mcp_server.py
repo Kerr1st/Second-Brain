@@ -395,3 +395,67 @@ class TestMemorySearchSchemaContext:
         assert all(c["type"] == "schema" and c["title"] and c["content"] for c in ctx)
         # One round trip for all top results, not one per result.
         assert batched.call_count == 1
+
+
+
+
+class TestProvenanceInToolOutputs:
+    """The Explorer must be able to tell a Slack day from a May synthesis: search and
+    list results carry source_type and created_at, and memory_recent_activity
+    summarises what arrived by channel."""
+
+    def test_search_results_carry_source_type_and_created_at(self, test_db, clean_tables):
+        base = "Quarterly business review prep with the Boeing account team"
+        _db.create_memory(type="source", title="Slack: #boeing — 2026-09-15", content=base + " slack",
+                          embedding=str(_deterministic_embedding(base + " slack")), source_type="slack")
+        with patch("src.mcp_server.generate_embedding", side_effect=_deterministic_embedding):
+            from src.mcp_server import memory_search
+            resp = memory_search(query=base, limit=5)
+        assert resp["results"], "expected at least one hit"
+        hit = resp["results"][0]
+        assert hit["source_type"] == "slack"
+        assert isinstance(hit["created_at"], str) and hit["created_at"][:4] == "2026" or hit["created_at"][:2] == "20"
+        assert set(hit) >= {"id", "title", "type", "source_type", "created_at", "score", "content", "tags"}
+
+    def test_list_since_days_and_parent_id(self, test_db, clean_tables):
+        new_id = _db.create_memory(type="source", title="Slack today", content="c", source_type="slack")
+        old_id = _db.create_memory(type="source", title="Slack long ago", content="c", source_type="slack")
+        with _db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE memories SET created_at = now() - interval '40 days' WHERE id = %s", (old_id,))
+            conn.commit()
+        from src.mcp_server import memory_list
+        out = memory_list(source_type="slack", since_days=2)
+        ids = {r["id"] for r in out}
+        assert new_id in ids and old_id not in ids
+        assert out[0]["parent_id"] is None and "T" in out[0]["created_at"]
+
+    def test_recent_activity_counts_documents_not_chunks_and_labels_generated(self, test_db, clean_tables):
+        parent = _db.create_memory(type="source", title="Slack: DM with grace — 2026-09-15", content="c",
+                                   source_type="slack")
+        for i in range(3):
+            _db.create_memory(type="source", title=f"Slack: DM with grace — 2026-09-15 (chunk {i+1}/3)",
+                              content="c", source_type="slack", parent_id=parent)
+        _db.create_memory(type="source", title="Budget alert", content="c", source_type="outlook_email")
+        _db.create_memory(type="insight", title="A dream-cycle synthesis", content="c")  # no source_type
+        old = _db.create_memory(type="source", title="Old article", content="c", source_type="article")
+        with _db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE memories SET created_at = now() - interval '30 days' WHERE id = %s", (old,))
+            conn.commit()
+
+        from src.mcp_server import memory_recent_activity
+        out = memory_recent_activity(days=7, samples_per_source=2)
+        by = {s["source_type"]: s for s in out["by_source"]}
+        assert by["slack"]["documents"] == 1 and by["slack"]["memories"] == 4
+        assert by["outlook_email"]["documents"] == 1
+        assert by["generated:insight"]["documents"] == 1
+        assert "article" not in by                                   # outside the window
+        assert out["total_documents"] == 3 and out["total_memories"] == 6
+        assert [s["title"] for s in by["slack"]["samples"]] == ["Slack: DM with grace — 2026-09-15"]  # parent only
+        assert out["by_source"][0]["source_type"] == "slack"        # sorted by documents desc, then memories
+
+    def test_recent_activity_clamps_arguments(self, test_db, clean_tables):
+        from src.mcp_server import memory_recent_activity
+        assert memory_recent_activity(days=0)["days"] == 1
+        assert memory_recent_activity(days=400)["days"] == 90

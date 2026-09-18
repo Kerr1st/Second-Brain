@@ -139,7 +139,7 @@ _EXPECTED_SIGNATURES = {
     },
     "db.get_memory": {"params": ["memory_id"]},
     "db.update_memory": {"params": ["memory_id"]},  # **fields
-    "db.list_memories": {"params": ["type", "status", "source_type", "limit", "offset"]},
+    "db.list_memories": {"params": ["type", "status", "source_type", "limit", "offset", "created_after"]},
     "db.search_similar": {"params": ["embedding", "limit", "type", "status"]},
     "db.create_relationship": {"params": ["source_id", "target_id", "relation_type", "note"]},
     "db.get_relationships": {"params": ["memory_id"]},
