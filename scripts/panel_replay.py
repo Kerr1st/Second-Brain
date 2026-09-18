@@ -180,6 +180,54 @@ def replay(rows: list[dict], seats: list[str], resolver, tracker: SpendTracker, 
     return records
 
 
+def replay_grounded(rows: list[dict], seats: list[str], orch, *, loader: Callable = load_memories_by_ids,
+                    sink: Callable[[dict], None] | None = None) -> list[dict]:
+    """Run candidates through the real pre-panel path — grounding audit + one revision
+    (orchestrator._ground_candidate) — then the chosen seats (orchestrator.invoke_evaluator).
+
+    Uses the orchestrator's own spend tracker; set ``orch._spend`` to a capped
+    SpendTracker before calling. Records carry the revised title and the audit's
+    findings so acceptance can be compared with the un-grounded replay.
+    """
+    records: list[dict] = []
+    emit = sink or (lambda r: None)
+    for row in rows:
+        original = candidate_from_row(row)
+        for m in loader(original.source_memories):
+            orch._slice_memory_cache[str(m["id"])] = m
+        cand = orch._ground_candidate(original)
+        revision = cand.revision or {}
+        base = {"candidate_id": row["id"], "run_id": str(row["run_id"]), "title": cand.title[:120],
+                "original_title": original.title[:120], "revised": cand is not original,
+                "audit_score": revision.get("audit_score"),
+                "audit_blocking": len(revision.get("blocking_issues") or []),
+                "audit_advisory": len(revision.get("advisory_issues") or []), "variant": "grounded"}
+        if not cand.content.strip():
+            for seat in seats:
+                rec = {**base, "seat": seat, "verdict": "REJECT", "reasoning": "nothing supportable after revision",
+                       "score": 0, "cost_usd": 0.0, "live_verdict": row.get(f"evaluator_{SEAT_COLUMNS[seat]}_verdict")}
+                records.append(rec); emit(rec)
+            continue
+        for seat in seats:
+            spec = orch.resolver.spec_for(seat)
+            before = orch._spend.total_usd
+            t0 = time.time()
+            try:
+                v = orch.invoke_evaluator(cand, seat)
+                rec = {**base, "seat": seat, "backend": spec.backend, "model": spec.model, "verdict": v.verdict,
+                       "score": v.score, "blocking_issues": v.blocking_issues, "advisory_issues": v.advisory_issues,
+                       "reasoning": v.reasoning[:4000]}
+            except SpendCapExceeded:
+                raise
+            except Exception as e:  # noqa: BLE001
+                rec = {**base, "seat": seat, "backend": spec.backend, "model": spec.model, "verdict": "ERROR",
+                       "reasoning": f"{type(e).__name__}: {e}"[:400]}
+            rec.update({"cost_usd": round(orch._spend.total_usd - before, 4), "latency_s": round(time.time() - t0, 1),
+                        "live_verdict": row.get(f"evaluator_{SEAT_COLUMNS[seat]}_verdict")})
+            records.append(rec); emit(rec)
+    return records
+
+
 def matrix(records: list[dict], seats: list[str]) -> dict:
     """Acceptance per seat, plus the 3-of-4 outcome when all four seats were replayed."""
     by_cand: dict[str, dict[str, str]] = {}
@@ -223,6 +271,8 @@ def main(argv=None) -> int:
     ap.add_argument("--candidate-file", help="JSON {candidate_id: {title, content, ...}} overrides")
     ap.add_argument("--cap-usd", type=float, default=2.0)
     ap.add_argument("--profile", help="backend profile (default: SECOND_BRAIN_PROFILE or config default)")
+    ap.add_argument("--ground", action="store_true",
+                    help="run the real pre-panel grounding audit + revision (orchestrator) before the seats")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s", datefmt="%H:%M:%S")
@@ -247,17 +297,27 @@ def main(argv=None) -> int:
 
     os.makedirs(OUT_DIR, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_path = os.path.join(OUT_DIR, f"{stamp}-{args.prompt_variant}.jsonl")
+    out_path = os.path.join(OUT_DIR, f"{stamp}-{'grounded' if args.ground else args.prompt_variant}.jsonl")
     with open(out_path, "a", encoding="utf-8") as fh:
         def sink(rec: dict) -> None:
             fh.write(json.dumps(rec, default=str) + "\n"); fh.flush()
             if rec.get("verdict"):
-                log.info("%-14s %-7s $%.3f  %s", rec["seat"], rec["verdict"], rec.get("cost_usd", 0), rec["title"][:60])
+                log.info("%-14s %-7s $%.3f  score=%-4s %s%s", rec["seat"], rec["verdict"], rec.get("cost_usd", 0),
+                         rec.get("score"), "(revised) " if rec.get("revised") else "", rec["title"][:60])
         try:
-            records = replay(rows, seats, resolver, tracker, prompt_fn=prompt_fn,
-                             overrides=parse_overrides(args.model_override), effort=args.effort,
-                             candidate_overrides=cand_over, variant=args.prompt_variant,
-                             dry_run=args.dry_run, sink=sink)
+            if args.ground:
+                from src.dream_cycle.orchestrator import DreamCycleOrchestrator
+                orch = DreamCycleOrchestrator()
+                orch._spend = tracker
+                orch._current_run_id = f"replay-{stamp}"
+                for seat in seats:
+                    _require_direct_api(seat, orch.resolver.spec_for(seat))
+                records = replay_grounded(rows, seats, orch, sink=sink)
+            else:
+                records = replay(rows, seats, resolver, tracker, prompt_fn=prompt_fn,
+                                 overrides=parse_overrides(args.model_override), effort=args.effort,
+                                 candidate_overrides=cand_over, variant=args.prompt_variant,
+                                 dry_run=args.dry_run, sink=sink)
         except SpendCapExceeded as e:
             log.error("stopped: %s", e); records = []
     if records:

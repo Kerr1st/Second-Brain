@@ -31,11 +31,15 @@ WHAT / EVIDENCE / WHY IT MATTERS structure; end EVIDENCE with one sentence begin
 "claim_scope:".
 - Set confidence by the evidence: 1 source = low; 2 sources or several from one day/conversation \
 = medium; 3+ independent sources = high.
-- Rewrite the title so it makes no claim the body does not support.
+- Rewrite the title so it makes no claim the body does not support. Revise schema_note and \
+every relationship note the same way — they are read by the evaluators too, and an unsupported \
+claim left there fails the candidate even when the body is clean.
 - If nothing supportable remains, return the candidate with content set to an empty string.
 
 Return ONLY the revised candidate as a JSON object with the fields: title, content, \
-confidence, confidence_reasoning, source_memories (a subset of the original ids)."""
+confidence, confidence_reasoning, schema_note, relationships (same target_id/relation_type as \
+the input, notes revised; drop a relationship whose claim is unsupported), source_memories \
+(a subset of the original ids)."""
 
 REVISION_SCHEMA = {
     "type": "object",
@@ -44,6 +48,10 @@ REVISION_SCHEMA = {
         "content": {"type": "string"},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
         "confidence_reasoning": {"type": "string"},
+        "schema_note": {"type": "string"},
+        "relationships": {"type": "array", "items": {"type": "object", "properties": {
+            "target_id": {"type": "string"}, "relation_type": {"type": "string"}, "note": {"type": "string"}},
+            "required": ["target_id", "relation_type"]}},
         "source_memories": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["title", "content", "confidence", "source_memories"],

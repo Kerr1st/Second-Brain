@@ -903,12 +903,21 @@ class DreamCycleOrchestrator:
         # Sources may only shrink: the revision must not introduce new citations.
         original_sources = [str(m) for m in candidate.source_memories]
         kept = [m for m in _as_str_list(out.get("source_memories")) if m in original_sources] or original_sources
+        # Relationships may be re-noted or dropped, never added: keep only targets the
+        # Thinker originally proposed. schema_note is revised too — evaluators read both.
+        original_targets = {str(r.get("target_id")) for r in candidate.relationships if isinstance(r, dict)}
+        relationships = candidate.relationships
+        if isinstance(out.get("relationships"), list):
+            relationships = [r for r in out["relationships"]
+                             if isinstance(r, dict) and str(r.get("target_id")) in original_targets]
         revised = CandidateInsight(
             **{**asdict(candidate),
                "title": str(out.get("title") or candidate.title)[:300],
                "content": str(out.get("content") or ""),
                "confidence": out.get("confidence") if out.get("confidence") in ("high", "medium", "low") else candidate.confidence,
                "confidence_reasoning": str(out.get("confidence_reasoning") or candidate.confidence_reasoning),
+               "schema_note": str(out["schema_note"]) if isinstance(out.get("schema_note"), str) else candidate.schema_note,
+               "relationships": relationships,
                "source_memories": kept,
                "revision": {"original_title": candidate.title, "audit_score": audit.score,
                             "blocking_issues": audit.blocking_issues, "advisory_issues": audit.advisory_issues}}

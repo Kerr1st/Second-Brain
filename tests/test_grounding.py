@@ -143,6 +143,20 @@ class TestReviseCandidate:
         assert req["blocking_issues"] == ["fax number"] and "no action needed" in req["cited_sources"]
         spend.assert_called_once_with("thinker", inv.invoke.return_value)
 
+    def test_schema_note_and_relationship_notes_are_revised_but_targets_never_added(self):
+        orch = _orch()
+        cand = _cand(schema_note="the feed will never supply the trigger",
+                     relationships=[{"target_id": SRC_A, "relation_type": "extends", "note": "cannot supply it"}])
+        inv = self._invoker({"title": "t", "content": "c", "confidence": "medium", "source_memories": [SRC_A, SRC_B],
+                             "schema_note": "the two captured notices did not mention the trigger",
+                             "relationships": [{"target_id": SRC_A, "relation_type": "extends", "note": "two notices, no mention"},
+                                               {"target_id": "99999999-9999-9999-9999-999999999999", "relation_type": "supports", "note": "new"}]})
+        with patch.object(orch, "_invoker_for", return_value=inv), patch.object(orch, "_role_has_tools", return_value=False), \
+             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
+            out = orch._revise_candidate(cand, _audit(blocking=["unsupported system-capability claim"]))
+        assert out.schema_note == "the two captured notices did not mention the trigger"
+        assert out.relationships == [{"target_id": SRC_A, "relation_type": "extends", "note": "two notices, no mention"}]
+
     def test_tool_capable_thinker_gets_no_schema_kwarg(self):
         orch = _orch()
         inv = self._invoker({"title": "t", "content": "c", "confidence": "low", "source_memories": [SRC_A]})

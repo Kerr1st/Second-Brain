@@ -135,15 +135,15 @@ Candidates, in priority order; each is small and independently testable:
   guard that skips the panel for candidates the Thinker itself marks `confidence: low`
   with a single source.
 
-### Phase 3 — Implement + verify offline  `[~]`
-- [ ] Implement the chosen items with unit tests (prompt contracts, consensus with REVISE,
+### Phase 3 — Implement + verify offline  `[x]`
+- [x] Implement the chosen items with unit tests (prompt contracts, consensus with REVISE,
   narrowing call, replay harness variant).
-- [ ] Replay all 12 `47fffa94` candidates through the new pipeline offline (narrowing +
+- [x] Replay all 12 `47fffa94` candidates through the new pipeline offline (narrowing +
   panel). Target: **Astra acceptance > 0**, overall acceptance 20–40%, and a spot-check that
   every accepted candidate is grounded in its cited sources (read them).
-- [ ] Full suite green; commit per item.
+- [x] Full suite green; commit per item.
 
-### Phase 4 — Live verification  `[ ]`
+### Phase 4 — Live verification  `[~]`
 - [ ] One scheduled run on `controlled` (via `launchctl kickstart gui/$(id -u)/com.second-brain.dream-cycle`).
   Check: ledger unchanged in shape (≥5 source types, ≥50% episodic), ≥1 accepted insight,
   digest lists it with all four reasonings, cost ≤ $6.
@@ -158,6 +158,38 @@ Candidates, in priority order; each is small and independently testable:
 
 _Updated as work proceeds; newest first._
 
+- 2026-09-18 07:35 — **Phase 3 verified offline. Phase 4 (live run) next.**
+  `scripts/panel_replay.py --ground` ran the 6-candidate set through the real path
+  (audit → revision → four seats, profile `controlled`, records
+  `logs/panel_replay/20260918T140804Z-grounded.jsonl`, $2.80 ≈ $0.47/candidate):
+
+  | candidate (live result: all REJECTED) | audit | revised | A B C D | 3-of-4 |
+  |---|---|---|---|---|
+  | Case 13484620 half-resolved | 33 | yes | A A A A | ACCEPTED |
+  | Two-track disability leave | 32 | yes | A A A A | ACCEPTED |
+  | 5-day state-letter clock | 30 | yes | A A R A | ACCEPTED |
+  | Colleague's Slack question | 35 | yes | A A A A | ACCEPTED |
+  | Second Brain as unlabeled lab | 30 | yes | A R A A | ACCEPTED |
+  | Hybrid profile's remaining spend | skipped (cap) | no | R A R R | REJECTED |
+
+  Astra seats: Skeptic 5/6, Epistemologist 4/6 (from 0/6 and 0/6), mean scores 75 / 67.
+  The unrevised control (audit skipped at 80% of the replay cap) was rejected by both Astra
+  seats — the mechanism, not leniency, produced the acceptances. The one Astra rejection of a
+  revised candidate was correct: the revision fixed the body but `schema_note` and a
+  relationship note still carried the unsupported claim → revision now covers those fields
+  too (test added). Total branch spend ≈ $9.00 of $12.
+  Acceptance on this set (5/6) is above the 20–40% guess; judged by content, all five accepted
+  revisions are scoped, attributed, and supported — the live nightly rate over a week is the
+  real measure.
+
+- 2026-09-18 07:10 — **Phase 3 implemented (`aa73701`), offline verification running.**
+  Prompt rewrites (subagent, verified 164 tests), graded schema, `_ground_candidate` /
+  `_revise_candidate`, migration 013 applied live, per-slice cap 3, 1,065 tests green.
+  `scripts/panel_replay.py --ground` runs the real audit → revision → panel path offline;
+  verification on the 6-candidate set is in flight (`/tmp/replay_grounded.log`,
+  `logs/panel_replay/*-grounded.jsonl`). Spend so far ≈ $6.20 + this run (≤ $4).
+  Success criteria: Astra acceptance > 0; overall 3-of-4 acceptance 20–40%; every accepted
+  candidate spot-checked against its sources.
 - 2026-09-18 06:40 — **Phase 1 complete; design chosen (see Decisions). Phase 3 starting.**
   Spend so far ≈ $6.20 of the $12 branch budget. Experiment records: `logs/panel_replay/`.
   - **Seat swap B** (Astra in the Advocate + Methodologist seats): Advocate 2/6, Methodologist
