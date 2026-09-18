@@ -107,7 +107,13 @@ drawn almost entirely from one channel will be cut to two.
 semantic memories (insight/synthesis/decision) per slice, from distinct parent \
 documents. The panel rejects candidates whose sources are several syntheses of the \
 same conversation; independent episodes are what survive review.
-- Slices with memory ids that do not exist are dropped. Copy ids from tool output."""
+- Slices with memory ids that do not exist are dropped. Copy ids from tool output.
+- TIME: you have about 15 minutes and each tool call costs ~20 seconds. Budget\
+ roughly 20-25 calls: the manifest already lists ids per channel, so start from\
+ those, use memory_list once per channel you want to enumerate, and reserve\
+ memory_search for finding the echo of one channel in another. Do not read every\
+ memory in full before deciding; titles and the 500-char search snippets are enough\
+ to assemble a slice — the Thinker reads the full text."""
 
 # Session-start mode: restricted to strategies 6, 8, 10 only
 SESSION_START_STRATEGIES = """\

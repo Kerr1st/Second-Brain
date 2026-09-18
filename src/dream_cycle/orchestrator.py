@@ -54,6 +54,10 @@ _ZERO_STATS = {
 # panel as broken. An infra failure (timeout/crash/unparseable output) must never
 # be silently recorded as a quality REJECT vote — retry, then abort loudly.
 EVALUATOR_MAX_ATTEMPTS = 3
+# The Explorer now enumerates channels and searches for cross-channel echoes;
+# with ~15-20s of kiro-cli overhead per tool turn a thorough pass takes 10-15
+# minutes (a 600s ceiling timed out at 30 tool calls on 2026-09-17).
+EXPLORER_TIMEOUT_S = int(os.environ.get("EXPLORER_TIMEOUT", "1200"))
 EVALUATOR_BACKOFF_S = 2.0
 
 
@@ -64,6 +68,7 @@ class DreamCycleOrchestrator:
         self.resolver = default_resolver()
         self._capture_dir: str | None = None
         self._current_run_id: str | None = None
+        self._current_started_at: datetime | None = None
         # Metered-spend guard (reset per run) and the slice contents delivered to
         # a tool-less Thinker, kept so evaluators can ground against the same text.
         self._spend = SpendTracker.from_env()
@@ -244,6 +249,7 @@ class DreamCycleOrchestrator:
         """
         # Phase 0: attribute per-call LLM metrics to this run.
         self._current_run_id = run_id
+        self._current_started_at = started_at
 
         # Step 2: Build feedback from historical rejections
         feedback = build_feedback_injection()
@@ -257,14 +263,20 @@ class DreamCycleOrchestrator:
             stats["recent_activity"],
         )
 
-        # Step 4: Invoke Explorer (with crash/timeout handling)
+        # Step 4: Invoke Explorer (with crash/timeout handling). On a scheduled run an
+        # Explorer failure no longer aborts the night: the guaranteed arrivals slice
+        # (built in _allocate_attention) lets the run still examine what arrived.
         try:
             slices = self.invoke_explorer(feedback, run_type, scope, stats)
+            logger.info("Explorer returned %d slices", len(slices))
         except (TimeoutError, RuntimeError):
-            logger.error("Explorer agent crashed or timed out (run_id=%s)", run_id)
-            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
-            return self._aborted_result(run_id, run_type, started_at)
-        logger.info("Explorer returned %d slices", len(slices))
+            if run_type not in ("scheduled", "session_start"):
+                logger.error("Explorer agent crashed or timed out (run_id=%s)", run_id)
+                dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
+                return self._aborted_result(run_id, run_type, started_at)
+            logger.error("Explorer agent crashed or timed out (run_id=%s); continuing with the "
+                         "guaranteed arrivals slice only", run_id)
+            slices = []
 
         # Attention allocation + ledger: validate the Explorer's slices against the
         # breadth budget, add a guaranteed arrivals slice if needed, and persist what
@@ -273,7 +285,8 @@ class DreamCycleOrchestrator:
 
         # Circuit breaker: empty slices → abort early
         if not slices:
-            logger.warning("Circuit breaker: Explorer returned 0 slices, aborting early")
+            logger.warning("Circuit breaker: no slices to examine (Explorer returned none and "
+                           "nothing arrived), aborting early")
             dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
             return self._aborted_result(run_id, run_type, started_at)
 
@@ -492,7 +505,8 @@ class DreamCycleOrchestrator:
         # reason to look at any of them.
         manifest = ""
         try:
-            window_start = ledger.arrival_window_start(self._current_run_id, run_type, dcdb=dream_cycle_db)
+            window_start = ledger.arrival_window_start(self._current_run_id, run_type,
+                                                       self._current_started_at, dcdb=dream_cycle_db)
             arrivals = dream_cycle_db.get_arrivals_summary(window_start, allocation.MANIFEST_SAMPLES_PER_SOURCE)
             manifest = allocation.build_arrivals_manifest(
                 window_start, arrivals if isinstance(arrivals, list) else [])
@@ -512,7 +526,7 @@ class DreamCycleOrchestrator:
             system_prompt=prompt,
             user_message=user_message,
             tools=True,
-            timeout=600,
+            timeout=EXPLORER_TIMEOUT_S,
             effort=self.resolver.spec_for("explorer").effort,
             stage="explorer",
             run_id=self._current_run_id,

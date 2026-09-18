@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 
 EPISODIC_TYPES = {"source"}
 DEFAULT_ARRIVAL_WINDOW = timedelta(days=7)   # when there is no previous run to anchor on
+# The window is anchored on the previous run of the same type, but never shorter
+# than a day (a re-run at 18:00 after the 05:00 run must still see last night's
+# captures) and never longer than two weeks (a long gap should not pull the whole
+# backlog into one slice).
+MIN_ARRIVAL_WINDOW = timedelta(hours=24)
+MAX_ARRIVAL_WINDOW = timedelta(days=14)
 REVISIT_RUNS = 3
 
 
@@ -163,14 +169,15 @@ def _dcdb(dcdb=None):
 
 
 def arrival_window_start(run_id: str, run_type: str, started_at: datetime | None = None, dcdb=None) -> datetime:
-    """Start of the arrivals window: previous completed run of this type, else 7 days back.
-
-    Tolerates a mocked ``dcdb`` (anything that is not a datetime falls back)."""
-    prev = _dcdb(dcdb).get_previous_run_started_at(run_id, run_type)
-    if isinstance(prev, datetime):
-        return _aware(prev)
+    """Start of the arrivals window: previous completed run of this type, clamped to
+    [MIN_ARRIVAL_WINDOW, MAX_ARRIVAL_WINDOW] before ``started_at``; 7 days back when
+    there is no previous run. Tolerates a mocked ``dcdb`` (non-datetime → fallback)."""
     anchor = _aware(started_at) if isinstance(started_at, datetime) else datetime.now(timezone.utc)
-    return anchor - DEFAULT_ARRIVAL_WINDOW
+    prev = _dcdb(dcdb).get_previous_run_started_at(run_id, run_type)
+    if not isinstance(prev, datetime):
+        return anchor - DEFAULT_ARRIVAL_WINDOW
+    prev = _aware(prev)
+    return min(anchor - MIN_ARRIVAL_WINDOW, max(anchor - MAX_ARRIVAL_WINDOW, prev))
 
 
 def fetch_provenance(slices, dcdb=None) -> dict[str, dict] | None:

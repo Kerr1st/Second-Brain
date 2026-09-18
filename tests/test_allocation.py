@@ -283,9 +283,80 @@ class TestAllocateAttention:
             db.get_arrivals_summary.return_value = arrivals
             db.get_strategy_usage.return_value = {}
             orch._current_run_id = "run-5"
+            orch._current_started_at = NOW
             orch.invoke_explorer("", "scheduled", None,
                                  stats={"total_count": 10, "recent_activity": 9, "date_range": {"min": NOW, "max": NOW}})
         msg = invoker.invoke.call_args.kwargs["user_message"]
         assert "## What arrived since the previous run (2026-09-17 09:00 UTC)" in msg
         assert "- slack: 3 conversation-days (9 memories)" in msg and "[id-9]" in msg
         assert "meet the slice budget" in msg
+
+
+
+
+# --------------------------------------------------------------------------- #
+# Lessons from the first assembled run (2026-09-17 18:41)                      #
+# --------------------------------------------------------------------------- #
+class TestArrivalWindowClamp:
+    """A re-run 13h after the nightly run saw 'nothing new'; the window now has a floor."""
+
+    def _dcdb(self, prev):
+        db = MagicMock()
+        db.get_previous_run_started_at.return_value = prev
+        return db
+
+    def test_window_never_shorter_than_a_day(self):
+        prev = NOW - timedelta(hours=13)
+        assert ledger.arrival_window_start("r", "scheduled", NOW, dcdb=self._dcdb(prev)) == NOW - ledger.MIN_ARRIVAL_WINDOW
+
+    def test_window_anchored_on_previous_run_when_older_than_a_day(self):
+        prev = NOW - timedelta(days=3)
+        assert ledger.arrival_window_start("r", "scheduled", NOW, dcdb=self._dcdb(prev)) == prev
+
+    def test_window_never_longer_than_two_weeks(self):
+        prev = NOW - timedelta(days=40)
+        assert ledger.arrival_window_start("r", "scheduled", NOW, dcdb=self._dcdb(prev)) == NOW - ledger.MAX_ARRIVAL_WINDOW
+
+    def test_no_previous_run_falls_back_to_seven_days(self):
+        assert ledger.arrival_window_start("r", "scheduled", NOW, dcdb=self._dcdb(None)) == NOW - ledger.DEFAULT_ARRIVAL_WINDOW
+        assert ledger.arrival_window_start("r", "scheduled", NOW, dcdb=MagicMock()) == NOW - ledger.DEFAULT_ARRIVAL_WINDOW
+
+
+class TestExplorerFailureFallback:
+    """On a scheduled run an Explorer timeout continues with the guaranteed arrivals slice."""
+
+    def _orch(self):
+        with patch("src.dream_cycle.orchestrator.default_resolver"):
+            return DreamCycleOrchestrator()
+
+    def test_scheduled_run_continues_with_arrivals_slice(self):
+        orch = self._orch()
+        arrivals_slice = MemorySlice(name="Arrivals", strategy=allocation.ARRIVALS_STRATEGY, memory_ids=[_uid()])
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch.object(orch, "invoke_explorer", side_effect=TimeoutError("600s")), \
+             patch.object(orch, "_allocate_attention", return_value=[arrivals_slice]) as alloc, \
+             patch.object(orch, "invoke_thinker", return_value=[]), \
+             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
+             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
+            db.create_run.return_value = "run-x"
+            db.get_memory_stats.return_value = {"total_count": 1, "recent_activity": 1, "date_range": {}}
+            result = orch.run("scheduled")
+        alloc.assert_called_once()
+        assert alloc.call_args[0][3] == []                       # Explorer contributed nothing
+        assert result.aborted_early is False                     # the run went on with the arrivals slice
+
+    def test_user_triggered_run_still_aborts(self):
+        orch = self._orch()
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch.object(orch, "invoke_explorer", side_effect=RuntimeError("crash")), \
+             patch.object(orch, "_allocate_attention") as alloc, \
+             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""):
+            db.create_run.return_value = "run-y"
+            db.get_memory_stats.return_value = {"total_count": 1, "recent_activity": 1, "date_range": {}}
+            result = orch.run("user_triggered", scope={"topic": "x"})
+        alloc.assert_not_called()
+        assert result.aborted_early is True
+
+    def test_explorer_timeout_is_generous_and_env_tunable(self):
+        from src.dream_cycle import orchestrator as o
+        assert o.EXPLORER_TIMEOUT_S >= 1200
