@@ -1,5 +1,5 @@
 #!/bin/bash
-export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
+export PATH="$HOME/.toolbox/bin:/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
 # Thin wrapper for launchd-scheduled dream cycle runs.
 # Runs the dream cycle (synthesis), then chains the Express push (delivery, P2)
 # so the freshest synthesis can reach the user. job_wrapper.sh expects a single

@@ -81,7 +81,9 @@ logger = logging.getLogger(__name__)
 # Configurable binary path, mirroring KiroInvoker's KIRO_CLI (Req 2.7). Defaults
 # to the bare ``claude`` on PATH so the adapter runs against a public Claude Code
 # install or the ASBX wrapper without code changes.
-CLAUDE_CLI = os.environ.get("CLAUDE_CLI", "claude")
+# Absolute default: under launchd PATH lacks ~/.toolbox/bin, and a bare "claude"
+# raised FileNotFoundError at 02:00 (2026-09-17). Same convention as KIRO_CLI.
+CLAUDE_CLI = os.environ.get("CLAUDE_CLI", os.path.expanduser("~/.toolbox/bin/claude"))
 
 # How the system prompt is delivered to the CLI. "file" (preferred) writes the
 # prompt to a temp file and passes --system-prompt-file; "append" passes it
