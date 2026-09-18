@@ -155,53 +155,92 @@ def format_attention_section(run: dict, slices: list[dict]) -> list[str]:
 # --------------------------------------------------------------------------- #
 # I/O                                                                          #
 # --------------------------------------------------------------------------- #
-def arrival_window_start(run_id: str, run_type: str, started_at: datetime | None = None) -> datetime:
-    """Start of the arrivals window: previous completed run of this type, else 7 days back."""
+def _dcdb(dcdb=None):
+    if dcdb is not None:
+        return dcdb
     import src.dream_cycle_db as dream_cycle_db
-    prev = dream_cycle_db.get_previous_run_started_at(run_id, run_type)
-    if prev is not None:
+    return dream_cycle_db
+
+
+def arrival_window_start(run_id: str, run_type: str, started_at: datetime | None = None, dcdb=None) -> datetime:
+    """Start of the arrivals window: previous completed run of this type, else 7 days back.
+
+    Tolerates a mocked ``dcdb`` (anything that is not a datetime falls back)."""
+    prev = _dcdb(dcdb).get_previous_run_started_at(run_id, run_type)
+    if isinstance(prev, datetime):
         return _aware(prev)
-    anchor = _aware(started_at) or datetime.now(timezone.utc)
+    anchor = _aware(started_at) if isinstance(started_at, datetime) else datetime.now(timezone.utc)
     return anchor - DEFAULT_ARRIVAL_WINDOW
 
 
+def fetch_provenance(slices, dcdb=None) -> dict[str, dict] | None:
+    """id -> provenance row for every memory id in ``slices``.
+
+    Returns None when the lookup did not produce a list (e.g. the DB layer is
+    mocked or unavailable) so callers can tell "nothing resolved" from "could
+    not look anything up" — the budget must not drop slices in the latter case.
+    """
+    dcdb = _dcdb(dcdb)
+    all_ids = []
+    for s in slices:
+        all_ids += [str(m) for m in (_get(s, "memory_ids") or [])]
+    prov = dcdb.get_memory_provenance(all_ids)
+    if not isinstance(prov, list):
+        return None
+    return {str(r["id"]): r for r in prov}
+
+
+def compute_slice_rows(run_id: str, run_type: str, slices, started_at: datetime | None = None,
+                       origins: dict[int, str] | None = None, dcdb=None,
+                       window_start: datetime | None = None,
+                       provenance: dict[str, dict] | None = None) -> list[dict]:
+    """Slice rows (with metrics) ready for ``record_slices``; pure apart from reads."""
+    dcdb = _dcdb(dcdb)
+    if window_start is None:
+        window_start = arrival_window_start(run_id, run_type, started_at, dcdb)
+    previous = dcdb.get_recent_slice_memory_ids(run_id, REVISIT_RUNS)
+    previous_ids = set(previous) if isinstance(previous, (set, list, tuple)) else set()
+    if provenance is None:
+        provenance = fetch_provenance(slices, dcdb) or {}
+
+    rows = []
+    for i, s in enumerate(slices):
+        ids = [str(m) for m in (_get(s, "memory_ids") or [])]
+        rows.append({
+            "name": _get(s, "name"), "strategy": _get(s, "strategy"),
+            "hypothesis": _get(s, "hypothesis"), "memory_ids": ids,
+            "memory_titles": _get(s, "memory_titles") or [],
+            "origin": (origins or {}).get(i, "explorer"),
+            "metrics": slice_metrics(ids, provenance, window_start, previous_ids),
+        })
+    return rows
+
+
+def log_run_metrics(run: dict) -> None:
+    if not run:
+        return
+    logger.info(
+        "Attention: %d slices, %d memories, arrivals %.0f%%, %d source types "
+        "(dominant %.0f%%), episodic %.0f%%, revisit %.0f%%, anchored slices %d",
+        run["slices"], run["memories"], 100 * run["arrival_share"], run["source_types"],
+        100 * run["concentration"], 100 * run["episodic_share"], 100 * run["revisit_share"],
+        run["arrival_anchored_slices"],
+    )
+
+
 def record_run_slices(run_id: str, run_type: str, slices, started_at: datetime | None = None,
-                      origins: dict[int, str] | None = None) -> dict:
+                      origins: dict[int, str] | None = None, dcdb=None) -> dict:
     """Compute metrics for the run's slices, persist them, and return run metrics.
 
     ``slices`` are MemorySlice objects (or dicts with the same fields). Never
     raises: the ledger is observability and must not abort a run.
     """
-    import src.dream_cycle_db as dream_cycle_db
-    from src.db import get_memory_provenance
-
+    dcdb = _dcdb(dcdb)
     try:
-        window_start = arrival_window_start(run_id, run_type, started_at)
-        previous_ids = dream_cycle_db.get_recent_slice_memory_ids(run_id, REVISIT_RUNS)
-        all_ids = []
-        for s in slices:
-            all_ids += [str(m) for m in _get(s, "memory_ids")]
-        provenance = {str(r["id"]): r for r in get_memory_provenance(all_ids)}
-
-        rows = []
-        for i, s in enumerate(slices):
-            ids = [str(m) for m in _get(s, "memory_ids")]
-            rows.append({
-                "name": _get(s, "name"), "strategy": _get(s, "strategy"),
-                "hypothesis": _get(s, "hypothesis"), "memory_ids": ids,
-                "memory_titles": _get(s, "memory_titles") or [],
-                "origin": (origins or {}).get(i, "explorer"),
-                "metrics": slice_metrics(ids, provenance, window_start, previous_ids),
-            })
-        dream_cycle_db.record_slices(run_id, rows)
+        rows = compute_slice_rows(run_id, run_type, slices, started_at, origins, dcdb)
+        dcdb.record_slices(run_id, rows)
         run = run_metrics(rows)
-        logger.info(
-            "Attention: %d slices, %d memories, arrivals %.0f%%, %d source types "
-            "(dominant %.0f%%), episodic %.0f%%, revisit %.0f%%, anchored slices %d",
-            run["slices"], run["memories"], 100 * run["arrival_share"], run["source_types"],
-            100 * run["concentration"], 100 * run["episodic_share"], 100 * run["revisit_share"],
-            run["arrival_anchored_slices"],
-        )
+        log_run_metrics(run)
         return run
     except Exception:
         logger.warning("Attention ledger failed (non-fatal)", exc_info=True)

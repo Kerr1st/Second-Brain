@@ -2392,6 +2392,9 @@ class TestFinalOrchestratorMethodSet:
             # and delegation to SpendTracker (pricing itself lives in backends/cost.py).
             "_role_has_tools",
             "_record_spend",
+            # Attention allocation: slice budget + guaranteed arrivals slice + ledger
+            # persistence, all through dream_cycle_db so unit tests stay hermetic.
+            "_allocate_attention",
         }
 
         actual_methods = {

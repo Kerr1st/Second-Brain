@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch, call, ANY
 
 import pytest
 
+from src.dream_cycle.feedback import FEEDBACK_CYCLES
 from src.models import (
     CandidateInsight,
     DreamCycleResult,
@@ -253,8 +254,8 @@ class TestFullPipelineIntegration:
         """
         _, mocks = self._run_pipeline()
 
-        mocks["dc_db"].get_recent_rejections.assert_called_once_with(n_cycles=3)
-        mocks["dc_db"].get_user_rejections.assert_called_once_with(n_cycles=3)
+        mocks["dc_db"].get_recent_rejections.assert_called_once_with(n_cycles=FEEDBACK_CYCLES)
+        mocks["dc_db"].get_user_rejections.assert_called_once_with(n_cycles=FEEDBACK_CYCLES)
 
     def test_explorer_invoked_with_correct_prompt(self):
         """Verify Explorer was invoked with feedback and run_type.

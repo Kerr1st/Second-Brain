@@ -945,3 +945,36 @@ def get_slices_for_run(run_id: str) -> list[dict]:
                 (run_id,),
             )
             return [dict(r) for r in cur.fetchall()]
+
+
+
+# Delegates so the orchestrator reaches every attention-related query through this
+# module (which its unit tests patch), keeping ledger/allocation pure and hermetic.
+
+def get_memory_provenance(memory_ids) -> list[dict]:
+    from src.db import get_memory_provenance as _impl
+    return _impl(memory_ids)
+
+
+def get_arrivals_summary(since, samples_per_source: int = 5) -> list[dict]:
+    from src.db import get_arrivals_summary as _impl
+    return _impl(since, samples_per_source=samples_per_source)
+
+
+def get_recent_parent_memories(since, limit: int = 2000) -> list[dict]:
+    """Parent-level (document) memories created since ``since``, newest first —
+    the candidate pool for the guaranteed arrivals slice."""
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, title, type, source_type, created_at
+                FROM memories
+                WHERE created_at >= %s AND parent_id IS NULL
+                  AND status IS DISTINCT FROM 'superseded'
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (since, limit),
+            )
+            return [dict(r) for r in cur.fetchall()]

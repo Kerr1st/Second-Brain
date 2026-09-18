@@ -32,7 +32,7 @@ from src.dream_cycle.consensus import tally_consensus
 from src.dream_cycle.storage import store_accepted, check_duplicate
 from src.dream_cycle.digest import generate_digest
 from src.dream_cycle.feedback import build_feedback_injection
-from src.dream_cycle.ledger import record_run_slices
+from src.dream_cycle import allocation, ledger
 from src.dream_cycle.packet import (
     EVALUATOR_VERDICT_SCHEMA,
     TOOLLESS_NOTE,
@@ -266,9 +266,10 @@ class DreamCycleOrchestrator:
             return self._aborted_result(run_id, run_type, started_at)
         logger.info("Explorer returned %d slices", len(slices))
 
-        # Attention ledger: persist what the Explorer chose to look at, with metrics,
-        # before anything downstream can fail. Observability only — never aborts.
-        record_run_slices(run_id, run_type, slices, started_at=started_at)
+        # Attention allocation + ledger: validate the Explorer's slices against the
+        # breadth budget, add a guaranteed arrivals slice if needed, and persist what
+        # this run will examine (with metrics) before anything downstream can fail.
+        slices = self._allocate_attention(run_id, run_type, started_at, slices)
 
         # Circuit breaker: empty slices → abort early
         if not slices:
@@ -486,11 +487,24 @@ class DreamCycleOrchestrator:
             strategy_usage=dream_cycle_db.get_strategy_usage(n_cycles=10),
         )
 
+        # Arrivals manifest: what was captured since the previous run, by channel,
+        # with ids. Without this the Explorer knew only "N new memories" and had no
+        # reason to look at any of them.
+        manifest = ""
+        try:
+            window_start = ledger.arrival_window_start(self._current_run_id, run_type, dcdb=dream_cycle_db)
+            arrivals = dream_cycle_db.get_arrivals_summary(window_start, allocation.MANIFEST_SAMPLES_PER_SOURCE)
+            manifest = allocation.build_arrivals_manifest(
+                window_start, arrivals if isinstance(arrivals, list) else [])
+        except Exception:
+            logger.warning("Arrivals manifest unavailable for this run", exc_info=True)
+
         user_message = (
             f"Run type: {run_type}. "
             f"Memory count: {stats['total_count']}. "
             f"Recent activity (7d): {stats['recent_activity']} new memories. "
-            "Please assemble 0-5 memory slices using diverse strategies."
+            "Please assemble 0-5 memory slices using diverse strategies and meet the slice budget."
+            + (f"\n\n{manifest}" if manifest else "")
         )
 
         logger.info("Invoking Explorer agent (run_type=%s)", run_type)
@@ -542,6 +556,49 @@ class DreamCycleOrchestrator:
                 "Explorer produced no usable slices (raw_candidates=%s). Raw output head: %r",
                 len(raw_slices) if isinstance(raw_slices, list) else "n/a", raw_head,
             )
+        return slices
+
+    def _allocate_attention(self, run_id: str, run_type: str, started_at: datetime,
+                            slices: list[MemorySlice]) -> list[MemorySlice]:
+        """Enforce the slice budget, add the guaranteed arrivals slice, persist the ledger.
+
+        Never aborts a run: on any failure the Explorer's slices are returned as-is.
+        Scoped runs (post_learn, user_triggered) are exempt from the budget — their
+        attention is directed by the scope — but are still recorded.
+        """
+        try:
+            window_start = ledger.arrival_window_start(run_id, run_type, started_at, dcdb=dream_cycle_db)
+            provenance = ledger.fetch_provenance(slices, dcdb=dream_cycle_db)
+            if provenance is None:
+                logger.info("Attention: provenance lookup unavailable; slices used as-is, ledger skipped")
+                return slices
+            rows = ledger.compute_slice_rows(run_id, run_type, slices, started_at, dcdb=dream_cycle_db,
+                                             window_start=window_start, provenance=provenance)
+            metrics = [r["metrics"] for r in rows]
+            origins: dict[int, str] = {}
+
+            if run_type in ("scheduled", "session_start"):
+                kept, kept_metrics, needs_arrivals = allocation.enforce_budget(slices, metrics)
+                if needs_arrivals:
+                    extra = allocation.build_arrivals_slice(window_start, dcdb=dream_cycle_db)
+                    if extra is not None:
+                        kept.append(extra)
+                        origins[len(kept) - 1] = allocation.ARRIVALS_ORIGIN
+                        logger.info("Added guaranteed arrivals slice with %d memories: %s",
+                                    len(extra.memory_ids), extra.name)
+                    else:
+                        logger.info("No arrivals to build a guaranteed slice from")
+                slices = kept
+                # Re-resolve: the arrivals slice brings ids the first lookup did not cover.
+                provenance = ledger.fetch_provenance(slices, dcdb=dream_cycle_db) or provenance
+                rows = ledger.compute_slice_rows(run_id, run_type, slices, started_at, origins,
+                                                 dcdb=dream_cycle_db, window_start=window_start,
+                                                 provenance=provenance)
+
+            dream_cycle_db.record_slices(run_id, rows)
+            ledger.log_run_metrics(ledger.run_metrics(rows))
+        except Exception:
+            logger.warning("Attention allocation failed (non-fatal); using Explorer slices as-is", exc_info=True)
         return slices
 
     def invoke_thinker(
