@@ -28,7 +28,7 @@ PY=/Users/kerrfir/second-brain/.venv/bin/python
 #     Billing data lags 8–24h, so the daily email is next-day confirmation of
 #     a cap trip, not the thing that stops it.
 #   Emergency stop: SECOND_BRAIN_KILL_SWITCH=1 refuses to start a run.
-export SECOND_BRAIN_PROFILE="${SECOND_BRAIN_PROFILE:-hybrid}"
+export SECOND_BRAIN_PROFILE="${SECOND_BRAIN_PROFILE:-controlled}"
 export SECOND_BRAIN_RUN_COST_CAP_USD="${SECOND_BRAIN_RUN_COST_CAP_USD:-6}"
 export BEDROCK_MAX_TOKENS="${BEDROCK_MAX_TOKENS:-16384}"
 export BEDROCK_REGION="${BEDROCK_REGION:-us-east-1}"

@@ -62,6 +62,22 @@ class TestLoadProfiles:
         assert not any("fable" in p[r].model for r in VALID_ROLES)
         Resolver(p)
 
+    def test_controlled_profile_avoids_kiro_and_fable(self):
+        """`controlled` (nightly default since 2026-09-17): no role on Kiro — its
+        server-side "Auto" routing served claude-fable-5.1 regardless of --model —
+        and no Fable anywhere. Explorer keeps tools (Claude Code); Thinker is
+        tool-less on direct Bedrock (it gets the slice packet inline); the panel
+        keeps two model families so 3-of-4 needs both Claude and Astra."""
+        profiles, _ = load_profiles()
+        p = profiles["controlled"]
+        assert all(p[r].backend != "kiro" for r in VALID_ROLES)
+        assert not any("fable" in p[r].model for r in VALID_ROLES)
+        assert BACKEND_CAPABILITIES[p["explorer"].backend].tools
+        assert p["thinker"].backend == "bedrock"
+        assert {p[r].model for r in ("skeptic", "epistemologist")} == {"global.openai.gpt-6-astra"}
+        assert all("claude" in p[r].model for r in ("advocate", "methodologist"))
+        Resolver(p)
+
     def test_laptop_profile_reproduces_today(self):
         """Default-preserving: laptop = all-Kiro/Opus; explorer+evaluators high, thinker max."""
         profiles, _ = load_profiles()
