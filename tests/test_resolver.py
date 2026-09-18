@@ -72,7 +72,7 @@ class TestLoadProfiles:
         p = profiles["controlled"]
         assert all(p[r].backend != "kiro" for r in VALID_ROLES)
         assert not any("fable" in p[r].model for r in VALID_ROLES)
-        assert BACKEND_CAPABILITIES[p["explorer"].backend].tools
+        assert BACKEND_CAPABILITIES[p["explorer"].backend].supports_mcp
         assert p["thinker"].backend == "bedrock"
         assert {p[r].model for r in ("skeptic", "epistemologist")} == {"global.openai.gpt-6-astra"}
         assert all("claude" in p[r].model for r in ("advocate", "methodologist"))
