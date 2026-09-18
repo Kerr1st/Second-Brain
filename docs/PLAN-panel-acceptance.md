@@ -272,7 +272,16 @@ _Updated as work proceeds; newest first._
   Rejected alternatives: REVISE verdict with a second full panel pass (≈ $0.70/candidate, more
   state); reseating an Astra seat (loses the only grounding check); rubric-only change
   (Astra 0/12 even on the graded prompt without revision).
-- 2026-09-18 — **Open (user):** cost envelope. Options: (A) raise `SECOND_BRAIN_RUN_COST_CAP_USD`
+- 2026-09-18 — **Cost envelope decided by the user: run every other weekday.** Dream cycle now
+  fires Mon/Wed/Fri 02:00 (plist `StartCalendarInterval` array); per-run cap raised to $9 so a
+  10-candidate night completes; AWS daily Bedrock budget raised to $10 (would otherwise alert
+  every run day). ≈ 13 runs/month × ~$8.50 ≈ $110/month; the $100 monthly alert is left in
+  place as the signal to revisit. The four accepted memories from `3a1263a6` were reviewed
+  against their sources: all grounded (quotes verbatim, participants and times present). Two
+  repairs: memory 69d015df was stored as a JSON blob (revision put the candidate JSON into
+  `content`; fixed in code with `_unwrap_nested_candidate` + test, row unwrapped and re-embedded);
+  memory d123e553 had one word inserted inside a quotation (moved outside the quote marks).
+- 2026-09-18 — *(superseded by the above)* Open (user): cost envelope. Options: (A) raise `SECOND_BRAIN_RUN_COST_CAP_USD`
   to 9 and the AWS daily budget to match (≈ $8.5/run, ≈ $255/month); (B) keep $6 and cut work —
   `MAX_CANDIDATES_PER_SLICE=1` / Thinker "at most 1" (≈ 5 candidates, ≈ $5/run) and Astra seats
   at `effort=medium`; (C) cap $8 + Astra `medium` (≈ $6.5/run). Until decided, nightly runs on

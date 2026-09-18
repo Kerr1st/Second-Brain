@@ -157,6 +157,18 @@ class TestReviseCandidate:
         assert out.schema_note == "the two captured notices did not mention the trigger"
         assert out.relationships == [{"target_id": SRC_A, "relation_type": "extends", "note": "two notices, no mention"}]
 
+    def test_nested_candidate_json_in_content_is_unwrapped(self):
+        """Observed live: the revision returned the whole candidate as a JSON string in `content`."""
+        orch = _orch()
+        inner = {"title": "Inner title", "content": "WHAT: the real body", "confidence": "medium",
+                 "source_memories": [SRC_A], "schema_note": "inner note"}
+        inv = self._invoker({"title": "Outer", "content": json.dumps(inner), "confidence": "high", "source_memories": [SRC_A, SRC_B]})
+        with patch.object(orch, "_invoker_for", return_value=inv), patch.object(orch, "_role_has_tools", return_value=False), \
+             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
+            out = orch._revise_candidate(_cand(), _audit(blocking=["x"]))
+        assert out.content == "WHAT: the real body" and out.title == "Inner title"
+        assert out.confidence == "medium" and out.source_memories == [SRC_A] and out.schema_note == "inner note"
+
     def test_tool_capable_thinker_gets_no_schema_kwarg(self):
         orch = _orch()
         inv = self._invoker({"title": "t", "content": "c", "confidence": "low", "source_memories": [SRC_A]})

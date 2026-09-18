@@ -65,6 +65,23 @@ def _as_int(value) -> int | None:
         return None
 
 
+def _unwrap_nested_candidate(out: dict) -> dict:
+    """A revision sometimes puts the whole candidate JSON into the ``content`` string
+    (observed 2026-09-18: an accepted memory was stored as a JSON blob). If ``content``
+    parses as a dict that itself has a ``content`` key, use the inner object's fields."""
+    content = out.get("content")
+    if isinstance(content, str) and content.lstrip().startswith("{"):
+        try:
+            inner = json.loads(content)
+        except ValueError:
+            return out
+        if isinstance(inner, dict) and isinstance(inner.get("content"), str):
+            merged = dict(out)
+            merged.update({k: v for k, v in inner.items() if k in REVISION_SCHEMA["properties"]})
+            return merged
+    return out
+
+
 def _as_str_list(value) -> list[str]:
     if isinstance(value, str):
         return [value] if value.strip() else []
@@ -900,6 +917,7 @@ class DreamCycleOrchestrator:
             out = out[0] if out else {}
         if not isinstance(out, dict) or "content" not in out:
             raise ValueError("revision returned no candidate")
+        out = _unwrap_nested_candidate(out)
         # Sources may only shrink: the revision must not introduce new citations.
         original_sources = [str(m) for m in candidate.source_memories]
         kept = [m for m in _as_str_list(out.get("source_memories")) if m in original_sources] or original_sources

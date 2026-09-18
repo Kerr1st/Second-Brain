@@ -18,7 +18,8 @@ PY=/Users/kerrfir/second-brain/.venv/bin/python
 #   seats metered on Bedrock (≈ $2.30/run measured). Bedrock auth is the CLI
 #   `default` profile (kiro-admin-session SSO; boto3 refreshes the token).
 # Cost controls, two layers:
-#   - Real-time (here): SECOND_BRAIN_RUN_COST_CAP_USD=6 is the per-run budget
+#   - Real-time (here): SECOND_BRAIN_RUN_COST_CAP_USD=9 is the per-run budget (a 10-candidate
+#     night with the grounding audit costs ~$8.50; runs Mon/Wed/Fri only, see the plist)
 #     (≈ 2.6x a typical $2.30 run; a p95 night is ≈ $5). Exceeding it aborts
 #     the rest of the panel — candidates already accepted are kept, the digest
 #     is skipped. BEDROCK_MAX_TOKENS bounds a single Astra call at ~$0.90.
@@ -29,7 +30,7 @@ PY=/Users/kerrfir/second-brain/.venv/bin/python
 #     a cap trip, not the thing that stops it.
 #   Emergency stop: SECOND_BRAIN_KILL_SWITCH=1 refuses to start a run.
 export SECOND_BRAIN_PROFILE="${SECOND_BRAIN_PROFILE:-controlled}"
-export SECOND_BRAIN_RUN_COST_CAP_USD="${SECOND_BRAIN_RUN_COST_CAP_USD:-6}"
+export SECOND_BRAIN_RUN_COST_CAP_USD="${SECOND_BRAIN_RUN_COST_CAP_USD:-9}"
 export BEDROCK_MAX_TOKENS="${BEDROCK_MAX_TOKENS:-16384}"
 export BEDROCK_REGION="${BEDROCK_REGION:-us-east-1}"
 
