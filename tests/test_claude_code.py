@@ -43,6 +43,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from src.backends.base import Invoker
+import src.backends.claude_code as cc
 from src.backends.claude_code import ClaudeCodeInvoker
 from src.backends.mcp_probe import MCPStartupProbe
 
@@ -179,7 +180,7 @@ class TestCommandConstruction:
         ClaudeCodeInvoker(model="claude-opus-4").invoke("sys", "hello")
         cmd = _last_cmd(mock_run)
 
-        assert cmd[0] == "claude"
+        assert cmd[0] == cc.CLAUDE_CLI and cmd[0].endswith("claude")   # absolute by default (launchd PATH)
         assert cmd[1] == "-p"
         # user message is the -p positional input, distinct from system prompt (Req 3.2)
         assert cmd[2] == "hello"

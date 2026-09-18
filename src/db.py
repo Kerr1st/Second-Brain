@@ -160,8 +160,16 @@ def update_memory(memory_id, **fields):
         conn.commit()
 
 
-def list_memories(type=None, status=None, source_type=None, limit=50, offset=0):
-    """List memories with optional filters."""
+_LIST_COLUMNS = (
+    "id, type, title, content, summary, tags, source_url, source_type, metadata, status, "
+    "confidence, parent_id, created_at, updated_at, access_count, mem_class, project, "
+    "last_accessed_at, encoding_context"
+)
+
+
+def list_memories(type=None, status=None, source_type=None, limit=50, offset=0, created_after=None):
+    """List memories with optional filters, newest first. Scalar columns only
+    (no embedding / search_vector — a listing never needs a 1024-dim vector per row)."""
     conditions = []
     params = []
     if type:
@@ -173,14 +181,68 @@ def list_memories(type=None, status=None, source_type=None, limit=50, offset=0):
     if source_type:
         conditions.append("source_type = %s")
         params.append(source_type)
+    if created_after is not None:
+        conditions.append("created_at >= %s")
+        params.append(created_after)
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     params.extend([limit, offset])
 
     with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(f"SELECT * FROM memories {where} ORDER BY created_at DESC LIMIT %s OFFSET %s", params)
+            cur.execute(
+                f"SELECT {_LIST_COLUMNS} FROM memories {where} ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                params,
+            )
             return cur.fetchall()
+
+
+def get_arrivals_summary(since, samples_per_source=5):
+    """What arrived since ``since``: per source, document/memory counts and the newest
+    documents (parent-level records, so a chunked article counts once).
+
+    Memories produced by the system itself (dream-cycle syntheses, distilled
+    insights without a capture channel) have no source_type; they are labelled
+    ``generated:<type>`` so the caller can tell captured life from synthesis.
+
+    Returns a list sorted by document count desc:
+        [{"source_type", "documents", "memories", "samples": [{"id","title","type","created_at"}]}]
+    """
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(source_type, 'generated:' || type) AS label,
+                       count(*) FILTER (WHERE parent_id IS NULL) AS documents,
+                       count(*) AS memories
+                FROM memories WHERE created_at >= %s
+                GROUP BY 1 ORDER BY 2 DESC, 3 DESC
+                """,
+                (since,),
+            )
+            counts = cur.fetchall()
+            cur.execute(
+                """
+                SELECT id, title, type, created_at, label FROM (
+                    SELECT id, title, type, created_at,
+                           COALESCE(source_type, 'generated:' || type) AS label,
+                           row_number() OVER (PARTITION BY COALESCE(source_type, 'generated:' || type)
+                                              ORDER BY created_at DESC) AS rn
+                    FROM memories WHERE created_at >= %s AND parent_id IS NULL
+                ) t WHERE rn <= %s ORDER BY label, created_at DESC
+                """,
+                (since, samples_per_source),
+            )
+            samples = {}
+            for r in cur.fetchall():
+                samples.setdefault(r["label"], []).append(
+                    {"id": str(r["id"]), "title": r["title"], "type": r["type"],
+                     "created_at": r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else str(r["created_at"])})
+    return [
+        {"source_type": c["label"], "documents": int(c["documents"]), "memories": int(c["memories"]),
+         "samples": samples.get(c["label"], [])}
+        for c in counts
+    ]
 
 
 # --- Semantic Search ---
@@ -347,3 +409,30 @@ def find_schemas_for_memories(memory_ids):
                 constituent_id = str(row.pop("constituent_id"))
                 grouped.setdefault(constituent_id, []).append(row)
             return grouped
+
+
+
+def get_memory_provenance(memory_ids):
+    """Lightweight provenance for many memories: id, type, source_type, created_at,
+    parent_id, project. No content, no vectors. Ids that don't exist (or are not
+    valid UUIDs) are absent from the result. Used by the dream-cycle attention ledger.
+    """
+    import uuid as _uuid
+    ids = []
+    for m in memory_ids:
+        try:
+            ids.append(str(_uuid.UUID(str(m))))
+        except (ValueError, AttributeError, TypeError):
+            continue
+    if not ids:
+        return []
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, type, source_type, created_at, parent_id, project
+                FROM memories WHERE id = ANY(%s::uuid[])
+                """,
+                (ids,),
+            )
+            return [dict(r) for r in cur.fetchall()]

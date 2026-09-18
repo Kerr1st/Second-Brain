@@ -6,7 +6,7 @@ Run: python -m src.mcp_server (stdio transport for Kiro/Claude Code)
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta, timezone
 from src.db import (
-    create_memory, get_memory, update_memory, list_memories,
+    create_memory, get_memory, update_memory, list_memories, get_arrivals_summary,
     create_relationship, get_relationships, find_temporal_neighbors,
     find_schemas_for_memories, get_schema_with_constituents,
 )
@@ -102,6 +102,8 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
 
     formatted = [
         {"id": str(r["id"]), "title": r["title"], "type": r["type"],
+         "source_type": r.get("source_type"),
+         "created_at": _iso(r.get("created_at")),
          "score": round(float(r.get("rerank_score", 0)), 3),
          "content": r["content"][:500], "tags": r["tags"]}
         for r in results
@@ -217,16 +219,51 @@ def memory_list(
     source_type: str | None = None,
     status: str | None = None,
     limit: int = 20,
+    since_days: int | None = None,
 ) -> list[dict]:
-    """List/browse recent memories by filter (type, source_type, status) — newest first,
-    no relevance ranking. Use memory_search for relevance; use this to enumerate or audit."""
-    results = list_memories(type=type, status=status, source_type=source_type, limit=limit)
+    """List/browse recent memories by filter (type, source_type, status, since_days) —
+    newest first, no relevance ranking. Use memory_search for relevance; use this to
+    enumerate or audit, e.g. memory_list(source_type='slack', since_days=2) to see
+    every Slack conversation-day captured since the day before yesterday."""
+    created_after = None
+    if since_days is not None and since_days > 0:
+        created_after = datetime.now(timezone.utc) - timedelta(days=since_days)
+    results = list_memories(type=type, status=status, source_type=source_type, limit=limit,
+                            created_after=created_after)
     return [
         {"id": str(r["id"]), "title": r["title"], "type": r["type"],
-         "source_type": r["source_type"], "created_at": str(r["created_at"]),
+         "source_type": r["source_type"], "created_at": _iso(r["created_at"]),
+         "parent_id": str(r["parent_id"]) if r.get("parent_id") else None,
          "tags": r["tags"]}
         for r in results
     ]
+
+
+@mcp.tool()
+def memory_recent_activity(days: int = 7, samples_per_source: int = 5) -> dict:
+    """What arrived in the last N days, by capture channel: document and memory counts
+    per source_type plus the newest document titles for each. Channels are the user's
+    life streams — slack (one document per conversation-day), outlook_email,
+    outlook_calendar, browser_history (one per day), article, youtube, kiro_cli_chat,
+    quick_desktop_* — and 'generated:<type>' for memories the system produced itself
+    (syntheses, distilled insights). Call this first to orient exploration on what is
+    new, then memory_list(source_type=..., since_days=...) or memory_search(...,
+    since_days=...) to drill into a channel."""
+    days = max(1, min(int(days), 90))
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    by_source = get_arrivals_summary(since, samples_per_source=max(0, min(int(samples_per_source), 20)))
+    return {
+        "since": _iso(since), "days": days,
+        "total_documents": sum(s["documents"] for s in by_source),
+        "total_memories": sum(s["memories"] for s in by_source),
+        "by_source": by_source,
+    }
+
+
+def _iso(value) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
 @mcp.tool()

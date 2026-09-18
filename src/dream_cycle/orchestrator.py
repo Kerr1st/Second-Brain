@@ -32,8 +32,10 @@ from src.dream_cycle.consensus import tally_consensus
 from src.dream_cycle.storage import store_accepted, check_duplicate
 from src.dream_cycle.digest import generate_digest
 from src.dream_cycle.feedback import build_feedback_injection
+from src.dream_cycle import allocation, ledger
 from src.dream_cycle.packet import (
     EVALUATOR_VERDICT_SCHEMA,
+    TOOLED_NOTE,
     TOOLLESS_NOTE,
     build_packet,
     format_sources_for_evaluator,
@@ -53,6 +55,11 @@ _ZERO_STATS = {
 # panel as broken. An infra failure (timeout/crash/unparseable output) must never
 # be silently recorded as a quality REJECT vote — retry, then abort loudly.
 EVALUATOR_MAX_ATTEMPTS = 3
+# The Explorer now enumerates channels and searches for cross-channel echoes;
+# with ~15-20s of kiro-cli overhead per tool turn a thorough pass takes 10-15
+# minutes (a 600s ceiling timed out at 30 tool calls on 2026-09-17).
+EXPLORER_TIMEOUT_S = int(os.environ.get("EXPLORER_TIMEOUT", "1200"))
+THINKER_TIMEOUT_S = int(os.environ.get("THINKER_TIMEOUT", "1200"))
 EVALUATOR_BACKOFF_S = 2.0
 
 
@@ -63,6 +70,7 @@ class DreamCycleOrchestrator:
         self.resolver = default_resolver()
         self._capture_dir: str | None = None
         self._current_run_id: str | None = None
+        self._current_started_at: datetime | None = None
         # Metered-spend guard (reset per run) and the slice contents delivered to
         # a tool-less Thinker, kept so evaluators can ground against the same text.
         self._spend = SpendTracker.from_env()
@@ -243,6 +251,7 @@ class DreamCycleOrchestrator:
         """
         # Phase 0: attribute per-call LLM metrics to this run.
         self._current_run_id = run_id
+        self._current_started_at = started_at
 
         # Step 2: Build feedback from historical rejections
         feedback = build_feedback_injection()
@@ -256,18 +265,30 @@ class DreamCycleOrchestrator:
             stats["recent_activity"],
         )
 
-        # Step 4: Invoke Explorer (with crash/timeout handling)
+        # Step 4: Invoke Explorer (with crash/timeout handling). On a scheduled run an
+        # Explorer failure no longer aborts the night: the guaranteed arrivals slice
+        # (built in _allocate_attention) lets the run still examine what arrived.
         try:
             slices = self.invoke_explorer(feedback, run_type, scope, stats)
+            logger.info("Explorer returned %d slices", len(slices))
         except (TimeoutError, RuntimeError):
-            logger.error("Explorer agent crashed or timed out (run_id=%s)", run_id)
-            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
-            return self._aborted_result(run_id, run_type, started_at)
-        logger.info("Explorer returned %d slices", len(slices))
+            if run_type not in ("scheduled", "session_start"):
+                logger.error("Explorer agent crashed or timed out (run_id=%s)", run_id)
+                dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
+                return self._aborted_result(run_id, run_type, started_at)
+            logger.error("Explorer agent crashed or timed out (run_id=%s); continuing with the "
+                         "guaranteed arrivals slice only", run_id)
+            slices = []
+
+        # Attention allocation + ledger: validate the Explorer's slices against the
+        # breadth budget, add a guaranteed arrivals slice if needed, and persist what
+        # this run will examine (with metrics) before anything downstream can fail.
+        slices = self._allocate_attention(run_id, run_type, started_at, slices)
 
         # Circuit breaker: empty slices → abort early
         if not slices:
-            logger.warning("Circuit breaker: Explorer returned 0 slices, aborting early")
+            logger.warning("Circuit breaker: no slices to examine (Explorer returned none and "
+                           "nothing arrived), aborting early")
             dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
             return self._aborted_result(run_id, run_type, started_at)
 
@@ -481,11 +502,25 @@ class DreamCycleOrchestrator:
             strategy_usage=dream_cycle_db.get_strategy_usage(n_cycles=10),
         )
 
+        # Arrivals manifest: what was captured since the previous run, by channel,
+        # with ids. Without this the Explorer knew only "N new memories" and had no
+        # reason to look at any of them.
+        manifest = ""
+        try:
+            window_start = ledger.arrival_window_start(self._current_run_id, run_type,
+                                                       self._current_started_at, dcdb=dream_cycle_db)
+            arrivals = dream_cycle_db.get_arrivals_summary(window_start, allocation.MANIFEST_SAMPLES_PER_SOURCE)
+            manifest = allocation.build_arrivals_manifest(
+                window_start, arrivals if isinstance(arrivals, list) else [])
+        except Exception:
+            logger.warning("Arrivals manifest unavailable for this run", exc_info=True)
+
         user_message = (
             f"Run type: {run_type}. "
             f"Memory count: {stats['total_count']}. "
             f"Recent activity (7d): {stats['recent_activity']} new memories. "
-            "Please assemble 0-5 memory slices using diverse strategies."
+            "Please assemble 0-5 memory slices using diverse strategies and meet the slice budget."
+            + (f"\n\n{manifest}" if manifest else "")
         )
 
         logger.info("Invoking Explorer agent (run_type=%s)", run_type)
@@ -493,7 +528,7 @@ class DreamCycleOrchestrator:
             system_prompt=prompt,
             user_message=user_message,
             tools=True,
-            timeout=600,
+            timeout=EXPLORER_TIMEOUT_S,
             effort=self.resolver.spec_for("explorer").effort,
             stage="explorer",
             run_id=self._current_run_id,
@@ -539,6 +574,49 @@ class DreamCycleOrchestrator:
             )
         return slices
 
+    def _allocate_attention(self, run_id: str, run_type: str, started_at: datetime,
+                            slices: list[MemorySlice]) -> list[MemorySlice]:
+        """Enforce the slice budget, add the guaranteed arrivals slice, persist the ledger.
+
+        Never aborts a run: on any failure the Explorer's slices are returned as-is.
+        Scoped runs (post_learn, user_triggered) are exempt from the budget — their
+        attention is directed by the scope — but are still recorded.
+        """
+        try:
+            window_start = ledger.arrival_window_start(run_id, run_type, started_at, dcdb=dream_cycle_db)
+            provenance = ledger.fetch_provenance(slices, dcdb=dream_cycle_db)
+            if provenance is None:
+                logger.info("Attention: provenance lookup unavailable; slices used as-is, ledger skipped")
+                return slices
+            rows = ledger.compute_slice_rows(run_id, run_type, slices, started_at, dcdb=dream_cycle_db,
+                                             window_start=window_start, provenance=provenance)
+            metrics = [r["metrics"] for r in rows]
+            origins: dict[int, str] = {}
+
+            if run_type in ("scheduled", "session_start"):
+                kept, kept_metrics, needs_arrivals = allocation.enforce_budget(slices, metrics)
+                if needs_arrivals:
+                    extra = allocation.build_arrivals_slice(window_start, dcdb=dream_cycle_db)
+                    if extra is not None:
+                        kept.append(extra)
+                        origins[len(kept) - 1] = allocation.ARRIVALS_ORIGIN
+                        logger.info("Added guaranteed arrivals slice with %d memories: %s",
+                                    len(extra.memory_ids), extra.name)
+                    else:
+                        logger.info("No arrivals to build a guaranteed slice from")
+                slices = kept
+                # Re-resolve: the arrivals slice brings ids the first lookup did not cover.
+                provenance = ledger.fetch_provenance(slices, dcdb=dream_cycle_db) or provenance
+                rows = ledger.compute_slice_rows(run_id, run_type, slices, started_at, origins,
+                                                 dcdb=dream_cycle_db, window_start=window_start,
+                                                 provenance=provenance)
+
+            dream_cycle_db.record_slices(run_id, rows)
+            ledger.log_run_metrics(ledger.run_metrics(rows))
+        except Exception:
+            logger.warning("Attention allocation failed (non-fatal); using Explorer slices as-is", exc_info=True)
+        return slices
+
     def invoke_thinker(
         self, slice: MemorySlice,
     ) -> list[CandidateInsight]:
@@ -566,21 +644,22 @@ class DreamCycleOrchestrator:
 
         # The evaluators are always tool-less, so cache the slice contents for
         # their grounding checks regardless of how the Thinker reads memories.
-        # A tool-capable Thinker (agentic CLI) reads them itself over MCP; a
-        # tool-less one (Direct-API / Bedrock) additionally gets the contents in
-        # its prompt — the "B2 context packet".
+        # Every Thinker gets the slice contents inline (the "B2 context packet"):
+        # a tool-capable one (agentic CLI) used to re-read 10-20 memories over MCP
+        # at ~20s per turn and timed out on episodic slices (2026-09-17); it now
+        # keeps its tools for CLS-interleaving searches only. A tool-less one
+        # (Direct-API / Bedrock) reasons from the packet alone.
         thinker_has_tools = self._role_has_tools("thinker")
         memories = load_memories_by_ids(slice.memory_ids)
         for memory in memories:
             self._slice_memory_cache[str(memory.get("id"))] = memory
-        if not thinker_has_tools:
-            payload["memory_slice"]["memories"] = build_packet(memories)
-            payload["note"] = TOOLLESS_NOTE
-            if len(memories) < len(slice.memory_ids):
-                logger.warning(
-                    "Thinker packet: loaded %d of %d slice memories for %s",
-                    len(memories), len(slice.memory_ids), slice.name,
-                )
+        payload["memory_slice"]["memories"] = build_packet(memories)
+        payload["note"] = TOOLED_NOTE if thinker_has_tools else TOOLLESS_NOTE
+        if len(memories) < len(slice.memory_ids):
+            logger.warning(
+                "Thinker packet: loaded %d of %d slice memories for %s",
+                len(memories), len(slice.memory_ids), slice.name,
+            )
 
         user_message = json.dumps(payload, default=str)
 
@@ -595,7 +674,7 @@ class DreamCycleOrchestrator:
             system_prompt=prompt,
             user_message=user_message,
             tools=thinker_has_tools,
-            timeout=600,
+            timeout=THINKER_TIMEOUT_S,
             effort=self.resolver.spec_for("thinker").effort,
             stage="thinker",
             run_id=self._current_run_id,

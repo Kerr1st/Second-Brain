@@ -38,12 +38,13 @@ the connection between them is unexplored.
 6. STALE KNOWLEDGE — A synthesis or decision was made based on information \
 that has since been superseded by newer memories.
 
-7. META-COGNITIVE REFLECTION — Examine the dream cycle's own history. Look \
-at rejected candidates from previous cycles. What patterns appear in the \
-rejections? Are there systematic blind spots? Also examine retrieval quality: \
-when searches return poor results, what does that tell us about gaps in the \
-memory space? Meta-cognitive insights are stored with tag "meta-cognitive" \
-and feed back into the Explorer's strategy selection.
+7. META-COGNITIVE REFLECTION — Only when the slice itself is about this \
+system's history (its strategy is retrieval_failure_analysis, or its memories \
+are the dream cycle's own candidates and digests): look at rejected candidates \
+from previous cycles. What patterns appear in the rejections? Are there \
+systematic blind spots? Meta-cognitive insights are stored with tag \
+"meta-cognitive" and feed back into the Explorer's strategy selection. Do not \
+introduce reflection on the dream cycle into slices about anything else.
 
 8. CLS INTERLEAVING — When examining a slice, actively search for existing \
 semantic memories (synthesis, insight, decision) that cover the same topic. \
@@ -60,6 +61,17 @@ the narrative. "We tried three caching approaches and the third worked" is a \
 summary. "Cache invalidation at the application layer is more reliable than \
 TTL-based expiry when data consistency matters more than latency" is a \
 distillation. Distilled memories link back to sources via derived_from.
+
+10. ARRIVALS (slices with strategy "arrivals_synthesis") — These memories are \
+what happened in the user's life since the previous run, across channels: Slack \
+conversation-days, emails, calendar events, browsing days, pages read, \
+AI-assistant sessions. Treat them as a week's evidence, not as a corpus of \
+principles. Look for: echoes between channels (the same account, person or \
+decision appearing in two places); commitments the user made or received and \
+their status; questions asked in one channel and answered in another; a \
+meeting and the reading or conversation that preceded it; anything the user \
+would want pointed out. A grounded, specific observation about this week beats \
+an abstract principle. Cite the episodes.
 """
 
 

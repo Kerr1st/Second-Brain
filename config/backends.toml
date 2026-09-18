@@ -75,3 +75,28 @@ skeptic        = { backend = "bedrock", model = "global.openai.gpt-6-astra",   e
 advocate       = { backend = "kiro",    model = "claude-sonnet-5",            effort = "high" }
 epistemologist = { backend = "bedrock", model = "global.openai.gpt-6-astra",   effort = "high" }
 methodologist  = { backend = "kiro",    model = "claude-sonnet-5",            effort = "high" }
+
+
+
+[profiles.controlled]
+# Every role on a backend that honours the requested model, all inside the AWS
+# account boundary, no Kiro. Added 2026-09-17 after kiro-cli 2.22 started
+# ignoring --model ("failed to set model: Method not found") and its server-side
+# "Auto" routing served claude-fable-5.1 to the Explorer and Thinker — the
+# agents said so themselves in their raw output ("this session is running on
+# claude-fable-5.1, which is not approved for PII") and began self-censoring
+# what to explore. Kiro labels Fable "NOT FOR CUSTOMER DATA, ITAR OR PII"; this
+# corpus is the personal one. Until Kiro honours --model again, do not route
+# the corpus through it.
+#
+# Explorer keeps tools via Claude Code (Bedrock-billed; honours inference-profile
+# ids). Thinker is tool-less on direct Bedrock: every Thinker now receives the
+# slice contents inline (B2 packet), so it no longer needs memory_read. Cost
+# estimate ≈ $3-4/run (Explorer ~$0.5-1, Thinker ~$1, Claude evaluators ~$0.4,
+# Astra ~$1.6) — under the $6/run cap; ~$100/month nightly.
+explorer       = { backend = "claude_code", model = "global.anthropic.claude-sonnet-5",  effort = "high" }
+thinker        = { backend = "bedrock",     model = "global.anthropic.claude-opus-5",    effort = "high" }
+skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
+advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
+epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
+methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
