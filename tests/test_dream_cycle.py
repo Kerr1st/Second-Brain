@@ -764,6 +764,7 @@ class TestSessionStartCandidateLimiting:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator") as mock_eval, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
@@ -809,6 +810,7 @@ class TestSessionStartCandidateLimiting:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator") as mock_eval, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
@@ -852,6 +854,7 @@ class TestSessionStartCandidateLimiting:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator") as mock_eval, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
@@ -1168,6 +1171,7 @@ class TestErrorHandling:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[slice_a, slice_b]), \
              patch.object(orch, "invoke_thinker", side_effect=thinker_side_effect), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator") as mock_eval, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
@@ -1213,6 +1217,7 @@ class TestErrorHandling:
              patch("src.dream_cycle.orchestrator.time.sleep"), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=[candidate]), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator", side_effect=TimeoutError("evaluator down")) as mock_eval, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
@@ -1256,6 +1261,7 @@ class TestErrorHandling:
              patch("src.dream_cycle.orchestrator.time.sleep"), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=[c1, c2]), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator", side_effect=eval_side_effect), \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
@@ -1295,6 +1301,7 @@ class TestErrorHandling:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=[candidate]), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator") as mock_eval, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
@@ -1337,6 +1344,7 @@ class TestErrorHandling:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=[candidate]), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator") as mock_eval, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""):
@@ -1760,6 +1768,8 @@ class TestRunRecordCompletenessProperty:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
+             patch("src.dream_cycle.orchestrator.MAX_CANDIDATES_PER_SLICE", 100), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator") as mock_eval, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
@@ -1874,6 +1884,7 @@ class TestRunRecordCompletenessExplicit:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator") as mock_eval, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
@@ -1954,6 +1965,7 @@ class TestRunRecordCompletenessExplicit:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator") as mock_eval, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
@@ -2395,6 +2407,10 @@ class TestFinalOrchestratorMethodSet:
             # Attention allocation: slice budget + guaranteed arrivals slice + ledger
             # persistence, all through dream_cycle_db so unit tests stay hermetic.
             "_allocate_attention",
+            # Pre-panel grounding: audit by one seat, one repair by the Thinker backend
+            # (docs/PLAN-panel-acceptance.md).
+            "_ground_candidate",
+            "_revise_candidate",
         }
 
         actual_methods = {
@@ -2604,7 +2620,7 @@ class TestToollessThinkerPacketAndSpendGuard:
 
         schema = captured["schema"]
         assert schema["properties"]["verdict"]["enum"] == ["ACCEPT", "REJECT"]
-        assert set(schema["required"]) == {"verdict", "reasoning"}
+        assert set(schema["required"]) == {"verdict", "score", "blocking_issues", "advisory_issues", "reasoning"}
 
     def test_tool_capable_evaluator_gets_no_schema_option(self):
         """Kiro's invoke() has a fixed signature; never pass it unknown kwargs."""

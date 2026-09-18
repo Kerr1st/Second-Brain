@@ -27,6 +27,7 @@ from src.models import (
     MemorySlice,
 )
 from src.prompts import get_evaluator_prompt, get_explorer_prompt, get_thinker_prompt
+from src.prompts.revision import REVISION_PROMPT, REVISION_SCHEMA, build_revision_request
 import src.dream_cycle_db as dream_cycle_db
 from src.dream_cycle.consensus import tally_consensus
 from src.dream_cycle.storage import store_accepted, check_duplicate
@@ -55,11 +56,32 @@ _ZERO_STATS = {
 # panel as broken. An infra failure (timeout/crash/unparseable output) must never
 # be silently recorded as a quality REJECT vote — retry, then abort loudly.
 EVALUATOR_MAX_ATTEMPTS = 3
+
+
+def _as_int(value) -> int | None:
+    try:
+        return int(value) if value is not None and not isinstance(value, bool) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_str_list(value) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if str(v).strip()]
+    return []
 # The Explorer now enumerates channels and searches for cross-channel echoes;
 # with ~15-20s of kiro-cli overhead per tool turn a thorough pass takes 10-15
 # minutes (a 600s ceiling timed out at 30 tool calls on 2026-09-17).
 EXPLORER_TIMEOUT_S = int(os.environ.get("EXPLORER_TIMEOUT", "1200"))
 THINKER_TIMEOUT_S = int(os.environ.get("THINKER_TIMEOUT", "1200"))
+# Grounding audit + revision (docs/PLAN-panel-acceptance.md). Skipped once the run has
+# spent this share of its cap, so the panel itself always gets to vote.
+GROUNDING_SPEND_SHARE = float(os.environ.get("GROUNDING_SPEND_SHARE", "0.8"))
+GROUNDING_AUDIT_ROLE = "skeptic"
+# Hard cap on candidates per slice (the Thinker is asked for at most 2).
+MAX_CANDIDATES_PER_SLICE = int(os.environ.get("MAX_CANDIDATES_PER_SLICE", "3"))
 EVALUATOR_BACKOFF_S = 2.0
 
 
@@ -302,14 +324,14 @@ class DreamCycleOrchestrator:
                     "Thinker failed for slice '%s', skipping", s.name, exc_info=True
                 )
                 continue
-            # Session-start mode: limit to 1-2 candidates per slice
-            if run_type == "session_start" and len(candidates) > 2:
+            # Per-slice cap: session-start keeps 2; every other run type keeps
+            # MAX_CANDIDATES_PER_SLICE (the Thinker is asked for at most 2, best first).
+            cap = 2 if run_type == "session_start" else MAX_CANDIDATES_PER_SLICE
+            if len(candidates) > cap:
                 logger.info(
-                    "Session-start mode: truncating %d candidates to 2 for slice '%s'",
-                    len(candidates),
-                    s.name,
+                    "Truncating %d candidates to %d for slice '%s'", len(candidates), cap, s.name,
                 )
-                candidates = candidates[:2]
+                candidates = candidates[:cap]
             all_candidates.extend(candidates)
         logger.info("Total candidates from Thinker: %d", len(all_candidates))
 
@@ -323,6 +345,20 @@ class DreamCycleOrchestrator:
         # orphaned accepted memories). An infra failure never fabricates a verdict.
         panel_aborted = False
         for candidate in all_candidates:
+            # Grounding audit + one revision before the panel votes (never aborts).
+            candidate = self._ground_candidate(candidate)
+            if not candidate.content.strip():
+                logger.info("Candidate '%s' had nothing supportable after revision; recording as rejected",
+                            candidate.title)
+                dream_cycle_db.store_candidate(
+                    run_id, asdict(candidate),
+                    {f"evaluator_{k}_verdict": "REJECT" for k in "abcd"}
+                    | {f"evaluator_{k}_reasoning": "grounding audit: nothing supportable remained after revision"
+                       for k in "abcd"},
+                    "REJECTED",
+                )
+                rejected.append(candidate)
+                continue
             try:
                 verdict_a = self._invoke_evaluator_safe(candidate, "skeptic")
                 verdict_b = self._invoke_evaluator_safe(candidate, "advocate")
@@ -350,6 +386,12 @@ class DreamCycleOrchestrator:
                 "evaluator_c_reasoning": verdict_c.reasoning,
                 "evaluator_d_verdict": verdict_d.verdict,
                 "evaluator_d_reasoning": verdict_d.reasoning,
+                # Graded detail (migration 013): score + issue lists per seat.
+                "evaluator_details": {
+                    v.role: {"score": v.score, "blocking_issues": v.blocking_issues,
+                             "advisory_issues": v.advisory_issues}
+                    for v in evaluator_verdicts
+                },
             }
 
             candidate_dict = asdict(candidate)
@@ -727,7 +769,7 @@ class DreamCycleOrchestrator:
         return candidates
 
     def invoke_evaluator(
-        self, candidate: CandidateInsight, role: str
+        self, candidate: CandidateInsight, role: str, stage: str | None = None,
     ) -> EvaluatorVerdict:
         """Invoke a single evaluator (skeptic/advocate/epistemologist/methodologist).
 
@@ -763,10 +805,11 @@ class DreamCycleOrchestrator:
 
         user_message = (
             f"Please evaluate this candidate insight as the {role}. "
-            "Return your verdict as JSON with 'verdict' and 'reasoning' fields."
+            "Return your verdict as JSON with 'verdict', 'score', 'blocking_issues', "
+            "'advisory_issues' and 'reasoning' fields."
         )
 
-        logger.info("Invoking evaluator: role=%s, candidate=%s", role, candidate.title)
+        logger.info("Invoking %s: role=%s, candidate=%s", stage or "evaluator", role, candidate.title)
         # Direct-API backends accept a JSON schema and return the verdict as a
         # tool call — immune to the quote-escaping failures of JSON-in-prose.
         # Agentic CLIs (Kiro's invoke() has a fixed signature) get no extra option.
@@ -775,22 +818,104 @@ class DreamCycleOrchestrator:
             system_prompt=prompt,
             user_message=user_message,
             effort=self.resolver.spec_for(role).effort,
-            stage=f"evaluator:{role}",
+            stage=stage or f"evaluator:{role}",
             run_id=self._current_run_id,
             **extra,
         )
         self._record_spend(role, result)
 
         safe_title = candidate.title.replace(" ", "_").replace("/", "_")[:40]
-        self._capture(f"evaluator_{role}_{safe_title}", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
+        self._capture(f"{(stage or 'evaluator').replace(':', '_')}_{role}_{safe_title}",
+                      inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
 
         output = result["output"]
         if isinstance(output, list):
             output = output[0] if output else {}
+        if not isinstance(output, dict):
+            output = {}
 
         return EvaluatorVerdict(
             role=role,
             verdict=output.get("verdict", "REJECT"),
             reasoning=output.get("reasoning", ""),
+            score=_as_int(output.get("score")),
+            blocking_issues=_as_str_list(output.get("blocking_issues")),
+            advisory_issues=_as_str_list(output.get("advisory_issues")),
         )
+
+    def _ground_candidate(self, candidate: CandidateInsight) -> CandidateInsight:
+        """Audit a candidate against its sources and repair it once before the panel.
+
+        One graded call by the ``GROUNDING_AUDIT_ROLE`` seat's backend lists blocking
+        and advisory defects; if there are any, one tool-less call by the Thinker's
+        backend repairs the candidate (remove/correct unsupported details, narrow the
+        claim, fix attribution, keep evidence). The panel then votes on the result.
+        Skipped when the run has spent >= GROUNDING_SPEND_SHARE of its cap. Never
+        raises except SpendCapExceeded: any other failure returns the candidate unchanged.
+        """
+        if self._spend.cap_usd and self._spend.total_usd >= GROUNDING_SPEND_SHARE * self._spend.cap_usd:
+            logger.info("Grounding audit skipped for '%s': run spend $%.2f >= %.0f%% of cap",
+                        candidate.title, self._spend.total_usd, 100 * GROUNDING_SPEND_SHARE)
+            return candidate
+        try:
+            audit = self.invoke_evaluator(candidate, GROUNDING_AUDIT_ROLE, stage="grounding_audit")
+        except SpendCapExceeded:
+            raise
+        except Exception:
+            logger.warning("Grounding audit failed for '%s'; panel votes on the original", candidate.title,
+                           exc_info=True)
+            return candidate
+        if not audit.blocking_issues and not audit.advisory_issues:
+            logger.info("Grounding audit: '%s' clean (score %s)", candidate.title, audit.score)
+            return candidate
+        logger.info("Grounding audit: '%s' score %s, %d blocking, %d advisory — revising",
+                    candidate.title, audit.score, len(audit.blocking_issues), len(audit.advisory_issues))
+        try:
+            return self._revise_candidate(candidate, audit)
+        except SpendCapExceeded:
+            raise
+        except Exception:
+            logger.warning("Revision failed for '%s'; panel votes on the original", candidate.title, exc_info=True)
+            return candidate
+
+    def _revise_candidate(self, candidate: CandidateInsight, audit: EvaluatorVerdict) -> CandidateInsight:
+        """One tool-less repair call on the Thinker's backend; returns the revised candidate."""
+        candidate_json = json.dumps(asdict(candidate), default=str)
+        sources_text = format_sources_for_evaluator(self._slice_memory_cache, candidate.source_memories)
+        user_message = build_revision_request(candidate_json, sources_text, audit.blocking_issues,
+                                              audit.advisory_issues)
+        result = self._invoker_for("thinker").invoke(
+            system_prompt=REVISION_PROMPT,
+            user_message=user_message,
+            tools=False,
+            timeout=THINKER_TIMEOUT_S,
+            effort="medium",
+            stage="revision",
+            run_id=self._current_run_id,
+            **({} if self._role_has_tools("thinker") else {"schema": REVISION_SCHEMA}),
+        )
+        self._record_spend("thinker", result)
+        out = result.get("output") or {}
+        if isinstance(out, list):
+            out = out[0] if out else {}
+        if not isinstance(out, dict) or "content" not in out:
+            raise ValueError("revision returned no candidate")
+        # Sources may only shrink: the revision must not introduce new citations.
+        original_sources = [str(m) for m in candidate.source_memories]
+        kept = [m for m in _as_str_list(out.get("source_memories")) if m in original_sources] or original_sources
+        revised = CandidateInsight(
+            **{**asdict(candidate),
+               "title": str(out.get("title") or candidate.title)[:300],
+               "content": str(out.get("content") or ""),
+               "confidence": out.get("confidence") if out.get("confidence") in ("high", "medium", "low") else candidate.confidence,
+               "confidence_reasoning": str(out.get("confidence_reasoning") or candidate.confidence_reasoning),
+               "source_memories": kept,
+               "revision": {"original_title": candidate.title, "audit_score": audit.score,
+                            "blocking_issues": audit.blocking_issues, "advisory_issues": audit.advisory_issues}}
+        )
+        self._capture(f"revision_{candidate.title.replace(' ', '_').replace('/', '_')[:40]}",
+                      inputs={"system_prompt": REVISION_PROMPT, "user_message": user_message}, output=out)
+        logger.info("Revised '%s' -> '%s' (confidence %s, %d/%d sources kept)", candidate.title[:60],
+                    revised.title[:60], revised.confidence, len(kept), len(original_sources))
+        return revised
 
