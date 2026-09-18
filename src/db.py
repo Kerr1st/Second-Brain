@@ -347,3 +347,30 @@ def find_schemas_for_memories(memory_ids):
                 constituent_id = str(row.pop("constituent_id"))
                 grouped.setdefault(constituent_id, []).append(row)
             return grouped
+
+
+
+def get_memory_provenance(memory_ids):
+    """Lightweight provenance for many memories: id, type, source_type, created_at,
+    parent_id, project. No content, no vectors. Ids that don't exist (or are not
+    valid UUIDs) are absent from the result. Used by the dream-cycle attention ledger.
+    """
+    import uuid as _uuid
+    ids = []
+    for m in memory_ids:
+        try:
+            ids.append(str(_uuid.UUID(str(m))))
+        except (ValueError, AttributeError, TypeError):
+            continue
+    if not ids:
+        return []
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, type, source_type, created_at, parent_id, project
+                FROM memories WHERE id = ANY(%s::uuid[])
+                """,
+                (ids,),
+            )
+            return [dict(r) for r in cur.fetchall()]

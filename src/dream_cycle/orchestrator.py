@@ -32,6 +32,7 @@ from src.dream_cycle.consensus import tally_consensus
 from src.dream_cycle.storage import store_accepted, check_duplicate
 from src.dream_cycle.digest import generate_digest
 from src.dream_cycle.feedback import build_feedback_injection
+from src.dream_cycle.ledger import record_run_slices
 from src.dream_cycle.packet import (
     EVALUATOR_VERDICT_SCHEMA,
     TOOLLESS_NOTE,
@@ -264,6 +265,10 @@ class DreamCycleOrchestrator:
             dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
             return self._aborted_result(run_id, run_type, started_at)
         logger.info("Explorer returned %d slices", len(slices))
+
+        # Attention ledger: persist what the Explorer chose to look at, with metrics,
+        # before anything downstream can fail. Observability only — never aborts.
+        record_run_slices(run_id, run_type, slices, started_at=started_at)
 
         # Circuit breaker: empty slices → abort early
         if not slices:

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import src.dream_cycle_db as dream_cycle_db
+from src.dream_cycle.ledger import format_attention_section, run_metrics
 from src.models import CandidateInsight
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,14 @@ def generate_digest(
     else:
         lines.append("- (none)")
     lines.append("")
+
+    # Attention ledger: what the Explorer examined (migration 012)
+    try:
+        slice_rows = dream_cycle_db.get_slices_for_run(run_id)
+        if slice_rows:
+            lines += format_attention_section(run_metrics(slice_rows), slice_rows)
+    except Exception:
+        logger.warning("Could not build the attention section for the digest", exc_info=True)
 
     # Feedback loop summary
     lines.append("## Feedback Loop Summary")
