@@ -2534,17 +2534,17 @@ class TestToollessThinkerPacketAndSpendGuard:
         # Contents are cached so evaluators can ground against the same sources.
         assert orch._slice_memory_cache[self.MEM_B]["title"] == "Calendar note"
 
-    def test_tool_capable_thinker_path_is_unchanged(self):
-        """Kiro / Claude Code / Codex Thinkers keep tools=True and read memories
-        themselves; no packet goes into their prompt. The slice contents are
-        still loaded into the cache so the evaluators — which are always
-        tool-less — can ground against source text (hybrid profile: Kiro
-        Thinker, Astra evaluators)."""
+    def test_tool_capable_thinker_gets_packet_and_keeps_tools_for_search(self):
+        """Kiro / Claude Code / Codex Thinkers keep tools=True but now receive the
+        slice contents inline too: re-reading 10-20 memories over MCP at ~20s per
+        turn timed out on episodic slices (2026-09-17). The note tells them to
+        spend tools on CLS-interleaving searches, not on memory_read. Contents
+        are still cached for the tool-less evaluators."""
         orch = _make_orchestrator()  # default laptop profile: kiro
         captured = {}
 
         def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
-            captured.update(user_message=user_message, tools=tools)
+            captured.update(user_message=user_message, tools=tools, timeout=kwargs.get("timeout"))
             return {"output": [], "raw": "[]"}
 
         with patch("src.dream_cycle.orchestrator.load_memories_by_ids", return_value=self._fake_memories()) as loader:
@@ -2553,8 +2553,11 @@ class TestToollessThinkerPacketAndSpendGuard:
 
         loader.assert_called_once_with([self.MEM_A, self.MEM_B])
         assert captured["tools"] is True
+        assert captured["timeout"] >= 1200
         payload = json.loads(captured["user_message"])
-        assert "memories" not in payload["memory_slice"] and "note" not in payload
+        assert [m["id"] for m in payload["memory_slice"]["memories"]] == [self.MEM_A, self.MEM_B]
+        assert "do not re-read them with memory_read" in payload["note"]
+        assert "not available" not in payload["note"].lower()
         assert orch._slice_memory_cache[self.MEM_A]["title"] == "Focus block"
 
     def test_evaluator_prompt_includes_cached_source_contents(self):

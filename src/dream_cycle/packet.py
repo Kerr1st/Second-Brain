@@ -34,6 +34,15 @@ TOOLLESS_NOTE = (
     "text only; do not attempt to search or read memories."
 )
 
+TOOLED_NOTE = (
+    "The full content of every memory in the slice is included above under "
+    "memory_slice.memories — do not re-read them with memory_read. Use your tools "
+    "only for what the packet cannot give you: memory_search to find existing "
+    "semantic memories on the same topic (CLS interleaving) or to check whether a "
+    "candidate already exists, and memory_graph to follow a relationship. Budget "
+    "about 6-10 tool calls; each costs ~20 seconds."
+)
+
 #: Schema for an evaluator verdict. Passed as ``schema=`` to Direct-API
 #: backends so the verdict arrives as a tool call rather than JSON-in-prose:
 #: in the first live Bedrock run, Sonnet 5 wrote ~3.5K tokens of markdown

@@ -35,6 +35,7 @@ from src.dream_cycle.feedback import build_feedback_injection
 from src.dream_cycle import allocation, ledger
 from src.dream_cycle.packet import (
     EVALUATOR_VERDICT_SCHEMA,
+    TOOLED_NOTE,
     TOOLLESS_NOTE,
     build_packet,
     format_sources_for_evaluator,
@@ -58,6 +59,7 @@ EVALUATOR_MAX_ATTEMPTS = 3
 # with ~15-20s of kiro-cli overhead per tool turn a thorough pass takes 10-15
 # minutes (a 600s ceiling timed out at 30 tool calls on 2026-09-17).
 EXPLORER_TIMEOUT_S = int(os.environ.get("EXPLORER_TIMEOUT", "1200"))
+THINKER_TIMEOUT_S = int(os.environ.get("THINKER_TIMEOUT", "1200"))
 EVALUATOR_BACKOFF_S = 2.0
 
 
@@ -642,21 +644,22 @@ class DreamCycleOrchestrator:
 
         # The evaluators are always tool-less, so cache the slice contents for
         # their grounding checks regardless of how the Thinker reads memories.
-        # A tool-capable Thinker (agentic CLI) reads them itself over MCP; a
-        # tool-less one (Direct-API / Bedrock) additionally gets the contents in
-        # its prompt — the "B2 context packet".
+        # Every Thinker gets the slice contents inline (the "B2 context packet"):
+        # a tool-capable one (agentic CLI) used to re-read 10-20 memories over MCP
+        # at ~20s per turn and timed out on episodic slices (2026-09-17); it now
+        # keeps its tools for CLS-interleaving searches only. A tool-less one
+        # (Direct-API / Bedrock) reasons from the packet alone.
         thinker_has_tools = self._role_has_tools("thinker")
         memories = load_memories_by_ids(slice.memory_ids)
         for memory in memories:
             self._slice_memory_cache[str(memory.get("id"))] = memory
-        if not thinker_has_tools:
-            payload["memory_slice"]["memories"] = build_packet(memories)
-            payload["note"] = TOOLLESS_NOTE
-            if len(memories) < len(slice.memory_ids):
-                logger.warning(
-                    "Thinker packet: loaded %d of %d slice memories for %s",
-                    len(memories), len(slice.memory_ids), slice.name,
-                )
+        payload["memory_slice"]["memories"] = build_packet(memories)
+        payload["note"] = TOOLED_NOTE if thinker_has_tools else TOOLLESS_NOTE
+        if len(memories) < len(slice.memory_ids):
+            logger.warning(
+                "Thinker packet: loaded %d of %d slice memories for %s",
+                len(memories), len(slice.memory_ids), slice.name,
+            )
 
         user_message = json.dumps(payload, default=str)
 
@@ -671,7 +674,7 @@ class DreamCycleOrchestrator:
             system_prompt=prompt,
             user_message=user_message,
             tools=thinker_has_tools,
-            timeout=600,
+            timeout=THINKER_TIMEOUT_S,
             effort=self.resolver.spec_for("thinker").effort,
             stage="thinker",
             run_id=self._current_run_id,
