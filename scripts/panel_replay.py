@@ -34,6 +34,7 @@ from typing import Callable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.backends.cost import SpendCapExceeded, SpendTracker  # noqa: E402
+from src.backends.base import BACKEND_CAPABILITIES  # noqa: E402
 from src.backends.resolver import DEFAULT_ADAPTERS, RoleBackend, default_resolver  # noqa: E402
 from src.dream_cycle.consensus import tally_consensus  # noqa: E402
 from src.dream_cycle.packet import (  # noqa: E402
@@ -100,6 +101,17 @@ def sources_text_for(candidate: CandidateInsight, loader: Callable = load_memori
 # --------------------------------------------------------------------------- #
 # Replay                                                                       #
 # --------------------------------------------------------------------------- #
+def _require_direct_api(seat: str, spec: RoleBackend) -> None:
+    """Replay only runs on Direct-API backends: they accept the verdict schema, and
+    they honour the requested model. An agentic CLI seat (Kiro) would silently route
+    the corpus to whatever the server picks — on 2026-09-17 that was Fable."""
+    caps = BACKEND_CAPABILITIES.get(spec.backend)
+    if caps is None or caps.supports_mcp:
+        raise SystemExit(
+            f"seat {seat!r} resolves to backend {spec.backend!r} ({spec.model}), which is not a Direct-API "
+            f"backend. Use --profile controlled or --model-override {seat}=bedrock:<model>.")
+
+
 def parse_overrides(specs: list[str]) -> dict[str, RoleBackend]:
     """--model-override skeptic=bedrock:global.anthropic.claude-sonnet-5[:effort]"""
     out = {}
@@ -126,6 +138,7 @@ def replay(rows: list[dict], seats: list[str], resolver, tracker: SpendTracker, 
         sources = sources_fn(cand)
         for seat in seats:
             spec = overrides.get(seat) or resolver.spec_for(seat)
+            _require_direct_api(seat, spec)
             eff = effort or spec.effort
             prompt = prompt_fn(role=seat, candidate_json=candidate_json, source_memories_content=sources)
             rec = {"candidate_id": row["id"], "run_id": str(row["run_id"]), "title": cand.title[:120],

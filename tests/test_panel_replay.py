@@ -81,6 +81,7 @@ class TestReplay:
             def invoke(self, system_prompt, user_message, effort=None, stage=None, schema=None, **kw):
                 return {"output": {"verdict": "ACCEPT", "reasoning": "swapped"}, "usage": {"input_tokens": 10, "output_tokens": 1}}
         monkeypatch.setitem(pr.DEFAULT_ADAPTERS, "fakebe", FakeAdapter)
+        monkeypatch.setitem(pr.BACKEND_CAPABILITIES, "fakebe", pr.BACKEND_CAPABILITIES["bedrock"])  # a Direct-API backend
         overrides = pr.parse_overrides(["skeptic=fakebe:sonnet-x:medium"])
         recs = pr.replay([_row()], ["skeptic", "advocate"], res, SpendTracker(cap_usd=5), overrides=overrides,
                          effort="low", sources_fn=lambda c: "")
@@ -119,6 +120,14 @@ class TestReplay:
                          dry_run=True, sources_fn=lambda c: "")
         assert res.calls == [] and seen == ["skeptic"]
         assert recs[0]["verdict"] is None and recs[0]["variant"] == "standard" and recs[0]["prompt_chars"] == len("VARIANT skeptic")
+
+
+class TestDirectApiOnly:
+    def test_agentic_cli_seat_is_refused(self):
+        res = _FakeResolver({s: "ACCEPT" for s in pr.SEATS})
+        res.specs["skeptic"] = RoleBackend(role="skeptic", backend="kiro", model="claude-opus-5", effort="high")
+        with pytest.raises(SystemExit, match="not a Direct-API backend"):
+            pr.replay([_row()], ["skeptic"], res, SpendTracker(cap_usd=5), sources_fn=lambda c: "")
 
 
 class TestNoWrites:
