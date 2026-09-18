@@ -145,3 +145,23 @@ def format_sources_for_evaluator(cache: dict[str, dict], source_ids) -> str:
     if not lines:
         return ""
     return "Source memory contents:\n" + "\n".join(lines)
+
+
+
+#: Graded verdict schema for the experimental "standard" evaluator prompt variant
+#: (see src/prompts/panel.py). Keeps the binary verdict so today's tally still works,
+#: and adds the information the panel currently throws away.
+EVALUATOR_VERDICT_SCHEMA_V2 = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["ACCEPT", "REJECT"]},
+        "score": {"type": "integer", "minimum": 0, "maximum": 100,
+                  "description": "How far the claim as written meets the Standard (0-100)."},
+        "blocking_issues": {"type": "array", "items": {"type": "string"},
+                            "description": "Blocking defects found (fabrication, contradiction, misattribution, uncited)."},
+        "advisory_issues": {"type": "array", "items": {"type": "string"},
+                            "description": "Advisory defects found (overreach, overlap, timing, depth)."},
+        "reasoning": {"type": "string", "description": "Name the failing letter(s) or state all four hold, then explain."},
+    },
+    "required": ["verdict", "score", "blocking_issues", "advisory_issues", "reasoning"],
+}

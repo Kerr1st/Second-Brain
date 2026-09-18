@@ -165,3 +165,91 @@ Return a JSON object with exactly two fields:
 Example: {{"verdict": "ACCEPT", "reasoning": "The insight is well-grounded in 4 independent memories..."}}"""
 
     return prompt
+
+
+
+
+# --------------------------------------------------------------------------- #
+# Variant "standard" (experimental; docs/PLAN-panel-acceptance.md Phase 1/2)
+# --------------------------------------------------------------------------- #
+# The current prompts list criteria but state no decision rule, and demand a binary
+# verdict with "no maybe". Replay experiments (2026-09-18) showed GPT-6 Astra then
+# rejects ~95% of candidates in any seat — including carefully scoped ones — while
+# conceding "the practical core is supported". This variant (a) states an explicit
+# acceptance standard, (b) separates BLOCKING defects (fabrication, contradiction by
+# the sources, misattribution, uncited claims) from ADVISORY ones (overreach, novelty,
+# timing, depth), and (c) asks for a 0-100 score alongside the verdict so a "supported
+# but overstated" judgement is expressible. The tally can then use scores and blocking
+# flags across both model families instead of counting binary vetoes.
+
+_STANDARD = """\
+## Standard
+
+The criteria below are lenses. This is the decision rule.
+
+ACCEPT when all four hold:
+(a) Grounded — every statement and quotation appears in the cited source text, attributed \
+to the right author, channel and date.
+(b) Scoped — the claim is stated at the scope the sources support. Three memories from one \
+week support a claim about that week, not "every", "never" or "always". A specific, scoped \
+observation about the user's current week qualifies on its own. Universality, a multi-period \
+pattern and six-month durability are NOT required.
+(c) Non-obvious and useful — it connects, names or flags something the user has not already \
+articulated, and the user could act on it or would want to know it now.
+(d) New — not a restatement of the sources or of any existing memory shown to you.
+
+BLOCKING defects (any one means REJECT): a quotation or fact not present in the cited \
+sources; a claim the cited sources contradict; wording credited to a person or organisation \
+the source does not show produced it; a conclusion that rests on a memory that is not cited.
+
+ADVISORY defects (lower the score, do not by themselves reject): a generalisation wider \
+than the sources carry; partial overlap with an existing memory; unverified timing; thin \
+WHY IT MATTERS. Name them; the user and the other evaluators will see them.
+
+Do not reject a correctly scoped claim for being narrow. Judge the claim as written, not \
+the claim it could have been. Your reasoning must name the letter(s) that fail, or state \
+that all four hold."""
+
+_VERDICT_V2 = """\
+## Your verdict
+
+Return a JSON object with these fields:
+- "verdict": "ACCEPT" or "REJECT"
+- "score": 0-100 — how far the claim, as written, meets the Standard (100 = all four letters \
+hold cleanly; 60 = holds with advisory defects; below 40 = a blocking defect or (c)/(d) fail)
+- "blocking_issues": list of strings, each one blocking defect found (empty if none)
+- "advisory_issues": list of strings, each one advisory defect found (empty if none)
+- "reasoning": name the letter(s) that fail or state that all four hold, then explain. \
+Provide reasoning before stating your verdict.
+
+Examples:
+{{"verdict": "ACCEPT", "score": 78, "blocking_issues": [], "advisory_issues": ["'each said no action was needed' is true of two of the three notices, not all three"], "reasoning": "(a) the two quotations appear in the cited notices; (b) the claim is limited to the captured notices and says so; (c) the user has not connected the state letter to the silence of the Amazon channel; (d) the cited DLS memory states the 5-day rule but not that no captured notice mentions it. All four hold, with one advisory overstatement."}}
+{{"verdict": "REJECT", "score": 22, "blocking_issues": ["the quoted phrase 'decision letter will follow' does not appear in any cited source"], "advisory_issues": [], "reasoning": "(a) fails: the central quotation is not in the sources. (b), (c), (d) not reached."}}"""
+
+
+def get_evaluator_prompt_standard(role: str, candidate_json: str, source_memories_content: str) -> str:
+    """Experimental variant of :func:`get_evaluator_prompt` with an explicit acceptance
+    standard, blocking/advisory separation and a graded verdict. Same role criteria."""
+    if role not in _ROLE_DESCRIPTIONS:
+        raise ValueError(
+            f"Invalid evaluator role: {role!r}. "
+            f"Must be one of: skeptic, advocate, epistemologist, methodologist"
+        )
+    role_description = _ROLE_DESCRIPTIONS[role]
+    criteria = _ROLE_CRITERIA[role]
+    extra_context = _ADVOCATE_CONTEXT if role == "advocate" else ""
+    return f"""\
+You are evaluating a candidate insight. Your role is {role_description} You are one of four \
+evaluators from two model families; your verdict, score and issue lists are combined with theirs.
+
+## The candidate insight:
+{candidate_json}
+
+## The source memories it references:
+{source_memories_content}
+{extra_context}
+{_STANDARD}
+
+{criteria}
+
+{_VERDICT_V2}"""

@@ -39,6 +39,7 @@ from src.backends.resolver import DEFAULT_ADAPTERS, RoleBackend, default_resolve
 from src.dream_cycle.consensus import tally_consensus  # noqa: E402
 from src.dream_cycle.packet import (  # noqa: E402
     EVALUATOR_VERDICT_SCHEMA,
+    EVALUATOR_VERDICT_SCHEMA_V2,
     format_sources_for_evaluator,
     load_memories_by_ids,
 )
@@ -101,6 +102,10 @@ def sources_text_for(candidate: CandidateInsight, loader: Callable = load_memori
 # --------------------------------------------------------------------------- #
 # Replay                                                                       #
 # --------------------------------------------------------------------------- #
+def schema_for(variant: str) -> dict:
+    return EVALUATOR_VERDICT_SCHEMA_V2 if variant == "standard" else EVALUATOR_VERDICT_SCHEMA
+
+
 def _require_direct_api(seat: str, spec: RoleBackend) -> None:
     """Replay only runs on Direct-API backends: they accept the verdict schema, and
     they honour the requested model. An agentic CLI seat (Kiro) would silently route
@@ -157,7 +162,7 @@ def replay(rows: list[dict], seats: list[str], resolver, tracker: SpendTracker, 
                     system_prompt=prompt,
                     user_message=(f"Please evaluate this candidate insight as the {seat}. "
                                   "Return your verdict as JSON with 'verdict' and 'reasoning' fields."),
-                    effort=eff, stage=f"replay:{seat}", schema=EVALUATOR_VERDICT_SCHEMA)
+                    effort=eff, stage=f"replay:{seat}", schema=schema_for(variant))
             except Exception as e:  # noqa: BLE001 — one bad call must not sink the experiment
                 rec.update({"verdict": "ERROR", "reasoning": f"{type(e).__name__}: {e}"[:400], "cost_usd": 0.0,
                             "latency_s": round(time.time() - t0, 1)})
@@ -168,6 +173,8 @@ def replay(rows: list[dict], seats: list[str], resolver, tracker: SpendTracker, 
                 output = output[0] if output else {}
             cost = tracker.record(spec.model, result.get("usage")) if isinstance(result.get("usage"), dict) else 0.0
             rec.update({"verdict": output.get("verdict", "REJECT"), "reasoning": (output.get("reasoning") or "")[:4000],
+                        "score": output.get("score"), "blocking_issues": output.get("blocking_issues"),
+                        "advisory_issues": output.get("advisory_issues"),
                         "cost_usd": round(cost, 4), "latency_s": round(time.time() - t0, 1)})
             records.append(rec); (sink or (lambda r: None))(rec)
     return records
@@ -184,7 +191,11 @@ def matrix(records: list[dict], seats: list[str]) -> dict:
         for cid, votes in by_cand.items():
             if all(votes.get(s) in ("ACCEPT", "REJECT") for s in SEATS):
                 outcomes[tally_consensus([EvaluatorVerdict(role=s, verdict=votes[s]) for s in SEATS])] += 1
+    scores = {s: [r["score"] for r in records if r["seat"] == s and isinstance(r.get("score"), int)] for s in seats}
+    blocking = {s: sum(1 for r in records if r["seat"] == s and r.get("blocking_issues")) for s in seats}
     return {"candidates": len(by_cand), "per_seat": {s: dict(c) for s, c in per_seat.items()},
+            "mean_score": {s: round(sum(v) / len(v), 1) for s, v in scores.items() if v},
+            "blocking_count": {s: n for s, n in blocking.items() if scores.get(s)},
             "consensus": dict(outcomes), "total_cost_usd": round(sum(r.get("cost_usd", 0) for r in records), 4)}
 
 
@@ -192,7 +203,8 @@ def print_matrix(m: dict) -> None:
     print(f"\n{m['candidates']} candidates, ${m['total_cost_usd']:.2f}")
     for seat, counts in m["per_seat"].items():
         acc = counts.get("ACCEPT", 0); tot = sum(counts.values())
-        print(f"  {seat:15s} ACCEPT {acc}/{tot}" + (f"  (errors {counts['ERROR']})" if counts.get("ERROR") else ""))
+        extra = f"  mean score {m['mean_score'][seat]}  blocking on {m['blocking_count'].get(seat, 0)}" if seat in m.get("mean_score", {}) else ""
+        print(f"  {seat:15s} ACCEPT {acc}/{tot}" + (f"  (errors {counts['ERROR']})" if counts.get("ERROR") else "") + extra)
     if m["consensus"]:
         print(f"  3-of-4: {m['consensus']}")
 

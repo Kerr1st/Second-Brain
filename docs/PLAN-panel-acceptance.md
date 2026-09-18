@@ -79,11 +79,11 @@ Hypotheses, to be tested before the fix is chosen (Phase 1):
 
 ## 4. Phases
 
-### Phase 0 — Instrument: offline panel replay  `[ ]`
+### Phase 0 — Instrument: offline panel replay  `[x]`
 Goal: evaluate stored candidates again, cheaply, with variant prompts/models/seats,
 without running Explorer or Thinker. Everything after this depends on it.
 
-- [ ] `scripts/panel_replay.py`
+- [x] `scripts/panel_replay.py`
   - inputs: `--run <run_id>` or `--candidate <id>...`; `--seats skeptic,advocate,...`;
     `--model-override role=backend:model` (e.g. `skeptic=bedrock:global.anthropic.claude-sonnet-5`);
     `--prompt-variant {current,v2}`; `--limit N`; `--dry-run`; `--cap-usd`.
@@ -95,20 +95,20 @@ without running Explorer or Thinker. Everything after this depends on it.
     verdict, reasoning, cost}` to `logs/panel_replay/<timestamp>.jsonl`, prints an
     acceptance matrix per seat and the 3-of-4 outcome.
   - never writes to `dream_cycle_candidates`; uses `SpendTracker` with `--cap-usd`.
-- [ ] `tests/test_panel_replay.py`: hermetic (fake invoker), covers matrix + cost cap + no DB writes.
-- [ ] Baseline replay on 6 candidates from `47fffa94` (3 life, 3 project), current prompts,
+- [x] `tests/test_panel_replay.py`: hermetic (fake invoker), covers matrix + cost cap + no DB writes.
+- [x] Baseline replay on 6 candidates from `47fffa94` (3 life, 3 project), current prompts,
   current models → confirm Astra ≈ 0 accepts reproduces. (~$1.8)
 
-### Phase 1 — Diagnose: seat vs. model vs. scope  `[ ]`
+### Phase 1 — Diagnose: seat vs. model vs. scope  `[x]`
 Same 6 candidates, three experiments (~$1.8 each):
-- [ ] **Seat swap**: Sonnet 5 in Skeptic+Epistemologist, Astra in Advocate+Methodologist.
-- [ ] **Scoped rewrite**: hand-narrow each candidate's title/WHAT to what its sources
+- [x] **Seat swap**: Sonnet 5 in Skeptic+Epistemologist, Astra in Advocate+Methodologist.
+- [x] **Scoped rewrite**: hand-narrow each candidate's title/WHAT to what its sources
   support (no other change); replay with current prompts/models. Tests H1 directly.
-- [ ] **Rubric v2**: current candidates, prompts with an explicit acceptance standard
+- [x] **Rubric v2**: current candidates, prompts with an explicit acceptance standard
   (Phase 2 draft). Tests H2.
-- [ ] Record results in §6 Decisions and choose the fix mix.
+- [x] Record results in §6 Decisions and choose the fix mix.
 
-### Phase 2 — Design the fix (choose from evidence)  `[ ]`
+### Phase 2 — Design the fix (choose from evidence)  `[x]` — see Decisions 2026-09-18
 Candidates, in priority order; each is small and independently testable:
 - [ ] **Thinker: scope-to-evidence rule** (`src/prompts/thinker.py`). Claims stated at the
   scope the cited memories support; quantify ("in the three notifications captured…");
@@ -135,7 +135,7 @@ Candidates, in priority order; each is small and independently testable:
   guard that skips the panel for candidates the Thinker itself marks `confidence: low`
   with a single source.
 
-### Phase 3 — Implement + verify offline  `[ ]`
+### Phase 3 — Implement + verify offline  `[~]`
 - [ ] Implement the chosen items with unit tests (prompt contracts, consensus with REVISE,
   narrowing call, replay harness variant).
 - [ ] Replay all 12 `47fffa94` candidates through the new pipeline offline (narrowing +
@@ -158,13 +158,69 @@ Candidates, in priority order; each is small and independently testable:
 
 _Updated as work proceeds; newest first._
 
-- 2026-09-17 21:05 — Branch created; plan written; Phase 0 starting. Subagents dispatched
-  for (A) rubric analysis and (B) REVISE-loop/replay design review (code-only inputs).
+- 2026-09-18 06:40 — **Phase 1 complete; design chosen (see Decisions). Phase 3 starting.**
+  Spend so far ≈ $6.20 of the $12 branch budget. Experiment records: `logs/panel_replay/`.
+  - **Seat swap B** (Astra in the Advocate + Methodologist seats): Advocate 2/6, Methodologist
+    0/6. Astra rejects in every seat; Sonnet accepts in every seat (swap A: 5/6, 6/6). Model
+    disposition, not the rubric, decides the vote. **H3 confirmed as dominant.**
+  - **Scoped rewrite** (3 life candidates hand-narrowed with `claim_scope`, Astra seats, current
+    prompts): 0/3 and 1/3. Scoping alone does not unlock Astra — it moves to the next defect.
+  - **Rubric v2** (graded prompt with an explicit Standard and BLOCKING/ADVISORY separation,
+    `get_evaluator_prompt_standard` + `EVALUATOR_VERDICT_SCHEMA_V2`; original candidates; Astra
+    seats): 0/12 ACCEPT, scores 28–32, **2–4 blocking issues per candidate — and they are
+    correct**: "closed on 2026-07-06" (sources say approved, not closed); fax number and
+    channels not in any cited source; "the case manager wrote" attributed to an agent summary;
+    "you concluded" attributing the assistant's words to the user; cost figures that contradict
+    the cited table; "none of them are in any deck" with no source. The Thinker fabricates
+    details and misattributes; Sonnet accepts ~70% of these anyway. **Astra is the only seat
+    catching real defects. Making the panel accept these candidates would be the wrong fix.**
+  - **Revision probe** (`scripts/revise_probe.py`: Thinker backend repairs 2 candidates from
+    Astra's issue lists, tool-less, ~$0.08 each; then Astra seats re-vote on v2): candidate 1 →
+    Skeptic ACCEPT (77) + Epistemologist ACCEPT; candidate 2 → Skeptic ACCEPT, Epistemologist
+    REJECT (1 blocking). With the Sonnet seats' existing ACCEPTs both would pass 3-of-4.
+    **A grounded revision passes Astra.** This is the mechanism to build.
+- 2026-09-18 06:20 — Phase 0 done. Replay harness committed (`e627f03` + Direct-API-only
+  guard). Experiment set: 6 candidates from `47fffa94` (`/tmp/replay_set.txt`; 3
+  `arrivals_synthesis`, 3 project). Baseline (Astra, current prompts): 12/12 verdicts identical
+  to the live run — a single flipped vote is signal. All 12 candidates of `47fffa94` cite only
+  in-slice sources (evaluators saw every source); "sources not supplied" is a Kiro-era artefact.
+  Objection tally across 41 Astra rejections (keyword, noisy): independence 39, scope 33,
+  causal overclaim 32, attribution 24, novelty 17. Subagent rubric analysis: 6 hard blockers for
+  a this-week observation + no decision rule.
+- 2026-09-17 21:05 — Branch created; plan written; Phase 0 starting.
 
 ## 6. Decisions
 
+- 2026-09-18 — **Design chosen from Phase 1 evidence: fix candidate grounding, not panel
+  leniency.** The panel is not too strict; the Thinker's candidates contain fabricated details,
+  misattributions and contradicted claims that only the Astra seats catch. Build:
+  1. **Thinker grounding + scope rule** (prevention): every fact traceable to a cited memory;
+     verbatim quotes; attribute to whoever produced the text (agent summaries are not the
+     email's author); no detail not in the packet; claims at the scope the sources support;
+     confidence by source count/independence; `claim_scope:` sentence; at most 2 candidates
+     per slice, best-grounded first.
+  2. **Graded evaluator prompt as THE prompt** (`get_evaluator_prompt` becomes the "standard"
+     variant): explicit acceptance Standard, BLOCKING vs ADVISORY defects, 0–100 score,
+     issue lists (`EVALUATOR_VERDICT_SCHEMA` gains score/blocking_issues/advisory_issues).
+     Criteria reworded per the subagent analysis (Skeptic 1–3, Advocate 4, Epistemologist
+     1, 2, 4, Methodologist 2), keeping pinned substrings.
+  3. **Pre-panel grounding audit + one revision** (orchestrator): before the panel, one
+     audit call by the Skeptic seat's backend (Astra) with the graded prompt; if it lists any
+     blocking or advisory issue, one tool-less revision call by the Thinker backend repairs the
+     candidate (remove/correct unsupported details, narrow scope, fix attribution, keep
+     evidence); the four-seat panel then votes once on the revised candidate. Consensus stays
+     binary 3-of-4. Audit/revision skipped when run spend ≥ 80% of cap. Original title kept in
+     `candidate_json.revision.original_title`; audit issues persisted for the digest.
+  4. **Cost levers**: ≤2 candidates per slice (Thinker rule + orchestrator hard cap 3);
+     Astra seats at `effort=medium` if verdict agreement with `high` holds on the replay set.
+     Estimated ≈ $5/run (Explorer 0.6 + Thinker 1.0 + 8 × (audit 0.12 + revise 0.08 + panel
+     0.30)); the user decides between the $6 cap and a higher cap.
+  Rejected alternatives: REVISE verdict with a second full panel pass (≈ $0.70/candidate, more
+  state); reseating an Astra seat (loses the only grounding check); rubric-only change
+  (Astra 0/12 even on the graded prompt without revision).
 - 2026-09-17 — Keep cross-family consensus and 3-of-4; fix scope and rubric first; reseat
-  only if Phase 1 shows Astra rejects regardless of rubric (H3).
+  only if Phase 1 shows Astra rejects regardless of rubric (H3). *(H3 confirmed; reseating
+  rejected anyway — see above.)*
 - 2026-09-17 — Subagents get code and prompts, never corpus content.
 
 ## 7. Useful queries
