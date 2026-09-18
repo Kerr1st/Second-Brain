@@ -143,8 +143,8 @@ Candidates, in priority order; each is small and independently testable:
   every accepted candidate is grounded in its cited sources (read them).
 - [x] Full suite green; commit per item.
 
-### Phase 4 — Live verification  `[~]`
-- [ ] One scheduled run on `controlled` (via `launchctl kickstart gui/$(id -u)/com.second-brain.dream-cycle`).
+### Phase 4 — Live verification  `[~]` — first run done; 5 nights of observation pending
+- [x] One scheduled run on `controlled` (via `launchctl kickstart gui/$(id -u)/com.second-brain.dream-cycle`).
   Check: ledger unchanged in shape (≥5 source types, ≥50% episodic), ≥1 accepted insight,
   digest lists it with all four reasonings, cost ≤ $6.
 - [ ] Then 5 nights of observation: acceptance per seat from
@@ -157,6 +157,28 @@ Candidates, in priority order; each is small and independently testable:
 ## 5. Status
 
 _Updated as work proceeds; newest first._
+
+- 2026-09-18 08:15 — **Phase 4 live run done: first accepted insights in the system's history.**
+  Run `3a1263a6` (scheduled, profile `controlled`, launched via launchd): Explorer 4 slices +
+  guaranteed arrivals slice (ledger: 10 source types, 80% episodic, 52% arrivals); Thinker 10
+  candidates (2 per slice); panel judged 6 before the **$6 cap stopped the run** at $6.10.
+
+  | candidate | audit | A B C D | Astra scores | result |
+  |---|---|---|---|---|
+  | Agentic SDLC pitch vs governance blocker, two channels | 34 → revised | A A A A | 95 / 98 | **ACCEPTED** (connection) |
+  | `k` alias launches Fable 5.1 at max effort | 35 → revised | A A R A | 84 / 38 | **ACCEPTED** (insight) |
+  | 'core is secure' title reads as a general verdict | 35 → revised | R A R A | 35 / 36 | REJECTED |
+  | Approval gating as the MCP-server safety rationale | 34 → revised | R A A A | 39 / 93 | **ACCEPTED** (connection) |
+  | SAA docs: PII masked only if not in the input | 35 → revised | A A A A | 92 / 94 | **ACCEPTED** (synthesis) |
+  | "PII restriction will never trigger" premise | skipped (80% cap) | R A R A | 36 / 34 | REJECTED |
+
+  Astra seats: Skeptic 3/6, Epistemologist 3/6 (lifetime before today: 1/70). Every revised
+  candidate scored 84–98 from at least one Astra seat; the unaudited control scored 36/34 and
+  was rejected — the same pattern as offline. 4 memories created (2 connection, 1 insight,
+  1 synthesis). Cost $6.10 for 6 candidates: skeptic 12 calls $1.64 (6 audits + 6 votes),
+  thinker 10 calls $1.72 (5 slices + 5 revisions), explorer $0.72, epistemologist $1.02,
+  advocate + methodologist $0.88. ≈ $0.55 per grounded candidate; a 10-candidate night needs
+  ≈ $8.5. **Cost envelope is now the user's decision** (see §6 open items).
 
 - 2026-09-18 07:35 — **Phase 3 verified offline. Phase 4 (live run) next.**
   `scripts/panel_replay.py --ground` ran the 6-candidate set through the real path
@@ -250,6 +272,11 @@ _Updated as work proceeds; newest first._
   Rejected alternatives: REVISE verdict with a second full panel pass (≈ $0.70/candidate, more
   state); reseating an Astra seat (loses the only grounding check); rubric-only change
   (Astra 0/12 even on the graded prompt without revision).
+- 2026-09-18 — **Open (user):** cost envelope. Options: (A) raise `SECOND_BRAIN_RUN_COST_CAP_USD`
+  to 9 and the AWS daily budget to match (≈ $8.5/run, ≈ $255/month); (B) keep $6 and cut work —
+  `MAX_CANDIDATES_PER_SLICE=1` / Thinker "at most 1" (≈ 5 candidates, ≈ $5/run) and Astra seats
+  at `effort=medium`; (C) cap $8 + Astra `medium` (≈ $6.5/run). Until decided, nightly runs on
+  this branch stop at the $6 cap after ~6 judged candidates (accepted ones are kept).
 - 2026-09-17 — Keep cross-family consensus and 3-of-4; fix scope and rubric first; reseat
   only if Phase 1 shows Astra rejects regardless of rubric (H3). *(H3 confirmed; reseating
   rejected anyway — see above.)*
