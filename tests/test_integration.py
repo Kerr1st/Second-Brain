@@ -195,6 +195,7 @@ class TestFullPipelineIntegration:
 
                 # Mock digest file writing
                 with patch("pathlib.Path.mkdir"), \
+                     patch.object(orch, "_skim_arrivals", return_value=None), \
                      patch("pathlib.Path.write_text"):
                     result = orch.run(run_type="scheduled")
 

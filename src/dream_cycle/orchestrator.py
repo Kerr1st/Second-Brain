@@ -19,7 +19,7 @@ import psycopg2
 
 from src.backends.base import BACKEND_CAPABILITIES
 from src.backends.cost import SpendCapExceeded, SpendTracker, kill_switch_engaged
-from src.backends.resolver import VALID_ROLES, default_resolver
+from src.backends.resolver import SKIM_ROLE, VALID_ROLES, default_resolver
 from src.models import (
     CandidateInsight,
     DreamCycleResult,
@@ -28,6 +28,7 @@ from src.models import (
 )
 from src.prompts import get_evaluator_prompt, get_explorer_prompt, get_thinker_prompt
 from src.prompts.revision import REVISION_PROMPT, REVISION_SCHEMA, build_revision_request
+from src.prompts.skim import PROMPT_VERSION as SKIM_PROMPT_VERSION
 import src.dream_cycle_db as dream_cycle_db
 from src.dream_cycle.consensus import tally_consensus
 from src.dream_cycle.storage import store_accepted, check_duplicate
@@ -42,6 +43,7 @@ from src.dream_cycle.packet import (
     format_sources_for_evaluator,
     load_memories_by_ids,
 )
+from src.skim.runner import SkimResult, skim_window
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,32 @@ GROUNDING_AUDIT_ROLE = "skeptic"
 # Hard cap on candidates per slice (the Thinker is asked for at most 2).
 MAX_CANDIDATES_PER_SLICE = int(os.environ.get("MAX_CANDIDATES_PER_SLICE", "3"))
 EVALUATOR_BACKOFF_S = 2.0
+# Skim stage (docs/PLAN-skim-stage.md, Step 3.5): every parent-level arrival in the
+# window is read once by the `skim` role's cheap Bedrock model. Its own sub-cap is
+# SKIM_SPEND_CAP_USD (env SECOND_BRAIN_SKIM_CAP_USD) and never more than
+# SKIM_RUN_CAP_SHARE of the run cap; the spend still counts toward the run cap.
+SKIM_SPEND_CAP_USD = 1.00
+SKIM_RUN_CAP_SHARE = 0.15
+
+
+def _skim_cap_usd(run_cap_usd: float) -> float:
+    """The skim's sub-cap: SECOND_BRAIN_SKIM_CAP_USD (default SKIM_SPEND_CAP_USD),
+    bounded to SKIM_RUN_CAP_SHARE of the run cap. A bad env value falls back to the
+    default with a warning, like SpendTracker.from_env."""
+    cap = SKIM_SPEND_CAP_USD
+    raw = os.environ.get("SECOND_BRAIN_SKIM_CAP_USD")
+    if raw:
+        try:
+            parsed = float(raw)
+            if parsed > 0:
+                cap = parsed
+            else:
+                logger.warning("SECOND_BRAIN_SKIM_CAP_USD=%r must be > 0; using default $%.2f", raw, cap)
+        except ValueError:
+            logger.warning("SECOND_BRAIN_SKIM_CAP_USD=%r is not a number; using default $%.2f", raw, cap)
+    if run_cap_usd and run_cap_usd > 0:
+        cap = min(cap, SKIM_RUN_CAP_SHARE * float(run_cap_usd))
+    return cap
 
 
 class DreamCycleOrchestrator:
@@ -309,6 +337,12 @@ class DreamCycleOrchestrator:
             stats["recent_activity"],
         )
 
+        # Step 3.5: Skim every arrival in the window (cheap Bedrock model, own sub-cap).
+        # Never aborts the run on its own failure: None means the Explorer gets the
+        # plain arrivals manifest, exactly as before. SpendCapExceeded propagates.
+        skim = self._skim_arrivals(run_id, run_type, started_at)
+        skim_stats = skim.to_stats() if skim is not None else {}
+
         # Step 4: Invoke Explorer (with crash/timeout handling). On a scheduled run an
         # Explorer failure no longer aborts the night: the guaranteed arrivals slice
         # (built in _allocate_attention) lets the run still examine what arrived.
@@ -318,7 +352,7 @@ class DreamCycleOrchestrator:
         except (TimeoutError, RuntimeError):
             if run_type not in ("scheduled", "session_start"):
                 logger.error("Explorer agent crashed or timed out (run_id=%s)", run_id)
-                dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
+                dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS | skim_stats, digest="")
                 return self._aborted_result(run_id, run_type, started_at)
             logger.error("Explorer agent crashed or timed out (run_id=%s); continuing with the "
                          "guaranteed arrivals slice only", run_id)
@@ -333,7 +367,7 @@ class DreamCycleOrchestrator:
         if not slices:
             logger.warning("Circuit breaker: no slices to examine (Explorer returned none and "
                            "nothing arrived), aborting early")
-            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
+            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS | skim_stats, digest="")
             return self._aborted_result(run_id, run_type, started_at)
 
         # Step 6: Invoke Thinker for each slice, collect candidates
@@ -462,6 +496,7 @@ class DreamCycleOrchestrator:
                 "candidates_generated": len(all_candidates),
                 "candidates_accepted": len(accepted),
                 "candidates_rejected": len(rejected),
+                **skim_stats,
             },
             digest=digest,
             explorer_output=json.dumps([{"name": s.name, "strategy": s.strategy, "memory_count": len(s.memory_ids)} for s in slices]),
@@ -680,6 +715,59 @@ class DreamCycleOrchestrator:
         except Exception:
             logger.warning("Attention allocation failed (non-fatal); using Explorer slices as-is", exc_info=True)
         return slices
+
+    def _skim_arrivals(self, run_id: str, run_type: str, started_at: datetime) -> SkimResult | None:
+        """Step 3.5 — skim every arrival in the run's window (docs/PLAN-skim-stage.md).
+
+        Resolves the ``skim`` role through the active profile and runs
+        :func:`~src.skim.runner.skim_window` over ``ledger.arrival_window_start``,
+        metering every call through the run's SpendTracker under the skim's own
+        sub-cap (:func:`_skim_cap_usd`). Returns the counts, or ``None`` — with one
+        WARNING — when the role is not configured, resolves to a non-Bedrock /
+        agentic backend, or anything at all fails: the run then continues exactly
+        as before (the Explorer gets the plain arrivals manifest). Only
+        :class:`SpendCapExceeded` propagates, like in every other stage.
+        """
+        try:
+            spec = self.resolver.spec_for(SKIM_ROLE)
+        except KeyError:
+            logger.warning("Skim skipped: role %r is not configured in the active backend profile", SKIM_ROLE)
+            return None
+        try:
+            backend = getattr(spec, "backend", None)
+            caps = BACKEND_CAPABILITIES.get(backend)
+            if caps is None or caps.supports_mcp:
+                logger.warning("Skim skipped: role %r must run on the direct Bedrock backend, not %r",
+                               SKIM_ROLE, backend)
+                return None
+            invoker = self._invoker_for(SKIM_ROLE)
+            window_start = ledger.arrival_window_start(run_id, run_type, started_at, dcdb=dream_cycle_db)
+            cap = _skim_cap_usd(self._spend.cap_usd)
+            result = skim_window(
+                window_start,
+                invoker=invoker,
+                model=spec.model,
+                prompt_version=SKIM_PROMPT_VERSION,
+                tracker=self._spend,
+                cap_usd=cap,
+                run_id=run_id,
+                effort=spec.effort or "low",
+            )
+        except SpendCapExceeded:
+            raise
+        except Exception:
+            logger.warning("Skim failed (non-fatal); the Explorer gets the arrivals manifest as before",
+                           exc_info=True)
+            return None
+        logger.info(
+            "Skim (%s): %d arrival(s) since %s — %d skimmed, %d reused, %d failed, %d invalid, %d coerced, "
+            "%d truncated; quotes %d/%d verbatim; $%.4f of $%.2f sub-cap in %.0fs%s",
+            spec.model, result.docs_total, window_start.isoformat(), result.skimmed, result.reused,
+            result.failed, result.invalid, result.coerced, result.truncated, result.quotes_verbatim,
+            result.quotes_emitted, result.cost_usd, cap, result.duration_s,
+            " (stopped at sub-cap)" if result.aborted_on_cap else "",
+        )
+        return result
 
     def invoke_thinker(
         self, slice: MemorySlice,

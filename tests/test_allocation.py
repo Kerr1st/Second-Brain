@@ -333,6 +333,7 @@ class TestExplorerFailureFallback:
         orch = self._orch()
         arrivals_slice = MemorySlice(name="Arrivals", strategy=allocation.ARRIVALS_STRATEGY, memory_ids=[_uid()])
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", side_effect=TimeoutError("600s")), \
              patch.object(orch, "_allocate_attention", return_value=[arrivals_slice]) as alloc, \
              patch.object(orch, "invoke_thinker", return_value=[]), \
@@ -348,6 +349,7 @@ class TestExplorerFailureFallback:
     def test_user_triggered_run_still_aborts(self):
         orch = self._orch()
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", side_effect=RuntimeError("crash")), \
              patch.object(orch, "_allocate_attention") as alloc, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""):
