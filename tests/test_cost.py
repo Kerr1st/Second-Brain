@@ -35,12 +35,74 @@ class TestPriceTable:
             ("us.anthropic.claude-haiku-4-5-20251001-v1:0", 1.0, 5.0),
             ("global.anthropic.claude-opus-4-8", 5.0, 25.0),
             ("global.openai.gpt-6-astra", 10.0, 50.0),
+            # Skim-stage models (standard tier, us-east-1 geo/in-region rates).
+            ("us.amazon.nova-2-lite-v1:0", 0.33, 2.75),
+            ("amazon.nova-2-lite-v1:0", 0.33, 2.75),
+            ("google.gemma-3-12b-it", 0.09, 0.29),
         ],
     )
     def test_known_models(self, model, per_m_in, per_m_out):
         price = price_for(model)
         assert price.known is True
         assert (price.input_per_m, price.output_per_m) == (per_m_in, per_m_out)
+
+    def test_skim_models_are_priced_before_any_live_call(self):
+        """Plan constraint 2: an unknown id is billed at the $10/$50 ceiling, which
+        at skim volume (~1.4M input tokens/week) books ≈ $15/week and trips the
+        sub-cap on the first document. Both skim models must be known."""
+        for model in ("us.amazon.nova-2-lite-v1:0", "google.gemma-3-12b-it"):
+            assert price_for(model).known is True, model
+
+    @pytest.mark.parametrize(
+        "model, per_m_in, per_m_out",
+        [
+            ("us.amazon.nova-2-lite-v1:0", 0.165, 1.375),   # listed Flex row (geo/in-region)
+            ("google.gemma-3-12b-it", 0.045, 0.145),        # derived: Flex = 50% of standard
+        ],
+    )
+    def test_flex_tier_prices(self, model, per_m_in, per_m_out):
+        price = price_for(model, service_tier="flex")
+        assert price.known is True
+        assert (price.input_per_m, price.output_per_m) == (per_m_in, per_m_out)
+
+    def test_flex_tier_only_applies_when_served_on_flex(self):
+        """Requesting Flex is not the same as being billed Flex: only the tier
+        reported back in the response (carried in `usage.serviceTier`) counts."""
+        nova = "us.amazon.nova-2-lite-v1:0"
+        assert price_for(nova, service_tier="default") == price_for(nova)
+        assert price_for(nova, service_tier="priority") == price_for(nova)
+        assert price_for(nova, service_tier=None) == price_for(nova)
+        # A model without a Flex entry keeps its standard rate under "flex".
+        assert price_for("global.anthropic.claude-sonnet-5", service_tier="flex") == price_for("global.anthropic.claude-sonnet-5")
+
+    def test_estimate_cost_uses_served_tier_from_usage(self):
+        nova = "us.amazon.nova-2-lite-v1:0"
+        usage = _usage(1_000_000, 100_000)
+        assert estimate_cost_usd(nova, usage) == pytest.approx(0.33 + 0.275)
+        assert estimate_cost_usd(nova, {**usage, "serviceTier": "flex"}) == pytest.approx(0.165 + 0.1375)
+        assert estimate_cost_usd(nova, {**usage, "serviceTier": "default"}) == pytest.approx(0.33 + 0.275)
+        # A one-document skim call (~3k in / ~300 out) costs about a tenth of a cent.
+        assert estimate_cost_usd(nova, _usage(3_000, 300)) == pytest.approx(0.00099 + 0.000825)
+
+    def test_nova_cache_reads_are_a_quarter_of_input(self):
+        """Pricing page: Nova cache-read input tokens are 75% less than on-demand input."""
+        assert price_for("us.amazon.nova-2-lite-v1:0").cache_read_per_m == pytest.approx(0.33 * 0.25)
+
+    def test_needle_order_unaffected_by_new_entries(self):
+        """The new needles are appended; the specific-before-general ordering of
+        the existing entries (fable-5-1 before fable-5, haiku before opus-4...) and
+        every previously-known id's price must be exactly as before."""
+        from src.backends.cost import _PRICE_TABLE
+        needles = [n for n, _, _ in _PRICE_TABLE]
+        assert needles.index("claude-fable-5") < needles.index("claude-opus-4")
+        assert needles.index("claude-haiku-4-5") < needles.index("claude-opus-4")
+        assert needles[-2:] == ["nova-2-lite", "gemma-3-12b"]
+        assert len(needles) == len(set(needles))
+        assert price_for("global.anthropic.claude-fable-5-1").input_per_m == 10.0
+        assert price_for("global.anthropic.claude-sonnet-5").input_per_m == 2.0
+        # Nova needle must not catch the older Nova family (still unknown → ceiling).
+        assert price_for("amazon.nova-lite-v1:0").known is False
+        assert price_for("amazon.nova-pro-v1:0").known is False
 
     def test_unknown_model_uses_conservative_ceiling(self):
         """Never under-count: an unpriced model is billed at the table maximum

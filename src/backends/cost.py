@@ -19,6 +19,13 @@ billed as output by both vendors and are already included in the provider's
 ``outputTokens``. Cache-read discounts are ignored (conservative). A model that
 is not in the table is priced at the table ceiling so the cap trips early
 rather than late.
+
+Service tiers (skim stage, 2026-09-20): Bedrock's Flex tier bills the skim
+models at half the standard rate. Standard prices live in :data:`_PRICE_TABLE`;
+Flex prices in :data:`_FLEX_PRICE_TABLE`. A call is priced at the Flex rate only
+when its ``usage`` block says the request was actually served on Flex
+(``serviceTier: "flex"``, copied by the Bedrock adapter from the Converse
+response's ``serviceTier.type``) — never from what was merely requested.
 """
 
 from __future__ import annotations
@@ -45,6 +52,24 @@ _PRICE_TABLE: tuple[tuple[str, float, float], ...] = (
     # OpenAI on Bedrock ({us,global}.openai.gpt-...)
     ("gpt-6-astra", 10.0, 50.0),
     ("gpt-5.6-sol", 4.0, 20.0),          # derived: Astra is 2.5x Sol's rate
+    # Skim-stage models (docs/PLAN-skim-stage.md). Standard tier, us-east-1,
+    # read from the Bedrock pricing page's data feed on 2026-09-20
+    # (https://aws.amazon.com/bedrock/pricing/ , Amazon Nova tab "Geo
+    # Cross-region inference and in-region" and the Google "On-Demand pricing"
+    # table for US East/West; price data published 2026-09-17). The `us.`
+    # geo profile is what the skim calls, so the geo/in-region rate applies —
+    # the `global.` profile is cheaper ($0.30 / $2.50) but leaves the US.
+    ("nova-2-lite", 0.33, 2.75),         # us.amazon.nova-2-lite-v1:0
+    ("gemma-3-12b", 0.09, 0.29),         # google.gemma-3-12b-it
+)
+
+# Flex service tier (https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ServiceTier.html).
+# Nova 2 Lite: listed explicitly on the pricing page ("Flex Tier", geo/in-region).
+# Gemma 3 12B: the page prints no Flex row and states "Flex tier pricing is at
+# 50% discount to Standard tier pricing", so the figure is derived.
+_FLEX_PRICE_TABLE: tuple[tuple[str, float, float], ...] = (
+    ("nova-2-lite", 0.165, 1.375),
+    ("gemma-3-12b", 0.045, 0.145),
 )
 
 # Conservative ceiling for unknown models (= the most expensive known tier).
@@ -72,13 +97,24 @@ class ModelPrice:
     _cache_read_fraction: float = 0.10
 
 
-def price_for(model: str) -> ModelPrice:
-    """Look up the list price for a model id (inference-profile or bare id)."""
+def price_for(model: str, service_tier: str | None = None) -> ModelPrice:
+    """Look up the list price for a model id (inference-profile or bare id).
+
+    ``service_tier`` is the tier the call was *served* on (Converse response
+    ``serviceTier.type``). Only ``"flex"`` changes the price, and only for
+    models with a Flex entry; anything else falls back to the standard rate.
+    """
     m = (model or "").lower()
+    tier = (service_tier or "").lower()
     for needle, inp, out in _PRICE_TABLE:
         if needle in m:
             # Fable 5.1 cut cache reads to $0.25/M (2.5% of its $10 input rate).
-            frac = 0.025 if "fable-5-1" in m else 0.10
+            # Amazon Nova lists cache reads at 75% less than input (25%).
+            frac = 0.025 if "fable-5-1" in m else (0.25 if "nova" in m else 0.10)
+            if tier == "flex":
+                for fneedle, finp, fout in _FLEX_PRICE_TABLE:
+                    if fneedle in m:
+                        return ModelPrice(finp, fout, True, frac)
             return ModelPrice(inp, out, True, frac)
     return ModelPrice(_CEILING_IN, _CEILING_OUT, False, 0.10)
 
@@ -115,7 +151,8 @@ def estimate_cost_usd(model: str, usage: dict | None) -> float:
     cache_write = _tokens(usage, "cacheWriteInputTokens", "cache_creation_input_tokens") or 0
     if inp is None and out is None and not cache_read and not cache_write:
         return 0.0
-    price = price_for(model)
+    tier = usage.get("serviceTier", usage.get("service_tier"))
+    price = price_for(model, tier if isinstance(tier, str) else None)
     return (
         (inp or 0) * price.input_per_m
         + (out or 0) * price.output_per_m
