@@ -231,6 +231,89 @@ def fetch_window_records(window_start: datetime, model: str, prompt_version: str
     return rows
 
 
+# --------------------------------------------------------------------------- #
+# Clusters (Phase 3, optional): existing embeddings, no model calls            #
+# --------------------------------------------------------------------------- #
+def _parse_vector(text: Any) -> list[float] | None:
+    """pgvector's text form ``[0.1,0.2,...]`` → floats (None for NULL / garbage)."""
+    if text is None:
+        return None
+    if isinstance(text, (list, tuple)):
+        return [float(x) for x in text]
+    s = str(text).strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        return None
+    try:
+        return [float(x) for x in s[1:-1].split(",") if x.strip()]
+    except ValueError:
+        return None
+
+
+def fetch_window_centroids(memory_ids: Iterable[Any]) -> dict[str, list[float]]:
+    """``{memory_id: vector}`` for the given parent-level memories, using what the
+    ingest already embedded: the parent's own ``embedding`` when it has one,
+    else the pgvector ``avg()`` of its chunks' embeddings. Two set queries (the
+    correlated form took ~14 s on 868 documents; these take ~0.4 s). Reads
+    vectors only — no text columns. Ids without any embedding are absent.
+    """
+    ids = _ids(memory_ids)
+    if not ids:
+        return {}
+    out: dict[str, list[float]] = {}
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, embedding::text FROM memories
+                WHERE id = ANY(%s::uuid[]) AND embedding IS NOT NULL
+                """,
+                (ids,),
+            )
+            for mid, vec in cur.fetchall():
+                parsed = _parse_vector(vec)
+                if parsed:
+                    out[str(mid)] = parsed
+            rest = [i for i in ids if i not in out]
+            if rest:
+                cur.execute(
+                    """
+                    SELECT parent_id::text, avg(embedding)::text FROM memories
+                    WHERE parent_id = ANY(%s::uuid[]) AND embedding IS NOT NULL
+                    GROUP BY parent_id
+                    """,
+                    (rest,),
+                )
+                for mid, vec in cur.fetchall():
+                    parsed = _parse_vector(vec)
+                    if parsed:
+                        out[str(mid)] = parsed
+    return out
+
+
+def set_cluster_ids(cluster_ids: dict[str, str | None], model: str, prompt_version: str) -> int:
+    """Write ``cluster_id`` (``"c1"``… or None) on the skim rows of the given
+    memories for ``(model, prompt_version)``; returns the number of rows updated.
+    Cluster ids are relative to one run's window, so a later run over an
+    overlapping window simply rewrites them."""
+    if not cluster_ids:
+        return 0
+    ids = list(cluster_ids)
+    labels = [cluster_ids[i] for i in ids]
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE memory_skim s SET cluster_id = v.cluster_id
+                FROM (SELECT unnest(%s::uuid[]) AS memory_id, unnest(%s::text[]) AS cluster_id) v
+                WHERE s.memory_id = v.memory_id AND s.model = %s AND s.prompt_version = %s
+                """,
+                (ids, labels, model, prompt_version),
+            )
+            updated = cur.rowcount or 0
+        conn.commit()
+    return int(updated)
+
+
 def run_summary(run_id: str) -> dict:
     """Counts and cost of the skims a run paid for:
     ``records, truncated, input_tokens, output_tokens, cost_usd``."""

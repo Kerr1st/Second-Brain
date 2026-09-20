@@ -15,6 +15,7 @@ from src.skim.faithfulness import (
     match_quote,
     normalize,
     quote_is_verbatim,
+    stored_form,
     tokenize,
 )
 from src.skim.schema import QuotedItem, SkimRecord
@@ -186,3 +187,29 @@ class TestCheckRecord:
         secret = "we agreed to move the beta launch to the 14th"
         res = check_record(self._record([secret], []), SOURCE)
         assert secret not in repr(res)
+
+
+
+class TestStoredForm:
+    """The persisted record: unverified quotes become null, the item stays,
+    ``quotes_unverified`` counts them; the SkimRecord is untouched."""
+
+    def _record(self):
+        return SkimRecord(summary="s", people=["Priya"],
+                          decisions=[QuotedItem("moved", "we agreed to move the beta launch to the 14th"),
+                                     QuotedItem("cancelled", "the launch is cancelled")],
+                          open_questions=[QuotedItem("tier", "which tier goes first?")])
+
+    def test_nulls_only_the_failing_quotes(self):
+        rec = self._record()
+        data, faith = stored_form(rec, SOURCE)
+        assert data["decisions"] == [{"text": "moved", "quote": "we agreed to move the beta launch to the 14th"},
+                                     {"text": "cancelled", "quote": None}]
+        assert data["open_questions"] == [{"text": "tier", "quote": "which tier goes first?"}]
+        assert data["quotes_unverified"] == 1 and faith["quotes_fabricated"] == 1
+        assert "coercions" not in data and data["people"] == ["Priya"]
+        assert rec.decisions[1].quote == "the launch is cancelled"          # record itself untouched
+
+    def test_all_verbatim_gives_zero(self):
+        data, faith = stored_form(SkimRecord(summary="s"), SOURCE)
+        assert data["quotes_unverified"] == 0 and faith["all_verbatim"] is True

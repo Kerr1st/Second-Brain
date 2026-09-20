@@ -122,6 +122,7 @@ class TestHappyPath:
         row = store.rows[(docs[0]["id"], MODEL, PROMPT_VERSION)]
         assert row["run_id"] == "run-1" and row["input_tokens"] == 3000 and row["output_tokens"] == 200
         assert row["skim"]["decisions"][0]["quote"] == "we agreed to move the beta launch to the 14th"
+        assert row["skim"]["quotes_unverified"] == 0 and res.quotes_unverified == 0
         assert "coercions" not in row["skim"] and row["truncated"] is False
         assert row["cost_usd"] == pytest.approx(3000 * 0.165e-6 + 200 * 1.375e-6, abs=1e-7)
 
@@ -282,9 +283,49 @@ class TestTruncationAndCoercion:
         """A quote from the cut-off tail is fabricated relative to what was sent."""
         body = DOC_B * 20 + "Decision: we agreed to move the beta launch to the 14th."
         doc = _doc(content=body)
-        res, _, _ = _run([doc], [_record(decisions=["we agreed to move the beta launch to the 14th"])],
-                         max_doc_chars=len(DOC_B) * 5)
+        res, _, store = _run([doc], [_record(decisions=["we agreed to move the beta launch to the 14th"])],
+                             max_doc_chars=len(DOC_B) * 5)
         assert res.truncated == 1 and res.quotes_emitted == 1 and res.quotes_verbatim == 0
+        assert res.quotes_unverified == 1
+        assert store.rows[(doc["id"], MODEL, PROMPT_VERSION)]["skim"]["decisions"][0]["quote"] is None
+
+
+class TestUnverifiedQuotePolicy:
+    """Policy (2026-09-20): a decision / open question whose quote fails both
+    faithfulness paths keeps its text, its quote is stored as null, and the
+    record carries ``quotes_unverified``; the counts reach SkimResult and the
+    run stats."""
+
+    def test_failing_quote_is_nulled_and_counted_but_the_item_stays(self):
+        doc = _doc()
+        res, _, store = _run([doc], [_record(
+            decisions=["we agreed to move the beta launch to the 14th"],           # verbatim
+            questions=["the pricing question was deferred to the steering group"],  # not in the text
+        )])
+        stored = store.rows[(doc["id"], MODEL, PROMPT_VERSION)]["skim"]
+        assert stored["decisions"][0]["quote"] == "we agreed to move the beta launch to the 14th"
+        assert stored["open_questions"][0] == {"text": "Tier order open.", "quote": None}
+        assert stored["quotes_unverified"] == 1
+        assert (res.quotes_emitted, res.quotes_verbatim, res.quotes_unverified) == (2, 1, 1)
+        assert res.to_stats()["skim_quotes_unverified"] == 1
+
+    def test_near_verbatim_markdown_differences_still_verify(self):
+        """The token path accepts markdown / punctuation drift, so only real
+        paraphrase is nulled."""
+        doc = _doc(content="- **Decision:** we agreed to move the *beta launch* to the 14th.\n")
+        res, _, store = _run([doc], [_record(decisions=["Decision: we agreed to move the beta launch to the 14th"])])
+        stored = store.rows[(doc["id"], MODEL, PROMPT_VERSION)]["skim"]
+        assert stored["decisions"][0]["quote"] is not None and stored["quotes_unverified"] == 0
+        assert res.quotes_unverified == 0
+
+    def test_counts_are_only_for_stored_records(self):
+        """An invalid reply or a failed store contributes no quote counts."""
+        docs = [_doc(), _doc()]
+        store = FakeStore(fail_upsert_for={docs[1]["id"]})
+        res, _, _ = _run(docs, [_record(questions=["invented passage"]), _record(questions=["invented passage"])],
+                         store=store)
+        assert res.skimmed == 1 and res.failed == 1
+        assert (res.quotes_emitted, res.quotes_unverified) == (1, 1)
 
     def test_coerced_records_are_counted_by_class(self):
         docs = [_doc(), _doc(), _doc(DOC_B)]

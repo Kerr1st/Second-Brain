@@ -179,3 +179,56 @@ class TestWindowAndSummary:
         with patch("src.skim.store.get_connection", get_conn):
             assert store.run_summary("r") == {"records": 0, "truncated": 0, "input_tokens": 0,
                                               "output_tokens": 0, "cost_usd": 0.0}
+
+
+
+class TestClusterStorage:
+    def test_centroids_use_own_embedding_then_chunk_average_and_read_no_text(self):
+        a, b, c = str(uuid4()), str(uuid4()), str(uuid4())
+        get_conn, conn, cur = _conn()
+        cur.fetchall.side_effect = [
+            [(a, "[0.1,0.2,0.3]")],                      # own embeddings: only a
+            [(b, "[1, 0, 0]"), (c, None)],               # chunk averages for the rest; c has none
+        ]
+        with patch("src.skim.store.get_connection", get_conn):
+            out = store.fetch_window_centroids([a, b, c])
+        assert out == {a: [0.1, 0.2, 0.3], b: [1.0, 0.0, 0.0]}
+        first, second = [call[0] for call in cur.execute.call_args_list]
+        assert "embedding::text" in first[0] and first[1] == ([a, b, c],)
+        assert "avg(embedding)::text" in second[0] and "GROUP BY parent_id" in second[0]
+        assert second[1] == ([b, c],)                     # only the ids still missing
+        for sql in (first[0], second[0]):
+            assert "content" not in sql and "title" not in sql
+        conn.commit.assert_not_called()
+
+    def test_centroids_skip_the_second_query_when_all_found_and_handle_empty(self):
+        a = str(uuid4())
+        get_conn, _, cur = _conn(fetchall=[(a, "[0.5,0.5]")])
+        with patch("src.skim.store.get_connection", get_conn):
+            assert store.fetch_window_centroids([a]) == {a: [0.5, 0.5]}
+        assert cur.execute.call_count == 1
+        assert store.fetch_window_centroids([]) == {}
+
+    def test_parse_vector(self):
+        assert store._parse_vector("[1,2.5, -3]") == [1.0, 2.5, -3.0]
+        assert store._parse_vector([1, 2]) == [1.0, 2.0]
+        assert store._parse_vector(None) is None and store._parse_vector("nope") is None
+        assert store._parse_vector("[a,b]") is None
+
+    def test_set_cluster_ids_updates_by_key_and_commits(self):
+        a, b = str(uuid4()), str(uuid4())
+        get_conn, conn, cur = _conn()
+        cur.rowcount = 2
+        with patch("src.skim.store.get_connection", get_conn):
+            n = store.set_cluster_ids({a: "c1", b: None}, MODEL, PV)
+        sql, params = cur.execute.call_args[0]
+        assert "UPDATE memory_skim" in sql and "s.model = %s AND s.prompt_version = %s" in sql
+        assert params == ([a, b], ["c1", None], MODEL, PV)
+        assert n == 2
+        conn.commit.assert_called_once()
+
+    def test_set_cluster_ids_empty_makes_no_query(self):
+        get_conn, _, cur = _conn()
+        with patch("src.skim.store.get_connection", get_conn):
+            assert store.set_cluster_ids({}, MODEL, PV) == 0
+        cur.execute.assert_not_called()

@@ -25,6 +25,15 @@ into a verbatim quote. This is the primary quality metric of the skim
 (docs/PLAN-skim-stage.md §2, Decisions): it is free, it needs no second model,
 and it catches exactly the failure mode — invented detail — that the panel's
 grounding audit exists for.
+
+**Stored form** (:func:`stored_form`, policy decided 2026-09-20 after two live
+probes on 33 documents: 8/10 quotes verbatim, the two misses near-verbatim edits
+of one long transcript — light paraphrase, not invention): a decision or open
+question whose quote fails *both* paths keeps its ``text`` but its ``quote`` is
+set to ``null`` and counted as *unverified*; the record gains
+``quotes_unverified: n``. The item stays in the record because the model's
+reading is still useful to the Explorer; the quote goes because nothing
+downstream may treat an unverified passage as the document's words.
 """
 
 from __future__ import annotations
@@ -169,3 +178,25 @@ def check_record(record: SkimRecord, source_text: str) -> dict[str, Any]:
         "per_field": per_field,
         "all_verbatim": emitted == verbatim,
     }
+
+
+
+#: Key added to the stored record: how many of its quotes failed both paths.
+QUOTES_UNVERIFIED_KEY = "quotes_unverified"
+
+
+def stored_form(record: SkimRecord, source_text: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The record as it is persisted, plus the :func:`check_record` result.
+
+    Applies the unverified-quote policy (module docstring): for every
+    ``(field, index)`` in ``fabricated_positions`` the item's ``quote`` becomes
+    ``None`` while its ``text`` stays, and the dict gains
+    ``quotes_unverified`` (0 when every quote was found). The
+    :class:`SkimRecord` itself is untouched.
+    """
+    faith = check_record(record, source_text)
+    data = record.to_dict()
+    for field_name, i in faith["fabricated_positions"]:
+        data[field_name][i]["quote"] = None
+    data[QUOTES_UNVERIFIED_KEY] = len(faith["fabricated_positions"])
+    return data, faith

@@ -2431,6 +2431,9 @@ class TestFinalOrchestratorMethodSet:
             # Step 3.5: skim every arrival with the cheap Bedrock `skim` role before the
             # Explorer looks (docs/PLAN-skim-stage.md); never aborts the run itself.
             "_skim_arrivals",
+            # Phase 3: the window's skim records (fetched + clustered) for the Explorer
+            # inventory and the weighted guaranteed slice; [] on any failure.
+            "_load_skim_records",
         }
 
         actual_methods = {

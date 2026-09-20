@@ -43,6 +43,8 @@ from src.dream_cycle.packet import (
     format_sources_for_evaluator,
     load_memories_by_ids,
 )
+from src.skim import store as skim_store
+from src.skim.cluster import cluster_window
 from src.skim.runner import SkimResult, skim_window
 
 logger = logging.getLogger(__name__)
@@ -142,6 +144,13 @@ class DreamCycleOrchestrator:
         # a tool-less Thinker, kept so evaluators can ground against the same text.
         self._spend = SpendTracker.from_env()
         self._slice_memory_cache: dict[str, dict] = {}
+        # Skim records for the run's arrivals window (Step 3.5 → Explorer inventory
+        # and the weighted guaranteed slice) and what the Explorer was actually given.
+        self._skim_records: list[dict] = []
+        self._explorer_input: dict = {}
+        # Ledger rows (origin + metrics) aligned with the slices _allocate_attention
+        # returned — the judging order (Phase 4) is derived from them.
+        self._slice_rows: list[dict] = []
 
     def _invoker_for(self, role: str):
         """Resolve the Invoker for a role from the active backend profile."""
@@ -259,6 +268,9 @@ class DreamCycleOrchestrator:
         # Fresh per-run spend accounting and slice-content cache.
         self._spend = SpendTracker.from_env()
         self._slice_memory_cache = {}
+        self._skim_records = []
+        self._explorer_input = {}
+        self._slice_rows = []
 
         # Session-start frequency cap: check before creating a run record
         if run_type == "session_start" and not dream_cycle_db.should_run_briefing():
@@ -342,6 +354,9 @@ class DreamCycleOrchestrator:
         # plain arrivals manifest, exactly as before. SpendCapExceeded propagates.
         skim = self._skim_arrivals(run_id, run_type, started_at)
         skim_stats = skim.to_stats() if skim is not None else {}
+        # The window's skim records (this run's and earlier runs' — idempotent per
+        # document) feed the Explorer's inventory and the weighted guaranteed slice.
+        self._skim_records = self._load_skim_records(skim, run_id, run_type, started_at)
 
         # Step 4: Invoke Explorer (with crash/timeout handling). On a scheduled run an
         # Explorer failure no longer aborts the night: the guaranteed arrivals slice
@@ -367,7 +382,7 @@ class DreamCycleOrchestrator:
         if not slices:
             logger.warning("Circuit breaker: no slices to examine (Explorer returned none and "
                            "nothing arrived), aborting early")
-            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS | skim_stats, digest="")
+            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS | skim_stats | self._explorer_input, digest="")
             return self._aborted_result(run_id, run_type, started_at)
 
         # Step 6: Invoke Thinker for each slice, collect candidates
@@ -497,6 +512,7 @@ class DreamCycleOrchestrator:
                 "candidates_accepted": len(accepted),
                 "candidates_rejected": len(rejected),
                 **skim_stats,
+                **self._explorer_input,
             },
             digest=digest,
             explorer_output=json.dumps([{"name": s.name, "strategy": s.strategy, "memory_count": len(s.memory_ids)} for s in slices]),
@@ -601,16 +617,35 @@ class DreamCycleOrchestrator:
             strategy_usage=dream_cycle_db.get_strategy_usage(n_cycles=10),
         )
 
-        # Arrivals manifest: what was captured since the previous run, by channel,
-        # with ids. Without this the Explorer knew only "N new memories" and had no
-        # reason to look at any of them.
+        # Arrivals block: what was captured since the previous run, by channel, with
+        # ids. Without this the Explorer knew only "N new memories" and had no reason
+        # to look at any of them. With skim records for the window (Step 3.5) the
+        # block is the full inventory — one line per document — instead of the
+        # 4-samples-per-channel manifest (docs/PLAN-skim-stage.md, Phase 3).
         manifest = ""
+        self._explorer_input = {}
         try:
             window_start = ledger.arrival_window_start(self._current_run_id, run_type,
                                                        self._current_started_at, dcdb=dream_cycle_db)
             arrivals = dream_cycle_db.get_arrivals_summary(window_start, allocation.MANIFEST_SAMPLES_PER_SOURCE)
-            manifest = allocation.build_arrivals_manifest(
-                window_start, arrivals if isinstance(arrivals, list) else [])
+            arrivals = arrivals if isinstance(arrivals, list) else []
+            if self._skim_records:
+                counts = {a["source_type"]: int(a["documents"]) for a in arrivals
+                          if isinstance(a, dict) and a.get("source_type") and a.get("documents")}
+                render = allocation.render_arrivals_inventory(window_start, self._skim_records,
+                                                              counts_by_channel=counts)
+                manifest = render.text
+                self._explorer_input = {"explorer_input": "inventory", "inventory_listed": render.listed,
+                                        "inventory_docs": render.total, "inventory_chars": len(manifest)}
+                logger.info("Explorer arrivals input: inventory — %d of %d skimmed documents listed "
+                            "(%d lines, %d chars)", render.listed, render.total, manifest.count("\n") + 1, len(manifest))
+            else:
+                manifest = allocation.build_arrivals_manifest(window_start, arrivals)
+                self._explorer_input = {"explorer_input": "manifest"}
+                logger.info("Explorer arrivals input: manifest — %d channels, %d sample ids per channel "
+                            "(%d lines, %d chars); no skim records for this window",
+                            len(arrivals), allocation.MANIFEST_SAMPLES_PER_SOURCE, manifest.count("\n") + 1,
+                            len(manifest))
         except Exception:
             logger.warning("Arrivals manifest unavailable for this run", exc_info=True)
 
@@ -679,8 +714,11 @@ class DreamCycleOrchestrator:
 
         Never aborts a run: on any failure the Explorer's slices are returned as-is.
         Scoped runs (post_learn, user_triggered) are exempt from the budget — their
-        attention is directed by the scope — but are still recorded.
+        attention is directed by the scope — but are still recorded. The ledger rows
+        of the returned slices are kept on ``self._slice_rows`` (same order) for the
+        judging order; they are empty when the ledger could not be computed.
         """
+        self._slice_rows = []
         try:
             window_start = ledger.arrival_window_start(run_id, run_type, started_at, dcdb=dream_cycle_db)
             provenance = ledger.fetch_provenance(slices, dcdb=dream_cycle_db)
@@ -691,16 +729,26 @@ class DreamCycleOrchestrator:
                                              window_start=window_start, provenance=provenance)
             metrics = [r["metrics"] for r in rows]
             origins: dict[int, str] = {}
+            extra_metrics: dict[int, dict] = {}
 
             if run_type in ("scheduled", "session_start"):
                 kept, kept_metrics, needs_arrivals = allocation.enforce_budget(slices, metrics)
                 if needs_arrivals:
-                    extra = allocation.build_arrivals_slice(window_start, dcdb=dream_cycle_db)
+                    # With skim records half the slice goes to the most salient / novel
+                    # arrivals (docs/PLAN-skim-stage.md, Phase 3); without them this is
+                    # the stratified sample it has always been.
+                    extra, selection = allocation.build_arrivals_selection(
+                        window_start, dcdb=dream_cycle_db, skim_records=self._skim_records or None)
                     if extra is not None:
                         kept.append(extra)
                         origins[len(kept) - 1] = allocation.ARRIVALS_ORIGIN
-                        logger.info("Added guaranteed arrivals slice with %d memories: %s",
-                                    len(extra.memory_ids), extra.name)
+                        extra_metrics[len(kept) - 1] = selection.metrics
+                        logger.info("Added guaranteed arrivals slice with %d memories (%s): %s",
+                                    len(extra.memory_ids),
+                                    f"{selection.skim_picked} picked for salience/novelty from the skim, "
+                                    f"{len(extra.memory_ids) - selection.skim_picked} stratified"
+                                    if selection.skim_weighted else "stratified, no skim records",
+                                    extra.name)
                     else:
                         logger.info("No arrivals to build a guaranteed slice from")
                 slices = kept
@@ -709,12 +757,47 @@ class DreamCycleOrchestrator:
                 rows = ledger.compute_slice_rows(run_id, run_type, slices, started_at, origins,
                                                  dcdb=dream_cycle_db, window_start=window_start,
                                                  provenance=provenance)
+                for i, m in extra_metrics.items():
+                    rows[i]["metrics"].update(m)
 
             dream_cycle_db.record_slices(run_id, rows)
             ledger.log_run_metrics(ledger.run_metrics(rows))
+            self._slice_rows = rows
         except Exception:
             logger.warning("Attention allocation failed (non-fatal); using Explorer slices as-is", exc_info=True)
+            self._slice_rows = []
         return slices
+
+    def _load_skim_records(self, skim: SkimResult | None, run_id: str, run_type: str,
+                           started_at: datetime) -> list[dict]:
+        """The window's skim records for the Explorer inventory and the weighted
+        guaranteed slice (docs/PLAN-skim-stage.md, Phase 3).
+
+        Fetched only when Step 3.5 ran and something is stored for the window
+        (``skimmed + reused > 0``). The records are then clustered by their
+        existing embeddings (``[c<k>]`` tags; no model calls). Never raises:
+        any failure logs a WARNING and returns ``[]``, which makes the Explorer
+        fall back to the plain manifest.
+        """
+        if skim is None or (skim.skimmed + skim.reused) <= 0:
+            return []
+        try:
+            window_start = ledger.arrival_window_start(run_id, run_type, started_at, dcdb=dream_cycle_db)
+            records = skim_store.fetch_window_records(window_start, skim.model, skim.prompt_version)
+        except Exception:
+            logger.warning("Skim records unavailable for the window (non-fatal); the Explorer gets the manifest",
+                           exc_info=True)
+            return []
+        if not isinstance(records, list) or not records:
+            logger.warning("Skim ran (%d skimmed, %d reused) but no records came back for the window",
+                           skim.skimmed, skim.reused)
+            return []
+        try:
+            cluster_window(records, model=skim.model, prompt_version=skim.prompt_version)
+        except Exception:
+            logger.warning("Skim clustering failed (non-fatal); inventory without cluster tags", exc_info=True)
+        logger.info("Skim records loaded for the window: %d (of %d arrivals)", len(records), skim.docs_total)
+        return records
 
     def _skim_arrivals(self, run_id: str, run_type: str, started_at: datetime) -> SkimResult | None:
         """Step 3.5 — skim every arrival in the run's window (docs/PLAN-skim-stage.md).

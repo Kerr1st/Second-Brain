@@ -305,3 +305,180 @@ class TestProvenanceIncludesSkim:
     def test_backend_provenance_omits_an_unconfigured_skim(self):
         orch = _orch(_profile(skim=False))
         assert set(orch._backend_provenance()) == set(AGENT_ROLES)
+
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 — Explorer consumption (docs/PLAN-skim-stage.md)                     #
+# --------------------------------------------------------------------------- #
+def _skim_record(rid, channel="slack", salience=2, novelty=1, summary="A synthetic summary.", created=None):
+    return {"id": rid, "title": "t", "source_type": channel, "created_at": created or STARTED,
+            "skim": {"summary": summary, "people": [], "entities": [], "topics": [], "decisions": [],
+                     "open_questions": [], "novelty": novelty, "salience": salience, "contradiction_hint": None,
+                     "doc_kind": "conversation", "quotes_unverified": 0},
+            "cluster_id": None, "truncated": False}
+
+
+class TestLoadSkimRecords:
+    def test_none_or_nothing_stored_fetches_nothing(self):
+        orch = _orch()
+        with patch("src.dream_cycle.orchestrator.skim_store") as st, \
+             patch("src.dream_cycle.orchestrator.dream_cycle_db"):
+            assert orch._load_skim_records(None, "run-s", "scheduled", STARTED) == []
+            assert orch._load_skim_records(SkimResult(docs_total=3, skimmed=0, reused=0), "run-s", "scheduled",
+                                           STARTED) == []
+        st.fetch_window_records.assert_not_called()
+
+    def test_fetches_the_window_for_the_skim_key_and_clusters(self):
+        orch = _orch()
+        recs = [_skim_record("a"), _skim_record("b")]
+        skim = SkimResult(docs_total=2, skimmed=1, reused=1, model=SKIM_MODEL, prompt_version=PROMPT_VERSION)
+        db = MagicMock()
+        db.get_previous_run_started_at.return_value = STARTED - timedelta(days=2)
+        with patch("src.dream_cycle.orchestrator.skim_store") as st, \
+             patch("src.dream_cycle.orchestrator.cluster_window") as cw, \
+             patch("src.dream_cycle.orchestrator.dream_cycle_db", db):
+            st.fetch_window_records.return_value = recs
+            out = orch._load_skim_records(skim, "run-s", "scheduled", STARTED)
+        assert out is recs
+        st.fetch_window_records.assert_called_once_with(STARTED - timedelta(days=2), SKIM_MODEL, PROMPT_VERSION)
+        cw.assert_called_once_with(recs, model=SKIM_MODEL, prompt_version=PROMPT_VERSION)
+
+    def test_store_failure_and_clustering_failure_are_non_fatal(self, caplog):
+        orch = _orch()
+        skim = SkimResult(docs_total=2, skimmed=2, model=SKIM_MODEL, prompt_version=PROMPT_VERSION)
+        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.orchestrator"), \
+             patch("src.dream_cycle.orchestrator.dream_cycle_db"):
+            # Store offline (conftest): the real module raises.
+            assert orch._load_skim_records(skim, "run-s", "scheduled", STARTED) == []
+        assert any("Skim records unavailable" in r.getMessage() for r in caplog.records)
+        recs = [_skim_record("a"), _skim_record("b")]
+        with patch("src.dream_cycle.orchestrator.skim_store") as st, \
+             patch("src.dream_cycle.orchestrator.cluster_window", side_effect=RuntimeError("no vectors")), \
+             patch("src.dream_cycle.orchestrator.dream_cycle_db"):
+            st.fetch_window_records.return_value = recs
+            assert orch._load_skim_records(skim, "run-s", "scheduled", STARTED) is recs
+
+    def test_empty_result_set_falls_back(self):
+        orch = _orch()
+        skim = SkimResult(docs_total=2, skimmed=2, model=SKIM_MODEL, prompt_version=PROMPT_VERSION)
+        with patch("src.dream_cycle.orchestrator.skim_store") as st, \
+             patch("src.dream_cycle.orchestrator.dream_cycle_db"):
+            st.fetch_window_records.return_value = []
+            assert orch._load_skim_records(skim, "run-s", "scheduled", STARTED) == []
+
+
+class TestExplorerInventory:
+    ARRIVALS = [{"source_type": "slack", "documents": 3, "memories": 9,
+                 "samples": [{"id": "id-9", "title": "Slack: #eng — 2026-09-19", "created_at": "2026-09-19T08:00:00+00:00"}]},
+                {"source_type": "article", "documents": 5, "memories": 20, "samples": []}]
+
+    def _explore(self, orch, caplog):
+        invoker = MagicMock()
+        invoker.invoke.return_value = {"output": [], "raw": "[]", "usage": None, "usage_source": "estimate"}
+        with caplog.at_level(logging.INFO, logger="src.dream_cycle.orchestrator"), \
+             patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch.object(orch, "_invoker_for", return_value=invoker), \
+             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
+            db.get_previous_run_started_at.return_value = STARTED - timedelta(days=1)
+            db.get_arrivals_summary.return_value = self.ARRIVALS
+            db.get_strategy_usage.return_value = {}
+            orch._current_started_at = STARTED
+            orch.invoke_explorer("", "scheduled", None,
+                                 stats={"total_count": 10, "recent_activity": 9, "date_range": {"min": STARTED, "max": STARTED}})
+        return invoker.invoke.call_args.kwargs["user_message"]
+
+    def test_records_make_the_user_message_an_inventory(self, caplog):
+        orch = _orch()
+        orch._skim_records = [_skim_record("id-a", "slack", 3, 2, "Priya moved the launch."),
+                              _skim_record("id-b", "article", 0, 1, "A generic article.")]
+        orch._skim_records[0]["cluster_id"] = "c1"
+        msg = self._explore(orch, caplog)
+        assert "## What arrived since the previous run (2026-09-19 02:00 UTC)" in msg
+        assert "8 documents across 2 channels; 2 of them were read by the skim stage" in msg
+        assert "- article: 5 articles / web pages" in msg and "- slack: 3 conversation-days" in msg
+        assert "id-a | slack | S3 N2 | - | Priya moved the launch. [c1]" in msg
+        assert msg.index("id-a | slack") < msg.index("id-b | article")
+        assert "[id-9]" not in msg                                   # no manifest samples in inventory mode
+        assert "meet the slice budget" in msg
+        assert orch._explorer_input == {"explorer_input": "inventory", "inventory_listed": 2, "inventory_docs": 2,
+                                        "inventory_chars": len(msg.split("\n\n", 1)[1])}
+        assert any("Explorer arrivals input: inventory — 2 of 2 skimmed documents listed" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_without_records_the_manifest_is_used_and_logged(self, caplog):
+        orch = _orch()
+        msg = self._explore(orch, caplog)
+        assert "- slack: 3 conversation-days (9 memories)" in msg and "[id-9]" in msg
+        assert " | S" not in msg
+        assert orch._explorer_input == {"explorer_input": "manifest"}
+        assert any("Explorer arrivals input: manifest — 2 channels" in r.getMessage() for r in caplog.records)
+
+    def test_pipeline_records_the_explorer_input_in_run_stats(self):
+        """run(): the choice travels to complete_run (here the circuit-breaker path, since a
+        mocked DB resolves no slices)."""
+        orch = _orch()
+        invoker = MagicMock()
+        invoker.invoke.return_value = {"output": [], "raw": "[]", "usage": None, "usage_source": "estimate"}
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
+             patch.object(orch, "_invoker_for", return_value=invoker), \
+             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"), \
+             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""):
+            db.create_run.return_value = "run-p"
+            db.get_memory_stats.return_value = {"total_count": 1, "recent_activity": 1, "date_range": {}}
+            db.get_arrivals_summary.return_value = []
+            db.get_strategy_usage.return_value = {}
+            result = orch.run("scheduled")
+        assert result.aborted_early is True
+        assert db.complete_run.call_args.kwargs["stats"]["explorer_input"] == "manifest"
+
+
+class TestWeightedArrivalsSliceWiring:
+    def _prov(self, mid, source_type="slack", created=None):
+        return {"id": mid, "type": "source", "source_type": source_type, "created_at": created or STARTED,
+                "parent_id": None, "project": None}
+
+    def test_allocate_attention_weights_the_guaranteed_slice_and_records_metrics(self):
+        orch = _orch()
+        new_rows = [{"id": f"slack-{i}", "title": f"Slack day {i}", "type": "source", "source_type": "slack",
+                     "created_at": STARTED - timedelta(hours=i)} for i in range(6)] + \
+                   [{"id": f"mail-{i}", "title": f"Email {i}", "type": "source", "source_type": "outlook_email",
+                     "created_at": STARTED - timedelta(hours=i)} for i in range(6)]
+        prov = [self._prov(r["id"], r["source_type"], r["created_at"]) for r in new_rows]
+        # The two oldest documents are the salient ones; stratification alone (newest first) skips them.
+        orch._skim_records = [_skim_record("slack-5", "slack", 3, 3), _skim_record("mail-5", "outlook_email", 3, 2)]
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db:
+            db.get_previous_run_started_at.return_value = STARTED - timedelta(days=1)
+            db.get_recent_slice_memory_ids.return_value = set()
+            db.get_memory_provenance.side_effect = lambda ids: [r for r in prov if r["id"] in set(ids)]
+            db.get_recent_parent_memories.return_value = new_rows
+            out = orch._allocate_attention("run-1", "scheduled", STARTED, [])
+        assert [s.strategy for s in out] == ["arrivals_synthesis"]
+        assert out[0].memory_ids[:2] == ["slack-5", "mail-5"]
+        assert len(out[0].memory_ids) == 8                                  # 4 + 4 under the per-channel cap
+        rows = db.record_slices.call_args[0][1]
+        assert rows[0]["origin"] == "guaranteed_arrivals"
+        assert rows[0]["metrics"]["skim_weighted"] is True and rows[0]["metrics"]["skim_picked"] == 2
+        assert rows[0]["metrics"]["arrival_share"] == 1.0
+        assert orch._slice_rows == rows                                     # kept for the judging order
+
+    def test_without_records_the_metrics_carry_no_skim_keys(self):
+        orch = _orch()
+        new_rows = [{"id": f"slack-{i}", "title": "t", "type": "source", "source_type": "slack", "created_at": STARTED}
+                    for i in range(3)]
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db:
+            db.get_previous_run_started_at.return_value = STARTED - timedelta(days=1)
+            db.get_recent_slice_memory_ids.return_value = set()
+            db.get_memory_provenance.side_effect = lambda ids: [self._prov(i) for i in ids]
+            db.get_recent_parent_memories.return_value = new_rows
+            orch._allocate_attention("run-1", "scheduled", STARTED, [])
+        rows = db.record_slices.call_args[0][1]
+        assert "skim_weighted" not in rows[0]["metrics"] and "skim_picked" not in rows[0]["metrics"]
+
+    def test_slice_rows_are_empty_when_the_ledger_is_unavailable(self):
+        orch = _orch()
+        orch._slice_rows = [{"stale": True}]
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db"):
+            out = orch._allocate_attention("run-1", "scheduled", STARTED, [MemorySlice(name="s", strategy="x", memory_ids=["m"])])
+        assert len(out) == 1 and orch._slice_rows == []

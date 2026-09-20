@@ -18,6 +18,11 @@ docs/PLAN-skim-stage.md §2:
   ``truncated``; the skim's own spend is summed and the loop stops cleanly
   (``aborted_on_cap``) once it reaches ``cap_usd``. Every call is also metered
   through ``tracker`` so it counts toward the run cap.
+* **Faithful** — before a record is stored its quotes are checked against the
+  text the model saw (:func:`src.skim.faithfulness.stored_form`): a quote that
+  fails both paths is stored as ``null`` (the item's ``text`` stays) and counted
+  in ``quotes_unverified`` on the record, in :class:`SkimResult` and in the run
+  stats.
 * **Quiet** — logging carries counts and ids only, never document text, titles,
   summaries or quotes.
 """
@@ -33,7 +38,7 @@ from typing import Any, Callable
 from src.backends.cost import SpendCapExceeded, estimate_cost_usd
 from src.prompts.skim import SKIM_SYSTEM_PROMPT, build_skim_request
 from src.skim import store as default_store
-from src.skim.faithfulness import check_record
+from src.skim.faithfulness import stored_form
 from src.skim.schema import SKIM_SCHEMA, SkimValidationError, validate_record
 
 logger = logging.getLogger(__name__)
@@ -55,6 +60,7 @@ class SkimResult:
     truncated: int = 0         # documents cut to max_doc_chars before the call
     quotes_emitted: int = 0
     quotes_verbatim: int = 0
+    quotes_unverified: int = 0  # stored as null: failed both faithfulness paths
     cost_usd: float = 0.0      # this pass's metered spend
     aborted_on_cap: bool = False
     duration_s: float = 0.0
@@ -79,6 +85,7 @@ class SkimResult:
             "skim_truncated": self.truncated,
             "skim_quotes_emitted": self.quotes_emitted,
             "skim_quotes_verbatim": self.quotes_verbatim,
+            "skim_quotes_unverified": self.quotes_unverified,
             "skim_cost_usd": round(self.cost_usd, 6),
             "skim_aborted_on_cap": self.aborted_on_cap,
             "skim_duration_s": round(self.duration_s, 1),
@@ -223,10 +230,13 @@ def skim_window(
                 raise cap_exc
             continue
 
-        faith = check_record(record, content)
+        # Stored form: quotes that fail both faithfulness paths become null (see
+        # src.skim.faithfulness.stored_form); the check runs against the text the
+        # model actually saw (after truncation).
+        skim_data, faith = stored_form(record, content)
         try:
             store.upsert_skim(
-                doc_id, model=model, prompt_version=prompt_version, skim=record.to_dict(), run_id=run_id,
+                doc_id, model=model, prompt_version=prompt_version, skim=skim_data, run_id=run_id,
                 input_tokens=usage.get("inputTokens", usage.get("input_tokens")) if usage else None,
                 output_tokens=usage.get("outputTokens", usage.get("output_tokens")) if usage else None,
                 cost_usd=cost, truncated=truncated,
@@ -242,6 +252,7 @@ def skim_window(
         result.skimmed += 1
         result.quotes_emitted += faith["quotes_emitted"]
         result.quotes_verbatim += faith["quotes_verbatim"]
+        result.quotes_unverified += faith["quotes_fabricated"]
         if record.coercions:
             result.coerced += 1
             for c in record.coercions:
@@ -252,8 +263,8 @@ def skim_window(
     result.coercion_classes = coercion_classes
     result.duration_s = time.monotonic() - t0
     logger.info("Skim done: %d skimmed, %d reused, %d failed, %d invalid, %d coerced, %d truncated; "
-                "quotes %d/%d verbatim; $%.4f in %.1fs%s",
+                "quotes %d/%d verbatim (%d stored as unverified); $%.4f in %.1fs%s",
                 result.skimmed, result.reused, result.failed, result.invalid, result.coerced, result.truncated,
-                result.quotes_verbatim, result.quotes_emitted, result.cost_usd, result.duration_s,
-                " (stopped at sub-cap)" if result.aborted_on_cap else "")
+                result.quotes_verbatim, result.quotes_emitted, result.quotes_unverified, result.cost_usd,
+                result.duration_s, " (stopped at sub-cap)" if result.aborted_on_cap else "")
     return result
