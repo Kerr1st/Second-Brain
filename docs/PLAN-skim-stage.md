@@ -91,9 +91,14 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
       `--dry-run`; per-doc call, validation, quote check; writes `logs/skim_probe/*.jsonl`;
       prints aggregates only (validity %, quote-verbatim %, empty-field rates, tokens, $,
       latency). Unit tests with a fake invoker (synthetic docs only).
+- [x] Follow-up A (after the first real probe): token-sequence quote path in
+      `faithfulness.py` (`verbatim_exact` / `verbatim_tokens` reported per field).
+- [x] Follow-up B: `validate_record(raw, coerce=True)` trims summary (hard limit 300, sentence
+      boundary) / quote (≤160 prefix) / topics (first 5) and records `coercions`; probe
+      reports coerced records and coercion classes; `--strict` keeps the old behaviour.
 
-### Phase 2 — Storage + runner  `[ ]`
-- [ ] `migrations/014_memory_skim.sql`; `src/skim/store.py` (upsert, fetch by window,
+### Phase 2 — Storage + runner  `[x]`
+- [x] `migrations/014_memory_skim.sql`; `src/skim/store.py` (upsert, fetch by window,
       already-skimmed filter); `src/skim/runner.py` (`skim_window(...)` with sub-cap,
       idempotency, per-doc error isolation, metrics); orchestrator Step 3.5 with fallback;
       resolver role `skim`; `config/backends.toml`; tests (pipeline tests bypass skim via
@@ -124,6 +129,23 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
 
 ## 5. Status (newest first)
 
+- 2026-09-20 — **Phase 1 follow-ups + Phase 2 done** (commits `921f59f` token-path quote check +
+  coercing validator, `e163b4b` migration 014 / store / runner / `skim` role, `b6e8717`
+  orchestrator Step 3.5; hermetic suite 1,166 → 1,268; zero Bedrock calls). Migration 014
+  applied to the live `memory_bank` with `migrations/migrate.sh` (recorded in
+  `schema_migrations`): table `memory_skim` + indexes, and — beyond the plan — a nullable
+  `dream_cycle_runs.stats JSONB` so `complete_run` can persist the skim counters
+  (`skim_docs/skimmed/reused/failed/cost_usd`, …) without a column each; additive, `panel-acceptance`
+  runs leave it NULL. Adapter options are a new inline table on a role in `backends.toml`
+  (`options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 }`, bedrock-only keys,
+  validated at load, part of the invoker cache key); `skim` is Bedrock Nova 2 Lite in all five
+  profiles and the resolver rejects it on any MCP-capable backend at load and at resolution.
+  Skim sub-cap `SKIM_SPEND_CAP_USD = 1.00` (env `SECOND_BRAIN_SKIM_CAP_USD`, ≤ 15% of the run cap),
+  metered on the run's `SpendTracker`. Skim runs for every run type (idempotent per
+  `(memory_id, model, prompt_version)`, so overlapping windows cost nothing twice). Safety net:
+  `tests/conftest.py` takes `src.skim.store` offline for the whole unit suite. Not yet live-run
+  (Phase 5); the stored `skim` jsonb is the plain record — fabricated-quote items are counted,
+  not dropped (Phase 3 decides how the inventory treats them).
 - 2026-09-20 — **Phase 1 done** (commits `9f15696` backends, `0ca0efb` skim modules + probe;
   hermetic suite 1,067 → 1,166). AWS docs verified and cited in `src/backends/bedrock.py`:
   Converse serves `us.amazon.nova-2-lite-v1:0`; reasoning off =
