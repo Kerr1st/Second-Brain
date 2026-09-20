@@ -153,7 +153,12 @@ class DreamCycleOrchestrator:
         """
         provenance: dict[str, dict] = {}
         for role in VALID_ROLES:
-            spec = self.resolver.spec_for(role)
+            try:
+                spec = self.resolver.spec_for(role)
+            except KeyError:
+                # Optional stage not configured (e.g. no skim role in a hand-built
+                # profile): the run proceeds without it, so provenance omits it.
+                continue
             provenance[role] = {
                 "backend": spec.backend,
                 "model": spec.model,
