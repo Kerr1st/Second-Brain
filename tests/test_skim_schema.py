@@ -11,14 +11,19 @@ import json
 import pytest
 
 from src.skim.schema import (
+    COERCION_SUMMARY_TRIMMED,
+    COERCION_TOPICS_TRUNCATED,
     DOC_KINDS,
     MAX_QUOTE_CHARS,
     MAX_SUMMARY_CHARS,
     MAX_TOPICS,
     SKIM_SCHEMA,
+    SUMMARY_HARD_LIMIT_CHARS,
     QuotedItem,
     SkimRecord,
     SkimValidationError,
+    trim_quote,
+    trim_summary,
     validate_record,
 )
 
@@ -119,13 +124,118 @@ class TestValidateAccepts:
         data["summary"] = "x" * MAX_SUMMARY_CHARS
         data["topics"] = [f"t{i}" for i in range(MAX_TOPICS)]
         data["decisions"][0]["quote"] = "q" * MAX_QUOTE_CHARS
-        validate_record(data)
+        rec = validate_record(data, coerce=False)
+        assert rec.coercions == [] and not rec.coerced
+
+
+class TestCoercion:
+    """coerce=True (default): over-long fields are trimmed and the trims recorded;
+    coerce=False keeps the strict Phase 1 behaviour."""
+
+    def test_valid_record_has_no_coercions(self):
+        rec = validate_record(good_record())
+        assert rec.coercions == [] and rec.coerced is False
+
+    def test_summary_between_soft_and_hard_limit_is_kept_untouched(self):
+        data = good_record()
+        data["summary"] = "s" * (MAX_SUMMARY_CHARS + 1)
+        rec = validate_record(data)
+        assert rec.summary == data["summary"] and rec.coercions == []
+        data["summary"] = "s" * SUMMARY_HARD_LIMIT_CHARS
+        assert validate_record(data).coercions == []
+
+    def test_summary_over_hard_limit_is_cut_at_last_sentence_boundary(self):
+        data = good_record()
+        first = "The note records the Orrery beta plan and the open pricing tier question in some detail."
+        second = " It then restates the launch schedule, the owners for each task and the review dates at length."
+        third = (" Finally it lists follow-ups, risks, mitigations and the people responsible for each of them,"
+                 " together with the dates on which every item is to be reviewed again by the whole team.")
+        data["summary"] = first + second + third
+        assert len(first + second) <= SUMMARY_HARD_LIMIT_CHARS < len(data["summary"])
+        rec = validate_record(data)
+        assert rec.summary == first + second
+        assert len(rec.summary) <= SUMMARY_HARD_LIMIT_CHARS
+        assert rec.coercions == [COERCION_SUMMARY_TRIMMED]
+
+    def test_summary_without_boundary_is_hard_cut(self):
+        data = good_record()
+        data["summary"] = "word " * 100  # 500 chars, no sentence end
+        rec = validate_record(data)
+        assert len(rec.summary) <= SUMMARY_HARD_LIMIT_CHARS and rec.summary == ("word " * 60).rstrip()
+        assert rec.coercions == [COERCION_SUMMARY_TRIMMED]
+
+    def test_trim_summary_ignores_a_boundary_in_the_first_third(self):
+        text = "Dr. " + "x" * 400
+        out = trim_summary(text, 300)
+        assert len(out) == 300 and out.startswith("Dr. x")
+
+    def test_quote_is_cut_to_a_prefix_at_a_word_boundary(self):
+        data = good_record()
+        long_quote = ("we agreed to move the beta launch to the fourteenth of the month " * 4).strip()
+        assert len(long_quote) > MAX_QUOTE_CHARS
+        data["decisions"][0]["quote"] = long_quote
+        data["open_questions"][0]["quote"] = "q" * (MAX_QUOTE_CHARS + 40)  # one unbreakable token
+        rec = validate_record(data)
+        q = rec.decisions[0].quote
+        assert len(q) <= MAX_QUOTE_CHARS and long_quote.startswith(q) and not q.endswith(" ")
+        assert long_quote[len(q)] == " ", "cut falls on a word boundary"
+        assert rec.open_questions[0].quote == "q" * MAX_QUOTE_CHARS
+        assert rec.coercions == ["decisions.quote_trimmed", "open_questions.quote_trimmed"]
+
+    def test_trim_quote_keeps_verbatim_prefix(self):
+        source = "alpha beta gamma delta epsilon"
+        assert trim_quote(source, 12) == "alpha beta"
+        assert trim_quote(source, 10) == "alpha beta"      # next char is a space: no word cut
+        assert trim_quote("abcdefghij", 4) == "abcd"        # no boundary at all: hard cut
+        assert trim_quote(source, 100) == source
+
+    def test_topics_keep_the_first_five(self):
+        data = good_record()
+        data["topics"] = [f"topic {i}" for i in range(MAX_TOPICS + 3)]
+        rec = validate_record(data)
+        assert rec.topics == [f"topic {i}" for i in range(MAX_TOPICS)]
+        assert rec.coercions == [COERCION_TOPICS_TRUNCATED]
+
+    def test_coercions_are_bookkeeping_not_record(self):
+        data = good_record()
+        data["topics"] = [f"topic {i}" for i in range(MAX_TOPICS + 1)]
+        rec = validate_record(data)
+        assert "coercions" not in rec.to_dict()
+        assert set(rec.to_dict()) == set(SKIM_SCHEMA["required"])
+        assert rec == validate_record(rec.to_dict())          # equality ignores coercions
+        assert validate_record(rec.to_dict()).coercions == []  # the trimmed record is clean
+
+    def test_structural_errors_are_never_coerced(self):
+        data = good_record()
+        data["salience"] = 4
+        with pytest.raises(SkimValidationError):
+            validate_record(data)
+        data = good_record()
+        data["decisions"][0]["quote"] = ""
+        with pytest.raises(SkimValidationError):
+            validate_record(data)
+
+    def test_strict_mode_rejects_what_coercion_trims(self):
+        for mutate in (lambda d: d.__setitem__("summary", "s" * (SUMMARY_HARD_LIMIT_CHARS + 1)),
+                       lambda d: d["decisions"][0].__setitem__("quote", "q" * (MAX_QUOTE_CHARS + 1)),
+                       lambda d: d.__setitem__("topics", [f"t{i}" for i in range(MAX_TOPICS + 1)])):
+            data = good_record()
+            mutate(data)
+            with pytest.raises(SkimValidationError):
+                validate_record(data, coerce=False)
+            assert validate_record(data).coerced
+        # Between the soft and the hard summary limit: strict rejects, coercion keeps as-is.
+        data = good_record()
+        data["summary"] = "s" * (MAX_SUMMARY_CHARS + 1)
+        with pytest.raises(SkimValidationError):
+            validate_record(data, coerce=False)
+        assert not validate_record(data).coerced
 
 
 class TestValidateRejects:
-    def _rejects(self, data, match):
+    def _rejects(self, data, match, **kw):
         with pytest.raises(SkimValidationError, match=match) as excinfo:
-            validate_record(data)
+            validate_record(data, **kw)
         assert isinstance(excinfo.value, ValueError)
 
     def test_missing_quote(self):
@@ -141,12 +251,12 @@ class TestValidateRejects:
     def test_quote_too_long(self):
         data = good_record()
         data["decisions"][0]["quote"] = "q" * (MAX_QUOTE_CHARS + 1)
-        self._rejects(data, r"decisions\[0\].quote is 161 characters; the limit is 160")
+        self._rejects(data, r"decisions\[0\].quote is 161 characters; the limit is 160", coerce=False)
 
     def test_too_many_topics(self):
         data = good_record()
         data["topics"] = [f"topic {i}" for i in range(MAX_TOPICS + 1)]
-        self._rejects(data, r"topics has 6 items; the limit is 5")
+        self._rejects(data, r"topics has 6 items; the limit is 5", coerce=False)
 
     def test_salience_out_of_range(self):
         data = good_record()
@@ -163,7 +273,7 @@ class TestValidateRejects:
     def test_summary_too_long(self):
         data = good_record()
         data["summary"] = "s" * (MAX_SUMMARY_CHARS + 1)
-        self._rejects(data, r"summary is 201 characters; the limit is 200")
+        self._rejects(data, r"summary is 201 characters; the limit is 200", coerce=False)
 
     def test_missing_and_unknown_fields(self):
         data = good_record()

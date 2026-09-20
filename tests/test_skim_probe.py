@@ -143,6 +143,34 @@ class TestRunProbeAndAggregate:
             sp.run_probe([_doc(DOC_A), _doc(DOC_A)], inv, MODEL, SpendTracker(cap_usd=0.30))
         assert len(inv.calls) == 1
 
+    def test_coercions_are_counted_by_class_and_strict_mode_rejects(self):
+        long_sentence = ("After the load test the whole Orrery team agreed to move the beta launch to the 14th, "
+                         "to keep the pricing tier question open until the council meets again, and to have Priya "
+                         "draft the announcement by Friday so that Tomasz can review it before the weekend.")
+        assert len(long_sentence) > 160
+        doc_c = _doc("Orrery sync notes.\n" + long_sentence + "\n")
+        docs = [doc_c, _doc(DOC_A), _doc(DOC_B, "article")]
+        outputs = [_record(summary="s. " * 120, decisions=[long_sentence]),        # summary + quote trimmed
+                   _record(topics=[f"t{i}" for i in range(7)]),                    # topics truncated
+                   _record()]                                                       # clean
+        recs = sp.run_probe(docs, _FakeInvoker(list(outputs)), MODEL, SpendTracker(cap_usd=1))
+        agg = sp.aggregate(recs)
+        assert agg["json_valid"] == 3 and agg["coerced_records"] == 2 and agg["coerced_pct"] == pytest.approx(66.7)
+        assert agg["coercion_classes"] == {"summary_trimmed": 1, "decisions.quote_trimmed": 1, "topics_truncated": 1}
+        assert recs[0]["coercions"] == ["summary_trimmed", "decisions.quote_trimmed"]
+        assert len(recs[0]["record"]["decisions"][0]["quote"]) <= 160
+        assert agg["quote_verbatim_pct"] == 100.0                # the trimmed prefix is still verbatim
+        assert agg["quote_match_paths"] == {"verbatim_exact": 1, "verbatim_tokens": 0}
+        strict = sp.run_probe(docs, _FakeInvoker(list(outputs)), MODEL, SpendTracker(cap_usd=1), coerce=False)
+        sagg = sp.aggregate(strict)
+        assert sagg["json_valid"] == 1 and sagg["coerced_records"] == 0
+        assert sagg["invalid_reasons"] == {"summary is N characters": 1, "topics has N items": 1}
+
+    def test_token_path_quote_is_verbatim_and_reported_by_path(self):
+        inv = _FakeInvoker([_record(decisions=["**We agreed** to move the *beta launch* to the 14th."])])
+        agg = sp.aggregate(sp.run_probe([_doc(DOC_A)], inv, MODEL, SpendTracker(cap_usd=1)))
+        assert agg["quotes_verbatim"] == 1 and agg["quote_match_paths"] == {"verbatim_exact": 0, "verbatim_tokens": 1}
+
     def test_dry_run_aggregate(self):
         recs = sp.run_probe([_doc(DOC_A), _doc(DOC_B, "article")], None, MODEL, SpendTracker(cap_usd=1), dry_run=True)
         agg = sp.aggregate(recs)
@@ -177,6 +205,7 @@ class TestStdoutIsAggregatesOnly:
             assert forbidden not in out
         assert "JSON-valid            1/2" in out and "quotes verbatim       1/1" in out
         assert "invalid:   1 × doc_kind must be one of" in out
+        assert "coerced records       0/1" in out
         assert "slack" in out and "records: /tmp/x.jsonl" in out
 
     def test_aggregate_dict_carries_no_text_fields(self):

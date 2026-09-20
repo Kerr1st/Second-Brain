@@ -15,9 +15,10 @@ STDOUT carries aggregates only — never a title, summary, quote or document tex
     ... --ids <uuid> [<uuid> ...]
     ... --model google.gemma-3-12b-it --service-tier default
     ... --dry-run                       # build requests, no model calls, no spend
+    ... --strict                        # Phase 1 behaviour: reject over-long fields
 
-This script is the only Phase 1 code that reads ``memories.content``, and only at
-the user's request.
+Reads ``memories.content`` only at the user's request (the runner's store,
+``src/skim/store.py``, is the other reader — inside a dream-cycle run).
 """
 from __future__ import annotations
 
@@ -86,8 +87,14 @@ def make_invoker(model: str, *, service_tier: str | None, temperature: float | N
 
 
 def skim_document(doc: dict, invoker, model: str, tracker: SpendTracker, *, effort: str = "low",
-                  timeout: int = 120, run_id: str | None = None, dry_run: bool = False) -> dict:
-    """Skim one document. Never raises except :class:`SpendCapExceeded` (a hard stop)."""
+                  timeout: int = 120, run_id: str | None = None, dry_run: bool = False,
+                  coerce: bool = True) -> dict:
+    """Skim one document. Never raises except :class:`SpendCapExceeded` (a hard stop).
+
+    ``coerce`` is passed to :func:`validate_record`: by default over-long fields
+    are trimmed and listed under ``coercions``; ``--strict`` keeps Phase 1's
+    reject-on-overrun behaviour so the raw overrun rate can still be measured.
+    """
     content = doc.get("content") or ""
     request = build_skim_request(content, doc.get("source_type"), doc.get("title"), doc.get("created_at"))
     rec: dict = {
@@ -95,7 +102,7 @@ def skim_document(doc: dict, invoker, model: str, tracker: SpendTracker, *, effo
         "created_at": str(doc.get("created_at") or ""), "model": model, "prompt_version": PROMPT_VERSION,
         "doc_chars": len(content), "prompt_chars": len(SKIM_SYSTEM_PROMPT) + len(request),
         "dry_run": dry_run, "error": None, "valid": None, "validation_error": None, "record": None,
-        "faithfulness": None, "latency_s": None, "input_tokens": None, "output_tokens": None,
+        "coercions": [], "faithfulness": None, "latency_s": None, "input_tokens": None, "output_tokens": None,
         "service_tier_served": None, "cost_usd": 0.0,
     }
     if dry_run:
@@ -121,28 +128,30 @@ def skim_document(doc: dict, invoker, model: str, tracker: SpendTracker, *, effo
         output = output[0] if output else None
     rec["raw_output"] = output
     try:
-        record = validate_record(output)
+        record = validate_record(output, coerce=coerce)
     except SkimValidationError as e:
         rec.update({"valid": False, "validation_error": str(e)[:400]})
         return rec
-    rec.update({"valid": True, "record": record.to_dict(), "faithfulness": check_record(record, content)})
+    rec.update({"valid": True, "record": record.to_dict(), "coercions": list(record.coercions),
+                "faithfulness": check_record(record, content)})
     return rec
 
 
 def run_probe(docs: list[dict], invoker, model: str, tracker: SpendTracker, *, effort: str = "low",
               timeout: int = 120, run_id: str | None = None, dry_run: bool = False,
-              sink: Callable[[dict], None] | None = None) -> list[dict]:
+              coerce: bool = True, sink: Callable[[dict], None] | None = None) -> list[dict]:
     """Skim every document in order; stop (re-raise) when the spend cap trips."""
     records: list[dict] = []
     emit = sink or (lambda r: None)
     for doc in docs:
         rec = skim_document(doc, invoker, model, tracker, effort=effort, timeout=timeout,
-                            run_id=run_id, dry_run=dry_run)
+                            run_id=run_id, dry_run=dry_run, coerce=coerce)
         records.append(rec); emit(rec)
         if not dry_run:
-            log.info("%s %-16s %s  %5.1fs  $%.5f", rec["memory_id"][:8], rec["channel"][:16],
+            log.info("%s %-16s %s  %5.1fs  $%.5f%s", rec["memory_id"][:8], rec["channel"][:16],
                      "ERROR" if rec["error"] else ("valid" if rec["valid"] else "INVALID"),
-                     rec["latency_s"] or 0.0, rec["cost_usd"])
+                     rec["latency_s"] or 0.0, rec["cost_usd"],
+                     f"  coerced×{len(rec['coercions'])}" if rec.get("coercions") else "")
     return records
 
 
@@ -174,6 +183,11 @@ def aggregate(records: list[dict]) -> dict:
     latencies = [r["latency_s"] for r in attempted if isinstance(r.get("latency_s"), (int, float))]
     quotes_emitted = sum(r["faithfulness"]["quotes_emitted"] for r in valid)
     quotes_verbatim = sum(r["faithfulness"]["quotes_verbatim"] for r in valid)
+    match_paths: Counter = Counter()
+    for r in valid:
+        match_paths.update(r["faithfulness"].get("match_paths") or {})
+    coerced = [r for r in valid if r.get("coercions")]
+    coercion_classes = Counter(c for r in coerced for c in r["coercions"])
     with_items = [r for r in valid if r["record"]["decisions"] or r["record"]["open_questions"]]
     per_channel: dict[str, Counter] = defaultdict(Counter)
     for r in records:
@@ -196,10 +210,14 @@ def aggregate(records: list[dict]) -> dict:
         "json_valid": len(valid),
         "json_valid_pct": _pct(len(valid), len(attempted)),
         "invalid_reasons": dict(Counter(reason_key(r["validation_error"] or "") for r in invalid)),
+        "coerced_records": len(coerced),
+        "coerced_pct": _pct(len(coerced), len(valid)),
+        "coercion_classes": dict(coercion_classes),
         "with_decision_or_question_pct": _pct(len(with_items), len(valid)),
         "quotes_emitted": quotes_emitted,
         "quotes_verbatim": quotes_verbatim,
         "quote_verbatim_pct": _pct(quotes_verbatim, quotes_emitted),
+        "quote_match_paths": dict(match_paths),
         "fabricated_quotes": quotes_emitted - quotes_verbatim,
         "records_with_fabrication": sum(1 for r in valid if not r["faithfulness"]["all_verbatim"]),
         "empty_summaries": sum(1 for r in valid if not r["record"]["summary"].strip()),
@@ -222,9 +240,13 @@ def print_aggregates(agg: dict, *, model: str, out_path: str | None) -> None:
     print(f"  JSON-valid            {agg['json_valid']}/{agg['calls']}  ({pct(agg['json_valid_pct'])})")
     for reason, n in sorted(agg["invalid_reasons"].items(), key=lambda kv: -kv[1]):
         print(f"    invalid: {n:3d} × {reason}")
+    print(f"  coerced records       {agg['coerced_records']}/{agg['json_valid']}  ({pct(agg['coerced_pct'])})")
+    for cls, n in sorted(agg["coercion_classes"].items(), key=lambda kv: -kv[1]):
+        print(f"    coerced: {n:3d} × {cls}")
     print(f"  ≥1 decision/question  {pct(agg['with_decision_or_question_pct'])} of valid records")
     print(f"  quotes verbatim       {agg['quotes_verbatim']}/{agg['quotes_emitted']}  ({pct(agg['quote_verbatim_pct'])})"
-          f"  fabricated {agg['fabricated_quotes']} in {agg['records_with_fabrication']} record(s)")
+          f"  fabricated {agg['fabricated_quotes']} in {agg['records_with_fabrication']} record(s)"
+          f"  paths {agg['quote_match_paths']}")
     print(f"  empty summaries       {agg['empty_summaries']}")
     print(f"  latency mean/max      {agg['latency_mean_s']} / {agg['latency_max_s']} s")
     print(f"  tokens in/out         {agg['input_tokens']} / {agg['output_tokens']}")
@@ -255,6 +277,8 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout", type=int, default=120)
     ap.add_argument("--cap-usd", type=float, default=DEFAULT_CAP_USD)
     ap.add_argument("--profile", help="AWS named profile for the Bedrock client (sets AWS_PROFILE)")
+    ap.add_argument("--strict", action="store_true",
+                    help="reject over-long summary/quote/topics instead of trimming them (Phase 1 behaviour)")
     ap.add_argument("--dry-run", action="store_true", help="build the requests; no model calls, no spend")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s", datefmt="%H:%M:%S")
@@ -283,7 +307,7 @@ def main(argv=None) -> int:
             records.append(rec)
         try:
             run_probe(docs, invoker, args.model, tracker, effort=args.effort, timeout=args.timeout,
-                      run_id=f"skim-probe-{stamp}", dry_run=args.dry_run, sink=sink)
+                      run_id=f"skim-probe-{stamp}", dry_run=args.dry_run, coerce=not args.strict, sink=sink)
         except SpendCapExceeded as e:
             log.error("stopped: %s", e)
     print_aggregates(aggregate(records), model=args.model, out_path=out_path)

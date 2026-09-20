@@ -1,16 +1,30 @@
 """Mechanical faithfulness check: is every quote in a skim record verbatim?
 
 The skim record carries a ``quote`` for each decision and open question. A
-quote is faithful when it is a contiguous passage of the source document. The
-check is a substring match after a small, symmetric normalisation of both
-sides — whitespace runs, typographic quote marks, dashes and ellipses — so a
-model that copied the passage correctly but through a Unicode-flattening
-tokenizer is not counted as fabricating, while any change of wording is. Case
-is not folded: a quote is verbatim or it is not.
+quote is faithful when it is a contiguous passage of the source document. Two
+paths establish that, tried in order:
 
-This is the primary quality metric of the skim (docs/PLAN-skim-stage.md §2,
-Decisions): it is free, it needs no second model, and it catches exactly the
-failure mode — invented detail — that the panel's grounding audit exists for.
+``verbatim_exact``
+    Substring match after a small, symmetric normalisation of both sides —
+    whitespace runs, typographic quote marks, dashes and ellipses — so a model
+    that copied the passage correctly but through a Unicode-flattening
+    tokenizer is not counted as fabricating. Case is kept.
+
+``verbatim_tokens``
+    Both sides are reduced to a list of lower-cased alphanumeric tokens
+    (markdown marks, bullets, punctuation, quote marks, URL separators all
+    vanish) and the quote passes when its token list occurs as a *contiguous*
+    sublist of the source's. This is what the first real probe needed
+    (2026-09-20): every "fabricated" quote had 100% token overlap with the
+    source and differed only in markdown / punctuation — ``**bold**`` markers,
+    a bullet dash, a backtick, a smart quote — not in wording. Reordered or
+    replaced words still fail, because the *sequence* must match.
+
+Both paths accept only what the document says; neither can turn a paraphrase
+into a verbatim quote. This is the primary quality metric of the skim
+(docs/PLAN-skim-stage.md §2, Decisions): it is free, it needs no second model,
+and it catches exactly the failure mode — invented detail — that the panel's
+grounding audit exists for.
 """
 
 from __future__ import annotations
@@ -33,6 +47,17 @@ _INVISIBLE = {c: "" for c in "\u200b\u200c\u200d\u2060\ufeff"}
 _TRANSLATION = str.maketrans({**_QUOTE_MARKS, **_DASHES, **_INVISIBLE, "\u2026": "..."})
 _OUTER_QUOTE_CHARS = "\"'"
 
+#: A token is a maximal run of Unicode letters and digits; everything else —
+#: markdown ``* _ \` # > | -``, bullets, quote marks, dashes, the punctuation of
+#: URLs — is a separator. Underscore is excluded from ``\w`` on purpose (it is
+#: markdown emphasis, not a word character here).
+_TOKEN_RE = re.compile(r"[^\W_]+")
+
+#: How a quote was matched (see module docstring); ``None`` means not found.
+VERBATIM_EXACT = "verbatim_exact"
+VERBATIM_TOKENS = "verbatim_tokens"
+MATCH_PATHS = (VERBATIM_EXACT, VERBATIM_TOKENS)
+
 
 def normalize(text: str) -> str:
     """Normalise whitespace, quote marks, dashes and ellipses; keep case and words."""
@@ -41,6 +66,17 @@ def normalize(text: str) -> str:
     text = text.translate(_TRANSLATION)
     text = _ELLIPSIS_RE.sub("...", text)
     return _WS_RE.sub(" ", text).strip()
+
+
+def tokenize(text: str) -> list[str]:
+    """Lower-cased alphanumeric tokens of ``text``; markdown and punctuation vanish.
+
+    ``"- **Decision:** ship `v2` on the 14th"`` → ``["decision", "ship", "v2",
+    "on", "the", "14th"]``. Applied identically to quote and source.
+    """
+    if not text:
+        return []
+    return [t.casefold() for t in _TOKEN_RE.findall(text.translate(_TRANSLATION))]
 
 
 def _strip_outer(quote: str) -> str:
@@ -61,18 +97,42 @@ def _strip_outer(quote: str) -> str:
     return q
 
 
-def quote_is_verbatim(quote: str, source_text: str) -> bool:
-    """True when ``quote`` occurs in ``source_text`` after normalisation.
+def _tokens_are_contiguous_sublist(needle: list[str], haystack: list[str]) -> bool:
+    """True when ``needle`` occurs as a contiguous run inside ``haystack``.
 
-    An empty quote (or one that is only quote marks / ellipsis) is never
-    verbatim — there is nothing to check.
+    Implemented as a substring search over the tokens joined with a separator
+    that cannot occur inside a token, so token boundaries are respected
+    (``["a", "bc"]`` never matches ``["ab", "c"]``) and the search runs in C.
+    """
+    if not needle or len(needle) > len(haystack):
+        return False
+    sep = "\x00"
+    return f"{sep}{sep.join(needle)}{sep}" in f"{sep}{sep.join(haystack)}{sep}"
+
+
+def match_quote(quote: str, source_text: str) -> str | None:
+    """How ``quote`` occurs in ``source_text``: ``"verbatim_exact"``,
+    ``"verbatim_tokens"`` or ``None`` when it does not.
+
+    The exact path is tried first (fast, case-preserving); the token path only
+    when it fails. An empty quote (or one that is only quote marks / ellipsis /
+    punctuation) never matches — there is nothing to check.
     """
     if not isinstance(quote, str) or not isinstance(source_text, str):
-        return False
+        return None
     q = _strip_outer(normalize(quote))
     if not q:
-        return False
-    return q in normalize(source_text)
+        return None
+    if q in normalize(source_text):
+        return VERBATIM_EXACT
+    if _tokens_are_contiguous_sublist(tokenize(q), tokenize(source_text)):
+        return VERBATIM_TOKENS
+    return None
+
+
+def quote_is_verbatim(quote: str, source_text: str) -> bool:
+    """True when ``quote`` is found in ``source_text`` by either path."""
+    return match_quote(quote, source_text) is not None
 
 
 def check_record(record: SkimRecord, source_text: str) -> dict[str, Any]:
@@ -80,20 +140,24 @@ def check_record(record: SkimRecord, source_text: str) -> dict[str, Any]:
 
     Returns counts only plus the ``(field, index)`` positions of fabricated
     quotes — never the quote text itself, so the result is safe to aggregate
-    and print. ``all_verbatim`` is True when every emitted quote was found
-    (vacuously True for a record with no quotes).
+    and print. Per field and overall, ``verbatim`` is split by the path that
+    established it (``verbatim_exact`` / ``verbatim_tokens``).
+    ``all_verbatim`` is True when every emitted quote was found (vacuously
+    True for a record with no quotes).
     """
     fabricated: list[tuple[str, int]] = []
     per_field: dict[str, dict[str, int]] = {}
     for field_name in ("decisions", "open_questions"):
         items = getattr(record, field_name)
-        found = 0
+        counts = {"total": len(items), "verbatim": 0, VERBATIM_EXACT: 0, VERBATIM_TOKENS: 0}
         for i, item in enumerate(items):
-            if quote_is_verbatim(item.quote, source_text):
-                found += 1
-            else:
+            path = match_quote(item.quote, source_text)
+            if path is None:
                 fabricated.append((field_name, i))
-        per_field[field_name] = {"total": len(items), "verbatim": found}
+            else:
+                counts["verbatim"] += 1
+                counts[path] += 1
+        per_field[field_name] = counts
     emitted = sum(v["total"] for v in per_field.values())
     verbatim = sum(v["verbatim"] for v in per_field.values())
     return {
@@ -101,6 +165,7 @@ def check_record(record: SkimRecord, source_text: str) -> dict[str, Any]:
         "quotes_verbatim": verbatim,
         "quotes_fabricated": emitted - verbatim,
         "fabricated_positions": fabricated,
+        "match_paths": {p: sum(v[p] for v in per_field.values()) for p in MATCH_PATHS},
         "per_field": per_field,
         "all_verbatim": emitted == verbatim,
     }
