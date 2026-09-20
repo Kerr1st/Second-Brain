@@ -76,18 +76,18 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
 ### Phase 0 — Setup  `[x]`
 - [x] Worktree + branch `skim-stage`; this plan.
 
-### Phase 1 — Nova adapter + probe  `[ ]`
-- [ ] Verify against AWS docs (cite in code comments): Converse support for
+### Phase 1 — Nova adapter + probe  `[x]`
+- [x] Verify against AWS docs (cite in code comments): Converse support for
       `us.amazon.nova-2-lite-v1:0`; the field that disables Nova 2 extended reasoning;
       the Flex service-tier request field (if any); forced `toolChoice.tool` support.
-- [ ] `cost.py`: price entries for `nova-2-lite` (standard and, if separately priced, flex)
+- [x] `cost.py`: price entries for `nova-2-lite` (standard and, if separately priced, flex)
       and `gemma-3-12b`; unit tests.
-- [ ] `bedrock.py`: per-model forced tool choice (Nova/Gemma) while Fable keeps `auto`;
+- [x] `bedrock.py`: per-model forced tool choice (Nova/Gemma) while Fable keeps `auto`;
       Nova reasoning-off fields; optional service tier; unit tests with a fake client.
-- [ ] `src/skim/schema.py` (JSON schema + `SkimRecord` dataclass + validation),
+- [x] `src/skim/schema.py` (JSON schema + `SkimRecord` dataclass + validation),
       `src/prompts/skim.py` (prompt, `PROMPT_VERSION`), `src/skim/faithfulness.py`
       (verbatim-quote check, normalised whitespace).
-- [ ] `scripts/skim_probe.py`: `--ids ... | --since ISO | --limit N`, `--model`, `--cap-usd`,
+- [x] `scripts/skim_probe.py`: `--ids ... | --since ISO | --limit N`, `--model`, `--cap-usd`,
       `--dry-run`; per-doc call, validation, quote check; writes `logs/skim_probe/*.jsonl`;
       prints aggregates only (validity %, quote-verbatim %, empty-field rates, tokens, $,
       latency). Unit tests with a fake invoker (synthetic docs only).
@@ -124,6 +124,23 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
 
 ## 5. Status (newest first)
 
+- 2026-09-20 — **Phase 1 done** (commits `9f15696` backends, `0ca0efb` skim modules + probe;
+  hermetic suite 1,067 → 1,166). AWS docs verified and cited in `src/backends/bedrock.py`:
+  Converse serves `us.amazon.nova-2-lite-v1:0`; reasoning off =
+  `additionalModelRequestFields.reasoningConfig.type = "disabled"`; tier =
+  `serviceTier: {"type": "flex"}` (response echoes the served tier); `toolChoice.tool` is
+  Nova/Claude-3-only, so Gemma 3 12B uses `outputConfig.textFormat` JSON schema instead
+  (doc-verified, not live). Prices (us-east-1, pricing-page data 2026-09-17): Nova 2 Lite geo
+  $0.33/$2.75 standard, $0.165/$1.375 Flex; Gemma 3 12B $0.09/$0.29, Flex derived $0.045/$0.145.
+  Live-verified on a synthetic document (3 calls, `AWS_PROFILE=second-brain-jobs`): the full
+  request — forced `structured_output` tool, `reasoningConfig disabled`, `temperature 0.0`,
+  `maxTokens 4096`, `serviceTier flex` — accepted every time; served tier `flex`; ~2.5k in /
+  ~340 out tokens; **$0.0009 per call**; 2.3–2.7 s. Quality on the synthetic doc: every quote
+  verbatim, people/entities exact; one open-question quote ran two sentences together (163 chars
+  > 160) on all three calls, and Nova accepts but does not enforce `maxLength` in the tool
+  schema — so the 160-char limit is enforced by `validate_record` and the probe reports
+  `invalid_reasons` by class. Watch this rate in Phase 5; relax the limit or trim quotes in code
+  if it dominates. Probe `--profile` means the AWS named profile (no backend role exists yet).
 - 2026-09-20 — Plan written; worktree `skim-stage` created off `panel-acceptance@1db8bf7`.
   Research doc `docs/RESEARCH-skim-model.md` exists untracked in the main tree (to be
   committed on this branch). User decisions: model = Nova 2 Lite; cadence stays Mon/Wed/Fri;
