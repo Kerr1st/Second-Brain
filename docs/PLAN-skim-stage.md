@@ -138,6 +138,11 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
 
 ## 5. Status (newest first)
 
+- 2026-09-20 — **Runtime off-switch added**: `SECOND_BRAIN_SKIM_DISABLED=1|true|yes` makes
+  `_skim_arrivals` return `None` with one WARNING and no model calls (constant `SKIM_DISABLED_ENV`,
+  3 tests; suite 1,370 → 1,374). `docs/SKIM-STAGE.md` "Disabling the skim" and `MODEL-BACKENDS.md`
+  updated; the earlier "no off-switch" note below is superseded. Remaining: memory note (done in the
+  agent's memory store), merge decision.
 - 2026-09-20 — **Phase 6 docs written** (this commit; docs only, zero Bedrock calls, no corpus content
   read). New `docs/SKIM-STAGE.md` (~180 lines): purpose, Step 3.5 (window, idempotency key, fallback),
   Nova 2 Lite request shape and prices with the `05171b48` numbers, the record schema with coercion and

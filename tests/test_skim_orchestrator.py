@@ -115,6 +115,26 @@ class TestSkimArrivalsFallbacks:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1 and "not configured" in warnings[0].getMessage()
 
+    @pytest.mark.parametrize("value", ["1", "true", "YES"])
+    def test_env_off_switch_skips_the_stage_with_one_warning(self, value, caplog, monkeypatch):
+        monkeypatch.setenv("SECOND_BRAIN_SKIM_DISABLED", value)
+        orch = _orch(_profile())
+        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.orchestrator"), \
+             patch("src.dream_cycle.orchestrator.skim_window") as sw, \
+             patch.object(orch, "_invoker_for") as inv, \
+             patch("src.dream_cycle.orchestrator.dream_cycle_db"):
+            assert orch._skim_arrivals("run-s", "scheduled", STARTED) is None
+        sw.assert_not_called(); inv.assert_not_called()
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1 and "SECOND_BRAIN_SKIM_DISABLED" in warnings[0].getMessage()
+
+    def test_env_off_switch_ignores_other_values(self, monkeypatch):
+        monkeypatch.setenv("SECOND_BRAIN_SKIM_DISABLED", "0")
+        orch = _orch(_profile(skim=False))  # falls through to the normal path
+        with patch("src.dream_cycle.orchestrator.skim_window"), \
+             patch("src.dream_cycle.orchestrator.dream_cycle_db"):
+            assert orch._skim_arrivals("run-s", "scheduled", STARTED) is None  # unconfigured, not disabled
+
     @pytest.mark.parametrize("backend", ["kiro", "claude_code", "codex"])
     def test_agentic_backend_returns_none_and_never_invokes(self, backend, caplog):
         orch = _orch(_profile(skim_backend=backend))

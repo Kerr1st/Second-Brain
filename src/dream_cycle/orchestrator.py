@@ -110,6 +110,8 @@ EVALUATOR_BACKOFF_S = 2.0
 # SKIM_RUN_CAP_SHARE of the run cap; the spend still counts toward the run cap.
 SKIM_SPEND_CAP_USD = 1.00
 SKIM_RUN_CAP_SHARE = 0.15
+#: Operational off-switch: set to 1/true/yes to skip Step 3.5 (manifest as before).
+SKIM_DISABLED_ENV = "SECOND_BRAIN_SKIM_DISABLED"
 # Budget-aware Thinker and panel (docs/PLAN-skim-stage.md, Phase 4). Per-unit
 # estimates from run 3a1263a6 (2026-09-18, Bedrock profile): the Thinker cost
 # $0.21–0.30 per slice; judging one candidate — grounding audit + revision + four
@@ -879,7 +881,13 @@ class DreamCycleOrchestrator:
         agentic backend, or anything at all fails: the run then continues exactly
         as before (the Explorer gets the plain arrivals manifest). Only
         :class:`SpendCapExceeded` propagates, like in every other stage.
+
+        Operational off-switch: ``SECOND_BRAIN_SKIM_DISABLED=1`` (also ``true``/``yes``)
+        skips the stage with one WARNING and no model calls.
         """
+        if os.environ.get(SKIM_DISABLED_ENV, "").strip().lower() in {"1", "true", "yes"}:
+            logger.warning("Skim skipped: %s is set; the Explorer gets the arrivals manifest", SKIM_DISABLED_ENV)
+            return None
         try:
             spec = self.resolver.spec_for(SKIM_ROLE)
         except KeyError:
