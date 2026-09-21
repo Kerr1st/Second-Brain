@@ -130,13 +130,27 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
       2 REJECTED**; run total **$6.90**, no cap trip, no soft stop, no fallback.
 
 ### Phase 6 — Wrap  `[~]`
-- [ ] `docs/MODEL-BACKENDS.md` (skim role, Nova) and a new `docs/SKIM-STAGE.md` (Step 3.5,
+- [x] `docs/MODEL-BACKENDS.md` (skim role, Nova) and a new `docs/SKIM-STAGE.md` (Step 3.5,
       sub-cap, migration 014, probe, inventory). `docs/ARCHITECTURE.md` and `docs/OPERATIONS.md`
       are NOT edited on this branch: the main tree carries the user's uncommitted edits to
       both (83 dirty files as of 2026-09-20), and touching them would block the branch switch.
-- [ ] Status here; memory note; merge decision (`panel-acceptance` then `skim-stage` → `main`).
+- [~] Status here; memory note; merge decision (`panel-acceptance` then `skim-stage` → `main`).
 
 ## 5. Status (newest first)
+
+- 2026-09-20 — **Phase 6 docs written** (this commit; docs only, zero Bedrock calls, no corpus content
+  read). New `docs/SKIM-STAGE.md` (~180 lines): purpose, Step 3.5 (window, idempotency key, fallback),
+  Nova 2 Lite request shape and prices with the `05171b48` numbers, the record schema with coercion and
+  the unverified-quote policy, `config/skim.toml` and the `PROMPT_VERSION` bump rule, `memory_skim` and
+  the `dream_cycle_runs.stats` keys, the inventory format and weighted guaranteed slice, judging order
+  and the budget soft stop, cost controls, operations (probe, SQL, post-run checks) and privacy.
+  `docs/MODEL-BACKENDS.md`: skim row in the workload and profile tables, the `options = {...}` syntax,
+  Nova/Gemma request rules and prices, sub-cap, data-boundary note, pointers to the two skim docs.
+  One correction surfaced while writing: there is **no runtime off-switch** for the skim — the
+  resolver requires the `skim` role in every profile (`tests/test_resolver.py`), so "remove the role"
+  breaks config load instead of skipping the stage; documented as such, with the two small code
+  options for a real switch left to the merge decision. `ARCHITECTURE.md` / `OPERATIONS.md` untouched
+  (§6). Remaining: memory note; merge decision.
 
 - 2026-09-20 — **Phase 5 done; skim verified live.** Re-probe of the 41 documents with `skim-v2`:
   41/41 valid, 10/10 quotes verbatim, salience S0/1/2/3 = 4/5/9/23 (v1 was 2/5/34/0). Recall
