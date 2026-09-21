@@ -104,14 +104,14 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
       resolver role `skim`; `config/backends.toml`; tests (pipeline tests bypass skim via
       `patch.object`, like `_ground_candidate`).
 
-### Phase 3 — Explorer consumption  `[ ]`
-- [ ] `allocation.build_arrivals_inventory`; orchestrator uses it when records exist;
+### Phase 3 — Explorer consumption  `[x]`
+- [x] `allocation.build_arrivals_inventory`; orchestrator uses it when records exist;
       `prompts/explorer.py` manifest/inventory section; guaranteed slice weighting;
       tests (`test_allocation*`, prompt contract tests).
-- [ ] Optional: `cluster_id` via existing embeddings (greedy cosine threshold) if cheap.
+- [x] Optional: `cluster_id` via existing embeddings (greedy cosine threshold) if cheap.
 
-### Phase 4 — Ordering + budget-aware Thinker  `[ ]`
-- [ ] Sort slices arrival-anchored-first (guaranteed first) before Step 6; skip Thinker
+### Phase 4 — Ordering + budget-aware Thinker  `[x]`
+- [x] Sort slices arrival-anchored-first (guaranteed first) before Step 6; skip Thinker
       when remaining budget < estimated judging cost; tests; log lines.
 
 ### Phase 5 — Live validation  `[ ]`
@@ -129,6 +129,26 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
 
 ## 5. Status (newest first)
 
+- 2026-09-20 — **Phases 3 + 4 done** (commits `e4aa4e6` Explorer inventory / weighted arrivals slice /
+  embedding clusters / unverified-quote policy, `0255abd` judging order + budget-aware Thinker and
+  panel soft stop; hermetic suite 1,268 → 1,332; zero Bedrock calls; no corpus content read).
+  Inventory line `id | channel | S<salience> N<novelty> | D<n> Q<n> C P<n> ! | summary(≤140) [c<k>]`,
+  salience↓ novelty↓ then round-robin across channels within a tier, 24k-char cap with a
+  "… k more documents not listed" footer; `invoke_explorer` logs `Explorer arrivals input: inventory|manifest`
+  with line/char counts and records `explorer_input` (+ `inventory_listed/docs/chars`) in run stats.
+  Guaranteed slice: 7 slots to the top salience/novelty records first, 7 to the stratified method over
+  the rest, caps held for the whole slice (`skim_weighted`/`skim_picked` in slice metrics); byte-identical
+  without records. Unverified-quote policy applied in the runner: a quote failing both faithfulness
+  paths is stored as `null`, the item's text stays, `quotes_unverified: n` on the record and
+  `skim_quotes_unverified` in stats. Clustering **done**: `memories.embedding vector(1024)` + pgvector
+  0.8.2 exist; the parent's embedding or `avg()` of its chunks covers 100% of the live window (868 docs,
+  two set queries ≈ 0.4 s); `src/skim/cluster.py` greedy cosine ≥ 0.86 (numpy), labels `c1..` persisted
+  to `memory_skim.cluster_id` and shown as `[c<k>]`. Phase 4: slices judged guaranteed-first then by
+  arrival_share↓ (stable; unchanged when the ledger is unavailable), `EST_THINKER_CALL_USD 0.30` /
+  `EST_JUDGE_CANDIDATE_USD 0.70` (run `3a1263a6`), Thinker skipped when remaining < 0.30 + 2×0.70 +
+  0.70×pending (`slices_skipped_for_budget`), panel stops softly when remaining < 0.70
+  (`candidates_unjudged_for_budget`; run completes normally); the hard cap stays the backstop.
+  Next: Phase 5 live validation from the worktree.
 - 2026-09-20 — **Phase 1 follow-ups + Phase 2 done** (commits `921f59f` token-path quote check +
   coercing validator, `e163b4b` migration 014 / store / runner / `skim` role, `b6e8717`
   orchestrator Step 3.5; hermetic suite 1,166 → 1,268; zero Bedrock calls). Migration 014
