@@ -129,6 +129,26 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
 
 ## 5. Status (newest first)
 
+- 2026-09-20 — **Prompt `skim-v2`: user identity + channel priors** (this commit; hermetic suite
+  1,332 → 1,370; zero Bedrock calls; no corpus content read). The live probe of 41 real documents with
+  `skim-v1` showed salience compressing — 34/41 at S2, S3 never used even for the user's own emails,
+  calendar entries and distilled work sessions, 3 of 4 web articles at S2 (novelty was fine: 0/1/2 =
+  8/15/18) — because the model was never told who "the user" is and had no channel priors. New
+  `config/skim.toml` (committed, not a secret: `[identity]` name / aliases / role / org / focus,
+  `[channels]` own_activity / external keyed by `source_type`; fields documented in its header) read by
+  `src/skim/identity.py` (`load_identity(path=None) -> Identity`; missing file → neutral defaults and no
+  identity block, malformed → `ValueError`). `src/prompts/skim.py`: "About the user" block between the
+  intro and the rules (with "never add these facts to the record unless the text states them"); salience
+  redefined by the user's role in the text (3 = author / addressee / participant or the user's own
+  decision, commitment, task or meeting; 2 = the user's team, customers, projects, tools or plans are the
+  subject but the user is not an actor; 1 = professional interest for the role; 0 = none; bulk mail and
+  automated notices do not make the user an addressee); channel priors (own-activity starts at 2 and
+  rises to 3 when the user is an actor; external starts at 0 and rises only when the text explicitly
+  concerns a focus area; untagged = text alone); the request's channel line carries the tag
+  (`channel: slack (the user's own activity)`, `channel: article (external content)`). Every other rule is
+  byte-identical to v1. Runner, probe and orchestrator import `PROMPT_VERSION`, so v1 rows are simply
+  superseded by the idempotency key. Next: re-probe the same 41 documents with `skim-v2` and compare the
+  salience distribution before Phase 5.
 - 2026-09-20 — **Phases 3 + 4 done** (commits `e4aa4e6` Explorer inventory / weighted arrivals slice /
   embedding clusters / unverified-quote policy, `0255abd` judging order + budget-aware Thinker and
   panel soft stop; hermetic suite 1,268 → 1,332; zero Bedrock calls; no corpus content read).

@@ -1,0 +1,65 @@
+# Skim-stage configuration: who "the user" is, and which capture channels carry
+# the user's own activity (docs/PLAN-skim-stage.md).
+#
+# Read by src/skim/identity.py (load_identity) when src/prompts/skim.py builds
+# the skim system prompt, and rendered there as an "About the user" block plus
+# a per-document channel tag in the request. Without it the model cannot tell
+# "addressed to / written by the user" (salience 3) from "touches the user's
+# projects" (salience 2), so everything compresses to 2: the live probe of 41
+# documents with prompt skim-v1 scored 34 at 2 and never used 3, not even for
+# the user's own emails, calendar entries and distilled work sessions.
+#
+# Not a secret: the name, role, organisation and focus areas as they already
+# appear throughout the user's own documents. No credentials, no contact
+# details. Missing file => neutral defaults (no identity block, no channel
+# tags); malformed file => ValueError at prompt build.
+#
+# [identity]
+#   name     The user's full name as it appears in emails, calendar entries and
+#            chat logs.
+#   aliases  Other strings that denote the user: login alias, handles, short
+#            forms. Matched by the model, not by code.
+#   role     Job title, as the user would state it.
+#   org      Employer / organisation.
+#   focus    Current focus areas — projects, products, customers, systems. An
+#            external document rises above salience 0 only when its text
+#            explicitly concerns one of these.
+#
+# [channels]  Ownership priors, keyed by memories.source_type (the request's
+#             "channel" line).
+#   own_activity  Channels that carry the user's own activity: mail, calendar,
+#                 chats, the user's AI-assistant sessions and what is distilled
+#                 from them. A document starts at salience 2 and rises to 3 when
+#                 the user is an actor in it (author, addressee, participant,
+#                 or the person who decided or committed).
+#   external      Channels that carry material the user merely read or watched.
+#                 A document starts at salience 0 and rises only when its text
+#                 explicitly concerns a focus area.
+#   A source_type in neither list gets no tag; the model judges from the text.
+#   A source_type in both lists is a configuration error.
+#
+# The identity block is part of the prompt the model sees, so an edit here that
+# should re-skim already-skimmed documents also needs a PROMPT_VERSION bump in
+# src/prompts/skim.py (memory_skim is unique on (memory_id, model, prompt_version)).
+
+[identity]
+name = "Kerr First"
+aliases = ["kerrfir"]
+role = "Senior Customer Success Specialist"
+org = "Amazon Web Services"
+focus = ["Kiro", "customer success", "Second Brain (personal knowledge system)"]
+
+[channels]
+own_activity = [
+  "outlook_email",
+  "outlook_calendar",
+  "slack",
+  "distilled_chat",
+  "kiro_cli_chat",
+  "kiro_ide_chat",
+  "quick_desktop_chat",
+  "quick_desktop_decision",
+  "quick_desktop_doc",
+  "weekly_digest",
+]
+external = ["article", "youtube", "browser_history", "quick_desktop_feed"]

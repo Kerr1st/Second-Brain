@@ -177,7 +177,7 @@ class TestIdempotency:
         docs = [_doc()]
         store = FakeStore()
         _run(docs, [_record()], store=store)
-        res = skim_window(WINDOW, invoker=FakeInvoker([_record()]), model=MODEL, prompt_version="skim-v2",
+        res = skim_window(WINDOW, invoker=FakeInvoker([_record()]), model=MODEL, prompt_version=PROMPT_VERSION + "-next",
                           tracker=SpendTracker(9.0), cap_usd=1.0, run_id="r2", fetch_docs=lambda ws: docs, store=store)
         assert res.skimmed == 1 and len(store.rows) == 2
 
