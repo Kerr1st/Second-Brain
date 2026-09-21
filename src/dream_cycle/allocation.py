@@ -523,3 +523,46 @@ def build_arrivals_slice(window_start: datetime, size: int = ARRIVALS_SLICE_SIZE
                          skim_records: list[dict] | None = None) -> MemorySlice | None:
     """DB-backed wrapper around :func:`compose_arrivals_slice` (reads via dream_cycle_db)."""
     return build_arrivals_selection(window_start, size, dcdb, skim_records)[0]
+
+
+
+# --------------------------------------------------------------------------- #
+# Judging order (Phase 4)                                                      #
+# --------------------------------------------------------------------------- #
+def order_slices(slices: list[MemorySlice], rows: list[dict] | None) -> list[tuple[MemorySlice, dict]]:
+    """The order in which the Thinker and the panel see the slices.
+
+    Run ``3a1263a6`` (2026-09-18) generated candidates for every slice and judged
+    them in slice order with the guaranteed arrivals slice appended last, so
+    under the spend cap the arrivals slice was the first thing cut. Now: the
+    ``guaranteed_arrivals`` slice first, then the Explorer's slices by
+    ``arrival_share`` descending, then slices without metrics — a stable sort,
+    so ties keep the Explorer's order. ``rows`` are the ledger rows aligned
+    with ``slices`` (``origin`` + ``metrics``); when they are missing or do not
+    line up (ledger unavailable) the order is unchanged. Returns
+    ``(slice, row)`` pairs; ``row`` is ``{}`` for a slice without one.
+    """
+    if not rows or len(rows) != len(slices):
+        return [(s, {}) for s in slices]
+
+    def key(pair: tuple[MemorySlice, dict]) -> tuple[int, float]:
+        row = pair[1]
+        if row.get("origin") == ARRIVALS_ORIGIN:
+            return (0, 0.0)
+        metrics = row.get("metrics") or {}
+        if "arrival_share" in metrics:
+            return (1, -float(metrics.get("arrival_share") or 0.0))
+        return (2, 0.0)
+
+    return sorted(zip(slices, rows), key=key)
+
+
+def describe_slice_order(ordered: list[tuple[MemorySlice, dict]]) -> str:
+    """One log-friendly line: ``1. [guaranteed_arrivals] name (arrivals 100%); 2. ...``."""
+    parts = []
+    for i, (s, row) in enumerate(ordered, 1):
+        origin = row.get("origin") or "explorer"
+        metrics = row.get("metrics") or {}
+        share = f" (arrivals {metrics['arrival_share']:.0%})" if "arrival_share" in metrics else ""
+        parts.append(f"{i}. [{origin}] {s.name}{share}")
+    return "; ".join(parts)

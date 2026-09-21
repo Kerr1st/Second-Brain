@@ -110,6 +110,19 @@ EVALUATOR_BACKOFF_S = 2.0
 # SKIM_RUN_CAP_SHARE of the run cap; the spend still counts toward the run cap.
 SKIM_SPEND_CAP_USD = 1.00
 SKIM_RUN_CAP_SHARE = 0.15
+# Budget-aware Thinker and panel (docs/PLAN-skim-stage.md, Phase 4). Per-unit
+# estimates from run 3a1263a6 (2026-09-18, Bedrock profile): the Thinker cost
+# $0.21–0.30 per slice; judging one candidate — grounding audit + revision + four
+# votes — cost ~$0.66. Rounded up so the rule errs toward finishing what was
+# started rather than starting more. Before invoking the Thinker for a slice the
+# run must be able to afford the call, judging its (up to two) candidates and
+# judging every candidate already generated; before judging a candidate it must
+# be able to afford that candidate. Otherwise the slice / the remaining
+# candidates are skipped, counted (slices_skipped_for_budget,
+# candidates_unjudged_for_budget) and the run completes normally — the hard
+# cap in SpendTracker stays as the backstop.
+EST_THINKER_CALL_USD = 0.30
+EST_JUDGE_CANDIDATE_USD = 0.70
 
 
 def _skim_cap_usd(run_cap_usd: float) -> float:
@@ -178,6 +191,16 @@ class DreamCycleOrchestrator:
                 "Metered call %s: $%.4f (run total $%.4f of $%.2f cap)",
                 role, cost, self._spend.total_usd, self._spend.cap_usd,
             )
+
+    def _budget_remaining(self) -> float | None:
+        """Dollars left under the run cap, from the SpendTracker's real figures
+        (never estimates), or None when no cap applies. With an all-Kiro profile
+        nothing is metered, the total stays at zero and the budget rules never
+        fire — the cap binds only where usage is real."""
+        cap = getattr(self._spend, "cap_usd", None)
+        if not isinstance(cap, (int, float)) or cap <= 0:
+            return None
+        return float(cap) - float(self._spend.total_usd)
 
     def _backend_provenance(self) -> dict:
         """Snapshot the active profile's (backend, model, effort) per role.
@@ -385,9 +408,33 @@ class DreamCycleOrchestrator:
             dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS | skim_stats | self._explorer_input, digest="")
             return self._aborted_result(run_id, run_type, started_at)
 
-        # Step 6: Invoke Thinker for each slice, collect candidates
+        # Judging order (Phase 4): the guaranteed arrivals slice first, then the
+        # Explorer's slices by arrival share — so the spend cap cuts stale material,
+        # not the most recent days. Stable when the ledger has no metrics.
+        ordered = allocation.order_slices(slices, self._slice_rows)
+        slices = [s for s, _ in ordered]
+        logger.info("Slice order for the Thinker and the panel: %s", allocation.describe_slice_order(ordered))
+
+        # Step 6: Invoke Thinker for each slice, collect candidates. Budget-aware:
+        # a slice is skipped when the remaining budget cannot cover the Thinker call,
+        # judging its candidates and judging what is already waiting.
         all_candidates: list[CandidateInsight] = []
-        for s in slices:
+        slices_skipped_for_budget = 0
+        for i, s in enumerate(slices):
+            remaining = self._budget_remaining()
+            if remaining is not None:
+                needed = EST_THINKER_CALL_USD + 2 * EST_JUDGE_CANDIDATE_USD + EST_JUDGE_CANDIDATE_USD * len(all_candidates)
+                if remaining < needed:
+                    slices_skipped_for_budget = len(slices) - i
+                    logger.warning(
+                        "Budget: $%.2f left of $%.2f, but the next slice needs ~$%.2f (Thinker $%.2f + judging "
+                        "2 new and %d pending candidates at $%.2f each); skipping the Thinker for the remaining "
+                        "%d slice(s): %s",
+                        remaining, self._spend.cap_usd, needed, EST_THINKER_CALL_USD, len(all_candidates),
+                        EST_JUDGE_CANDIDATE_USD, slices_skipped_for_budget,
+                        "; ".join(sl.name for sl in slices[i:]),
+                    )
+                    break
             try:
                 candidates = self.invoke_thinker(s)
             except Exception:
@@ -404,18 +451,34 @@ class DreamCycleOrchestrator:
                 )
                 candidates = candidates[:cap]
             all_candidates.extend(candidates)
-        logger.info("Total candidates from Thinker: %d", len(all_candidates))
+        logger.info("Total candidates from Thinker: %d%s", len(all_candidates),
+                    f" ({slices_skipped_for_budget} slice(s) skipped for budget)" if slices_skipped_for_budget else "")
 
         accepted: list[CandidateInsight] = []
         rejected: list[CandidateInsight] = []
+        candidates_unjudged_for_budget = 0
 
         # Step 7: Consensus Panel — invoke 4 evaluators per candidate.
         # If an evaluator is unrecoverable after retries (the panel is genuinely
         # down), abort the run loudly — but keep the candidates already evaluated
         # so the run record reflects real persisted work (no zeroed-stats lie /
         # orphaned accepted memories). An infra failure never fabricates a verdict.
+        # Soft stop: when the remaining budget cannot cover judging one more
+        # candidate, the rest are left unjudged — no verdict stored, none
+        # fabricated — and the run completes normally instead of tripping the
+        # hard cap mid-candidate.
         panel_aborted = False
-        for candidate in all_candidates:
+        for idx, candidate in enumerate(all_candidates):
+            remaining = self._budget_remaining()
+            if remaining is not None and remaining < EST_JUDGE_CANDIDATE_USD:
+                candidates_unjudged_for_budget = len(all_candidates) - idx
+                logger.warning(
+                    "Budget: $%.2f left of $%.2f is below the ~$%.2f judging one candidate costs; leaving %d "
+                    "candidate(s) unjudged: %s",
+                    remaining, self._spend.cap_usd, EST_JUDGE_CANDIDATE_USD, candidates_unjudged_for_budget,
+                    "; ".join(c.title for c in all_candidates[idx:]),
+                )
+                break
             # Grounding audit + one revision before the panel votes (never aborts).
             candidate = self._ground_candidate(candidate)
             if not candidate.content.strip():
@@ -505,6 +568,11 @@ class DreamCycleOrchestrator:
         except Exception:
             logger.debug("Relationship decay skipped (non-critical)", exc_info=True)
 
+        budget_stats = {}
+        if slices_skipped_for_budget:
+            budget_stats["slices_skipped_for_budget"] = slices_skipped_for_budget
+        if candidates_unjudged_for_budget:
+            budget_stats["candidates_unjudged_for_budget"] = candidates_unjudged_for_budget
         dream_cycle_db.complete_run(
             run_id,
             stats={
@@ -513,6 +581,7 @@ class DreamCycleOrchestrator:
                 "candidates_rejected": len(rejected),
                 **skim_stats,
                 **self._explorer_input,
+                **budget_stats,
             },
             digest=digest,
             explorer_output=json.dumps([{"name": s.name, "strategy": s.strategy, "memory_count": len(s.memory_ids)} for s in slices]),

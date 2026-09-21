@@ -2434,6 +2434,9 @@ class TestFinalOrchestratorMethodSet:
             # Phase 3: the window's skim records (fetched + clustered) for the Explorer
             # inventory and the weighted guaranteed slice; [] on any failure.
             "_load_skim_records",
+            # Phase 4: real dollars left under the run cap (SpendTracker), read before
+            # each Thinker call and each judged candidate.
+            "_budget_remaining",
         }
 
         actual_methods = {
@@ -2665,6 +2668,10 @@ class TestToollessThinkerPacketAndSpendGuard:
     def test_spend_cap_breach_aborts_run_without_retry(self, monkeypatch):
         monkeypatch.setenv("SECOND_BRAIN_RUN_COST_CAP_USD", "0.01")
         monkeypatch.delenv("SECOND_BRAIN_KILL_SWITCH", raising=False)
+        # The budget-aware soft stops (Phase 4) would otherwise never let a $0.01 run
+        # reach the panel; zero them so the hard cap itself is what this test exercises.
+        monkeypatch.setattr("src.dream_cycle.orchestrator.EST_THINKER_CALL_USD", 0.0)
+        monkeypatch.setattr("src.dream_cycle.orchestrator.EST_JUDGE_CANDIDATE_USD", 0.0)
         orch = _make_orchestrator()
         orch.resolver = self._bedrock_resolver()
         test_slice = self._slice()
