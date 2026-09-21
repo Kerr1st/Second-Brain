@@ -64,7 +64,10 @@ ARRIVALS_PER_SOURCE_CAP = 4
 MAX_SEMANTIC_IN_ARRIVALS = 3
 MANIFEST_SAMPLES_PER_SOURCE = 4
 MANIFEST_MAX_CHARS = 7000
-INVENTORY_MAX_CHARS = 24_000
+#: ~10k tokens. The first live run (05171b48, 2026-09-20) listed 121 of 164 documents at
+#: 24k chars; a Fri→Mon window is ~200 documents at ~175 chars per line, so 40k lists all
+#: of a 3-day window and still leaves the Explorer (200k+ context) plenty of room.
+INVENTORY_MAX_CHARS = 40_000
 INVENTORY_SUMMARY_CHARS = 140
 
 # Channel → what one document is, for the manifest and the prompt.

@@ -114,20 +114,39 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
 - [x] Sort slices arrival-anchored-first (guaranteed first) before Step 6; skip Thinker
       when remaining budget < estimated judging cost; tests; log lines.
 
-### Phase 5 — Live validation  `[ ]`
-- [ ] Probe on ~25 real docs across channels (~$0.10): JSON validity ≥ 98%, quote-verbatim
-      ≥ 95%, no fabricated people on a 10-record Astra/Sonnet spot-check (aggregates only).
-- [ ] Recall test: skim the source memories of run `3a1263a6`'s four ACCEPTED candidates
-      (`dream_cycle_candidates.candidate_json->'sources'`); all must carry salience ≥ 2 or a
-      decision/open question with a verbatim quote.
-- [ ] One manual live run from the worktree (`--profile controlled`, $9 cap): skim cost,
-      inventory size, Explorer slice arrival-share vs `3a1263a6`, no fallback triggered.
+### Phase 5 — Live validation  `[x]`
+- [x] Probe on real docs (41 across 10 channels, `skim-v2`, $0.045): JSON validity 41/41 with
+      coercion (2 summaries trimmed), quotes 10/10 verbatim, salience now discriminates
+      (S0/1/2/3 = 4/5/9/23; articles 0–1, own-activity channels 3). The Astra/Sonnet people
+      spot-check was replaced by the mechanical verbatim-quote check (see Decisions).
+- [x] Recall test: 12 parent-level sources behind `3a1263a6`'s four ACCEPTED candidates
+      (6 of the 18 listed ids are chunks, which the skim reaches through their parents):
+      11/12 flagged (salience ≥ 2 or a verified decision); the miss is a browsing-day record.
+- [x] Live run `05171b48` (2026-09-20 17:43, worktree, profile `controlled`, $9 cap): skim
+      164 arrivals in 260 s for $0.19 (0 failed, 0 invalid, 5 coerced, quotes 22/23 verbatim,
+      1 nulled); Explorer input = inventory (121/164 listed at the 24k cap → cap raised to
+      40k); Explorer $0.33 (was $0.72); attention 4 slices / 44 memories / **arrivals 91%**
+      (was 52%) / 5 source types / episodic 93%; 8 candidates, all judged, **6 ACCEPTED,
+      2 REJECTED**; run total **$6.90**, no cap trip, no soft stop, no fallback.
 
-### Phase 6 — Wrap  `[ ]`
-- [ ] `docs/MODEL-BACKENDS.md` (skim role, Nova), `docs/ARCHITECTURE.md` (Step 3.5),
-      `docs/OPERATIONS.md` (sub-cap, migration 014); Status here; memory note; merge decision.
+### Phase 6 — Wrap  `[~]`
+- [ ] `docs/MODEL-BACKENDS.md` (skim role, Nova) and a new `docs/SKIM-STAGE.md` (Step 3.5,
+      sub-cap, migration 014, probe, inventory). `docs/ARCHITECTURE.md` and `docs/OPERATIONS.md`
+      are NOT edited on this branch: the main tree carries the user's uncommitted edits to
+      both (83 dirty files as of 2026-09-20), and touching them would block the branch switch.
+- [ ] Status here; memory note; merge decision (`panel-acceptance` then `skim-stage` → `main`).
 
 ## 5. Status (newest first)
+
+- 2026-09-20 — **Phase 5 done; skim verified live.** Re-probe of the 41 documents with `skim-v2`:
+  41/41 valid, 10/10 quotes verbatim, salience S0/1/2/3 = 4/5/9/23 (v1 was 2/5/34/0). Recall
+  11/12. Live run `05171b48`: 164 arrivals skimmed for $0.19, inventory fed to the Explorer,
+  arrivals share of the examined memories 91% (run `3a1263a6`: 52%), 8 candidates → 6 accepted /
+  2 rejected, $6.90 total, nothing skipped for budget. `INVENTORY_MAX_CHARS` 24k → 40k so a
+  Fri→Mon window lists every document. Main tree still runs `panel-acceptance` (Mon 02:00 next);
+  switching it to the merged `main` needs the user's merge approval and a clean checkout path
+  around the 83 uncommitted files there (none overlap this branch's changes — checked with
+  `git diff --name-only main skim-stage`).
 
 - 2026-09-20 — **Prompt `skim-v2`: user identity + channel priors** (this commit; hermetic suite
   1,332 → 1,370; zero Bedrock calls; no corpus content read). The live probe of 41 real documents with
@@ -209,6 +228,15 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
   build the skim now; `panel-acceptance` merge still pending.
 
 ## 6. Decisions
+
+- **2026-09-20 Verbatim-quote check replaces the model spot-check for faithfulness.** The two
+  probes showed every "fabricated" quote was a near-verbatim edit (all tokens present, long
+  contiguous runs) in one long agent transcript, never an invention; a paid Astra/Sonnet
+  people-check would have cost more than the skim itself. Unverified quotes are nulled and
+  counted (`quotes_unverified`), so nothing unverified reaches the Explorer as a quote.
+- **2026-09-20 Docs land in `MODEL-BACKENDS.md` + new `SKIM-STAGE.md`, not
+  `ARCHITECTURE.md`/`OPERATIONS.md`,** because the main tree has uncommitted user edits to
+  those two files; fold the Step 3.5 paragraph in after the user commits them.
 
 - **2026-09-20 Nova 2 Lite over Gemma 3 12B / GLM 5 / DeepSeek V3.2.** Faithfulness
   (HHEM 5.1% vs 4.4% / 10.1% / 6.3%) within noise of the best, 1M context, first-party data
