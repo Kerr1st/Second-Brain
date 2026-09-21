@@ -110,12 +110,12 @@ Same 6 candidates, three experiments (~$1.8 each):
 
 ### Phase 2 — Design the fix (choose from evidence)  `[x]` — see Decisions 2026-09-18
 Candidates, in priority order; each is small and independently testable:
-- [ ] **Thinker: scope-to-evidence rule** (`src/prompts/thinker.py`). Claims stated at the
+- [x] **Thinker: scope-to-evidence rule** (implemented in Phase 3, `aa73701`) (`src/prompts/thinker.py`). Claims stated at the
   scope the cited memories support; quantify ("in the three notifications captured…");
   no "every/never/always/the only" unless every cited memory instantiates it; confidence
   set by count and independence of sources (1 source → low; 2 → medium; 3+ independent →
   high); a required `claim_scope` sentence in EVIDENCE. Prompt-contract tests.
-- [ ] **Evaluators: acceptance standard** (`src/prompts/panel.py`). Add a shared
+- [x] **Evaluators: acceptance standard** (implemented in Phase 3, `aa73701`) (`src/prompts/panel.py`). Add a shared
   "## Standard" block: ACCEPT when the claim is (a) grounded in the cited sources, (b)
   stated at a scope the sources support, (c) non-obvious and useful to the user, (d) not
   already in the corpus. A scoped observation about this week qualifies; universality is
@@ -123,14 +123,14 @@ Candidates, in priority order; each is small and independently testable:
   must name the failing letter. Epistemologist criterion 1 reworded: "1 memory = single
   observation, say so; 2–3 = emerging; 3+ independent = pattern" as *labels for scope*, not
   as a bar.
-- [ ] **REVISE loop** (orchestrator, `models.EvaluatorVerdict`, `consensus`). Verdict enum
+- [-] **REVISE loop** (dropped 2026-09-18: replaced by the pre-panel grounding audit + one revision, see Decisions) (orchestrator, `models.EvaluatorVerdict`, `consensus`). Verdict enum
   gains `REVISE` with a `revised_claim` suggestion (schema change). If the first pass has no
   ACCEPT majority but ≥2 REVISE/ACCEPT and the REVISE reasons are about scope, run one
   tool-less Thinker narrowing call ("restate this candidate at the scope these objections
   allow; keep the evidence; do not add claims") and re-run the panel once. On the second
   pass REVISE counts as REJECT. Cost bound: ≤1 narrowing + ≤4 evaluator calls per
   candidate; skip when the run's spend is above 70% of the cap. Method-set test updated.
-- [ ] **Cost levers**: Astra evaluators at `effort=medium` (measure verdict agreement with
+- [ ] **Cost levers** (open follow-up; "at most 3 candidates per slice" is done as `MAX_CANDIDATES_PER_SLICE`): Astra evaluators at `effort=medium` (measure verdict agreement with
   `high` on the replay set before switching); Thinker "at most 3 candidates per slice";
   guard that skips the panel for candidates the Thinker itself marks `confidence: low`
   with a single source.
@@ -143,21 +143,27 @@ Candidates, in priority order; each is small and independently testable:
   every accepted candidate is grounded in its cited sources (read them).
 - [x] Full suite green; commit per item.
 
-### Phase 4 — Live verification  `[~]` — first run done; 5 nights of observation pending
+### Phase 4 — Live verification  `[~]` — 2 of 5 observation runs done
 - [x] One scheduled run on `controlled` (via `launchctl kickstart gui/$(id -u)/com.second-brain.dream-cycle`).
   Check: ledger unchanged in shape (≥5 source types, ≥50% episodic), ≥1 accepted insight,
   digest lists it with all four reasonings, cost ≤ $6.
-- [ ] Then 5 nights of observation: acceptance per seat from
-  `dream_cycle_candidates`, cost per run from the log's `run total`.
+- [~] Then 5 nights of observation: acceptance per seat from
+  `dream_cycle_candidates`, cost per run from the log's `run total`. So far: `3a1263a6`
+  (2026-09-18) 4 accepted / 2 rejected, $6.10 (cap trip at $6); `05171b48` (2026-09-20, with the
+  skim stage) 6 / 2, $6.90, no cap trip. Next: Mon 09-21, Wed 09-23, Fri 09-25 scheduled runs.
 
-### Phase 5 — Wrap  `[ ]`
-- [ ] Update `docs/MODEL-BACKENDS.md` (profile `controlled`, panel semantics) and
-  `docs/DREAM-CYCLE.md` if present; update this plan's Status; user decides merge.
+### Phase 5 — Wrap  `[x]`
+- [x] `docs/MODEL-BACKENDS.md` gained a "Panel semantics" section (2026-09-20); there is no
+  `docs/DREAM-CYCLE.md`. Merged into local `main` as `4958caf` on 2026-09-20 with the user's approval.
 
 ## 5. Status
 
 _Updated as work proceeds; newest first._
 
+- 2026-09-20 — **Merged into `main` (`4958caf`)**, followed by the skim stage (`2dcf10e`,
+  `docs/PLAN-skim-stage.md`). Stale Phase 2 boxes reconciled (two implemented, REVISE loop
+  dropped, cost levers left open). Observation: 2 of 5 runs; the remaining three are the Mon/Wed/Fri
+  scheduled runs of 2026-09-21/23/25, now with the skim in front of the Explorer.
 - 2026-09-18 08:15 — **Phase 4 live run done: first accepted insights in the system's history.**
   Run `3a1263a6` (scheduled, profile `controlled`, launched via launchd): Explorer 4 slices +
   guaranteed arrivals slice (ledger: 10 source types, 80% episodic, 52% arrivals); Thinker 10
