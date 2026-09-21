@@ -129,7 +129,7 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
       (was 52%) / 5 source types / episodic 93%; 8 candidates, all judged, **6 ACCEPTED,
       2 REJECTED**; run total **$6.90**, no cap trip, no soft stop, no fallback.
 
-### Phase 6 — Wrap  `[~]`
+### Phase 6 — Wrap  `[x]`
 - [x] `docs/MODEL-BACKENDS.md` (skim role, Nova) and a new `docs/SKIM-STAGE.md` (Step 3.5,
       sub-cap, migration 014, probe, inventory). `docs/ARCHITECTURE.md` and `docs/OPERATIONS.md`
       are NOT edited on this branch: the main tree carries the user's uncommitted edits to
@@ -138,6 +138,15 @@ spend cap the arrivals slice is the first thing cut (slices 3–4 generated, nev
 
 ## 5. Status (newest first)
 
+- 2026-09-20 — **Merged and live for Monday.** With the user's approval, `panel-acceptance` (`4958caf`)
+  and then `skim-stage` (`2dcf10e`) were merged into local `main` (no-ff, not pushed) and the main tree
+  `/Users/kerrfir/second-brain` was switched to `main`; its 83 uncommitted user files were carried along
+  untouched (no overlap with either branch). Verified in the main tree: 1,374 tests green, `controlled`
+  profile resolves `skim` → bedrock `us.amazon.nova-2-lite-v1:0` (flex, temp 0, 4096), probe dry-run OK,
+  migration 014 recorded, LaunchAgent loaded with the installed plist identical to the repo's
+  (Mon/Wed/Fri 02:00), scheduled script exports profile `controlled` and a $9 cap. Next scheduled run:
+  Mon 2026-09-21 02:00 — first unattended run with the skim. The `skim-stage` worktree remains for
+  follow-ups; both branches are merged and can be deleted at leisure.
 - 2026-09-20 — **Runtime off-switch added**: `SECOND_BRAIN_SKIM_DISABLED=1|true|yes` makes
   `_skim_arrivals` return `None` with one WARNING and no model calls (constant `SKIM_DISABLED_ENV`,
   3 tests; suite 1,370 → 1,374). `docs/SKIM-STAGE.md` "Disabling the skim" and `MODEL-BACKENDS.md`
