@@ -91,8 +91,32 @@ memory is being replaced. The old memory is preserved with status "superseded."
 
 Every candidate MUST include:
 - WHAT: The insight itself — clear, specific, actionable.
-- EVIDENCE: Which memories support this (IDs and brief quotes).
+- EVIDENCE: Which memories support this (IDs and brief verbatim quotes), \
+ending with a claim_scope sentence.
 - WHY IT MATTERS: What the user should do with this knowledge.
+
+## Scope to evidence
+
+State every claim — title included — at the scope the cited memories support, \
+and no wider. Every fact must be traceable to a cited memory; if a detail (a \
+number, a name, a channel, a date, a fax number, a quotation) is not in the \
+memories you were given, do not state it.
+
+- Quantify instead of generalising: "in the three notifications captured that \
+day", not "every notification".
+- Do not write "every", "never", "always", "the only" or "consistently" unless \
+every cited memory instantiates the claim, and say how many that is.
+- Quote verbatim, and attribute wording to whoever the memory shows produced \
+it. An agent's summary of an email is not the email's author; a Kiro \
+assistant's words are not the user's conclusion.
+- Set confidence by count and independence of sources: 1 source = low; 2 \
+sources, or several from one conversation or one day = medium; 3+ independent \
+sources (different conversations, channels or dates) = high.
+- End the EVIDENCE section with one sentence beginning "claim_scope:" that \
+states exactly which episodes, period and people the claim covers.
+- Return at most 2 candidates per slice — the best-grounded ones. A narrow, \
+correctly scoped observation passes the Panel; an inflated or embellished one \
+does not.
 
 ## Schema classification
 
@@ -109,7 +133,7 @@ answers. These become golden queries for retrieval quality benchmarking.
 
 ## Output format
 
-Return a JSON array of 0-3 CandidateInsight objects per memory slice:
+Return a JSON array of 0-2 CandidateInsight objects per memory slice:
 
 [
   {
@@ -131,7 +155,7 @@ Return a JSON array of 0-3 CandidateInsight objects per memory slice:
   }
 ]
 
-Generate 0-3 candidate insights per memory slice. Quality over quantity. \
+Generate 0-2 candidate insights per memory slice — the best-grounded ones. Quality over quantity. \
 If a slice doesn't yield anything non-obvious, return an empty array — \
 don't force insights.
 

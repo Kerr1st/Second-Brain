@@ -52,9 +52,16 @@ EVALUATOR_VERDICT_SCHEMA = {
     "type": "object",
     "properties": {
         "verdict": {"type": "string", "enum": ["ACCEPT", "REJECT"]},
-        "reasoning": {"type": "string", "description": "Full reasoning behind the verdict."},
+        "score": {"type": "integer", "minimum": 0, "maximum": 100,
+                  "description": "How far the claim as written meets the Standard (0-100)."},
+        "blocking_issues": {"type": "array", "items": {"type": "string"},
+                            "description": "Blocking defects found (fabrication, contradiction, misattribution, uncited)."},
+        "advisory_issues": {"type": "array", "items": {"type": "string"},
+                            "description": "Advisory defects found (overreach, overlap, timing, depth)."},
+        "reasoning": {"type": "string",
+                      "description": "Name the failing Standard letter(s) or state all four hold, then explain."},
     },
-    "required": ["verdict", "reasoning"],
+    "required": ["verdict", "score", "blocking_issues", "advisory_issues", "reasoning"],
 }
 
 
@@ -145,3 +152,8 @@ def format_sources_for_evaluator(cache: dict[str, dict], source_ids) -> str:
     if not lines:
         return ""
     return "Source memory contents:\n" + "\n".join(lines)
+
+
+
+#: Kept for the replay harness and older call sites; identical to the graded schema.
+EVALUATOR_VERDICT_SCHEMA_V2 = EVALUATOR_VERDICT_SCHEMA

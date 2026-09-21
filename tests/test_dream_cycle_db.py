@@ -189,8 +189,8 @@ class TestStoreCandidate(unittest.TestCase):
         self.assertIn("INSERT INTO dream_cycle_candidates", sql_arg)
         self.assertEqual(params[0], run_id)
         self.assertEqual(json.loads(params[1]), candidate)
-        self.assertEqual(params[-2], "ACCEPTED")
-        self.assertEqual(params[-1], memory_id)
+        self.assertEqual(params[-3], "ACCEPTED")
+        self.assertEqual(params[-2], memory_id)
         mock_conn.commit.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
@@ -211,8 +211,8 @@ class TestStoreCandidate(unittest.TestCase):
         result = store_candidate(run_id, candidate, verdicts, "DEFERRED")
 
         params = mock_cur.execute.call_args[0][1]
-        self.assertEqual(params[-2], "DEFERRED")
-        self.assertIsNone(params[-1])  # no created_memory_id
+        self.assertEqual(params[-3], "DEFERRED")
+        self.assertIsNone(params[-2])  # no created_memory_id
 
     @patch("src.dream_cycle_db.get_connection")
     def test_store_rejected_candidate(self, mock_get_conn):
@@ -232,8 +232,8 @@ class TestStoreCandidate(unittest.TestCase):
         result = store_candidate(run_id, candidate, verdicts, "REJECTED")
 
         params = mock_cur.execute.call_args[0][1]
-        self.assertEqual(params[-2], "REJECTED")
-        self.assertIsNone(params[-1])
+        self.assertEqual(params[-3], "REJECTED")
+        self.assertIsNone(params[-2])
 
     @patch("src.dream_cycle_db.get_connection")
     def test_store_candidate_extracts_operation_fields(self, mock_get_conn):

@@ -52,6 +52,10 @@ class CandidateInsight:
     source_memories: list[str] = field(default_factory=list)  # UUIDs
     relationships: list[dict] = field(default_factory=list)  # [{target_id, relation_type, note}]
     strategy_that_found_it: str = ""
+    # Set when the pre-panel grounding audit found defects and the candidate was
+    # revised before the panel voted: {original_title, audit_score, blocking_issues,
+    # advisory_issues}. Persisted inside candidate_json.
+    revision: dict | None = None
 
 
 @dataclass
@@ -61,3 +65,13 @@ class EvaluatorVerdict:
     role: str  # skeptic, advocate, epistemologist, methodologist
     verdict: str  # ACCEPT, REJECT
     reasoning: str = ""  # Full reasoning text
+    # Graded verdict (2026-09-18): how far the claim meets the Standard, and the
+    # defects found. blocking = fabrication / contradiction / misattribution / uncited;
+    # advisory = overreach / overlap / timing / depth. None/empty for legacy verdicts.
+    score: int | None = None
+    blocking_issues: list[str] = field(default_factory=list)
+    advisory_issues: list[str] = field(default_factory=list)
+
+    @property
+    def has_blocking(self) -> bool:
+        return bool(self.blocking_issues)

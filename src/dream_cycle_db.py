@@ -87,7 +87,9 @@ def store_candidate(
     verdicts: dict with keys evaluator_a_verdict, evaluator_a_reasoning,
               evaluator_b_verdict, evaluator_b_reasoning,
               evaluator_c_verdict, evaluator_c_reasoning,
-              evaluator_d_verdict, evaluator_d_reasoning.
+              evaluator_d_verdict, evaluator_d_reasoning, and optionally
+              evaluator_details ({role: {score, blocking_issues, advisory_issues}},
+              migration 013).
     final_verdict: ACCEPTED or REJECTED.
     created_memory_id: UUID of the memory created for ACCEPTED candidates.
     """
@@ -102,9 +104,9 @@ def store_candidate(
                     evaluator_b_verdict, evaluator_b_reasoning,
                     evaluator_c_verdict, evaluator_c_reasoning,
                     evaluator_d_verdict, evaluator_d_reasoning,
-                    final_verdict, created_memory_id
+                    final_verdict, created_memory_id, evaluator_details
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -123,6 +125,7 @@ def store_candidate(
                     verdicts.get("evaluator_d_reasoning"),
                     final_verdict,
                     created_memory_id,
+                    json.dumps(verdicts["evaluator_details"], default=str) if verdicts.get("evaluator_details") else None,
                 ),
             )
             candidate_id = cur.fetchone()[0]

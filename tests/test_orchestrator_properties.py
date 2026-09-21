@@ -81,6 +81,7 @@ EXPECTED_VERDICT_KEYS = {
     "evaluator_b_verdict", "evaluator_b_reasoning",
     "evaluator_c_verdict", "evaluator_c_reasoning",
     "evaluator_d_verdict", "evaluator_d_reasoning",
+    "evaluator_details",  # graded detail per seat (migration 013)
 }
 
 
@@ -131,6 +132,7 @@ class TestFourEvaluatorOrchestration:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=[candidate]), \
+             patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
              patch.object(orch, "invoke_evaluator", side_effect=mock_evaluator), \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \

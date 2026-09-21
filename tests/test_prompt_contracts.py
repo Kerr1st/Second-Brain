@@ -150,12 +150,24 @@ class TestThinkerPromptReceivesMemorySlice:
         assert "SUPERSEDE" in prompt
 
     def test_thinker_system_prompt_documents_depth_framework(self):
-        """The Thinker prompt requires WHAT, EVIDENCE, WHY IT MATTERS."""
+        """The Thinker prompt requires WHAT, EVIDENCE, WHY IT MATTERS, and
+        follows the depth framework with the scope-to-evidence rule that
+        grounds each candidate before it reaches the Panel."""
         prompt = get_thinker_prompt()
 
         assert "WHAT" in prompt
         assert "EVIDENCE" in prompt
         assert "WHY IT MATTERS" in prompt
+
+        # Scope-to-evidence rule (docs/PLAN-panel-acceptance.md, Decisions 2026-09-18)
+        assert "## Scope to evidence" in prompt
+        assert 'one sentence beginning "claim_scope:"' in prompt
+        assert "1 source = low" in prompt
+        assert (
+            prompt.index("## Depth framework")
+            < prompt.index("## Scope to evidence")
+            < prompt.index("## Schema classification")
+        )
 
 
 # ---------------------------------------------------------------------------
