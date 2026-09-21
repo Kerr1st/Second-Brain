@@ -124,6 +124,7 @@ class TestCircuitBreakerProperty:
         orch = _make_orchestrator()
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[]) as mock_explorer, \
              patch.object(orch, "invoke_thinker") as mock_thinker, \
              patch.object(orch, "invoke_evaluator") as mock_evaluator, \
@@ -165,6 +166,7 @@ class TestCircuitBreakerExplicit:
         orch = _make_orchestrator()
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[]), \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""):
 
@@ -656,7 +658,8 @@ class TestSessionStartFrequencyCap:
         """
         orch = _make_orchestrator()
 
-        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db:
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None):
             mock_db.should_run_briefing.return_value = False
 
             result = orch.run(run_type="session_start")
@@ -679,6 +682,7 @@ class TestSessionStartFrequencyCap:
         orch = _make_orchestrator()
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[]) as mock_explorer, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""):
 
@@ -706,6 +710,7 @@ class TestSessionStartFrequencyCap:
 
         for run_type in ["scheduled", "post_learn", "user_triggered"]:
             with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+                 patch.object(orch, "_skim_arrivals", return_value=None), \
                  patch.object(orch, "invoke_explorer", return_value=[]), \
                  patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""):
 
@@ -762,6 +767,7 @@ class TestSessionStartCandidateLimiting:
         ]
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
              patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
@@ -808,6 +814,7 @@ class TestSessionStartCandidateLimiting:
         ]
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
              patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
@@ -852,6 +859,7 @@ class TestSessionStartCandidateLimiting:
         ]
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
              patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
@@ -1119,6 +1127,7 @@ class TestErrorHandling:
         orch = _make_orchestrator()
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", side_effect=TimeoutError("Explorer timed out")), \
              patch.object(orch, "invoke_thinker") as mock_thinker, \
              patch.object(orch, "invoke_evaluator") as mock_evaluator, \
@@ -1169,6 +1178,7 @@ class TestErrorHandling:
             return [candidate_b]
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[slice_a, slice_b]), \
              patch.object(orch, "invoke_thinker", side_effect=thinker_side_effect), \
              patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
@@ -1214,6 +1224,7 @@ class TestErrorHandling:
         candidate = self._make_candidate("Unrecoverable Eval Candidate")
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch("src.dream_cycle.orchestrator.time.sleep"), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=[candidate]), \
@@ -1258,6 +1269,7 @@ class TestErrorHandling:
             raise TimeoutError("panel down on c2")
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch("src.dream_cycle.orchestrator.time.sleep"), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=[c1, c2]), \
@@ -1299,6 +1311,7 @@ class TestErrorHandling:
         candidate = self._make_candidate("One Dissent Candidate")
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=[candidate]), \
              patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
@@ -1342,6 +1355,7 @@ class TestErrorHandling:
         candidate = self._make_candidate("Two Dissent Candidate")
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=[candidate]), \
              patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
@@ -1766,6 +1780,7 @@ class TestRunRecordCompletenessProperty:
             )
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
              patch("src.dream_cycle.orchestrator.MAX_CANDIDATES_PER_SLICE", 100), \
@@ -1882,6 +1897,7 @@ class TestRunRecordCompletenessExplicit:
         ]
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
              patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
@@ -1963,6 +1979,7 @@ class TestRunRecordCompletenessExplicit:
         ]
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
              patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
@@ -2411,6 +2428,15 @@ class TestFinalOrchestratorMethodSet:
             # (docs/PLAN-panel-acceptance.md).
             "_ground_candidate",
             "_revise_candidate",
+            # Step 3.5: skim every arrival with the cheap Bedrock `skim` role before the
+            # Explorer looks (docs/PLAN-skim-stage.md); never aborts the run itself.
+            "_skim_arrivals",
+            # Phase 3: the window's skim records (fetched + clustered) for the Explorer
+            # inventory and the weighted guaranteed slice; [] on any failure.
+            "_load_skim_records",
+            # Phase 4: real dollars left under the run cap (SpendTracker), read before
+            # each Thinker call and each judged candidate.
+            "_budget_remaining",
         }
 
         actual_methods = {
@@ -2642,6 +2668,10 @@ class TestToollessThinkerPacketAndSpendGuard:
     def test_spend_cap_breach_aborts_run_without_retry(self, monkeypatch):
         monkeypatch.setenv("SECOND_BRAIN_RUN_COST_CAP_USD", "0.01")
         monkeypatch.delenv("SECOND_BRAIN_KILL_SWITCH", raising=False)
+        # The budget-aware soft stops (Phase 4) would otherwise never let a $0.01 run
+        # reach the panel; zero them so the hard cap itself is what this test exercises.
+        monkeypatch.setattr("src.dream_cycle.orchestrator.EST_THINKER_CALL_USD", 0.0)
+        monkeypatch.setattr("src.dream_cycle.orchestrator.EST_JUDGE_CANDIDATE_USD", 0.0)
         orch = _make_orchestrator()
         orch.resolver = self._bedrock_resolver()
         test_slice = self._slice()
@@ -2657,6 +2687,7 @@ class TestToollessThinkerPacketAndSpendGuard:
         }))
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch("src.dream_cycle.orchestrator.time.sleep"), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=[candidate]), \
@@ -2683,6 +2714,7 @@ class TestToollessThinkerPacketAndSpendGuard:
         monkeypatch.setenv("SECOND_BRAIN_KILL_SWITCH", "1")
         orch = _make_orchestrator()
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer") as explorer:
             result = orch.run(run_type="scheduled")
 

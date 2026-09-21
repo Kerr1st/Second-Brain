@@ -200,6 +200,7 @@ class TestPipelineIntegration:
     def _run(self, orch, candidate, ground_result, verdicts):
         slice_ = MemorySlice(name="S", strategy="arrivals_synthesis", memory_ids=[SRC_A, SRC_B])
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[slice_]), \
              patch.object(orch, "_allocate_attention", side_effect=lambda r, t, s, sl: sl), \
              patch.object(orch, "invoke_thinker", return_value=[candidate]), \
@@ -239,6 +240,7 @@ class TestPerSliceCap:
         cands = [_cand(title=f"c{i}") for i in range(5)]
         slice_ = MemorySlice(name="S", strategy="arrivals_synthesis", memory_ids=[SRC_A, SRC_B])
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[slice_]), \
              patch.object(orch, "_allocate_attention", side_effect=lambda r, t, s, sl: sl), \
              patch.object(orch, "invoke_thinker", return_value=cands), \

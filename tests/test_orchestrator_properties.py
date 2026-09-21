@@ -55,7 +55,10 @@ create_candidates = st.builds(
     schema_note=st.text(max_size=30),
     confidence=confidence_levels,
     confidence_reasoning=st.text(max_size=50),
-    content=st.text(min_size=1, max_size=200, alphabet=st.characters(whitelist_categories=("L", "N", "Z"))),
+    # Whitespace-only content is rejected before the panel (grounding path), so the
+    # "four evaluators per candidate" property holds only for supportable content.
+    content=st.text(min_size=1, max_size=200, alphabet=st.characters(whitelist_categories=("L", "N", "Z")))
+    .filter(lambda s: s.strip()),
     source_memories=st.lists(st.uuids().map(str), min_size=0, max_size=3),
     relationships=st.lists(
         st.fixed_dictionaries({
@@ -130,6 +133,7 @@ class TestFourEvaluatorOrchestration:
             )
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=[candidate]), \
              patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
@@ -292,6 +296,7 @@ class TestNoDeferredInPipeline:
             return "cand-id"
 
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[test_slice]), \
              patch.object(orch, "invoke_thinker", return_value=candidates), \
              patch.object(orch, "invoke_evaluator", side_effect=eval_side_effects), \

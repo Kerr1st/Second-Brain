@@ -181,9 +181,16 @@ def assert_backend_supports_role(backend: str, role: str) -> None:
     deferred "B1" decoupling (see ``docs/DREAM-CYCLE-MCP-DECOUPLING.md``); we
     reject it loudly rather than let the Explorer run blind.
 
+    The skim (``docs/PLAN-skim-stage.md`` constraint 1) is the inverse: it feeds
+    every arriving document's full text to its model, so it may run only on a
+    tool-less Direct-API backend inside the AWS account (``bedrock``) — never on
+    an agentic CLI (Kiro, Claude Code, Codex), which is what ``supports_mcp``
+    marks.
+
     Args:
         backend: Backend name; must be a key of :data:`BACKEND_CAPABILITIES`.
-        role: Agent role (``"explorer"``, ``"thinker"``, ``"skeptic"``, ...).
+        role: Agent role (``"explorer"``, ``"thinker"``, ``"skeptic"``, ...,
+            ``"skim"``).
 
     Raises:
         KeyError: If ``backend`` is unknown.
@@ -199,6 +206,12 @@ def assert_backend_supports_role(backend: str, role: str) -> None:
             f"Explorer requires an MCP-capable backend, but {backend!r} is tool-less "
             f"(supports_mcp=False). Routing the Explorer to a Direct-API backend is the "
             f"deferred B1 decoupling — see docs/DREAM-CYCLE-MCP-DECOUPLING.md."
+        )
+    if role == "skim" and caps.supports_mcp:
+        raise ValueError(
+            f"The skim role must run on a tool-less Direct-API backend (bedrock), not on the "
+            f"agentic CLI {backend!r}: it sends every arriving document's text to its model, "
+            f"and that text stays inside the AWS account — see docs/PLAN-skim-stage.md §3."
         )
 
 

@@ -61,17 +61,19 @@ ALL_STRATEGIES = """\
     elaborative interrogation at increasing intervals produces stronger encoding
     than one-shot elaboration.)
 
-12. ARRIVALS SYNTHESIS (cross-channel) — Start from the arrivals manifest in the
-    user message: what was captured since the previous run, by channel. Within
-    that window, find echoes ACROSS channels: a Slack thread and an email about
-    the same account; a calendar meeting and the page read just before it; a
-    question asked in one place and answered in another; a decision made in a
-    Kiro session that shows up as a commitment in Slack. Assemble slices whose
-    memories are mostly new and span at least two channels. Use
-    memory_recent_activity, then memory_list(source_type=..., since_days=...)
-    to enumerate a channel, then memory_search(..., since_days=...) to find the
-    echo in another. This is the only strategy that guarantees the user's most
-    recent days are examined at all."""
+12. ARRIVALS SYNTHESIS (cross-channel) — Start from the arrivals inventory (or
+    manifest) in the user message: what was captured since the previous run, by
+    channel. Within that window, find echoes ACROSS channels: a Slack thread and
+    an email about the same account; a calendar meeting and the page read just
+    before it; a question asked in one place and answered in another; a decision
+    made in a Kiro session that shows up as a commitment in Slack. Assemble slices
+    whose memories are mostly new and span at least two channels. Use the
+    inventory lines first (they already carry ids, salience and what each
+    document states; memory_recent_activity shows the same window as counts),
+    then memory_list(source_type=..., since_days=...) to enumerate a channel,
+    then memory_search(..., since_days=...) to find the echo in another. This
+    is the only strategy that guarantees the user's most recent days are
+    examined at all."""
 
 SOURCES_SECTION = """\
 ## Where memories come from
@@ -94,6 +96,30 @@ with type "source" is an episode — something that happened; insight/synthesis/
 memories are interpretations of episodes. The user's work on this knowledge system is \
 one project among the others — part of their day, neither privileged nor excluded."""
 
+ARRIVALS_SECTION = """\
+## The arrivals inventory (in the user message)
+
+The user message ends with what arrived since the previous run. When the skim stage \
+has read the window, it is an INVENTORY: per-channel counts, then one line per document \
+— `id | channel | S<n> N<n> | flags | summary` — ordered most salient first. A cheap \
+model wrote each line from the document alone; it states what the document says, not \
+what it means.
+- S = salience to the user's own work and life, 0-3 (0 generic web content, 3 addressed \
+to or about the user's own work). N = novelty, 0-3 (3 a surprising fact or a decision with \
+consequences).
+- Flags: D<n> decisions recorded, Q<n> open questions, C the text itself notes a change or \
+reversal, P<n> people named, `!` a quoted passage could not be verified against the text \
+(read that document before relying on it), `[c<k>]` documents whose embeddings cluster \
+together — the same matter seen from several channels.
+- Every id in the inventory is retrievable with memory_read; documents cut for length are \
+still retrievable through memory_list / memory_search.
+- Assemble arrival-anchored slices FROM the inventory, across channels and across salience \
+levels: high salience first but not exclusively — an S1 article the user read right after an \
+S3 meeting is often the echo you are looking for. Do not exclude any channel; this is the \
+user's whole digital day, and the routine channels are where the patterns hide.
+Without skim records the block is the older MANIFEST: counts per channel plus a few sample \
+ids each; enumerate with memory_list from there."""
+
 BUDGET_SECTION = """\
 ## Slice budget (enforced by the orchestrator)
 
@@ -109,11 +135,11 @@ documents. The panel rejects candidates whose sources are several syntheses of t
 same conversation; independent episodes are what survive review.
 - Slices with memory ids that do not exist are dropped. Copy ids from tool output.
 - TIME: you have about 15 minutes and each tool call costs ~20 seconds. Budget\
- roughly 20-25 calls: the manifest already lists ids per channel, so start from\
- those, use memory_list once per channel you want to enumerate, and reserve\
+ roughly 20-25 calls: the inventory (or manifest) already lists ids per channel, so\
+ start from those, use memory_list once per channel you want to enumerate, and reserve\
  memory_search for finding the echo of one channel in another. Do not read every\
- memory in full before deciding; titles and the 500-char search snippets are enough\
- to assemble a slice — the Thinker reads the full text."""
+ memory in full before deciding; the inventory lines, titles and the 500-char search\
+ snippets are enough to assemble a slice — the Thinker reads the full text."""
 
 # Session-start mode: restricted to strategies 6, 8, 10 only
 SESSION_START_STRATEGIES = """\
@@ -295,6 +321,8 @@ questions that were asked months ago and now have answers elsewhere in the syste
 and, every run, what the most recent days contain that the user has not connected yet.
 
 {SOURCES_SECTION}
+
+{ARRIVALS_SECTION}
 
 {strategies}
 {diversity_section}

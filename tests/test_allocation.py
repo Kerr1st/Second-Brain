@@ -1,6 +1,7 @@
 """Attention allocation: feedback bounds, arrivals manifest, slice budget,
 guaranteed arrivals slice, prompt contracts, and the orchestrator hook (hermetic)."""
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -107,6 +108,96 @@ class TestManifest:
         assert len(text) <= 1200 and text.endswith("(truncated)")
         assert "Nothing new was captured" in allocation.build_arrivals_manifest(WINDOW, [])
 
+    def test_manifest_without_memory_counts(self):
+        text = allocation.build_arrivals_manifest(WINDOW, [{"source_type": "slack", "documents": 3, "samples": []}])
+        assert "3 documents across 1 channels" in text and "- slack: 3 conversation-days" in text
+        assert "memories" not in text.split("\n")[1].split(".")[0]
+
+
+# --------------------------------------------------------------------------- #
+# Inventory (skim records)                                                     #
+# --------------------------------------------------------------------------- #
+def _rec(channel="slack", salience=2, novelty=1, created=NOW, summary="A synthetic summary.", decisions=0,
+         questions=0, people=0, hint=None, unverified=0, cluster=None, rid=None):
+    items = [{"text": f"item {i}", "quote": None if i < unverified else "a verbatim passage"} for i in range(decisions)]
+    qs = [{"text": f"q {i}", "quote": "a verbatim passage"} for i in range(questions)]
+    return {"id": rid or _uid(), "title": "t", "source_type": channel, "created_at": created,
+            "skim": {"summary": summary, "people": [f"P{i}" for i in range(people)], "entities": [], "topics": [],
+                     "decisions": items, "open_questions": qs, "novelty": novelty, "salience": salience,
+                     "contradiction_hint": hint, "doc_kind": "conversation", "quotes_unverified": unverified},
+            "cluster_id": cluster, "truncated": False}
+
+
+class TestInventory:
+    COUNTS = {"slack": 40, "article": 120, "outlook_email": 12}
+
+    def test_header_legend_and_line_format(self):
+        r = _rec("slack", 3, 2, summary="Priya moved the beta launch to the 14th.", decisions=1, questions=1,
+                 people=2, hint="reverses the earlier date", rid="id-1")
+        text = allocation.build_arrivals_inventory(WINDOW, [r], counts_by_channel=self.COUNTS)
+        assert text.startswith("## What arrived since the previous run (2026-09-17 09:00 UTC)")
+        assert "172 documents across 3 channels; 1 of them were read by the skim stage" in text
+        assert "- article: 120 articles / web pages" in text and "- slack: 40 conversation-days" in text
+        assert allocation.INVENTORY_LEGEND in text
+        assert "id-1 | slack | S3 N2 | D1 Q1 C P2 | Priya moved the beta launch to the 14th." in text
+
+    def test_flags_unverified_marker_cluster_tag_and_empty_flags(self):
+        bang = _rec(decisions=2, unverified=1, rid="id-b")
+        plain = _rec(salience=0, novelty=0, summary="", rid="id-p", cluster="c2")
+        text = allocation.build_arrivals_inventory(WINDOW, [bang, plain], counts_by_channel=self.COUNTS)
+        assert "id-b | slack | S2 N1 | D2 ! | A synthetic summary." in text
+        assert "id-p | slack | S0 N0 | - | - [c2]" in text
+
+    def test_unverified_marker_also_from_null_quotes_without_the_count(self):
+        r = _rec(decisions=1, rid="id-n")
+        r["skim"]["decisions"][0]["quote"] = None
+        del r["skim"]["quotes_unverified"]
+        assert "id-n | slack | S2 N1 | D1 ! |" in allocation.build_arrivals_inventory(
+            WINDOW, [r], counts_by_channel=self.COUNTS)
+
+    def test_order_salience_then_novelty_then_round_robin_across_channels(self):
+        recs = [_rec("article", 1, 1, NOW - timedelta(hours=h), rid=f"art-{h}") for h in range(4)]
+        recs += [_rec("slack", 1, 1, NOW - timedelta(hours=9), rid="slack-old"),
+                 _rec("slack", 1, 1, NOW - timedelta(hours=1), rid="slack-new"),
+                 _rec("outlook_email", 1, 1, NOW - timedelta(hours=2), rid="mail-1"),
+                 _rec("outlook_email", 3, 0, NOW - timedelta(days=1), rid="mail-top"),
+                 _rec("article", 2, 3, NOW - timedelta(days=2), rid="art-novel")]
+        order = [r["id"] for r in allocation.rank_skim_records(recs)]
+        assert order[:2] == ["mail-top", "art-novel"]                          # S3 first, then S2
+        tier = order[2:]
+        assert tier[:3] == ["art-0", "slack-new", "mail-1"]                     # round-robin: biggest channel first
+        assert tier[3:5] == ["art-1", "slack-old"] and tier[5:] == ["art-2", "art-3"]
+        assert [r["id"] for r in allocation.rank_skim_records(recs)] == order  # deterministic
+
+    def test_char_cap_lists_a_prefix_and_counts_the_rest(self):
+        recs = [_rec("article", 1, 1, NOW - timedelta(minutes=i), summary="x" * 120, rid=f"a{i:03d}") for i in range(200)]
+        render = allocation.render_arrivals_inventory(WINDOW, recs, counts_by_channel={"article": 200}, max_chars=6000)
+        assert len(render.text) <= 6000
+        assert 0 < render.listed < 200 and render.total == 200 and render.fallback is False
+        assert render.text.endswith(f"… {200 - render.listed} more documents not listed (all ids are retrievable by tools)")
+        full = allocation.render_arrivals_inventory(WINDOW, recs, counts_by_channel={"article": 200}, max_chars=200_000)
+        assert full.listed == 200 and "more documents not listed" not in full.text
+
+    def test_summary_is_trimmed_for_the_line(self):
+        r = _rec(summary="word " * 60, rid="id-l")
+        line = [l for l in allocation.build_arrivals_inventory(WINDOW, [r], counts_by_channel=self.COUNTS).split("\n")
+                if l.startswith("id-l")][0]
+        summary = line.split(" | ")[-1]
+        assert summary.endswith("…") and len(summary) <= allocation.INVENTORY_SUMMARY_CHARS + 1
+
+    def test_empty_records_fall_back_to_the_manifest(self):
+        render = allocation.render_arrivals_inventory(WINDOW, [], counts_by_channel=self.COUNTS)
+        assert render.fallback is True and render.listed == 0
+        assert render.text == allocation.build_arrivals_manifest(
+            WINDOW, [{"source_type": "article", "documents": 120, "samples": []},
+                     {"source_type": "slack", "documents": 40, "samples": []},
+                     {"source_type": "outlook_email", "documents": 12, "samples": []}])
+        assert "Nothing new was captured" in allocation.build_arrivals_inventory(WINDOW, [], counts_by_channel={})
+
+    def test_counts_fall_back_to_the_records_when_the_summary_is_missing(self):
+        text = allocation.build_arrivals_inventory(WINDOW, [_rec("slack"), _rec("article")], counts_by_channel={})
+        assert "2 documents across 2 channels" in text
+
 
 # --------------------------------------------------------------------------- #
 # Budget enforcement                                                           #
@@ -188,6 +279,80 @@ class TestArrivalsSlice:
         assert s is not None and len(s.memory_ids) == allocation.MAX_SEMANTIC_IN_ARRIVALS
 
 
+class TestSkimWeightedArrivalsSlice:
+    """With skim records half the slice goes to the most salient / novel documents;
+    without them the selection is exactly the old one."""
+
+    def _rows(self):
+        rows = []
+        for ch in ("slack", "outlook_email", "browser_history", "article"):
+            rows += [{"id": f"{ch}-{i}", "title": f"{ch} doc {i}", "type": "source", "source_type": ch,
+                      "created_at": NOW - timedelta(hours=i)} for i in range(10)]
+        rows += [{"id": f"insight-{i}", "title": f"insight {i}", "type": "insight", "source_type": None,
+                  "created_at": NOW} for i in range(4)]
+        return rows
+
+    def test_without_records_is_the_old_selection(self):
+        rows = self._rows()
+        sel = allocation.select_arrivals(rows, 14)
+        assert sel.skim_weighted is False and sel.skim_picked == 0 and sel.metrics == {}
+        old = allocation.compose_arrivals_slice(WINDOW, rows, 14)
+        assert old.memory_ids == [r["id"] for r in sel.rows]
+        assert allocation.compose_arrivals_slice(WINDOW, rows, 14, skim_records=None) == old
+        assert allocation.compose_arrivals_slice(WINDOW, rows, 14, skim_records=[]) == old
+
+    def test_half_from_salience_half_stratified_under_the_caps(self):
+        rows = self._rows()
+        # The oldest article / slack docs are the salient ones — stratification (newest first) would miss them.
+        recs = [_rec("article", 3, 3, NOW - timedelta(hours=9), rid="article-9"),
+                _rec("article", 3, 2, NOW - timedelta(hours=8), rid="article-8"),
+                _rec("slack", 3, 1, NOW - timedelta(hours=9), rid="slack-9"),
+                _rec("slack", 2, 3, NOW - timedelta(hours=8), rid="slack-8"),
+                _rec("outlook_email", 2, 2, NOW - timedelta(hours=9), rid="outlook_email-9"),
+                _rec("browser_history", 1, 1, NOW - timedelta(hours=9), rid="browser_history-9"),
+                _rec("article", 0, 0, NOW - timedelta(hours=7), rid="article-7")] + \
+               [_rec("article", 3, 3, NOW - timedelta(hours=i), rid=f"article-{i}") for i in range(3, 6)]  # S3 backlog > cap
+        sel = allocation.select_arrivals(rows, 14, skim_records=recs)
+        ids = [r["id"] for r in sel.rows]
+        assert len(ids) == 14 == len(set(ids))
+        assert sel.skim_weighted is True and sel.skim_picked == 7
+        assert sel.metrics == {"skim_weighted": True, "skim_picked": 7}
+        # Salience half first, in inventory order: four S3 articles (cap), then slack S3/S2, then the email.
+        assert ids[:7] == ["article-3", "article-4", "article-5", "article-9", "slack-9", "slack-8", "outlook_email-9"]
+        # Stratified half over the rest, newest first, spread across the channels with room left.
+        assert {"slack-0", "outlook_email-0", "browser_history-0"} <= set(ids[7:])
+        assert not any(i.startswith("article") for i in ids[7:])            # article had no room left
+        by_channel = Counter(i.rsplit("-", 1)[0] for i in ids)
+        assert max(by_channel.values()) <= allocation.ARRIVALS_PER_SOURCE_CAP   # cap holds across both halves
+        assert "article-7" not in ids                                        # S0 never beats the S3 backlog
+
+    def test_semantic_cap_holds_for_the_skim_half(self):
+        rows = self._rows()
+        recs = [_rec(None, 3, 3, rid=f"insight-{i}") for i in range(4)]
+        sel = allocation.select_arrivals(rows, 14, skim_records=recs)
+        assert sum(1 for r in sel.rows if r["id"].startswith("insight")) == allocation.MAX_SEMANTIC_IN_ARRIVALS
+        assert sel.skim_picked == allocation.MAX_SEMANTIC_IN_ARRIVALS and len(sel.rows) == 14
+
+    def test_partial_skim_leaves_more_to_the_stratified_half_so_the_slice_does_not_shrink(self):
+        rows = self._rows()
+        sel = allocation.select_arrivals(rows, 14, skim_records=[_rec("article", 3, 3, rid="article-9")])
+        assert len(sel.rows) == 14 and sel.skim_picked == 1 and sel.rows[0]["id"] == "article-9"
+
+    def test_records_for_unknown_ids_are_ignored(self):
+        rows = self._rows()
+        sel = allocation.select_arrivals(rows, 14, skim_records=[_rec("article", 3, 3, rid="not-in-window")])
+        assert "not-in-window" not in [r["id"] for r in sel.rows] and sel.skim_picked == 0
+
+    def test_build_arrivals_selection_reads_through_dcdb(self):
+        db = MagicMock()
+        db.get_recent_parent_memories.return_value = self._rows()
+        slice_, sel = allocation.build_arrivals_selection(WINDOW, dcdb=db, skim_records=[_rec("slack", 3, 3, rid="slack-9")])
+        assert slice_.strategy == allocation.ARRIVALS_STRATEGY and "slack-9" in slice_.memory_ids
+        assert sel.skim_weighted is True and sel.skim_picked >= 1
+        assert allocation.build_arrivals_slice(WINDOW, dcdb=db).memory_ids == \
+               allocation.compose_arrivals_slice(WINDOW, self._rows()).memory_ids
+
+
 # --------------------------------------------------------------------------- #
 # Prompt contracts                                                             #
 # --------------------------------------------------------------------------- #
@@ -203,6 +368,28 @@ class TestPromptContracts:
         # Feedback comes after the strategies and budget, not before them.
         assert p.index("## Lessons from recent cycles") > p.index("## Slice budget")
         assert p.index("## Where memories come from") < p.index("1. TEMPORAL JUXTAPOSITION")
+
+    def test_explorer_prompt_explains_the_inventory(self):
+        """Phase 3 (docs/PLAN-skim-stage.md): the Explorer knows the inventory semantics and
+        is told to build arrival-anchored slices from it across channels and salience levels."""
+        p = get_explorer_prompt(memory_count=1, date_range="x", feedback_injection="", run_type="scheduled")
+        assert "## The arrivals inventory (in the user message)" in p
+        assert "`id | channel | S<n> N<n> | flags | summary`" in p
+        assert "S = salience to the user's own work and life, 0-3" in p and "N = novelty, 0-3" in p
+        assert "`!` a quoted passage could not be verified" in p and "`[c<k>]`" in p
+        assert "Every id in the inventory is retrievable with memory_read" in p
+        assert "high salience first but not exclusively" in p
+        assert "Do not exclude any channel; this is the user's whole digital day" in p
+        assert "Without skim records the block is the older MANIFEST" in p
+        # Placed with the source description, before the strategies; strategy 12 and TIME refer to it.
+        assert p.index("## Where memories come from") < p.index("## The arrivals inventory") < p.index("1. TEMPORAL JUXTAPOSITION")
+        assert "Start from the arrivals inventory (or" in p and "the inventory (or manifest) already lists ids" in p
+        # The slice-budget rules themselves are unchanged.
+        assert "at least 60% of their memories created since the previous run" in p
+        assert "Three or more slices drawn almost entirely from one channel will be cut to two" in p
+        # session_start mode gets the same explanation (the block is in every user message).
+        s = get_explorer_prompt(memory_count=1, date_range="x", feedback_injection="", run_type="session_start")
+        assert "## The arrivals inventory (in the user message)" in s
 
     def test_thinker_prompt_gates_meta_and_frames_arrivals(self):
         t = get_thinker_prompt()
@@ -333,6 +520,7 @@ class TestExplorerFailureFallback:
         orch = self._orch()
         arrivals_slice = MemorySlice(name="Arrivals", strategy=allocation.ARRIVALS_STRATEGY, memory_ids=[_uid()])
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", side_effect=TimeoutError("600s")), \
              patch.object(orch, "_allocate_attention", return_value=[arrivals_slice]) as alloc, \
              patch.object(orch, "invoke_thinker", return_value=[]), \
@@ -348,6 +536,7 @@ class TestExplorerFailureFallback:
     def test_user_triggered_run_still_aborts(self):
         orch = self._orch()
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", side_effect=RuntimeError("crash")), \
              patch.object(orch, "_allocate_attention") as alloc, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""):

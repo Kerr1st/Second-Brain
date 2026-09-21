@@ -122,7 +122,8 @@ class TestCompleteRun(unittest.TestCase):
         params = mock_cur.execute.call_args[0][1]
         self.assertIn("UPDATE dream_cycle_runs", sql_arg)
         self.assertIn("completed_at", sql_arg)
-        self.assertEqual(params, (8, 3, 3, digest, None, None, run_id))
+        self.assertIn("stats = %s", sql_arg)
+        self.assertEqual(params, (8, 3, 3, digest, None, None, None, run_id))
         mock_conn.commit.assert_called_once()
 
     @patch("src.dream_cycle_db.get_connection")
@@ -138,8 +139,31 @@ class TestCompleteRun(unittest.TestCase):
         complete_run(run_id, {}, "empty digest")
 
         params = mock_cur.execute.call_args[0][1]
-        # All stats default to 0
-        self.assertEqual(params, (0, 0, 0, "empty digest", None, None, run_id))
+        # All stats default to 0; no extra stats -> stats column NULL
+        self.assertEqual(params, (0, 0, 0, "empty digest", None, None, None, run_id))
+
+    @patch("src.dream_cycle_db.get_connection")
+    def test_complete_run_persists_extra_stats_as_json(self, mock_get_conn):
+        """Keys without their own column (the skim counters, migration 014) land in
+        the stats JSONB; the three candidate counters stay in their columns only."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = lambda s: mock_cur
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        run_id = str(uuid4())
+        stats = {"candidates_generated": 2, "candidates_accepted": 1, "candidates_rejected": 1,
+                 "skim_docs": 40, "skim_skimmed": 35, "skim_reused": 5, "skim_failed": 0,
+                 "skim_cost_usd": 0.0312}
+        complete_run(run_id, stats, "d")
+
+        params = mock_cur.execute.call_args[0][1]
+        self.assertEqual(params[:3], (2, 1, 1))
+        self.assertEqual(json.loads(params[6]), {"skim_docs": 40, "skim_skimmed": 35, "skim_reused": 5,
+                                                 "skim_failed": 0, "skim_cost_usd": 0.0312})
+        self.assertEqual(params[7], run_id)
 
 
 class TestStoreCandidate(unittest.TestCase):

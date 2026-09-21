@@ -8,6 +8,25 @@
 # The `bedrock` profile runs the Thinker and all four evaluators on the direct
 # Bedrock Converse API (metered; see the spend cap below).
 #
+# Adapter options. A role may carry `options = { ... }` — an inline table of
+# keyword arguments passed to the adapter's constructor. Only the `bedrock`
+# adapter accepts options (src/backends/resolver.py ADAPTER_OPTIONS):
+#   temperature   float 0.0-1.0   Converse inferenceConfig.temperature
+#   service_tier  "default" | "flex" | "priority" | "reserved"   Converse serviceTier.type
+#   max_tokens    int             Converse inferenceConfig.maxTokens (default 32768)
+# Roles sharing backend+model but not options get separate invokers.
+#
+# The `skim` role (docs/PLAN-skim-stage.md, Step 3.5 of a run) reads every
+# parent-level arrival in the run's window with a cheap, faithful model and is
+# the same in every profile: Amazon Nova 2 Lite on the direct Bedrock API, Flex
+# tier, temperature 0, extended reasoning off (effort = "low"), 4096 output
+# tokens. It is Bedrock-only by rule — the resolver rejects a skim on Kiro /
+# Claude Code / Codex at config load — because it sends full document text to
+# its model, and that text stays inside the AWS account. Its own sub-cap is
+# SKIM_SPEND_CAP_USD ($1.00, env SECOND_BRAIN_SKIM_CAP_USD, at most 15% of the
+# run cap) and it is metered against the run cap like every other stage; any
+# skim failure is non-fatal (the Explorer gets the plain arrivals manifest).
+#
 # Credentials are NOT stored here — they stay out-of-band / gitignored.
 # See docs/MODEL-BACKENDS.md.
 
@@ -20,6 +39,7 @@ skeptic        = { backend = "kiro", model = "claude-opus-4.8", effort = "high" 
 advocate       = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
 epistemologist = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
 methodologist  = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
+skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
 [profiles.mini]
 # Mac Mini: no Kiro -> Claude Code on Bedrock. The claude_code adapter is
@@ -36,6 +56,7 @@ skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opu
 advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
 [profiles.bedrock]
 # Direct Bedrock Converse API for every tool-less role; the Explorer needs the
@@ -58,6 +79,7 @@ skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",
 advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
 epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
 methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
+skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
 [profiles.hybrid]
 # Everything Claude runs on Kiro (credits, no metered bill); only the two
@@ -75,6 +97,7 @@ skeptic        = { backend = "bedrock", model = "global.openai.gpt-6-astra",   e
 advocate       = { backend = "kiro",    model = "claude-sonnet-5",            effort = "high" }
 epistemologist = { backend = "bedrock", model = "global.openai.gpt-6-astra",   effort = "high" }
 methodologist  = { backend = "kiro",    model = "claude-sonnet-5",            effort = "high" }
+skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
 
 
@@ -100,3 +123,4 @@ skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",
 advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
 epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
 methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
+skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }

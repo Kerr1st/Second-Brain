@@ -19,7 +19,7 @@ import psycopg2
 
 from src.backends.base import BACKEND_CAPABILITIES
 from src.backends.cost import SpendCapExceeded, SpendTracker, kill_switch_engaged
-from src.backends.resolver import VALID_ROLES, default_resolver
+from src.backends.resolver import SKIM_ROLE, VALID_ROLES, default_resolver
 from src.models import (
     CandidateInsight,
     DreamCycleResult,
@@ -28,6 +28,7 @@ from src.models import (
 )
 from src.prompts import get_evaluator_prompt, get_explorer_prompt, get_thinker_prompt
 from src.prompts.revision import REVISION_PROMPT, REVISION_SCHEMA, build_revision_request
+from src.prompts.skim import PROMPT_VERSION as SKIM_PROMPT_VERSION
 import src.dream_cycle_db as dream_cycle_db
 from src.dream_cycle.consensus import tally_consensus
 from src.dream_cycle.storage import store_accepted, check_duplicate
@@ -42,6 +43,9 @@ from src.dream_cycle.packet import (
     format_sources_for_evaluator,
     load_memories_by_ids,
 )
+from src.skim import store as skim_store
+from src.skim.cluster import cluster_window
+from src.skim.runner import SkimResult, skim_window
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +104,47 @@ GROUNDING_AUDIT_ROLE = "skeptic"
 # Hard cap on candidates per slice (the Thinker is asked for at most 2).
 MAX_CANDIDATES_PER_SLICE = int(os.environ.get("MAX_CANDIDATES_PER_SLICE", "3"))
 EVALUATOR_BACKOFF_S = 2.0
+# Skim stage (docs/PLAN-skim-stage.md, Step 3.5): every parent-level arrival in the
+# window is read once by the `skim` role's cheap Bedrock model. Its own sub-cap is
+# SKIM_SPEND_CAP_USD (env SECOND_BRAIN_SKIM_CAP_USD) and never more than
+# SKIM_RUN_CAP_SHARE of the run cap; the spend still counts toward the run cap.
+SKIM_SPEND_CAP_USD = 1.00
+SKIM_RUN_CAP_SHARE = 0.15
+#: Operational off-switch: set to 1/true/yes to skip Step 3.5 (manifest as before).
+SKIM_DISABLED_ENV = "SECOND_BRAIN_SKIM_DISABLED"
+# Budget-aware Thinker and panel (docs/PLAN-skim-stage.md, Phase 4). Per-unit
+# estimates from run 3a1263a6 (2026-09-18, Bedrock profile): the Thinker cost
+# $0.21–0.30 per slice; judging one candidate — grounding audit + revision + four
+# votes — cost ~$0.66. Rounded up so the rule errs toward finishing what was
+# started rather than starting more. Before invoking the Thinker for a slice the
+# run must be able to afford the call, judging its (up to two) candidates and
+# judging every candidate already generated; before judging a candidate it must
+# be able to afford that candidate. Otherwise the slice / the remaining
+# candidates are skipped, counted (slices_skipped_for_budget,
+# candidates_unjudged_for_budget) and the run completes normally — the hard
+# cap in SpendTracker stays as the backstop.
+EST_THINKER_CALL_USD = 0.30
+EST_JUDGE_CANDIDATE_USD = 0.70
+
+
+def _skim_cap_usd(run_cap_usd: float) -> float:
+    """The skim's sub-cap: SECOND_BRAIN_SKIM_CAP_USD (default SKIM_SPEND_CAP_USD),
+    bounded to SKIM_RUN_CAP_SHARE of the run cap. A bad env value falls back to the
+    default with a warning, like SpendTracker.from_env."""
+    cap = SKIM_SPEND_CAP_USD
+    raw = os.environ.get("SECOND_BRAIN_SKIM_CAP_USD")
+    if raw:
+        try:
+            parsed = float(raw)
+            if parsed > 0:
+                cap = parsed
+            else:
+                logger.warning("SECOND_BRAIN_SKIM_CAP_USD=%r must be > 0; using default $%.2f", raw, cap)
+        except ValueError:
+            logger.warning("SECOND_BRAIN_SKIM_CAP_USD=%r is not a number; using default $%.2f", raw, cap)
+    if run_cap_usd and run_cap_usd > 0:
+        cap = min(cap, SKIM_RUN_CAP_SHARE * float(run_cap_usd))
+    return cap
 
 
 class DreamCycleOrchestrator:
@@ -114,6 +159,13 @@ class DreamCycleOrchestrator:
         # a tool-less Thinker, kept so evaluators can ground against the same text.
         self._spend = SpendTracker.from_env()
         self._slice_memory_cache: dict[str, dict] = {}
+        # Skim records for the run's arrivals window (Step 3.5 → Explorer inventory
+        # and the weighted guaranteed slice) and what the Explorer was actually given.
+        self._skim_records: list[dict] = []
+        self._explorer_input: dict = {}
+        # Ledger rows (origin + metrics) aligned with the slices _allocate_attention
+        # returned — the judging order (Phase 4) is derived from them.
+        self._slice_rows: list[dict] = []
 
     def _invoker_for(self, role: str):
         """Resolve the Invoker for a role from the active backend profile."""
@@ -142,6 +194,16 @@ class DreamCycleOrchestrator:
                 role, cost, self._spend.total_usd, self._spend.cap_usd,
             )
 
+    def _budget_remaining(self) -> float | None:
+        """Dollars left under the run cap, from the SpendTracker's real figures
+        (never estimates), or None when no cap applies. With an all-Kiro profile
+        nothing is metered, the total stays at zero and the budget rules never
+        fire — the cap binds only where usage is real."""
+        cap = getattr(self._spend, "cap_usd", None)
+        if not isinstance(cap, (int, float)) or cap <= 0:
+            return None
+        return float(cap) - float(self._spend.total_usd)
+
     def _backend_provenance(self) -> dict:
         """Snapshot the active profile's (backend, model, effort) per role.
 
@@ -153,7 +215,12 @@ class DreamCycleOrchestrator:
         """
         provenance: dict[str, dict] = {}
         for role in VALID_ROLES:
-            spec = self.resolver.spec_for(role)
+            try:
+                spec = self.resolver.spec_for(role)
+            except KeyError:
+                # Optional stage not configured (e.g. no skim role in a hand-built
+                # profile): the run proceeds without it, so provenance omits it.
+                continue
             provenance[role] = {
                 "backend": spec.backend,
                 "model": spec.model,
@@ -226,6 +293,9 @@ class DreamCycleOrchestrator:
         # Fresh per-run spend accounting and slice-content cache.
         self._spend = SpendTracker.from_env()
         self._slice_memory_cache = {}
+        self._skim_records = []
+        self._explorer_input = {}
+        self._slice_rows = []
 
         # Session-start frequency cap: check before creating a run record
         if run_type == "session_start" and not dream_cycle_db.should_run_briefing():
@@ -304,6 +374,15 @@ class DreamCycleOrchestrator:
             stats["recent_activity"],
         )
 
+        # Step 3.5: Skim every arrival in the window (cheap Bedrock model, own sub-cap).
+        # Never aborts the run on its own failure: None means the Explorer gets the
+        # plain arrivals manifest, exactly as before. SpendCapExceeded propagates.
+        skim = self._skim_arrivals(run_id, run_type, started_at)
+        skim_stats = skim.to_stats() if skim is not None else {}
+        # The window's skim records (this run's and earlier runs' — idempotent per
+        # document) feed the Explorer's inventory and the weighted guaranteed slice.
+        self._skim_records = self._load_skim_records(skim, run_id, run_type, started_at)
+
         # Step 4: Invoke Explorer (with crash/timeout handling). On a scheduled run an
         # Explorer failure no longer aborts the night: the guaranteed arrivals slice
         # (built in _allocate_attention) lets the run still examine what arrived.
@@ -313,7 +392,7 @@ class DreamCycleOrchestrator:
         except (TimeoutError, RuntimeError):
             if run_type not in ("scheduled", "session_start"):
                 logger.error("Explorer agent crashed or timed out (run_id=%s)", run_id)
-                dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
+                dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS | skim_stats, digest="")
                 return self._aborted_result(run_id, run_type, started_at)
             logger.error("Explorer agent crashed or timed out (run_id=%s); continuing with the "
                          "guaranteed arrivals slice only", run_id)
@@ -328,12 +407,36 @@ class DreamCycleOrchestrator:
         if not slices:
             logger.warning("Circuit breaker: no slices to examine (Explorer returned none and "
                            "nothing arrived), aborting early")
-            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
+            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS | skim_stats | self._explorer_input, digest="")
             return self._aborted_result(run_id, run_type, started_at)
 
-        # Step 6: Invoke Thinker for each slice, collect candidates
+        # Judging order (Phase 4): the guaranteed arrivals slice first, then the
+        # Explorer's slices by arrival share — so the spend cap cuts stale material,
+        # not the most recent days. Stable when the ledger has no metrics.
+        ordered = allocation.order_slices(slices, self._slice_rows)
+        slices = [s for s, _ in ordered]
+        logger.info("Slice order for the Thinker and the panel: %s", allocation.describe_slice_order(ordered))
+
+        # Step 6: Invoke Thinker for each slice, collect candidates. Budget-aware:
+        # a slice is skipped when the remaining budget cannot cover the Thinker call,
+        # judging its candidates and judging what is already waiting.
         all_candidates: list[CandidateInsight] = []
-        for s in slices:
+        slices_skipped_for_budget = 0
+        for i, s in enumerate(slices):
+            remaining = self._budget_remaining()
+            if remaining is not None:
+                needed = EST_THINKER_CALL_USD + 2 * EST_JUDGE_CANDIDATE_USD + EST_JUDGE_CANDIDATE_USD * len(all_candidates)
+                if remaining < needed:
+                    slices_skipped_for_budget = len(slices) - i
+                    logger.warning(
+                        "Budget: $%.2f left of $%.2f, but the next slice needs ~$%.2f (Thinker $%.2f + judging "
+                        "2 new and %d pending candidates at $%.2f each); skipping the Thinker for the remaining "
+                        "%d slice(s): %s",
+                        remaining, self._spend.cap_usd, needed, EST_THINKER_CALL_USD, len(all_candidates),
+                        EST_JUDGE_CANDIDATE_USD, slices_skipped_for_budget,
+                        "; ".join(sl.name for sl in slices[i:]),
+                    )
+                    break
             try:
                 candidates = self.invoke_thinker(s)
             except Exception:
@@ -350,18 +453,34 @@ class DreamCycleOrchestrator:
                 )
                 candidates = candidates[:cap]
             all_candidates.extend(candidates)
-        logger.info("Total candidates from Thinker: %d", len(all_candidates))
+        logger.info("Total candidates from Thinker: %d%s", len(all_candidates),
+                    f" ({slices_skipped_for_budget} slice(s) skipped for budget)" if slices_skipped_for_budget else "")
 
         accepted: list[CandidateInsight] = []
         rejected: list[CandidateInsight] = []
+        candidates_unjudged_for_budget = 0
 
         # Step 7: Consensus Panel — invoke 4 evaluators per candidate.
         # If an evaluator is unrecoverable after retries (the panel is genuinely
         # down), abort the run loudly — but keep the candidates already evaluated
         # so the run record reflects real persisted work (no zeroed-stats lie /
         # orphaned accepted memories). An infra failure never fabricates a verdict.
+        # Soft stop: when the remaining budget cannot cover judging one more
+        # candidate, the rest are left unjudged — no verdict stored, none
+        # fabricated — and the run completes normally instead of tripping the
+        # hard cap mid-candidate.
         panel_aborted = False
-        for candidate in all_candidates:
+        for idx, candidate in enumerate(all_candidates):
+            remaining = self._budget_remaining()
+            if remaining is not None and remaining < EST_JUDGE_CANDIDATE_USD:
+                candidates_unjudged_for_budget = len(all_candidates) - idx
+                logger.warning(
+                    "Budget: $%.2f left of $%.2f is below the ~$%.2f judging one candidate costs; leaving %d "
+                    "candidate(s) unjudged: %s",
+                    remaining, self._spend.cap_usd, EST_JUDGE_CANDIDATE_USD, candidates_unjudged_for_budget,
+                    "; ".join(c.title for c in all_candidates[idx:]),
+                )
+                break
             # Grounding audit + one revision before the panel votes (never aborts).
             candidate = self._ground_candidate(candidate)
             if not candidate.content.strip():
@@ -451,12 +570,20 @@ class DreamCycleOrchestrator:
         except Exception:
             logger.debug("Relationship decay skipped (non-critical)", exc_info=True)
 
+        budget_stats = {}
+        if slices_skipped_for_budget:
+            budget_stats["slices_skipped_for_budget"] = slices_skipped_for_budget
+        if candidates_unjudged_for_budget:
+            budget_stats["candidates_unjudged_for_budget"] = candidates_unjudged_for_budget
         dream_cycle_db.complete_run(
             run_id,
             stats={
                 "candidates_generated": len(all_candidates),
                 "candidates_accepted": len(accepted),
                 "candidates_rejected": len(rejected),
+                **skim_stats,
+                **self._explorer_input,
+                **budget_stats,
             },
             digest=digest,
             explorer_output=json.dumps([{"name": s.name, "strategy": s.strategy, "memory_count": len(s.memory_ids)} for s in slices]),
@@ -561,16 +688,35 @@ class DreamCycleOrchestrator:
             strategy_usage=dream_cycle_db.get_strategy_usage(n_cycles=10),
         )
 
-        # Arrivals manifest: what was captured since the previous run, by channel,
-        # with ids. Without this the Explorer knew only "N new memories" and had no
-        # reason to look at any of them.
+        # Arrivals block: what was captured since the previous run, by channel, with
+        # ids. Without this the Explorer knew only "N new memories" and had no reason
+        # to look at any of them. With skim records for the window (Step 3.5) the
+        # block is the full inventory — one line per document — instead of the
+        # 4-samples-per-channel manifest (docs/PLAN-skim-stage.md, Phase 3).
         manifest = ""
+        self._explorer_input = {}
         try:
             window_start = ledger.arrival_window_start(self._current_run_id, run_type,
                                                        self._current_started_at, dcdb=dream_cycle_db)
             arrivals = dream_cycle_db.get_arrivals_summary(window_start, allocation.MANIFEST_SAMPLES_PER_SOURCE)
-            manifest = allocation.build_arrivals_manifest(
-                window_start, arrivals if isinstance(arrivals, list) else [])
+            arrivals = arrivals if isinstance(arrivals, list) else []
+            if self._skim_records:
+                counts = {a["source_type"]: int(a["documents"]) for a in arrivals
+                          if isinstance(a, dict) and a.get("source_type") and a.get("documents")}
+                render = allocation.render_arrivals_inventory(window_start, self._skim_records,
+                                                              counts_by_channel=counts)
+                manifest = render.text
+                self._explorer_input = {"explorer_input": "inventory", "inventory_listed": render.listed,
+                                        "inventory_docs": render.total, "inventory_chars": len(manifest)}
+                logger.info("Explorer arrivals input: inventory — %d of %d skimmed documents listed "
+                            "(%d lines, %d chars)", render.listed, render.total, manifest.count("\n") + 1, len(manifest))
+            else:
+                manifest = allocation.build_arrivals_manifest(window_start, arrivals)
+                self._explorer_input = {"explorer_input": "manifest"}
+                logger.info("Explorer arrivals input: manifest — %d channels, %d sample ids per channel "
+                            "(%d lines, %d chars); no skim records for this window",
+                            len(arrivals), allocation.MANIFEST_SAMPLES_PER_SOURCE, manifest.count("\n") + 1,
+                            len(manifest))
         except Exception:
             logger.warning("Arrivals manifest unavailable for this run", exc_info=True)
 
@@ -639,8 +785,11 @@ class DreamCycleOrchestrator:
 
         Never aborts a run: on any failure the Explorer's slices are returned as-is.
         Scoped runs (post_learn, user_triggered) are exempt from the budget — their
-        attention is directed by the scope — but are still recorded.
+        attention is directed by the scope — but are still recorded. The ledger rows
+        of the returned slices are kept on ``self._slice_rows`` (same order) for the
+        judging order; they are empty when the ledger could not be computed.
         """
+        self._slice_rows = []
         try:
             window_start = ledger.arrival_window_start(run_id, run_type, started_at, dcdb=dream_cycle_db)
             provenance = ledger.fetch_provenance(slices, dcdb=dream_cycle_db)
@@ -651,16 +800,26 @@ class DreamCycleOrchestrator:
                                              window_start=window_start, provenance=provenance)
             metrics = [r["metrics"] for r in rows]
             origins: dict[int, str] = {}
+            extra_metrics: dict[int, dict] = {}
 
             if run_type in ("scheduled", "session_start"):
                 kept, kept_metrics, needs_arrivals = allocation.enforce_budget(slices, metrics)
                 if needs_arrivals:
-                    extra = allocation.build_arrivals_slice(window_start, dcdb=dream_cycle_db)
+                    # With skim records half the slice goes to the most salient / novel
+                    # arrivals (docs/PLAN-skim-stage.md, Phase 3); without them this is
+                    # the stratified sample it has always been.
+                    extra, selection = allocation.build_arrivals_selection(
+                        window_start, dcdb=dream_cycle_db, skim_records=self._skim_records or None)
                     if extra is not None:
                         kept.append(extra)
                         origins[len(kept) - 1] = allocation.ARRIVALS_ORIGIN
-                        logger.info("Added guaranteed arrivals slice with %d memories: %s",
-                                    len(extra.memory_ids), extra.name)
+                        extra_metrics[len(kept) - 1] = selection.metrics
+                        logger.info("Added guaranteed arrivals slice with %d memories (%s): %s",
+                                    len(extra.memory_ids),
+                                    f"{selection.skim_picked} picked for salience/novelty from the skim, "
+                                    f"{len(extra.memory_ids) - selection.skim_picked} stratified"
+                                    if selection.skim_weighted else "stratified, no skim records",
+                                    extra.name)
                     else:
                         logger.info("No arrivals to build a guaranteed slice from")
                 slices = kept
@@ -669,12 +828,106 @@ class DreamCycleOrchestrator:
                 rows = ledger.compute_slice_rows(run_id, run_type, slices, started_at, origins,
                                                  dcdb=dream_cycle_db, window_start=window_start,
                                                  provenance=provenance)
+                for i, m in extra_metrics.items():
+                    rows[i]["metrics"].update(m)
 
             dream_cycle_db.record_slices(run_id, rows)
             ledger.log_run_metrics(ledger.run_metrics(rows))
+            self._slice_rows = rows
         except Exception:
             logger.warning("Attention allocation failed (non-fatal); using Explorer slices as-is", exc_info=True)
+            self._slice_rows = []
         return slices
+
+    def _load_skim_records(self, skim: SkimResult | None, run_id: str, run_type: str,
+                           started_at: datetime) -> list[dict]:
+        """The window's skim records for the Explorer inventory and the weighted
+        guaranteed slice (docs/PLAN-skim-stage.md, Phase 3).
+
+        Fetched only when Step 3.5 ran and something is stored for the window
+        (``skimmed + reused > 0``). The records are then clustered by their
+        existing embeddings (``[c<k>]`` tags; no model calls). Never raises:
+        any failure logs a WARNING and returns ``[]``, which makes the Explorer
+        fall back to the plain manifest.
+        """
+        if skim is None or (skim.skimmed + skim.reused) <= 0:
+            return []
+        try:
+            window_start = ledger.arrival_window_start(run_id, run_type, started_at, dcdb=dream_cycle_db)
+            records = skim_store.fetch_window_records(window_start, skim.model, skim.prompt_version)
+        except Exception:
+            logger.warning("Skim records unavailable for the window (non-fatal); the Explorer gets the manifest",
+                           exc_info=True)
+            return []
+        if not isinstance(records, list) or not records:
+            logger.warning("Skim ran (%d skimmed, %d reused) but no records came back for the window",
+                           skim.skimmed, skim.reused)
+            return []
+        try:
+            cluster_window(records, model=skim.model, prompt_version=skim.prompt_version)
+        except Exception:
+            logger.warning("Skim clustering failed (non-fatal); inventory without cluster tags", exc_info=True)
+        logger.info("Skim records loaded for the window: %d (of %d arrivals)", len(records), skim.docs_total)
+        return records
+
+    def _skim_arrivals(self, run_id: str, run_type: str, started_at: datetime) -> SkimResult | None:
+        """Step 3.5 — skim every arrival in the run's window (docs/PLAN-skim-stage.md).
+
+        Resolves the ``skim`` role through the active profile and runs
+        :func:`~src.skim.runner.skim_window` over ``ledger.arrival_window_start``,
+        metering every call through the run's SpendTracker under the skim's own
+        sub-cap (:func:`_skim_cap_usd`). Returns the counts, or ``None`` — with one
+        WARNING — when the role is not configured, resolves to a non-Bedrock /
+        agentic backend, or anything at all fails: the run then continues exactly
+        as before (the Explorer gets the plain arrivals manifest). Only
+        :class:`SpendCapExceeded` propagates, like in every other stage.
+
+        Operational off-switch: ``SECOND_BRAIN_SKIM_DISABLED=1`` (also ``true``/``yes``)
+        skips the stage with one WARNING and no model calls.
+        """
+        if os.environ.get(SKIM_DISABLED_ENV, "").strip().lower() in {"1", "true", "yes"}:
+            logger.warning("Skim skipped: %s is set; the Explorer gets the arrivals manifest", SKIM_DISABLED_ENV)
+            return None
+        try:
+            spec = self.resolver.spec_for(SKIM_ROLE)
+        except KeyError:
+            logger.warning("Skim skipped: role %r is not configured in the active backend profile", SKIM_ROLE)
+            return None
+        try:
+            backend = getattr(spec, "backend", None)
+            caps = BACKEND_CAPABILITIES.get(backend)
+            if caps is None or caps.supports_mcp:
+                logger.warning("Skim skipped: role %r must run on the direct Bedrock backend, not %r",
+                               SKIM_ROLE, backend)
+                return None
+            invoker = self._invoker_for(SKIM_ROLE)
+            window_start = ledger.arrival_window_start(run_id, run_type, started_at, dcdb=dream_cycle_db)
+            cap = _skim_cap_usd(self._spend.cap_usd)
+            result = skim_window(
+                window_start,
+                invoker=invoker,
+                model=spec.model,
+                prompt_version=SKIM_PROMPT_VERSION,
+                tracker=self._spend,
+                cap_usd=cap,
+                run_id=run_id,
+                effort=spec.effort or "low",
+            )
+        except SpendCapExceeded:
+            raise
+        except Exception:
+            logger.warning("Skim failed (non-fatal); the Explorer gets the arrivals manifest as before",
+                           exc_info=True)
+            return None
+        logger.info(
+            "Skim (%s): %d arrival(s) since %s — %d skimmed, %d reused, %d failed, %d invalid, %d coerced, "
+            "%d truncated; quotes %d/%d verbatim; $%.4f of $%.2f sub-cap in %.0fs%s",
+            spec.model, result.docs_total, window_start.isoformat(), result.skimmed, result.reused,
+            result.failed, result.invalid, result.coerced, result.truncated, result.quotes_verbatim,
+            result.quotes_emitted, result.cost_usd, cap, result.duration_s,
+            " (stopped at sub-cap)" if result.aborted_on_cap else "",
+        )
+        return result
 
     def invoke_thinker(
         self, slice: MemorySlice,

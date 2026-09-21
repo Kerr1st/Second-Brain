@@ -38,13 +38,22 @@ def create_run(run_type: str, backend_provenance: dict | None = None) -> str:
         return str(run_id)
 
 
+#: Stats keys with their own column on dream_cycle_runs; every other key goes
+#: into the ``stats`` JSONB column (migration 014) — e.g. the skim_* counters.
+_RUN_STAT_COLUMNS = ("candidates_generated", "candidates_accepted", "candidates_rejected")
+
+
 def complete_run(run_id: str, stats: dict, digest: str,
                  explorer_output: str | None = None,
                  explorer_feedback_injected: str | None = None) -> None:
     """Update run with completion time, stats, and digest text.
 
     stats keys: candidates_generated, candidates_accepted, candidates_rejected
+    (own columns); any further keys (skim_docs, skim_skimmed, skim_reused,
+    skim_failed, skim_cost_usd, ...) are stored as JSON in ``stats``
+    (NULL when there are none).
     """
+    extra = {k: v for k, v in (stats or {}).items() if k not in _RUN_STAT_COLUMNS}
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -57,7 +66,8 @@ def complete_run(run_id: str, stats: dict, digest: str,
                     candidates_rejected = %s,
                     digest = %s,
                     explorer_output = %s,
-                    explorer_feedback_injected = %s
+                    explorer_feedback_injected = %s,
+                    stats = %s
                 WHERE id = %s
                 """,
                 (
@@ -67,6 +77,7 @@ def complete_run(run_id: str, stats: dict, digest: str,
                     digest,
                     explorer_output,
                     explorer_feedback_injected,
+                    json.dumps(extra, default=str) if extra else None,
                     run_id,
                 ),
             )

@@ -103,16 +103,193 @@ class TestConstruction:
 # ---------------------------------------------------------------------------
 
 class TestStructuredOutputShape:
-    def test_tool_choice_is_auto_never_forced(self):
+    def test_tool_choice_is_auto_never_forced_for_claude(self):
         """Fable 5.1 returns ValidationException for toolChoice.tool / .any."""
         inv = BedrockInvoker(model="global.anthropic.claude-fable-5-1")
-        cfg = inv._shape_structured_output(schema={"type": "object"})
+        cfg = inv._shape_structured_output(schema={"type": "object"})["toolConfig"]
         assert cfg["toolChoice"] == {"auto": {}}
         assert cfg["tools"][0]["toolSpec"]["inputSchema"] == {"json": {"type": "object"}}
 
     def test_no_schema_means_no_tool_config(self):
         inv = BedrockInvoker(model="global.anthropic.claude-fable-5-1")
         assert inv._shape_structured_output() is None
+
+    @pytest.mark.parametrize("model", ["us.amazon.nova-2-lite-v1:0", "amazon.nova-2-lite-v1:0",
+                                       "global.amazon.nova-2-lite-v1:0", "amazon.nova-pro-v1:0"])
+    def test_nova_forces_the_structured_output_tool(self, model):
+        """toolChoice.tool is supported for Amazon Nova (and Claude 3) only —
+        https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolChoice.html ;
+        Nova serves it with constrained decoding, so the reply is schema-valid."""
+        inv = BedrockInvoker(model=model)
+        cfg = inv._shape_structured_output(schema={"type": "object"})["toolConfig"]
+        assert cfg["toolChoice"] == {"tool": {"name": "structured_output"}}
+        assert cfg["tools"][0]["toolSpec"]["name"] == "structured_output"
+        assert cfg["tools"][0]["toolSpec"]["inputSchema"] == {"json": {"type": "object"}}
+
+    def test_gemma_uses_json_schema_output_format(self):
+        """Gemma 3 12B: structured outputs yes, client-side tool calling only on
+        bedrock-mantle → Converse outputConfig.textFormat (structured-output.html)."""
+        inv = BedrockInvoker(model="google.gemma-3-12b-it")
+        shape = inv._shape_structured_output(schema={"type": "object", "properties": {"a": {"type": "string"}}})
+        assert "toolConfig" not in shape
+        fmt = shape["outputConfig"]["textFormat"]
+        assert fmt["type"] == "json_schema"
+        js = fmt["structure"]["jsonSchema"]
+        assert js["name"] == "structured_output"
+        assert json.loads(js["schema"]) == {"type": "object", "properties": {"a": {"type": "string"}}}
+
+    def test_openai_keeps_auto_tool_choice(self):
+        inv = BedrockInvoker(model="global.openai.gpt-6-astra")
+        cfg = inv._shape_structured_output(schema={"type": "object"})["toolConfig"]
+        assert cfg["toolChoice"] == {"auto": {}}
+
+
+# ---------------------------------------------------------------------------
+# Construction options: temperature and service tier
+# ---------------------------------------------------------------------------
+
+class TestRequestOptions:
+    def test_temperature_and_service_tier_validated(self):
+        with pytest.raises(ValueError, match="temperature"):
+            BedrockInvoker(model="us.amazon.nova-2-lite-v1:0", temperature=1.5)
+        with pytest.raises(ValueError, match="service_tier"):
+            BedrockInvoker(model="us.amazon.nova-2-lite-v1:0", service_tier="cheap")
+        inv = BedrockInvoker(model="us.amazon.nova-2-lite-v1:0", temperature=0, service_tier="flex")
+        assert inv._temperature == 0.0 and inv._service_tier == "flex"
+
+    def test_defaults_send_neither(self):
+        client = _FakeBedrockClient(response=_converse_response({"text": "{}"}))
+        inv = BedrockInvoker(model="global.anthropic.claude-sonnet-5", client=client)
+        inv.invoke("sys", "user")
+        call = client.calls[0]
+        assert call["inferenceConfig"] == {"maxTokens": inv._max_tokens}
+        assert "serviceTier" not in call
+
+
+# ---------------------------------------------------------------------------
+# Exact request kwargs per model family (the skim-stage contract)
+# ---------------------------------------------------------------------------
+
+_SCHEMA = {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}
+
+
+class TestPerModelRequestShape:
+    def test_nova_2_lite_full_skim_request(self):
+        """(i) Nova 2 Lite: forced tool, reasoning explicitly off, temperature 0,
+        Flex tier — the exact kwargs the skim stage sends (live-verified 2026-09-20)."""
+        payload = {"summary": "s"}
+        client = _FakeBedrockClient(response=_converse_response(
+            {"toolUse": {"toolUseId": "t1", "name": "structured_output", "input": payload}},
+            stop_reason="tool_use", usage=(3000, 120)))
+        inv = BedrockInvoker(model="us.amazon.nova-2-lite-v1:0", client=client, max_tokens=4096,
+                             temperature=0.0, service_tier="flex")
+        result = inv.invoke("sys", "doc", schema=_SCHEMA, stage="skim", run_id="r1")
+
+        assert result["output"] == payload
+        assert client.calls == [{
+            "modelId": "us.amazon.nova-2-lite-v1:0",
+            "messages": [{"role": "user", "content": [{"text": "doc"}]}],
+            "inferenceConfig": {"maxTokens": 4096, "temperature": 0.0},
+            "system": [{"text": "sys"}],
+            "toolConfig": {
+                "tools": [{"toolSpec": {
+                    "name": "structured_output",
+                    "description": "Respond with structured output matching the schema.",
+                    "inputSchema": {"json": _SCHEMA},
+                }}],
+                "toolChoice": {"tool": {"name": "structured_output"}},
+            },
+            "serviceTier": {"type": "flex"},
+            "additionalModelRequestFields": {"reasoningConfig": {"type": "disabled"}},
+        }]
+
+    def test_nova_2_reasoning_off_even_without_effort_and_without_schema(self):
+        client = _FakeBedrockClient(response=_converse_response({"text": "{}"}))
+        inv = BedrockInvoker(model="us.amazon.nova-2-lite-v1:0", client=client)
+        inv.invoke("sys", "user")
+        call = client.calls[0]
+        assert call["additionalModelRequestFields"] == {"reasoningConfig": {"type": "disabled"}}
+        assert "toolConfig" not in call and "serviceTier" not in call
+        assert call["inferenceConfig"] == {"maxTokens": inv._max_tokens}
+
+    def test_fable_request_unchanged(self):
+        """(ii) Fable 5.1: auto tool choice, adaptive thinking, no tier, no
+        temperature, no reasoningConfig — byte-for-byte what shipped before."""
+        client = _FakeBedrockClient(response=_converse_response(
+            _reasoning_block(), {"text": json.dumps({"summary": "s"})}))
+        inv = BedrockInvoker(model="global.anthropic.claude-fable-5-1", client=client, max_tokens=32768)
+        inv.invoke("sys", "user", effort="high", schema=_SCHEMA)
+        assert client.calls == [{
+            "modelId": "global.anthropic.claude-fable-5-1",
+            "messages": [{"role": "user", "content": [{"text": "user"}]}],
+            "inferenceConfig": {"maxTokens": 32768},
+            "system": [{"text": "sys"}],
+            "toolConfig": {
+                "tools": [{"toolSpec": {
+                    "name": "structured_output",
+                    "description": "Respond with structured output matching the schema.",
+                    "inputSchema": {"json": _SCHEMA},
+                }}],
+                "toolChoice": {"auto": {}},
+            },
+            "additionalModelRequestFields": {"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}},
+        }]
+
+    def test_openai_request_unchanged(self):
+        """(iii) GPT-6 Astra: auto tool choice and reasoning.effort only."""
+        client = _FakeBedrockClient(response=_converse_response({"text": json.dumps({"summary": "s"})}))
+        inv = BedrockInvoker(model="global.openai.gpt-6-astra", client=client, max_tokens=32768)
+        inv.invoke("sys", "user", effort="high", schema=_SCHEMA)
+        assert client.calls == [{
+            "modelId": "global.openai.gpt-6-astra",
+            "messages": [{"role": "user", "content": [{"text": "user"}]}],
+            "inferenceConfig": {"maxTokens": 32768},
+            "system": [{"text": "sys"}],
+            "toolConfig": {
+                "tools": [{"toolSpec": {
+                    "name": "structured_output",
+                    "description": "Respond with structured output matching the schema.",
+                    "inputSchema": {"json": _SCHEMA},
+                }}],
+                "toolChoice": {"auto": {}},
+            },
+            "additionalModelRequestFields": {"reasoning": {"effort": "high"}},
+        }]
+
+    def test_gemma_request_uses_output_config(self):
+        """Gemma 3 12B: JSON-schema output format, no toolConfig, no reasoning
+        fields (doc-verified only; Phase 1 spends on Nova alone)."""
+        client = _FakeBedrockClient(response=_converse_response({"text": json.dumps({"summary": "s"})}))
+        inv = BedrockInvoker(model="google.gemma-3-12b-it", client=client, max_tokens=2048,
+                             temperature=0.0, service_tier="flex")
+        result = inv.invoke("sys", "doc", schema=_SCHEMA)
+        assert result["output"] == {"summary": "s"}
+        call = client.calls[0]
+        assert "toolConfig" not in call and "additionalModelRequestFields" not in call
+        assert call["outputConfig"]["textFormat"]["type"] == "json_schema"
+        assert json.loads(call["outputConfig"]["textFormat"]["structure"]["jsonSchema"]["schema"]) == _SCHEMA
+        assert call["serviceTier"] == {"type": "flex"}
+        assert call["inferenceConfig"] == {"maxTokens": 2048, "temperature": 0.0}
+
+    def test_served_service_tier_is_carried_in_usage(self):
+        """Converse echoes serviceTier; cost.py prices Flex from this echo only."""
+        resp = _converse_response(
+            {"toolUse": {"toolUseId": "t1", "name": "structured_output", "input": {"summary": "s"}}},
+            stop_reason="tool_use", usage=(1000, 50))
+        resp["serviceTier"] = {"type": "flex"}
+        client = _FakeBedrockClient(response=resp)
+        inv = BedrockInvoker(model="us.amazon.nova-2-lite-v1:0", client=client, service_tier="flex")
+        result = inv.invoke("sys", "doc", schema=_SCHEMA)
+        assert result["usage"]["serviceTier"] == "flex"
+        from src.backends.cost import estimate_cost_usd
+        assert estimate_cost_usd("us.amazon.nova-2-lite-v1:0", result["usage"]) == pytest.approx(
+            1000 * 0.165 / 1e6 + 50 * 1.375 / 1e6)
+
+    def test_no_service_tier_echo_means_no_key(self):
+        client = _FakeBedrockClient(response=_converse_response({"text": "{}"}))
+        inv = BedrockInvoker(model="us.amazon.nova-2-lite-v1:0", client=client)
+        result = inv.invoke("sys", "user")
+        assert "serviceTier" not in result["usage"]
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +400,15 @@ class TestEffortMapping:
             ("us.openai.gpt-5.6-sol", "xhigh", {"reasoning": {"effort": "xhigh"}}),
             # Unknown vendor: provenance-only.
             ("amazon.nova-pro-v1:0", "high", None),
+            # Nova 2: reasoningConfig (extended-thinking.html). low = off (skim setting).
+            ("us.amazon.nova-2-lite-v1:0", "low", {"reasoningConfig": {"type": "disabled"}}),
+            ("us.amazon.nova-2-lite-v1:0", "medium",
+             {"reasoningConfig": {"type": "enabled", "maxReasoningEffort": "medium"}}),
+            ("us.amazon.nova-2-lite-v1:0", "high",
+             {"reasoningConfig": {"type": "enabled", "maxReasoningEffort": "high"}}),
+            ("us.amazon.nova-2-lite-v1:0", "max",
+             {"reasoningConfig": {"type": "enabled", "maxReasoningEffort": "high"}}),
+            ("us.amazon.nova-2-lite-v1:0", "turbo", {"reasoningConfig": {"type": "disabled"}}),
             # Unknown effort level: provenance-only, never fail.
             ("global.anthropic.claude-fable-5-1", "turbo", None),
         ],

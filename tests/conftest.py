@@ -20,6 +20,28 @@ from src.db import close_pool
 
 
 # ---------------------------------------------------------------------------
+# Safety net: the skim store never reaches a real database from a unit test
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _skim_store_is_offline(monkeypatch):
+    """Make ``src.skim.store`` raise instead of opening a connection.
+
+    The skim stage (orchestrator Step 3.5) reads arrivals *with their content*
+    and sends them to a metered model. Pipeline tests bypass it with
+    ``patch.object(orch, "_skim_arrivals", return_value=None)``; should one
+    forget, this fixture guarantees the store cannot touch the live
+    ``memory_bank`` database — the runner fails closed (``_skim_arrivals`` logs
+    a WARNING and returns None) before any document or credential is used.
+    Store tests patch ``src.skim.store.get_connection`` themselves, which takes
+    precedence.
+    """
+    def _refuse(*args, **kwargs):
+        raise RuntimeError("src.skim.store is offline in unit tests (see tests/conftest.py)")
+    monkeypatch.setattr("src.skim.store.get_connection", _refuse)
+
+
+# ---------------------------------------------------------------------------
 # Database fixtures
 # ---------------------------------------------------------------------------
 

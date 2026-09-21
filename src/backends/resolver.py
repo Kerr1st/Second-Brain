@@ -6,17 +6,24 @@ reproduces today's all-Kiro behavior) and hands the orchestrator a concrete
 :class:`~src.backends.base.Invoker` per role, plus the resolved
 ``(backend, model, effort)`` for provenance.
 
-Invokers are cached per ``(backend, model)``, so an all-Kiro profile yields a
-single shared KiroInvoker across all roles — identical to today — while a
+Invokers are cached per ``(backend, model, options)``, so an all-Kiro profile
+yields a single shared KiroInvoker across all roles — identical to today — while a
 role-diverse map reuses one client per distinct backend+model. See
 ``docs/MODEL-BACKENDS.md``.
+
+Adapter options (``options = { ... }`` on a role, skim stage 2026-09-20): a role
+may carry an inline table of constructor keyword arguments for its adapter, e.g.
+``options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 }``.
+Only the ``bedrock`` adapter accepts options today (:data:`ADAPTER_OPTIONS`);
+an option on another backend, or an unknown key, is rejected at config load.
 """
 
 from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from src.backends.base import BACKEND_CAPABILITIES, Invoker, assert_backend_supports_role
 from src.backends.bedrock import BedrockInvoker
@@ -30,8 +37,8 @@ _REPO_ROOT = os.path.dirname(
 DEFAULT_CONFIG_PATH = os.path.join(_REPO_ROOT, "config", "backends.toml")
 
 # backend name -> adapter class. The three agentic CLIs speak MCP and can run
-# any role; `bedrock` is the tool-less Direct-API family (Thinker/evaluators
-# only — the Explorer guard below rejects it).
+# any agent role; `bedrock` is the tool-less Direct-API family (Thinker/evaluators
+# and the skim — the Explorer guard below rejects it for the Explorer).
 DEFAULT_ADAPTERS: dict[str, type] = {
     "kiro": KiroInvoker,
     "claude_code": ClaudeCodeInvoker,
@@ -39,7 +46,14 @@ DEFAULT_ADAPTERS: dict[str, type] = {
     "bedrock": BedrockInvoker,
 }
 
-VALID_ROLES = (
+#: Constructor keyword arguments a role's ``options`` table may set, per backend.
+#: Backends absent here accept no options.
+ADAPTER_OPTIONS: dict[str, frozenset[str]] = {
+    "bedrock": frozenset({"temperature", "service_tier", "max_tokens"}),
+}
+
+#: The thinking roles: agents that read slices and judge candidates.
+AGENT_ROLES = (
     "explorer",
     "thinker",
     "skeptic",
@@ -47,6 +61,12 @@ VALID_ROLES = (
     "epistemologist",
     "methodologist",
 )
+
+#: The skim stage (docs/PLAN-skim-stage.md): data processing over every arrival,
+#: Bedrock-only in every profile — corpus text never goes through an agentic CLI.
+SKIM_ROLE = "skim"
+
+VALID_ROLES = (*AGENT_ROLES, SKIM_ROLE)
 
 _REQUIRED_ROLES = frozenset(VALID_ROLES)
 
@@ -57,7 +77,8 @@ def _validate_profile(name: str, role_map: dict[str, "RoleBackend"]) -> None:
     A profile missing a role would otherwise abort the dream cycle **mid-run**
     (after LLM spend) with a bare ``KeyError`` when that role is first resolved;
     an unknown (typo'd) role would silently never be used. Catch both at config
-    load, before the orchestrator builds.
+    load, before the orchestrator builds. Also rejects adapter options the
+    backend does not accept, and a skim role off the Bedrock backend.
     """
     present = set(role_map)
     missing = _REQUIRED_ROLES - present
@@ -78,16 +99,42 @@ def _validate_profile(name: str, role_map: dict[str, "RoleBackend"]) -> None:
                 f"backend profile {name!r}: role {role!r} uses unknown backend "
                 f"{spec.backend!r}. Valid backends: {sorted(BACKEND_CAPABILITIES)}."
             )
+        _validate_options(name, spec)
+        # Every role/backend capability rule (Explorer needs tools, skim is
+        # Bedrock-only) is checked here too, so a bad profile fails at load.
+        assert_backend_supports_role(spec.backend, role)
+
+
+def _validate_options(profile_name: str, spec: "RoleBackend") -> None:
+    if not spec.options:
+        return
+    allowed = ADAPTER_OPTIONS.get(spec.backend, frozenset())
+    unknown = set(spec.options) - allowed
+    if unknown:
+        raise ValueError(
+            f"backend profile {profile_name!r}: role {spec.role!r} sets option(s) {sorted(unknown)} "
+            f"that the {spec.backend!r} adapter does not accept. "
+            f"Allowed: {sorted(allowed) or 'none'}."
+        )
 
 
 @dataclass(frozen=True)
 class RoleBackend:
-    """Resolved execution spec for one role (also the provenance record)."""
+    """Resolved execution spec for one role (also the provenance record).
+
+    ``options`` are adapter constructor keyword arguments from the role's
+    ``options = { ... }`` table (``None`` when absent).
+    """
 
     role: str
     backend: str
     model: str
     effort: str | None = None
+    options: dict[str, Any] | None = field(default=None, hash=False)
+
+    def options_key(self) -> tuple:
+        """Hashable form of ``options`` for the invoker cache."""
+        return tuple(sorted((self.options or {}).items()))
 
 
 def load_profiles(
@@ -108,11 +155,18 @@ def load_profiles(
     for pname, roles in data.get("profiles", {}).items():
         role_map: dict[str, RoleBackend] = {}
         for role, spec in roles.items():
+            options = spec.get("options")
+            if options is not None and not isinstance(options, dict):
+                raise ValueError(
+                    f"backend profile {pname!r}: role {role!r} 'options' must be a table, "
+                    f"got {type(options).__name__}"
+                )
             role_map[role] = RoleBackend(
                 role=role,
                 backend=spec["backend"],
                 model=spec["model"],
                 effort=spec.get("effort"),
+                options=dict(options) if options else None,
             )
         profiles[pname] = role_map
     return profiles, default_profile
@@ -133,13 +187,15 @@ class Resolver:
     ):
         self._profile = profile
         self._adapters = adapters if adapters is not None else DEFAULT_ADAPTERS
-        self._cache: dict[tuple[str, str], Invoker] = {}
+        self._cache: dict[tuple, Invoker] = {}
         # Eager fail-fast: a tool-less Direct-API backend cannot run the Explorer
-        # (it needs the live MCP tool-loop). Reject such a profile at construction
-        # rather than only when the Explorer is first resolved mid-run. The lazy
-        # guard in invoker_for() stays as defense-in-depth for every role.
-        if "explorer" in self._profile:
-            assert_backend_supports_role(self._profile["explorer"].backend, "explorer")
+        # (it needs the live MCP tool-loop), and the skim must not leave Bedrock
+        # (corpus text through an agentic CLI). Reject such a profile at
+        # construction rather than only when the role is first resolved mid-run.
+        # The lazy guard in invoker_for() stays as defense-in-depth for every role.
+        for guarded in ("explorer", SKIM_ROLE):
+            if guarded in self._profile:
+                assert_backend_supports_role(self._profile[guarded].backend, guarded)
 
     def spec_for(self, role: str) -> RoleBackend:
         try:
@@ -151,9 +207,9 @@ class Resolver:
 
     def invoker_for(self, role: str) -> Invoker:
         spec = self.spec_for(role)
-        # Explorer-needs-tools guard (rejects routing it to a Direct-API backend).
+        # Capability guards (Explorer needs tools; skim is Bedrock-only).
         assert_backend_supports_role(spec.backend, role)
-        key = (spec.backend, spec.model)
+        key = (spec.backend, spec.model, spec.options_key())
         if key not in self._cache:
             adapter_cls = self._adapters.get(spec.backend)
             if adapter_cls is None:
@@ -161,7 +217,7 @@ class Resolver:
                     f"Backend {spec.backend!r} has no adapter yet (role {role!r}). "
                     f"Implemented: {sorted(self._adapters)}. See docs/MODEL-BACKENDS.md."
                 )
-            self._cache[key] = adapter_cls(model=spec.model)
+            self._cache[key] = adapter_cls(model=spec.model, **(spec.options or {}))
         return self._cache[key]
 
 
