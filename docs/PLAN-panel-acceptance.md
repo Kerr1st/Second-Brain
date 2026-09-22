@@ -143,14 +143,16 @@ Candidates, in priority order; each is small and independently testable:
   every accepted candidate is grounded in its cited sources (read them).
 - [x] Full suite green; commit per item.
 
-### Phase 4 — Live verification  `[~]` — 2 of 5 observation runs done
+### Phase 4 — Live verification  `[~]` — 3 of 5 observation runs done
 - [x] One scheduled run on `controlled` (via `launchctl kickstart gui/$(id -u)/com.second-brain.dream-cycle`).
   Check: ledger unchanged in shape (≥5 source types, ≥50% episodic), ≥1 accepted insight,
   digest lists it with all four reasonings, cost ≤ $6.
 - [~] Then 5 nights of observation: acceptance per seat from
   `dream_cycle_candidates`, cost per run from the log's `run total`. So far: `3a1263a6`
   (2026-09-18) 4 accepted / 2 rejected, $6.10 (cap trip at $6); `05171b48` (2026-09-20, with the
-  skim stage) 6 / 2, $6.90, no cap trip. Next: Mon 09-21, Wed 09-23, Fri 09-25 scheduled runs.
+  skim stage) 6 / 2, $6.90, no cap trip; `720f03b3` (Mon 2026-09-21, first unattended run with the
+  skim) 6 / 2, $7.56 — but it ran 02:16→08:34 because the MacBook slept with the lid closed (launchd
+  fired on a Power Nap dark-wake; Explorer $1.75 through the interruptions). Next: Wed 09-23, Fri 09-25.
 
 ### Phase 5 — Wrap  `[x]`
 - [x] `docs/MODEL-BACKENDS.md` gained a "Panel semantics" section (2026-09-20); there is no
