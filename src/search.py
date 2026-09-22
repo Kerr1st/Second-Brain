@@ -19,6 +19,7 @@ from src.db import get_connection
 from src.rerank_weights import (
     COEFFICIENTS,
     MEM_CLASS_BOOST,
+    OVERLAP_WINDOW_CHARS,
     PROJECT_PENALTY,
     REINFORCEMENT_COEFF,
     STALENESS_PENALTY_MAX,
@@ -87,23 +88,29 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
             cur.execute(vec_query, vec_params)
             vec_results = {str(r["id"]): i + 1 for i, r in enumerate(cur.fetchall())}
 
-            # Full-text search
-            ts_query = " | ".join(re.sub(r"[^\w\s]", "", query_text).split())
-            if ts_query.strip():
-                # `search_vector @@ to_tsquery(...)` restricts the leg to rows that
-                # actually match and lets the planner use the GIN index; ts_rank alone
-                # would return every row (non-matches ranked 0) via a full seq scan.
-                fts_params = [ts_query] + params_base + [ts_query, prefetch]
-                fts_where = where + sql.SQL(" AND search_vector @@ to_tsquery('english', %s)")
-                fts_query = sql.SQL(
+            # Full-text search — AND-first, OR as fallback. OR-ing every term lets a
+            # common word ("stage") fill the whole leg with documents that never
+            # mention the rare one ("skim"); the AND leg puts documents containing
+            # every term first, and OR only tops the leg up when AND is short.
+            terms = re.sub(r"[^\w\s]", " ", query_text).split()
+            fts_results: dict[str, int] = {}
+            if terms:
+                fts_sql = sql.SQL(
                     "SELECT id, ts_rank(search_vector, to_tsquery('english', %s)) AS rank"
                     " FROM memories {where}"
                     " ORDER BY rank DESC LIMIT %s"
-                ).format(where=fts_where)
-                cur.execute(fts_query, fts_params)
-                fts_results = {str(r["id"]): i + 1 for i, r in enumerate(cur.fetchall())}
-            else:
-                fts_results = {}
+                ).format(where=where + sql.SQL(" AND search_vector @@ to_tsquery('english', %s)"))
+                ordered: list[str] = []
+                for op in (" & ", " | ") if len(terms) > 1 else (" | ",):
+                    ts_query = op.join(terms)
+                    cur.execute(fts_sql, [ts_query] + params_base + [ts_query, prefetch])
+                    for r in cur.fetchall():
+                        mid = str(r["id"])
+                        if mid not in fts_results:
+                            fts_results[mid] = len(ordered) + 1
+                            ordered.append(mid)
+                    if len(ordered) >= prefetch:
+                        break
 
             # RRF fusion
             all_ids = set(vec_results) | set(fts_results)
@@ -129,6 +136,13 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
 
         # Dedup (P2): collapse near-identical content and cap results per parent
         # so raw chat/doc chunks and the dual-scheme imports stop flooding results.
+        # The RRF score handed to rerank() is min-max normalised over the fused
+        # candidate set: raw RRF lives in [0, 2/(k+1)] ≈ [0, 0.033], so unnormalised
+        # it contributed at most 0.30 × 0.033 ≈ 0.01 to the rerank score and the
+        # relevance-blind priors (length, depth, type) decided the order — the
+        # rerank weights and tests/test_rerank.py assume rrf_score in [0, 1].
+        lo, hi = scored[-1][1], scored[0][1]
+        span = hi - lo
         out, seen_content, per_parent = [], set(), {}
         for mid, score in scored[:prefetch]:
             row = row_by_id.get(mid)
@@ -142,7 +156,8 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
                 continue
             seen_content.add(ckey)
             per_parent[pkey] = per_parent.get(pkey, 0) + 1
-            row["rrf_score"] = score
+            row["rrf_raw"] = score
+            row["rrf_score"] = (score - lo) / span if span > 0 else 1.0
             out.append(row)
             if len(out) >= limit:
                 break
@@ -169,6 +184,36 @@ def compute_spacing_bonus(last_accessed_at, now=None):
     return min(1.0, days_since / 7.0)
 
 
+#: Query tokens at least this long also match content tokens they are a prefix of
+#: (and vice versa), so "skim" matches "skimmed" and "stage" matches "stages".
+OVERLAP_PREFIX_MIN = 4
+
+
+def token_overlap(query_tokens, doc_tokens) -> float:
+    """Fraction of query tokens present in ``doc_tokens``.
+
+    A query token counts as present when an identical token exists, or when a
+    doc token and the query token share a prefix relationship and the shorter
+    of the two is at least ``OVERLAP_PREFIX_MIN`` characters — a cheap,
+    stemmer-free way to tolerate inflection ("skim"/"skimmed", "stage"/"stages")
+    that the full-text leg already tolerates through its stemmer. Exact matches
+    are checked first, so the O(query × doc) prefix scan runs only for tokens
+    that missed.
+    """
+    if not query_tokens:
+        return 0.0
+    hits = 0
+    for q in query_tokens:
+        if q in doc_tokens:
+            hits += 1
+            continue
+        if len(q) >= OVERLAP_PREFIX_MIN and any(
+            (t.startswith(q)) or (len(t) >= OVERLAP_PREFIX_MIN and q.startswith(t)) for t in doc_tokens
+        ):
+            hits += 1
+    return hits / len(query_tokens)
+
+
 def rerank(results, query_text, query_project=None):
     """Utility reranking: recency, type boost, token overlap, access reinforcement.
 
@@ -177,22 +222,22 @@ def rerank(results, query_text, query_project=None):
     if not results:
         return results
 
-    query_tokens = set(re.sub(r"[^\w\s]", "", query_text).lower().split())
+    query_tokens = set(re.sub(r"[^\w\s]", " ", query_text).lower().split())
     now = datetime.now(timezone.utc)
 
     for r in results:
-        # Token overlap
-        content_tokens = set(re.sub(r"[^\w\s]", "", (r.get("content") or "")[:2000]).lower().split())
-        title_tokens = set(re.sub(r"[^\w\s]", "", (r.get("title") or "")).lower().split())
+        # Token overlap (inflection-tolerant: "skim" matches "skimmed", see token_overlap)
+        content_tokens = set(re.sub(r"[^\w\s]", " ", (r.get("content") or "")[:OVERLAP_WINDOW_CHARS]).lower().split())
+        title_tokens = set(re.sub(r"[^\w\s]", " ", (r.get("title") or "")).lower().split())
         all_tokens = content_tokens | title_tokens
-        overlap = len(query_tokens & all_tokens) / max(1, len(query_tokens))
-        title_overlap = len(query_tokens & title_tokens) / max(1, len(query_tokens))
+        overlap = token_overlap(query_tokens, all_tokens)
+        title_overlap = token_overlap(query_tokens, title_tokens)
 
         # Encoding context overlap (Godden & Baddeley 1975: contextual reinstatement)
         encoding_ctx = r.get("encoding_context") or ""
         if encoding_ctx:
-            ctx_tokens = set(re.sub(r"[^\w\s]", "", encoding_ctx).lower().split())
-            context_overlap = len(query_tokens & ctx_tokens) / max(1, len(query_tokens))
+            ctx_tokens = set(re.sub(r"[^\w\s]", " ", encoding_ctx).lower().split())
+            context_overlap = token_overlap(query_tokens, ctx_tokens)
         else:
             context_overlap = 0.0
 

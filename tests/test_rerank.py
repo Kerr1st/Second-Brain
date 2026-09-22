@@ -11,6 +11,20 @@ from hypothesis import given, settings, assume, strategies as st
 from src.search import compute_spacing_bonus, rerank
 
 
+def _oracle_overlap(query_tokens, doc_tokens):
+    """Independent re-statement of the overlap rule: exact token, or a prefix
+    relationship where the shorter token has at least 4 characters."""
+    if not query_tokens:
+        return 0.0
+    hits = 0
+    for q in query_tokens:
+        if q in doc_tokens:
+            hits += 1
+        elif len(q) >= 4 and any(t.startswith(q) or (len(t) >= 4 and q.startswith(t)) for t in doc_tokens):
+            hits += 1
+    return hits / len(query_tokens)
+
+
 class TestSpacingBonusFormula:
     """Feature: retrieval-quality, Property 3: Spacing Bonus Formula
 
@@ -269,13 +283,13 @@ class TestCompleteRerankFormula:
         }
 
         # Independently compute expected score using the same logic as rerank()
-        query_tokens = set(re.sub(r"[^\w\s]", "", query_text).lower().split())
-        content_tokens = set(re.sub(r"[^\w\s]", "", content[:2000]).lower().split())
-        title_tokens = set(re.sub(r"[^\w\s]", "", title).lower().split())
+        query_tokens = set(re.sub(r"[^\w\s]", " ", query_text).lower().split())
+        content_tokens = set(re.sub(r"[^\w\s]", " ", content[:20000]).lower().split())
+        title_tokens = set(re.sub(r"[^\w\s]", " ", title).lower().split())
         all_tokens = content_tokens | title_tokens
 
-        expected_overlap = len(query_tokens & all_tokens) / max(1, len(query_tokens))
-        expected_title_overlap = len(query_tokens & title_tokens) / max(1, len(query_tokens))
+        expected_overlap = _oracle_overlap(query_tokens, all_tokens)
+        expected_title_overlap = _oracle_overlap(query_tokens, title_tokens)
 
         # Context overlap (None encoding_context → 0.0)
         expected_context_overlap = 0.0

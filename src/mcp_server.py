@@ -1,8 +1,25 @@
 """MCP server — exposes the Second Brain to AI agents.
 
 Run: python -m src.mcp_server (stdio transport for Kiro/Claude Code)
+
+Input validation happens here, at the boundary (vocabularies and helpers in
+``src/validation.py``). The database has no CHECK constraints on type/status/
+relation_type, so this is what keeps ``type="bogus"`` out of the corpus, and it
+is what stops a malformed id from surfacing a raw Postgres error (SQL text,
+constraint names) to the client. Invalid input is reported in the shape of each
+tool's normal return type instead of raising:
+
+* tools returning ``dict`` (memory_read, memory_graph, memory_search) return
+  ``{"error": "<message>"}``;
+* tools returning ``str`` (memory_create, memory_update, memory_relate,
+  memory_learn) return ``"Error: <message>"``;
+* memory_list returns ``list[dict]`` and raises ``ValueError`` instead — FastMCP
+  reports that as an ``isError`` result carrying only the message.
+
+Real failures (connection loss, unexpected constraint violations) still propagate.
 """
 
+import psycopg2.errors
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta, timezone
 from src.db import (
@@ -15,9 +32,28 @@ from src.embeddings import generate_embedding
 from src.classify import classify_memory
 from src.depth import compute_depth_score
 from src.project import normalize_project_tag
+from src.validation import (
+    MEMORY_TYPES, FILTERABLE_TYPES, MEMORY_STATUSES, RELATION_TYPES, ValidationError,
+    uuid_or_error, one_of, optional_one_of, require_text, require_mapping,
+    clamp_limit, clamp_days, clean_tags,
+)
 from src import express
 
 mcp = FastMCP("Second Brain")
+
+
+def _guarded(fn, *args, **kwargs):
+    """Call a ``src.db`` function, translating the two data-shape errors Postgres can
+    still raise after boundary validation into :class:`ValidationError`, so the client
+    sees a one-line message and never SQL text or a constraint name. Every other
+    exception (connection loss, unexpected constraint) propagates unchanged."""
+    try:
+        return fn(*args, **kwargs)
+    except psycopg2.errors.InvalidTextRepresentation as e:
+        detail = (e.diag.message_primary or "a value has the wrong format").strip()
+        raise ValidationError(f"Invalid value: {detail}") from e
+    except psycopg2.errors.ForeignKeyViolation as e:
+        raise ValidationError("A referenced memory does not exist") from e
 
 
 @mcp.tool()
@@ -43,13 +79,24 @@ def memory_create(
     encoding_context: Optional. Describe what you were working on when creating this memory
     (e.g., "debugging auth flow", "reading about CLS theory"). Improves future retrieval
     by matching the cognitive context at search time (Godden & Baddeley 1975).
+
+    Invalid input (unknown type, empty title/content, tags that are not a list of
+    strings, metadata that is not an object) returns 'Error: ...' and writes nothing.
     """
+    try:
+        type = one_of(type, MEMORY_TYPES, "type")
+        title = require_text(title, "title")
+        content = require_text(content, "content")
+        tags = clean_tags(tags)
+        metadata = require_mapping(metadata, "metadata")
+    except ValidationError as e:
+        return f"Error: {e}"
+
     embedding = generate_embedding(content)
     mem_class = classify_memory(type, content)
     depth_score = compute_depth_score(content)
     project = normalize_project_tag(project)
-    if metadata is None:
-        metadata = {}
+    metadata = dict(metadata or {})  # copy: never mutate the caller's dict
     metadata["depth_score"] = depth_score
     mid = create_memory(
         type=type, title=title, content=content, embedding=embedding,
@@ -86,9 +133,21 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
     - status: e.g. 'active' to exclude superseded items.
     - project: scope to a project tag.
 
+    limit is clamped to 1–100 and since_days to 0–365. An empty query or an unknown
+    type/status filter returns {"error": "..."} instead of results.
+
     Iterate for best results: if hits are thin or off-target, refine the query or
     filters and search again, then call memory_read(id) for full content or
     memory_graph(id) to follow related memories."""
+    try:
+        query = require_text(query, "query")
+        type = optional_one_of(type, FILTERABLE_TYPES, "type")
+        status = optional_one_of(status, MEMORY_STATUSES, "status")
+        limit = clamp_limit(limit)
+        since_days = clamp_days(since_days, "since_days")
+    except ValidationError as e:
+        return {"error": str(e)}
+
     embedding = generate_embedding(query)
     project = normalize_project_tag(project)
     created_after = None
@@ -154,8 +213,14 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
 @mcp.tool()
 def memory_read(memory_id: str) -> dict:
     """Read a single memory by ID and return its full content. Use this to expand a
-    memory_search hit whose 500-char preview was truncated, before acting on it."""
-    mem = get_memory(memory_id)
+    memory_search hit whose 500-char preview was truncated, before acting on it.
+
+    Returns {"error": "..."} for a malformed id or a memory that does not exist."""
+    try:
+        memory_id = uuid_or_error(memory_id, "memory_id")
+        mem = _guarded(get_memory, memory_id)
+    except ValidationError as e:
+        return {"error": str(e)}
     if not mem:
         return {"error": "Not found"}
     out = {}
@@ -181,23 +246,51 @@ def memory_update(
     summary: str | None = None,
     type: str | None = None,
 ) -> str:
-    """Update fields on a memory. Pass only the fields to change."""
-    fields = {k: v for k, v in {
-        "title": title, "content": content, "status": status,
-        "tags": tags, "summary": summary, "type": type,
-    }.items() if v is not None}
+    """Update fields on a memory. Pass only the fields to change.
+
+    status: active, superseded, archived
+    type: idea, synthesis, research, insight, question, decision, priority, project, connection, source
+
+    Returns 'Error: ...' (and changes nothing) for a malformed or unknown memory_id,
+    an unknown status/type, an empty title/content, or when no field is passed."""
+    try:
+        memory_id = uuid_or_error(memory_id, "memory_id")
+        if title is not None:
+            title = require_text(title, "title")
+        if content is not None:
+            content = require_text(content, "content")
+        if status is not None:
+            status = one_of(status, MEMORY_STATUSES, "status")
+        if type is not None:
+            type = one_of(type, MEMORY_TYPES, "type")
+        tags = clean_tags(tags)
+        fields = {k: v for k, v in {
+            "title": title, "content": content, "status": status,
+            "tags": tags, "summary": summary, "type": type,
+        }.items() if v is not None}
+        if not fields:
+            raise ValidationError("nothing to update: pass at least one of title, content, "
+                                  "status, tags, summary, type")
+        existing = _guarded(get_memory, memory_id)
+    except ValidationError as e:
+        return f"Error: {e}"
+    if not existing:
+        return "Error: Not found"
+
     if "content" in fields:
         fields["embedding"] = generate_embedding(fields["content"])
-        existing = get_memory(memory_id)
-        existing_metadata = (existing.get("metadata") or {}) if existing else {}
+        existing_metadata = existing.get("metadata") or {}
         if isinstance(existing_metadata, str):
             import json as _json
             existing_metadata = _json.loads(existing_metadata)
-        mem_type = fields.get("type") or (existing.get("type") if existing else "idea")
+        mem_type = fields.get("type") or existing.get("type") or "idea"
         fields["mem_class"] = classify_memory(mem_type, fields["content"])
         existing_metadata["depth_score"] = compute_depth_score(fields["content"])
         fields["metadata"] = existing_metadata
-    update_memory(memory_id, **fields)
+    try:
+        _guarded(update_memory, memory_id, **fields)
+    except ValidationError as e:
+        return f"Error: {e}"
     return f"Updated memory {memory_id}"
 
 
@@ -207,9 +300,24 @@ def memory_relate(
 ) -> str:
     """Create a relationship between two memories.
 
-    relation_type: supports, contradicts, extends, inspires, derived_from, related_to
+    relation_type: supports, contradicts, extends, inspires, derived_from, related_to, superseded_by
+
+    Both ids must be existing memories and must differ; an unknown relation_type or a
+    missing/malformed id returns 'Error: ...' and writes nothing.
     """
-    create_relationship(source_id, target_id, relation_type, note)
+    try:
+        source_id = uuid_or_error(source_id, "source_id")
+        target_id = uuid_or_error(target_id, "target_id")
+        relation_type = one_of(relation_type, RELATION_TYPES, "relation_type")
+        if source_id == target_id:
+            raise ValidationError("source_id and target_id must be different memories")
+        missing = [name for name, mid in (("source_id", source_id), ("target_id", target_id))
+                   if not _guarded(get_memory, mid)]
+        if missing:
+            raise ValidationError(f"Not found: {', '.join(missing)}")
+        _guarded(create_relationship, source_id, target_id, relation_type, note)
+    except ValidationError as e:
+        return f"Error: {e}"
     return f"Related {source_id} → {relation_type} → {target_id}"
 
 
@@ -224,7 +332,16 @@ def memory_list(
     """List/browse recent memories by filter (type, source_type, status, since_days) —
     newest first, no relevance ranking. Use memory_search for relevance; use this to
     enumerate or audit, e.g. memory_list(source_type='slack', since_days=2) to see
-    every Slack conversation-day captured since the day before yesterday."""
+    every Slack conversation-day captured since the day before yesterday.
+
+    limit is clamped to 1–100 and since_days to 0–365. An unknown type/status filter
+    raises ValueError (reported by the server as an error result) rather than
+    returning an empty list — a list has no clean slot for an error object, and a
+    silent [] would look like "nothing matched"."""
+    type = optional_one_of(type, FILTERABLE_TYPES, "type")
+    status = optional_one_of(status, MEMORY_STATUSES, "status")
+    limit = clamp_limit(limit)
+    since_days = clamp_days(since_days, "since_days")
     created_after = None
     if since_days is not None and since_days > 0:
         created_after = datetime.now(timezone.utc) - timedelta(days=since_days)
@@ -270,11 +387,17 @@ def _iso(value) -> str | None:
 def memory_graph(memory_id: str) -> dict:
     """Get a memory plus its linked relationships (target_id, relation_type, note).
     Use it to traverse from a memory_search hit to related memories, then memory_read
-    those target_ids to follow a chain of reasoning."""
-    mem = get_memory(memory_id)
-    if not mem:
-        return {"error": "Not found"}
-    rels = get_relationships(memory_id)
+    those target_ids to follow a chain of reasoning.
+
+    Returns {"error": "..."} for a malformed id or a memory that does not exist."""
+    try:
+        memory_id = uuid_or_error(memory_id, "memory_id")
+        mem = _guarded(get_memory, memory_id)
+        if not mem:
+            return {"error": "Not found"}
+        rels = _guarded(get_relationships, memory_id)
+    except ValidationError as e:
+        return {"error": str(e)}
     return {
         "memory": {"id": str(mem["id"]), "title": mem["title"], "type": mem["type"]},
         "relationships": [
@@ -308,8 +431,17 @@ def memory_learn(
 
     Create ONE memory per atomic insight, not one giant summary.
     The value is in the CONNECTIONS to existing knowledge, not the summary.
+
+    Empty content, or topics with no non-blank comma-separated entry, returns 'Error: ...'.
     """
+    try:
+        content = require_text(content, "content")
+        topics = require_text(topics, "topics")
+    except ValidationError as e:
+        return f"Error: {e}"
     topic_list = [t.strip() for t in topics.split(",") if t.strip()]
+    if not topic_list:
+        return "Error: topics must contain at least one non-empty, comma-separated topic"
 
     # Search existing memories for each topic
     related_sections = []
@@ -358,7 +490,8 @@ def memory_brief(window_days: int = 14, use_llm: bool = False) -> str:
     waiting to be queried. Use memory_search instead when you have a specific question.
 
     Args:
-        window_days: how far back to pull recent dream-cycle insights (default 14).
+        window_days: how far back to pull recent dream-cycle insights (default 14;
+            clamped to 0–365).
         use_llm: write polished headlines via an LLM editor pass (slower, spawns a
             subprocess); default False uses fast deterministic ranking.
 
@@ -368,6 +501,7 @@ def memory_brief(window_days: int = 14, use_llm: bool = False) -> str:
         def invoke(self, *a, **k):
             raise RuntimeError("deterministic")
 
+    window_days = clamp_days(14 if window_days is None else window_days, "window_days")
     briefing = express.compose_briefing(window_days=window_days)
     briefing = express.edit_briefing(briefing, invoker=None if use_llm else _NoLLM())
     return express.render_markdown(briefing)

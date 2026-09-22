@@ -39,7 +39,7 @@ cluster assignments, so the Explorer receives a complete ranked inventory. It is
 generation; the frontier models keep the thinking. The project's central quality problem is fabrication, so
 **faithfulness of the extracted metadata matters most**, and the output must be reliable JSON.
 
-**Workload (28-day average, per week).** 382 documents, ~931k input tokens of document text, ~115k output tokens.
+**Workload (28-day average, per week).** 382 documents, ~931k input tokens of document text, ~115k output tokens. *(Correction 2026-09-22: ~80% of this was one YouTube transcript re-ingested 42×/night by a Crawlee parser bug, since fixed and cleaned — the real workload is ~180 documents / ~175k tokens per week, so every cost figure in this document is a ~3–5× overestimate. The model ranking is unaffected: cost never discriminated.)*
 Channels: articles 239 docs / 810k tokens (max 14k per doc); Slack 35 / 80k (p95 15k); kiro_cli_chat ~1 / 16k (max
 25k); quick_desktop_feed 48 / 7k; email 12 / 6k; distilled_chat 32 / 4k; browser_history 2 / 4k; calendar 8 / 1k.
 A ~1.2k-token instruction + schema prefix per document adds ~0.46M input tokens/week (so ~1.39M input total).
