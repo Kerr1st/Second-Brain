@@ -57,6 +57,8 @@ own_activity = [
   "distilled_chat",
   "kiro_cli_chat",
   "kiro_ide_chat",
+  "codex_task",
+  "distilled_agent_task",
   "quick_desktop_chat",
   "quick_desktop_decision",
   "quick_desktop_doc",

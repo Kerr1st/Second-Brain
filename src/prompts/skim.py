@@ -31,7 +31,7 @@ from typing import Any
 from src.skim.identity import EXTERNAL, OWN_ACTIVITY, Identity, load_identity
 from src.skim.schema import DOC_KINDS, MAX_QUOTE_CHARS, MAX_SUMMARY_CHARS, MAX_TOPICS
 
-PROMPT_VERSION = "skim-v2"
+PROMPT_VERSION = "skim-v3"
 
 #: The channel tags, as they appear both in the request's ``channel:`` line and in the
 #: system prompt's channel-prior rule — keep the two in step.

@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Codex session capture. Every 6 hours (not hourly as originally templated): a task
+  whose derived-memory contract keeps failing is retried on every run, and each retry
+  is one Bedrock Opus 5 call (~$0.10), so a permanently failing task would cost ~$2.40/day
+  hourly versus ~$0.40 at this cadence. Codex sessions are bursty, and unchanged tasks
+  cost nothing, so 6 hours loses no coverage. See docs/PLAN-capture-repair.md.
+  Paths are absolute and machine-specific (launchd does not expand ~ or $HOME here).
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -7,22 +15,26 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/path/to/second-brain/scripts/jobs/codex_capture.sh</string>
+        <string>/Users/kerrfir/second-brain/scripts/jobs/codex_capture.sh</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>SECOND_BRAIN_PROFILE</key>
-        <string>codex_local</string>
-        <key>CODEX_CLI</key>
-        <string>/Applications/ChatGPT.app/Contents/Resources/codex</string>
+        <string>controlled</string>
+        <key>AWS_PROFILE</key>
+        <string>second-brain-jobs</string>
+        <key>CODEX_HOME</key>
+        <string>/Users/kerrfir/.codex</string>
     </dict>
     <key>StartInterval</key>
-    <integer>3600</integer>
+    <integer>21600</integer>
     <key>RunAtLoad</key>
-    <true/>
+    <false/>
     <key>StandardOutPath</key>
-    <string>/path/to/second-brain/logs/codex-capture.log</string>
+    <string>/Users/kerrfir/second-brain/logs/codex-capture.log</string>
     <key>StandardErrorPath</key>
-    <string>/path/to/second-brain/logs/codex-capture.log</string>
+    <string>/Users/kerrfir/second-brain/logs/codex-capture.log</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/kerrfir/second-brain</string>
 </dict>
 </plist>
