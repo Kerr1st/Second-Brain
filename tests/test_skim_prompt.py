@@ -35,7 +35,7 @@ SOMEBODY = Identity(name="Ada Example", aliases=("adax", "ada.e"), role="Staff E
 
 class TestSkimSystemPrompt:
     def test_prompt_version_is_pinned(self):
-        assert PROMPT_VERSION == "skim-v2"
+        assert PROMPT_VERSION == "skim-v3"
 
     def test_runner_probe_and_orchestrator_import_the_version(self):
         # Bumping PROMPT_VERSION here must be enough: nobody pins their own copy.
@@ -72,7 +72,7 @@ class TestSkimSystemPrompt:
     def test_prompt_defines_the_four_salience_levels_by_the_users_role_in_the_text(self):
         assert "salience (0-3): how much the text concerns the user's own work or life" in SKIM_SYSTEM_PROMPT
         assert "and from who the user is" in SKIM_SYSTEM_PROMPT
-        # skim-v2: 3 = the user is an actor; 2 = the user's things are the subject; 1 = role interest; 0 = none.
+        # skim-v3: 3 = the user is an actor; 2 = the user's things are the subject; 1 = role interest; 0 = none.
         assert ("3 = the user is the author, an addressee or a participant, or the text records the "
                 "user's own decision, commitment, task or meeting") in SKIM_SYSTEM_PROMPT
         assert ("2 = the user's team, customers, projects, tools or plans are the subject but the user "
@@ -132,7 +132,7 @@ class TestIdentityBlock:
         assert render_identity_block(NOBODY) == ""
         assert "About the user" not in prompt and "Name:" not in prompt
         assert "Channel priors for salience" in prompt and "salience (0-3)" in prompt
-        # The prompt is exactly the skim-v2 prompt minus the block.
+        # The prompt is exactly the skim-v3 prompt minus the block.
         assert prompt == "\n\n".join(p for p in SKIM_SYSTEM_PROMPT.split("\n\n") if not p.startswith("About the user:"))
 
     def test_partial_identity_renders_only_what_is_known(self):

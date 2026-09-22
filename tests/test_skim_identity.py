@@ -76,6 +76,7 @@ class TestCommittedConfig:
         ident = load_identity()
         assert ident.own_activity == {
             "outlook_email", "outlook_calendar", "slack", "distilled_chat", "kiro_cli_chat", "kiro_ide_chat",
+            "codex_task", "distilled_agent_task",
             "quick_desktop_chat", "quick_desktop_decision", "quick_desktop_doc", "weekly_digest",
         }
         assert ident.external == {"article", "youtube", "browser_history", "quick_desktop_feed"}
