@@ -3,6 +3,10 @@
 Reads knowledge/index.md, compares against PostgreSQL, ingests new entries
 through the shared pipeline (chunk → embed → store).
 
+Only non-empty http(s) source URLs are ingested: `already_processed` is
+keyed by URL, so anything else could never be deduplicated and would be
+re-ingested on every run (the 2026-06..09 duplicate-transcript incident).
+
 Usage: python scripts/crawlee_ingest.py
 """
 
@@ -13,7 +17,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.parsers.crawlee import parse_all
+from src.parsers import crawlee
 from src.db import get_processed_source_urls, is_reachable
 from src.ingest import ingest_content
 
@@ -50,7 +54,13 @@ def main():
     skipped = 0
     failed = 0
 
-    for source_url, source_type, content in parse_all(already_processed=already):
+    for source_url, source_type, content in crawlee.parse_all(already_processed=already):
+        # Defensive guard: the parser never yields these, but an empty or
+        # non-http URL must never reach the database (it cannot be deduplicated).
+        if not crawlee.is_http_url(source_url):
+            log.warning(f"SKIP (bad url): {source_url!r:.80}")
+            skipped += 1
+            continue
         try:
             result = ingest_content(content, source_type, source_url)
             if result:
@@ -62,7 +72,16 @@ def main():
             log.error(f"FAIL: {source_url[:80]} — {e}")
             failed += 1
 
-    log.info(f"=== Complete: processed={processed}, skipped={skipped}, failed={failed} ===")
+    stats = crawlee.last_parse_stats
+    log.info(
+        f"=== Complete: processed={processed}, skipped={skipped}, failed={failed} | "
+        f"index rows={stats.get('rows', 0)}, entries={stats.get('entries', 0)}, "
+        f"rows_without_url={stats.get('skipped_no_url', 0)}, "
+        f"duplicate_rows={stats.get('duplicate_urls', 0)}, "
+        f"unresolved={stats.get('unresolved', 0)}, "
+        f"source_files={stats.get('source_files', 0)}, "
+        f"unindexed_output={stats.get('unindexed_output', 0)} ==="
+    )
 
 
 if __name__ == "__main__":
