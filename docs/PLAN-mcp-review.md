@@ -78,15 +78,39 @@ uses `memory_bank_test` (created by `tests/conftest.py`). Hermetic run:
 ## 4. Phases
 
 ### Phase 0 — Diagnosis  `[x]`  (this document, §1)
-### Phase 1 — Stop the bleeding: Crawlee parser + ingest guard  `[ ]`
-### Phase 2 — Clean the corpus (backup table + delete)  `[ ]`
-### Phase 3 — MCP input validation + clean errors  `[ ]`
-### Phase 4 — Search: AND-first FTS, measured  `[ ]`
-### Phase 5 — Re-probe all tools, update docs (`docs/SKIM-STAGE.md` workload numbers,
-`docs/user-guide/connect-ai-agent.md` if it claims Claude Code is wired), merge  `[ ]`
+### Phase 1 — Stop the bleeding: Crawlee parser + ingest guard  `[x]`  (`bcbac68`)
+### Phase 2 — Clean the corpus (backup table + delete)  `[x]`  (`scripts/cleanup_duplicate_sources.py --apply`, 2026-09-22 13:40 UTC)
+### Phase 3 — MCP input validation + clean errors  `[x]`  (`e3e2d80`)
+### Phase 4 — Search: AND-first FTS + RRF normalisation + overlap fixes, measured  `[x]`  (`3d47290`)
+### Phase 5 — Re-probe all tools, update docs, merge  `[x]`
 
 ## 5. Status (newest first)
 
+- 2026-09-22 — **All phases done.**
+  - Parser (`bcbac68`): robust row parsing (title may contain `|`), exact `Source:` header match via a
+    one-pass URL→file map, no empty/non-http URLs; real index now parses to 1,280 unique URLs
+    (was 1,064 valid + 42 empty + 603 shifted), 29 tests.
+  - Cleanup: 81 duplicate groups, **6,493 rows deleted** (4,149 parents + 2,344 chunks, 73 MB), 10 rows
+    kept because dream-cycle candidates cite them, 12,551 relationships cascade-deleted. Backups:
+    `memories_dedup_backup_2026_09_22_1340`, `memory_relationships_dedup_backup_2026_09_22_1340`.
+    Corpus 129,449 → 122,956 rows; the video now has 30 rows (its 3 legitimate ingestions + evidence).
+  - MCP hardening (`e3e2d80`): vocabularies in `src/validation.py`; every tool rejects bad types,
+    statuses, relation types, malformed ids, blank text, missing relate targets with a one-line message;
+    `_guarded()` turns `InvalidTextRepresentation`/`ForeignKeyViolation` into clean errors; 84 tests.
+  - Search (`3d47290`): **`rrf_score` was never normalised** — raw RRF tops out at 2/61 ≈ 0.033, so the
+    0.30 weight contributed ≤ 0.01 and length/depth/type priors decided the order (a relevance-blind
+    ranker: "skim stage" returned five unrelated May/June items). Now min-max normalised over the fused
+    set. FTS leg is AND-first with OR top-up. Overlap tokeniser keeps hyphenated words apart, reads the
+    whole chunk (20k, was 2k — a 5.9k chunk with the term in its tail scored zero) and tolerates
+    inflection by prefix ("skim"/"skimming"). "skim stage" now returns the Sep 22 skim-stage chat first.
+  - Re-probe over stdio: all 10 tools OK, every invalid input answered with a clean message, nothing
+    written on rejection. Workload figures corrected in `SKIM-STAGE.md`, `PLAN-skim-stage.md`,
+    `RESEARCH-skim-model.md` (real: ~180 docs / ~175k tokens per week).
+  - Not the cause: transport and client wiring — Kiro CLI and Kiro IDE connect on every session;
+    Claude Code and Codex simply have no second-brain server configured.
+  - Follow-up noted: `tests/test_ingest_{doc_chunks,eventlog,interactions}.py` use a local `test_db`
+    fixture that bypasses conftest's DB override — run as a subset they can touch the live DB (they
+    wrote nothing this time). Fix: a conftest-level `DB_CONFIG` override.
 - 2026-09-22 — Diagnosis done; branch `mcp-review` created; probe leftovers removed from the
   live DB (3 synthetic memories, 1 bogus relationship).
 

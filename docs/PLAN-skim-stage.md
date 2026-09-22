@@ -14,7 +14,8 @@ use `AWS_PROFILE=second-brain-jobs`, region us-east-1. Research behind this plan
 
 A run examines ~30 arrival memories (0–5 Explorer slices of 10–20 memories, plus a fixed
 14-memory guaranteed arrivals slice) while ~382 parent-level memories (~931k tokens/week,
-articles 87% of tokens) arrive per week. Coverage therefore cannot be bought with cadence:
+articles 87% of tokens) arrive per week — corrected 2026-09-22 to ~180 docs / ~175k tokens after the
+Crawlee duplicate-ingestion bug was found and cleaned (`docs/PLAN-mcp-review.md`). Coverage therefore cannot be bought with cadence:
 full coverage would need ~13 runs/week (~$110/week). The Explorer chooses slices from a
 manifest of counts plus 4 sample ids per channel (`MANIFEST_SAMPLES_PER_SOURCE`,
 `src/dream_cycle/allocation.py`), so ~90% of arrivals are never seen by any agent.
