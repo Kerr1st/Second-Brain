@@ -8,7 +8,7 @@
     <array>
         <string>/bin/bash</string>
         <string>/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh</string>
-        <string>/Users/kerrfir/second-brain/scripts/weekly_digest.py</string>
+        <string>/Users/kerrfir/second-brain/scripts/jobs/weekly_digest.sh</string>
         <string>weekly-digest</string>
     </array>
     <key>StartCalendarInterval</key>
@@ -20,5 +20,7 @@
         <key>Minute</key>
         <integer>0</integer>
     </dict>
+    <key>WorkingDirectory</key>
+    <string>/Users/kerrfir/second-brain</string>
 </dict>
 </plist>
