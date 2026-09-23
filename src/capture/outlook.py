@@ -13,6 +13,12 @@ Source URLs are content-derived, not Graph ids: Graph message ids change when
 a message moves folders, which would re-ingest it. ``outlook://mail/<received>/
 <hash(subject|from)>`` is stable across moves.
 
+grasp-mcp died mid-session on 2026-09-20/21 (``McpError: Connection closed``),
+losing 57–81 h of mail and calendar behind a stack trace. That is now survivable:
+:class:`~src.capture.mcp_client.McpClient` reconnects and retries the failing
+call once per session, and a failure that outlives the retry exits 4
+(transport) rather than 1, distinct from an expired Graph token's 3 (auth).
+
     python -m src.capture.outlook [--days-back N] [--dry-run] [--no-calendar]
 """
 from __future__ import annotations
@@ -24,10 +30,13 @@ import html
 import logging
 import os
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
-from src.capture.mcp_client import McpClient, McpToolError
+from src.capture.mcp_client import (
+    CaptureFailure, McpClient, McpToolError, classify_error, report_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +45,13 @@ SOURCE_TYPE_CALENDAR = "outlook_calendar"
 
 GRASP_CMD = os.environ.get("GRASP_MCP", os.path.expanduser("~/.toolbox/bin/grasp-mcp"))
 GRASP_ARGS = ["serve", "--quiet"]
+
+# Per-tool-call ceiling. The heaviest call is one 50-message listing page (Graph
+# occasionally takes tens of seconds on a large mailbox), so the 60s used by the
+# credentials probe is too tight for capture — but it must stay bounded, or a
+# hung server holds the job open until launchd's next run.
+OUTLOOK_CALL_TIMEOUT = float(os.environ.get("OUTLOOK_CALL_TIMEOUT", "180"))
+AUTH_FIX = "open Kiro and use an Outlook tool once to refresh the Microsoft Graph token"
 
 MAIL_FOLDERS = ("inbox", "sent")
 PAGE_SIZE = 50
@@ -266,9 +282,16 @@ async def _run_async(days_back: int, calendar: bool, dry_run: bool) -> dict:
     already_cal = set(get_processed_source_urls(SOURCE_TYPE_CALENDAR))
     logger.info("Outlook capture: window %s .. %s (calendar to %s)", start.date(), end.date(), cal_end.date())
 
-    async with McpClient(GRASP_CMD, GRASP_ARGS) as client:
-        mail = await collect_mail(client.call_json, start, end, already_mail)
-        events = await collect_calendar(client.call_json, start, cal_end, already_cal) if calendar else []
+    try:
+        async with McpClient(GRASP_CMD, GRASP_ARGS, call_timeout=OUTLOOK_CALL_TIMEOUT) as client:
+            mail = await collect_mail(client.call_json, start, end, already_mail)
+            events = await collect_calendar(client.call_json, start, cal_end, already_cal) if calendar else []
+            if client.reconnects_used:
+                logger.warning("grasp-mcp connection was re-established %d time(s) during this run",
+                               client.reconnects_used)
+    except Exception as e:  # noqa: BLE001 - classify: transport death vs stale token vs bug
+        kind = classify_error(e)
+        raise CaptureFailure(kind, str(e), AUTH_FIX if kind == "auth" else None) from e
 
     summary = {}
     for source_type, items in ((SOURCE_TYPE_MAIL, mail), (SOURCE_TYPE_CALENDAR, events)):
@@ -287,17 +310,22 @@ def capture(days_back: int = 2, calendar: bool = True, dry_run: bool = False) ->
     return asyncio.run(_run_async(days_back, calendar, dry_run))
 
 
-def main():
+def main() -> int:
+    """Return the process exit code: 0 OK, 3 auth, 4 transport, 1 anything else."""
     ap = argparse.ArgumentParser(description="Capture Outlook mail + calendar into the Second Brain.")
     ap.add_argument("--days-back", type=int, default=2, help="rolling window in days (default 2)")
     ap.add_argument("--no-calendar", action="store_true", help="skip calendar events")
     ap.add_argument("--dry-run", action="store_true", help="fetch + list, do not ingest")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    summary = capture(days_back=args.days_back, calendar=not args.no_calendar, dry_run=args.dry_run)
+    try:
+        summary = capture(days_back=args.days_back, calendar=not args.no_calendar, dry_run=args.dry_run)
+    except CaptureFailure as failure:
+        return report_failure(failure, "outlook")
     total_new = sum(v.get("processed", v.get("new", 0)) for v in summary.values())
     logger.info("captures_this_cycle: outlook=%d", total_new)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
