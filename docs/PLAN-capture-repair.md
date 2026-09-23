@@ -55,7 +55,7 @@ sessions live at `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` and `~/.codex/ar
 ### Phase 0 — Diagnose + branch  `[x]`  (this document)
 - [x] Inventory channels, jobs, exit codes, freshness (§2).
 
-### Phase 1 — Slack auth recovery  `[ ]`
+### Phase 1 — Slack auth recovery  `[x]`
 - [ ] Reproduce: `.venv/bin/python -m scripts.jobs.capture_slack` (or the job script) by hand now
       that `~/.midway/cookie` is fresh; capture the exact error if it still fails.
 - [ ] If it was only the stale cookie: confirm a clean run, then add a **pre-flight auth check**
@@ -68,7 +68,7 @@ sessions live at `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` and `~/.codex/ar
 - [ ] Test: a unit test for the pre-flight check (auth error → exit 2, no capture attempted) using
       a fake MCP client.
 
-### Phase 2 — Outlook (email + calendar) transport recovery  `[ ]`
+### Phase 2 — Outlook (email + calendar) transport recovery  `[x]`
 - [ ] Reproduce `grasp-mcp serve` by hand; the failure is `Connection closed` (server died/timeout),
       distinct from Slack's auth error. Check: grasp-mcp binary present/updated (`~/.toolbox/bin/
       grasp-mcp`), Graph token cached and unexpired, call timeout large enough for the mailbox.
@@ -116,7 +116,7 @@ self-contained file set onto `codex-capture-port` and merged (`5386c2b`).
       the export comes from and whether the sub-streams (chat/decision/doc) are expected to be quiet.
 - [ ] Browser/articles: already fresh — just record expected cadence in the ops doc.
 
-### Phase 5 — Monitoring so silent failure can't recur  `[ ]`
+### Phase 5 — Monitoring so silent failure can't recur  `[x]`
 - [ ] Fix `credentials` and `liveness` jobs (both exit 1 today) — they are the safety net that
       should have flagged Slack/Outlook. Make `liveness` assert per-channel freshness (newest row
       younger than N × cadence) and notify on breach.
@@ -129,6 +129,39 @@ self-contained file set onto `codex-capture-port` and merged (`5386c2b`).
 
 ## 5. Status (newest first)
 
+- 2026-09-23 — **All capture channels healthy; monitors fixed; merged to local `main` (`34bc2b5`).**
+  - **Root cause of "nobody noticed": the credentials monitor cried wolf every night.** `aws` lives
+    at `/usr/local/bin/aws`, which is not on the monitor's PATH under launchd, so both AWS checks
+    reported "EXPIRED/BROKEN" (exit 127 misread as auth failure) every single night — alert fatigue
+    that buried the real Slack and Outlook outages. Fixed (`dfd7b9d`): PATH corrected, three outcomes
+    (OK / expired / tool-missing), and REQUIRED vs ADVISORY severity so only a credential the
+    unattended pipeline actually needs fails the job. Verified in a launchd-like env: 4/4 ✅, exit 0.
+  - `verify_liveness.sh` was never broken — it was correctly reporting silent channels. Expectations
+    made truthful: `quick_desktop_doc` retired (dormant since 2026-06-04, advisory not failure),
+    `quick_desktop_synth` 5 → 21 d, plus two new checks — `codex_task` (7 d) and the **Quick upstream
+    sqlite file's mtime** (7 d), so "Quick stopped exporting" is visible as such. Now exits 0.
+  - Slack + Outlook: both **self-healed** on 2026-09-23 (Midway cookie refreshed; grasp-mcp transient)
+    and landed 64 Slack conversation-days, 30 emails, 15 calendar events. Hardened anyway (`f4c4ddc`):
+    a Slack pre-flight auth probe, one bounded reconnect per client session for a dead MCP server, an
+    exit-code taxonomy (0 ok / 3 auth / 4 transport / 1 other) with a notification only for auth, and
+    `McpAuthError`/`McpTransportError` no longer subclassing `McpToolError` — previously a per-item
+    `except McpToolError: continue` could swallow a lapsed credential and exit 0 with zero rows.
+    Verified by real runs: Slack OK, Outlook captured 9 emails + 6 events, both exit 0.
+  - **Weekly digest was violating the Kiro/Fable rule** and had failed since ~2026-09-16: it hardcoded
+    `KiroInvoker` (corpus content → Kiro, which ignores `--model` and has routed to Fable 5.1) and
+    timed out at 600 s. Now resolves the `skim` role — direct Bedrock in every profile — refuses any
+    MCP-capable backend before building an invoker, 180 s timeout, metered under
+    `SECOND_BRAIN_DIGEST_CAP_USD` (default $0.25). First digest since Sept 16 written for **$0.0004**.
+  - Codex semantic retry bounded (`7abada7`): 3 attempts per unprocessed tail
+    (`SECOND_BRAIN_CODEX_SEMANTIC_MAX_ATTEMPTS`), counter in the task's `metadata.semantic_attempts`
+    keyed by prompt-version + model so a model/prompt change grants a fresh budget; abandonment is
+    marked, logged and counted as `semantic_abandoned` in the run summary. Previously unbounded at
+    ~$0.10 per retry every 6 h.
+  - Repo cleaned: 5 merged worktrees removed, 9 merged branches deleted, one worktree and one branch
+    (`main`) remain; the user's 83 uncommitted files untouched. Suite 1,630 green.
+  - OPEN for the user: the dedup backup tables from 2026-09-22 (`memories_dedup_backup_2026_09_22_1340`
+    6,493 rows / 101 MB and its relationships twin) are still the only copy of the deleted duplicates —
+    drop them once you are satisfied, or keep as insurance.
 - 2026-09-22 — **Codex capture is live.** Found the existing implementation on `origin/main`
   rather than rebuilding it (§Phase 3). Histories are unrelated, so the fix was a file-level
   port, not a merge. Backfilled 17 tasks ($1.98), 141 Codex rows now searchable, LaunchAgent
