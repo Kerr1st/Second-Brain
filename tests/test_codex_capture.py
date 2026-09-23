@@ -1160,3 +1160,202 @@ def test_current_unsupported_followup_does_not_capture_partial_prompt(tmp_path):
     unsupported["payload"]["content"] = [{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]
     records = (*CURRENT_RECORDS[:2], unsupported, *CURRENT_RECORDS[2:])
     assert _current_snapshot(_current_home(tmp_path, records)).turns == ()
+
+
+
+class _AlwaysFailingSemanticPass:
+    """A Thinker whose output never satisfies the evidence contract."""
+
+    def __init__(self):
+        self.calls = []
+
+    def run(self, *, previous_segment, turns):
+        self.calls.append((previous_segment, turns))
+        raise codex_capture.SemanticResultError(
+            "Topic Segments must cover every new Agent Turn exactly once and in order"
+        )
+
+
+def _semantic_children(task_id):
+    with db.get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM memories WHERE parent_id = %s",
+            (task_id,),
+        )
+        segments = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT count(*) FROM memories WHERE source_type = 'distilled_agent_task'"
+        )
+        memories = cursor.fetchone()[0]
+    return segments, memories
+
+
+def test_permanently_failing_semantic_pass_is_bounded_then_never_retried(
+    test_db, clean_tables, tmp_path, monkeypatch, caplog
+):
+    home = _real_codex_home(tmp_path)
+    semantic = _AlwaysFailingSemanticPass()
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock"),
+    )
+    bound = codex_capture.SEMANTIC_MAX_ATTEMPTS
+
+    with caplog.at_level("WARNING", logger="src.capture.codex"):
+        reports = [
+            codex_capture.run_codex_capture(NOW, backfill=True) for _ in range(bound + 3)
+        ]
+    task_id, content, metadata, _, _ = _task_row()
+    segments, memories = _semantic_children(task_id)
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelname == "WARNING" and TASK_ID in record.getMessage()
+    ]
+
+    # The model is called exactly `bound` times across all simulated runs.
+    assert len(semantic.calls) == bound == 3
+    assert [report.failed for report in reports] == [1] * bound + [0, 0, 0]
+    assert [report.semantic_abandoned for report in reports] == [0] * (bound - 1) + [
+        1
+    ] * 4
+    assert all(report.semantic_processed == 0 for report in reports)
+    assert reports[-1].failures == ()
+    # The verbatim Captured Task survives untouched and stays unprocessed.
+    assert len(metadata["turns"]) == 3
+    assert metadata["semantic_cursor"] is None
+    assert content.startswith(f"# {MANIFEST['title']}")
+    assert (segments, memories) == (0, 0)
+    # The abandonment is recorded with its reason, and warned about once.
+    assert metadata["semantic_abandoned"]["attempts"] == bound
+    assert metadata["semantic_abandoned"]["error_type"] == "SemanticResultError"
+    assert metadata["semantic_abandoned"]["reason"] == (
+        codex_capture.SEMANTIC_ABANDON_REASON
+    )
+    assert len(warnings) == 1
+    assert "abandoned" in warnings[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected_calls"),
+    [("1", 1), ("2", 2), ("not-a-number", 3), ("0", 3)],
+)
+def test_attempt_bound_honours_its_environment_override(
+    test_db, clean_tables, tmp_path, monkeypatch, env_value, expected_calls
+):
+    home = _real_codex_home(tmp_path)
+    semantic = _AlwaysFailingSemanticPass()
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock"),
+    )
+    monkeypatch.setenv(codex_capture.SEMANTIC_MAX_ATTEMPTS_ENV, env_value)
+
+    reports = [codex_capture.run_codex_capture(NOW, backfill=True) for _ in range(5)]
+    _, _, metadata, _, _ = _task_row()
+
+    assert len(semantic.calls) == expected_calls
+    assert sum(report.failed for report in reports) == expected_calls
+    assert reports[-1].semantic_abandoned == 1
+    assert metadata["semantic_abandoned"]["attempts"] == expected_calls
+
+
+def test_new_turns_reset_the_semantic_attempt_budget(
+    test_db, clean_tables, tmp_path, monkeypatch
+):
+    home = _real_codex_home(tmp_path, turn_indexes=(0, 1))
+    semantic = _AlwaysFailingSemanticPass()
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock"),
+    )
+    bound = codex_capture.SEMANTIC_MAX_ATTEMPTS
+
+    for _ in range(bound + 1):
+        codex_capture.run_codex_capture(NOW, backfill=True)
+    _, _, abandoned_metadata, _, _ = _task_row()
+
+    # A new Agent Turn is a new unprocessed tail, so the budget starts over.
+    _write_rollout(home, turn_indexes=(0, 1, 2))
+    resumed = codex_capture.run_codex_capture(NOW, backfill=True)
+    _, _, resumed_metadata, _, _ = _task_row()
+
+    assert len(semantic.calls) == bound + 1
+    assert (resumed.refreshed, resumed.failed, resumed.semantic_abandoned) == (1, 1, 0)
+    assert abandoned_metadata["semantic_abandoned"]["attempts"] == bound
+    assert "semantic_abandoned" not in resumed_metadata
+    assert resumed_metadata["semantic_attempts"]["count"] == 1
+    assert len(resumed_metadata["turns"]) == 3
+    assert resumed_metadata["semantic_cursor"] is None
+
+
+def test_second_attempt_success_processes_and_leaves_no_abandonment_mark(
+    test_db, clean_tables, tmp_path, monkeypatch
+):
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(
+        codex_capture.SemanticResultError("a segment referenced an unknown Agent Turn"),
+        lambda previous, turns: _one_segment(previous, turns),
+    )
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock"),
+    )
+
+    failed = codex_capture.run_codex_capture(NOW, backfill=True)
+    _, _, failed_metadata, _, _ = _task_row()
+    succeeded = codex_capture.run_codex_capture(NOW, backfill=True)
+    task_id, _, metadata, _, _ = _task_row()
+    segments, memories = _semantic_children(task_id)
+
+    assert (failed.failed, failed.semantic_abandoned) == (1, 0)
+    assert failed_metadata["semantic_attempts"]["count"] == 1
+    assert (succeeded.semantic_processed, succeeded.semantic_retried) == (1, 1)
+    assert (succeeded.failed, succeeded.semantic_abandoned) == (0, 0)
+    assert len(semantic.calls) == 2
+    assert metadata["semantic_cursor"] == metadata["turns"][-1]["turn_id"]
+    assert "semantic_attempts" not in metadata
+    assert "semantic_abandoned" not in metadata
+    assert (segments, memories) == (1, 1)
+
+
+def test_run_summary_json_reports_semantic_abandonment(
+    test_db, clean_tables, tmp_path, monkeypatch, capsys
+):
+    from scripts.capture_codex import main
+
+    home = _real_codex_home(tmp_path)
+    _install_services(
+        monkeypatch,
+        _services(home, _AlwaysFailingSemanticPass(), tmp_path / "capture.lock"),
+    )
+    monkeypatch.setenv(codex_capture.SEMANTIC_MAX_ATTEMPTS_ENV, "1")
+
+    assert main(["--backfill"], now=NOW) == 1
+    abandoning_run = json.loads(capsys.readouterr().out)
+    assert main(["--backfill"], now=NOW) == 0
+    later_run = json.loads(capsys.readouterr().out)
+
+    assert abandoning_run["semantic_abandoned"] == 1
+    assert abandoning_run["failed"] == 1
+    assert later_run["semantic_abandoned"] == 1
+    assert later_run["failed"] == 0
+
+
+def test_semantic_contract_identity_includes_prompt_version_and_model():
+    pass_with_model = codex_capture._BackendSemanticPass()
+    with patch.object(
+        codex_capture,
+        "default_resolver",
+        return_value=SimpleNamespace(
+            spec_for=lambda role: SimpleNamespace(model="anthropic.opus-5")
+        ),
+    ):
+        contract = pass_with_model.contract_id
+    with patch.object(
+        codex_capture, "default_resolver", side_effect=RuntimeError("no profile")
+    ):
+        fallback = pass_with_model.contract_id
+
+    assert contract == f"{codex_capture.SEMANTIC_PROMPT_VERSION}:anthropic.opus-5"
+    assert fallback == codex_capture.SEMANTIC_PROMPT_VERSION

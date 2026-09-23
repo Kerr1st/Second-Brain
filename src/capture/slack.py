@@ -13,6 +13,12 @@ preamble and wrapping each message text in ``<slack-user-content>`` tags with
 whitespace datamarked as U+E000. Those are transport artefacts, not content —
 :func:`clean_text` undoes them before rendering.
 
+A stale Midway cookie killed this job silently on 2026-09-20 and 09-21 (two
+days of Slack lost), so every run starts with :func:`preflight` — one cheap
+``list_my_channels`` probe. An auth failure exits 3 with a one-line "run
+mwinit" message and a notification, *without* attempting the capture; a dead
+server exits 4; only a real capture exits 0.
+
     python -m src.capture.slack [--days-back N] [--dry-run] [--max-conversations N]
 """
 from __future__ import annotations
@@ -22,15 +28,26 @@ import asyncio
 import logging
 import os
 import re
+import sys
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
-from src.capture.mcp_client import McpClient, McpToolError
+from src.capture.mcp_client import (
+    CaptureFailure, McpClient, McpToolError, auth_error_in_payload, classify_error, report_failure,
+)
 
 logger = logging.getLogger(__name__)
 
 SOURCE_TYPE = "slack"
 SLACK_CMD = os.environ.get("SLACK_MCP", os.path.expanduser("~/.aim/mcp-servers/slack-mcp"))
+
+# Per-tool-call ceiling. A channel-day page (200 messages + up to 50 threads) is
+# the heaviest call; 120s is generous for it and still bounded.
+SLACK_CALL_TIMEOUT = float(os.environ.get("SLACK_CALL_TIMEOUT", "120"))
+# The probe must be quick — it exists to fail fast, not to wait out a sick server.
+PROBE_TOOL = "list_my_channels"
+PROBE_TIMEOUT = float(os.environ.get("SLACK_PROBE_TIMEOUT", "60"))
+AUTH_FIX = "run `mwinit` to refresh the Midway cookie, then re-run the job"
 
 MAX_CONVERSATIONS = int(os.environ.get("SLACK_MAX_CONVERSATIONS", "200"))
 MAX_MESSAGES_PER_DAY = 1000   # get_messages upper bound per call
@@ -154,6 +171,31 @@ def day_bounds_utc(day: date) -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------- #
+# Pre-flight auth probe                                                        #
+# --------------------------------------------------------------------------- #
+async def preflight(call: Call) -> tuple[str, str]:
+    """Probe ``list_my_channels`` once; return ``(kind, detail)``.
+
+    ``kind`` is ``"ok"``, ``"auth"``, ``"transport"`` or ``"error"``. This is the
+    same call the capture makes first, so it fails in exactly the same way the
+    real run would — only here the failure is classified instead of becoming a
+    01:00 stack trace. Never raises.
+    """
+    try:
+        data = await asyncio.wait_for(call(PROBE_TOOL, {}), timeout=PROBE_TIMEOUT)
+    except asyncio.TimeoutError:
+        return "transport", f"{PROBE_TOOL}: no reply within {PROBE_TIMEOUT:.0f}s (server hung)"
+    except Exception as e:  # noqa: BLE001 - classification is the whole point
+        return classify_error(e), f"{PROBE_TOOL}: {e}"
+    auth = auth_error_in_payload(data)
+    if auth:
+        return "auth", f"{PROBE_TOOL}: {auth}"
+    if not isinstance(data, dict) or "sections" not in data:
+        return "error", f"{PROBE_TOOL}: unexpected reply {type(data).__name__}"
+    return "ok", ""
+
+
+# --------------------------------------------------------------------------- #
 # Collection (async, injectable `call` for tests)                              #
 # --------------------------------------------------------------------------- #
 async def list_conversations(call: Call, max_conversations: int = MAX_CONVERSATIONS) -> list[dict]:
@@ -267,8 +309,18 @@ async def _run_async(days_back: int, max_conversations: int, dry_run: bool) -> d
 
     days = completed_days(days_back)
     already = set(get_processed_source_urls(SOURCE_TYPE))
-    async with McpClient(SLACK_CMD, []) as client:
-        items = await collect(client.call_json, days, already, max_conversations)
+    try:
+        async with McpClient(SLACK_CMD, [], call_timeout=SLACK_CALL_TIMEOUT) as client:
+            kind, detail = await preflight(client.call_json)
+            if kind != "ok":
+                # Do not attempt the capture: with a stale cookie every call fails.
+                raise CaptureFailure(kind, detail, AUTH_FIX if kind == "auth" else None)
+            items = await collect(client.call_json, days, already, max_conversations)
+    except CaptureFailure:
+        raise
+    except Exception as e:  # noqa: BLE001 - classify, then exit with the right code
+        raise CaptureFailure(classify_error(e), str(e),
+                             AUTH_FIX if classify_error(e) == "auth" else None) from e
     if dry_run:
         for url, _ in items:
             logger.info("[DRY] %s", url)
@@ -282,16 +334,21 @@ def capture(days_back: int = 2, max_conversations: int = MAX_CONVERSATIONS, dry_
     return asyncio.run(_run_async(days_back, max_conversations, dry_run))
 
 
-def main():
+def main() -> int:
+    """Return the process exit code: 0 OK, 3 auth, 4 transport, 1 anything else."""
     ap = argparse.ArgumentParser(description="Capture Slack conversations into the Second Brain.")
     ap.add_argument("--days-back", type=int, default=2, help="completed local days to capture (default 2)")
     ap.add_argument("--max-conversations", type=int, default=MAX_CONVERSATIONS)
     ap.add_argument("--dry-run", action="store_true", help="fetch + list, do not ingest")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    stats = capture(days_back=args.days_back, max_conversations=args.max_conversations, dry_run=args.dry_run)
+    try:
+        stats = capture(days_back=args.days_back, max_conversations=args.max_conversations, dry_run=args.dry_run)
+    except CaptureFailure as failure:
+        return report_failure(failure, SOURCE_TYPE)
     logger.info("captures_this_cycle: slack=%d", stats.get("processed", stats.get("new", 0)))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
