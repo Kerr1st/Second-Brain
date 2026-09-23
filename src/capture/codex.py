@@ -5,6 +5,17 @@ Agent Turn capture, one combined semantic pass, and atomic semantic persistence.
 The Captured Task commits before semantic processing so a transient model or
 embedding failure never loses source evidence; the unchanged cursor causes the
 whole unprocessed tail to retry on the next run.
+
+That retry is bounded. Each attempt on one unprocessed tail is counted in the
+Captured Task's ``metadata.semantic_attempts``; after
+``SEMANTIC_MAX_ATTEMPTS`` (default 3, overridden by the environment variable
+``SECOND_BRAIN_CODEX_SEMANTIC_MAX_ATTEMPTS``) the tail is marked
+``metadata.semantic_abandoned``, counted in the run summary as
+``semantic_abandoned``, and never sent to the model again. The verbatim
+Captured Task is always kept. The attempt counter is keyed by the semantic
+contract (prompt version plus resolved model) and the identity of the
+unprocessed tail, so new Agent Turns, a new prompt version, or a different
+Thinker model each start a fresh budget.
 """
 
 from __future__ import annotations
@@ -14,6 +25,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 import fcntl
 import json
+import logging
 import os
 from pathlib import Path
 import tempfile
@@ -36,6 +48,24 @@ from src.embeddings import generate_embedding
 IDLE_THRESHOLD = timedelta(hours=6)
 TASK_SOURCE_TYPE = "codex_task"
 MEMORY_SOURCE_TYPE = "distilled_agent_task"
+
+#: Version of the semantic contract (system prompt below). Bumping it retires
+#: every recorded attempt count and abandonment, so a reworked prompt gets a
+#: fresh budget on tails an earlier prompt could never satisfy.
+SEMANTIC_PROMPT_VERSION = "codex-semantic-v1"
+
+#: Maximum model attempts spent on one unprocessed tail of one Codex Task
+#: before it is abandoned. Overridable at runtime by
+#: ``SECOND_BRAIN_CODEX_SEMANTIC_MAX_ATTEMPTS`` (a positive integer).
+SEMANTIC_MAX_ATTEMPTS = 3
+SEMANTIC_MAX_ATTEMPTS_ENV = "SECOND_BRAIN_CODEX_SEMANTIC_MAX_ATTEMPTS"
+
+SEMANTIC_ABANDON_REASON = (
+    "the semantic pass did not satisfy the evidence contract within the "
+    "attempt budget"
+)
+
+logger = logging.getLogger(__name__)
 
 
 _SEMANTIC_SYSTEM_PROMPT = """You perform one semantic pass over a Codex Task.
@@ -104,6 +134,7 @@ class CaptureReport:
     unchanged: int = 0
     semantic_processed: int = 0
     semantic_retried: int = 0
+    semantic_abandoned: int = 0
     failed: int = 0
     dry_run: bool = False
     failures: tuple[TaskFailure, ...] = ()
@@ -145,6 +176,15 @@ class SemanticResultError(ValueError):
 
 class _BackendSemanticPass:
     """Lazily resolve the configured Thinker only when semantic work exists."""
+
+    @property
+    def contract_id(self) -> str:
+        """Prompt version plus resolved model — the attempt budget's identity."""
+        try:
+            model = default_resolver().spec_for("thinker").model
+        except Exception:  # pragma: no cover - resolution fails later anyway
+            return SEMANTIC_PROMPT_VERSION
+        return f"{SEMANTIC_PROMPT_VERSION}:{model}"
 
     def run(self, *, previous_segment, turns):
         resolver = default_resolver()
@@ -235,6 +275,7 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         "unchanged": 0,
         "semantic_processed": 0,
         "semantic_retried": 0,
+        "semantic_abandoned": 0,
         "failed": 0,
     }
     failures: list[TaskFailure] = []
@@ -282,12 +323,54 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         tail = _unprocessed_tail(captured.turns, captured.metadata.get("semantic_cursor"))
         if not tail:
             continue
+        attempt_key = _attempt_key(captured, tail, services)
+        bound = _semantic_max_attempts()
+        spent = _recorded_attempts(captured.metadata, attempt_key)
+        if _is_abandoned(captured.metadata, attempt_key) or spent >= bound:
+            if not _is_abandoned(captured.metadata, attempt_key):
+                # The bound was lowered after the attempts were spent.
+                _record_abandonment(
+                    captured, attempt_key, spent, None, now, services.connect
+                )
+                logger.warning(
+                    "Codex task %s abandoned semantically: %d attempt(s) "
+                    "already spent meets the bound of %d. The verbatim "
+                    "Captured Task is kept; no further model calls.",
+                    ref.native_task_id,
+                    spent,
+                    bound,
+                )
+            counts["semantic_abandoned"] += 1
+            logger.info(
+                "Codex task %s stays semantically abandoned; %d unprocessed "
+                "Agent Turn(s) kept verbatim, no model call",
+                ref.native_task_id,
+                len(tail),
+            )
+            continue
         if captured.disposition == "unchanged":
             counts["semantic_retried"] += 1
+        attempt = spent + 1
+        _record_attempt(captured, attempt_key, attempt, now, services.connect)
 
         try:
             _process_semantics(captured, tail, services)
         except Exception as exc:
+            if attempt >= bound:
+                _record_abandonment(
+                    captured, attempt_key, attempt, type(exc).__name__, now,
+                    services.connect,
+                )
+                counts["semantic_abandoned"] += 1
+                logger.warning(
+                    "Codex task %s abandoned semantically after %d attempt(s): "
+                    "%s (%s). The verbatim Captured Task is kept; no further "
+                    "model calls will be made for these Agent Turns.",
+                    ref.native_task_id,
+                    attempt,
+                    SEMANTIC_ABANDON_REASON,
+                    type(exc).__name__,
+                )
             _record_failure(counts, failures, ref.native_task_id, "semantic", exc)
             continue
         counts["semantic_processed"] += 1
@@ -423,6 +506,11 @@ def _metadata_for_snapshot(
         "turns": [_turn_dict(turn) for turn in turns],
         "semantic_cursor": semantic_cursor,
     }
+    # The semantic retry budget lives beside the cursor and must survive a
+    # refresh; its key, not this copy, decides when it resets.
+    for key in ("semantic_attempts", "semantic_abandoned"):
+        if key in previous:
+            metadata[key] = previous[key]
     if native_title:
         metadata["native_title"] = native_title
     return metadata
@@ -579,6 +667,122 @@ def _unprocessed_tail(
         if turn.turn_id == cursor:
             return turns[index + 1 :]
     raise RuntimeError("semantic cursor does not identify a stored Agent Turn")
+
+
+def _semantic_max_attempts() -> int:
+    """The attempt bound: the module default unless the environment overrides it."""
+    raw = os.environ.get(SEMANTIC_MAX_ATTEMPTS_ENV)
+    if raw is None or not raw.strip():
+        return SEMANTIC_MAX_ATTEMPTS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        logger.warning(
+            "%s=%r is not a positive integer; using the default bound of %d",
+            SEMANTIC_MAX_ATTEMPTS_ENV,
+            raw,
+            SEMANTIC_MAX_ATTEMPTS,
+        )
+        return SEMANTIC_MAX_ATTEMPTS
+    return value
+
+
+def _attempt_key(captured: _CapturedTask, tail, services) -> str:
+    """Identity of one retry budget: semantic contract plus unprocessed tail.
+
+    New Agent Turns move the tail's last turn ID, and a new prompt version or
+    Thinker model moves the contract, so either starts counting from zero.
+    """
+    contract = getattr(services.semantic, "contract_id", None)
+    if not isinstance(contract, str) or not contract:
+        contract = SEMANTIC_PROMPT_VERSION
+    cursor = captured.metadata.get("semantic_cursor") or ""
+    return f"{contract}|{cursor}|{tail[-1].turn_id}"
+
+
+def _recorded_attempts(metadata: dict[str, Any], key: str) -> int:
+    record = metadata.get("semantic_attempts")
+    if not isinstance(record, dict) or record.get("key") != key:
+        return 0
+    try:
+        return max(0, int(record.get("count", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_abandoned(metadata: dict[str, Any], key: str) -> bool:
+    record = metadata.get("semantic_abandoned")
+    return isinstance(record, dict) and record.get("key") == key
+
+
+def _record_attempt(captured, key, attempt, now, connect) -> None:
+    """Persist the attempt before spending it, so a crash still counts."""
+    _update_task_metadata(
+        captured,
+        {
+            "semantic_attempts": {
+                "key": key,
+                "count": attempt,
+                "last_attempt_at": now.isoformat(),
+            }
+        },
+        connect,
+        # Any abandonment mark still present belongs to a retired budget.
+        drop=("semantic_abandoned",),
+    )
+
+
+def _record_abandonment(captured, key, attempt, error_type, now, connect) -> None:
+    """Mark the tail abandoned. The verbatim Captured Task is left untouched."""
+    _update_task_metadata(
+        captured,
+        {
+            "semantic_abandoned": {
+                "key": key,
+                "attempts": attempt,
+                "reason": SEMANTIC_ABANDON_REASON,
+                "error_type": error_type,
+                "abandoned_at": now.isoformat(),
+            }
+        },
+        connect,
+    )
+
+
+def _update_task_metadata(
+    captured, updates: dict[str, Any], connect, *, drop: tuple[str, ...] = ()
+) -> None:
+    with connect() as connection:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT metadata FROM memories WHERE id = %s FOR UPDATE",
+                    (captured.memory_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuntimeError("the Captured Task row disappeared")
+                metadata = dict(row[0])
+                for key in drop:
+                    metadata.pop(key, None)
+                metadata.update(updates)
+                cursor.execute(
+                    """
+                    UPDATE memories
+                    SET metadata = %s, updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (json.dumps(metadata), captured.memory_id),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    for key in drop:
+        captured.metadata.pop(key, None)
+    captured.metadata.update(updates)
 
 
 def _last_segment(captured: _CapturedTask, connect) -> _StoredSegment | None:
@@ -847,6 +1051,9 @@ def _store_semantic_result(
                     )
 
                 current_metadata["semantic_cursor"] = tail[-1].turn_id
+                # The tail is processed: retire its retry budget.
+                current_metadata.pop("semantic_attempts", None)
+                current_metadata.pop("semantic_abandoned", None)
                 cursor.execute(
                     """
                     UPDATE memories
