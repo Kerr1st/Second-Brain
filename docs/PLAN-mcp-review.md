@@ -92,7 +92,11 @@ uses `memory_bank_test` (created by `tests/conftest.py`). Hermetic run:
     (was 1,064 valid + 42 empty + 603 shifted), 29 tests.
   - Cleanup: 81 duplicate groups, **6,493 rows deleted** (4,149 parents + 2,344 chunks, 73 MB), 10 rows
     kept because dream-cycle candidates cite them, 12,551 relationships cascade-deleted. Backups:
-    `memories_dedup_backup_2026_09_22_1340`, `memory_relationships_dedup_backup_2026_09_22_1340`.
+    `memories_dedup_backup_2026_09_22_1340`, `memory_relationships_dedup_backup_2026_09_22_1340` —
+    **dropped 2026-09-23** on the user's instruction, after verifying all 247 distinct
+    (source_url, md5(content)) groups in the backup still had an identical surviving row in
+    `memories` (0 groups without a survivor), so nothing unique was lost. Reclaimed 102 MB
+    (2,241 → 2,139 MB). Restoring a duplicate is no longer possible, and no longer meaningful.
     Corpus 129,449 → 122,956 rows; the video now has 30 rows (its 3 legitimate ingestions + evidence).
   - MCP hardening (`e3e2d80`): vocabularies in `src/validation.py`; every tool rejects bad types,
     statuses, relation types, malformed ids, blank text, missing relate targets with a one-line message;
