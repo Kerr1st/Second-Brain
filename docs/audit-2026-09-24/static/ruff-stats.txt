@@ -1,0 +1,40 @@
+ 26	UP045  	[*] non-pep604-annotation-optional
+ 21	RUF059 	[ ] unused-unpacked-variable
+ 19	FURB167	[*] regex-flag-alias
+ 10	UP035  	[*] deprecated-import
+  9	S110   	[ ] try-except-pass
+  8	F541   	[*] f-string-missing-placeholders
+  8	SIM115 	[ ] open-file-with-context-handler
+  6	RUF022 	[*] unsorted-dunder-all
+  5	DTZ005 	[ ] call-datetime-now-without-tzinfo
+  5	ISC004 	[ ] implicit-string-concatenation-in-collection-literal
+  5	PLW1510	[ ] subprocess-run-without-check
+  5	RUF015 	[ ] unnecessary-iterable-allocation-for-first-element
+  4	SIM114 	[*] if-with-same-arms
+  4	RUF012 	[ ] mutable-class-default
+  4	UP037  	[*] quoted-annotation
+  3	DTZ001 	[ ] call-datetime-without-tzinfo
+  3	G201   	[ ] logging-exc-info
+  3	SIM103 	[ ] needless-bool
+  3	LOG015 	[ ] root-logger-call
+  3	RET501 	[*] unnecessary-return-none
+  2	DTZ011 	[ ] call-date-today
+  2	SIM102 	[ ] collapsible-if
+  2	PERF102	[ ] incorrect-dict-iterator
+  2	UP031  	[ ] printf-string-formatting
+  2	F811   	[*] redefined-while-unused
+  2	FURB188	[*] slice-to-remove-prefix-or-suffix
+  2	TRY004 	[ ] type-check-without-type-error
+  2	C408   	[ ] unnecessary-collection-call
+  2	PLC0414	[ ] useless-import-alias
+  1	E722   	[ ] bare-except
+  1	TC005  	[*] empty-type-checking-block
+  1	SIM113 	[ ] enumerate-for-loop
+  1	FURB122	[*] for-loop-writes
+  1	PIE810 	[ ] multiple-starts-ends-with
+  1	PYI034 	[ ] non-self-return-type
+  1	F821   	[ ] undefined-name
+  1	UP012  	[*] unnecessary-encode-utf8
+  1	PLR1711	[*] useless-return
+Found 601 errors.
+[*] 360 fixable with the `--fix` option (73 hidden fixes can be enabled with the `--unsafe-fixes` option).
