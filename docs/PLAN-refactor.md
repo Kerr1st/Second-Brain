@@ -1,6 +1,6 @@
 # Refactor plan — streamlining Second Brain (v2)
 
-**Status:** proposed, not started. **Base:** `main` @ `6b8c2d2`. **Evidence:** [AUDIT-2026-09-24.md](AUDIT-2026-09-24.md) and the [findings register](audit-2026-09-24/00-FINDINGS-REGISTER.md) — every item below cites its `F-nnn` rows. This plan supersedes v1 ([archived](audit-2026-09-23/PLAN-refactor-v1-superseded.md)); the changes are itemised in the [errata](audit-2026-09-24/00-ERRATA-for-AUDIT-2026-09-23.md) §2.
+**Status:** Phase 0 mitigations done (`54b191d`); decisions D1–D5 open; Phase 1 not started. **Base:** `main` @ `6b8c2d2`; audit committed at `dd3d425`. **Evidence:** [AUDIT-2026-09-24.md](AUDIT-2026-09-24.md) and the [findings register](audit-2026-09-24/00-FINDINGS-REGISTER.md) — every item below cites its `F-nnn` rows. This plan supersedes v1 ([archived](audit-2026-09-23/PLAN-refactor-v1-superseded.md)); the changes are itemised in the [errata](audit-2026-09-24/00-ERRATA-for-AUDIT-2026-09-23.md) §2.
 
 **How to pick this up later.** Phases are independent and shippable in order; each ends with the hermetic suite green. Within a phase, items are numbered in dependency order — where the order matters it is stated. Each item is small enough to be a spec on its own. When an item is done, mark it here and in the register.
 
