@@ -38,9 +38,12 @@ export BEDROCK_REGION="${BEDROCK_REGION:-us-east-1}"
 "$PY" /Users/kerrfir/second-brain/scripts/dream_cycle_run.py --run-type scheduled
 dc_status=$?
 
-# 2. Express push (delivery): gated high by should_push() — sends only on a new
-#    cross-project synthesis or contradiction, else a benign no-op. Best-effort:
-#    never let it mask the dream cycle's own exit status.
-"$PY" /Users/kerrfir/second-brain/scripts/express_push.py || true
+# 2. Express push (delivery) — DISABLED 2026-09-24 (PLAN-refactor.md Phase 0, item 0.2; F-001).
+#    express.py:481 builds AgentInvoker() = Kiro (server-routed to claude-fable-5.1 since
+#    kiro-cli 2.22 ignores --model), sending briefing content outside the profile system;
+#    and email has never been configured, so every result was discarded anyway.
+#    Re-enable only after Phase 1 item 1 routes the editor through the resolver and
+#    gates on email_configured() BEFORE the LLM pass.
+# "$PY" /Users/kerrfir/second-brain/scripts/express_push.py || true
 
 exit $dc_status
