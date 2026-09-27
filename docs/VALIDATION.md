@@ -10,6 +10,8 @@ Correctness regressions cover atomic source revisions, intra-batch identity, bou
 
 Run only `SECOND_BRAIN_PROFILE=controlled .venv/bin/python scripts/test_isolated.py -- -q`. The runner validates a disposable manifest before collecting tests. Actual external embeddings, inference, source credentials and cloud backup synchronization need separate qualification.
 
+For the optional Jev component, see [the evidence-screening plan](JEV-EVIDENCE-SCREENING.md). Its offline failure/accounting tests run inside this same isolated suite. Its explicitly requested live evaluation uses only the versioned synthetic fixture through OpenRouter, outside the offline suite, and records calibration/holdout separation, baseline comparison, unknown spend and actual usage. A successful synthetic comparison is not authorization for a private source transfer or evidence of human usefulness.
+
 ## Measure whether Second Brain improves work
 
 Freeze one current decision, such as Kiro and AI-DLC adoption planning, and a bounded source set from multiple projects. Record what is already known, the deliverable, source versions/roles/timestamps, exact providers, cost threshold, missing stages and baseline ordinary retrieval.

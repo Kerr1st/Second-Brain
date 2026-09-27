@@ -36,6 +36,8 @@ Lexical retrieval uses PostgreSQL full-text search; it is not a separate BM25 se
 
 Ranking weights have one home in `src/rerank_weights.py`; source classifications derive from `src/validation.py`. Context overlap, status, recency, access history, depth and project affect ranking. A project filter is a deliberate scope restriction, so cross-project discovery must not silently apply it everywhere. The offline retrieval quality fixture exercises the actual query path with synthetic embeddings; it establishes regressions, not real-world semantic quality.
 
+The optional [Jev evidence-screening experiment](JEV-EVIDENCE-SCREENING.md) assesses bounded query/passage pairs through an explicitly constructed client. Shadow annotations preserve baseline candidates and order. Its standalone synthetic evaluation compares the actual utility reranker with an experimental semantic order; it does not add network calls to `rerank`, change MCP responses, or activate a new corpus provider. Private-data qualification and production activation remain distinct gates.
+
 ## Discovery and learning
 
 The orchestrator coordinates stages; stage/agent modules perform bounded work. Step 3.5 skims arrivals into validated structured records. It does not prove a discovery. Explorer reads through an explicit read-only MCP registry. In the controlled route the Thinker and review roles receive bounded source packets over Bedrock.
