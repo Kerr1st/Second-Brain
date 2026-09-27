@@ -18,6 +18,19 @@ from pathlib import Path
 import plistlib
 import subprocess
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_capture_paths(tmp_path, monkeypatch):
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    probe = tmp_path / "pg-ready-stub"
+    probe.write_text("#!/bin/sh\nexit 0\n")
+    probe.chmod(0o700)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setenv("PG_ISREADY_BIN", str(probe))
+
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/jobs/codex_capture.sh"
 PLIST = (

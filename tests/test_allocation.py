@@ -402,8 +402,7 @@ class TestPromptContracts:
 # --------------------------------------------------------------------------- #
 class TestAllocateAttention:
     def _orch(self):
-        with patch("src.dream_cycle.orchestrator.default_resolver"):
-            return DreamCycleOrchestrator()
+        return DreamCycleOrchestrator()
 
     def test_adds_guaranteed_slice_and_persists_ledger(self):
         old_ids = [_uid() for _ in range(12)]
@@ -460,12 +459,12 @@ class TestAllocateAttention:
     def test_explorer_user_message_carries_manifest(self):
         orch = self._orch()
         invoker = MagicMock()
-        invoker.invoke.return_value = {"output": [], "raw": "[]", "usage": None, "usage_source": "estimate"}
+        invoker.invoke.return_value = {"output": [], "raw": "[]", "usage": {"inputTokens": 0, "outputTokens": 0}, "usage_source": "real"}
         arrivals = [{"source_type": "slack", "documents": 3, "memories": 9,
                      "samples": [{"id": "id-9", "title": "Slack: #eng — 2026-09-17", "created_at": "2026-09-17T08:00:00+00:00"}]}]
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
              patch.object(orch, "_invoker_for", return_value=invoker), \
-             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
+             patch.object(orch, "_capture"):
             db.get_previous_run_started_at.return_value = WINDOW
             db.get_arrivals_summary.return_value = arrivals
             db.get_strategy_usage.return_value = {}
@@ -473,7 +472,7 @@ class TestAllocateAttention:
             orch._current_started_at = NOW
             orch.invoke_explorer("", "scheduled", None,
                                  stats={"total_count": 10, "recent_activity": 9, "date_range": {"min": NOW, "max": NOW}})
-        msg = invoker.invoke.call_args.kwargs["user_message"]
+        msg = invoker.invoke.call_args.args[1]
         assert "## What arrived since the previous run (2026-09-17 09:00 UTC)" in msg
         assert "- slack: 3 conversation-days (9 memories)" in msg and "[id-9]" in msg
         assert "meet the slice budget" in msg
@@ -513,8 +512,7 @@ class TestExplorerFailureFallback:
     """On a scheduled run an Explorer timeout continues with the guaranteed arrivals slice."""
 
     def _orch(self):
-        with patch("src.dream_cycle.orchestrator.default_resolver"):
-            return DreamCycleOrchestrator()
+        return DreamCycleOrchestrator()
 
     def test_scheduled_run_continues_with_arrivals_slice(self):
         orch = self._orch()

@@ -72,6 +72,12 @@ class EvaluatorVerdict:
     blocking_issues: list[str] = field(default_factory=list)
     advisory_issues: list[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        # A malformed model answer is a retryable contract failure, never an
+        # implicit rejection. Keep the panel's binary policy explicit.
+        if not isinstance(self.verdict, str) or self.verdict not in {"ACCEPT", "REJECT"}:
+            raise ValueError("Evaluator verdict must be ACCEPT or REJECT")
+
     @property
     def has_blocking(self) -> bool:
         return bool(self.blocking_issues)

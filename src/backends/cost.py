@@ -31,6 +31,7 @@ response's ``serviceTier.type``) — never from what was merely requested.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 
@@ -120,7 +121,7 @@ def price_for(model: str, service_tier: str | None = None) -> ModelPrice:
 
 
 def _int_or_none(value) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _tokens(usage: dict, *keys: str) -> int | None:
@@ -143,7 +144,7 @@ def estimate_cost_usd(model: str, usage: dict | None) -> float:
     if not isinstance(usage, dict):
         return 0.0
     reported = usage.get("total_cost_usd")
-    if isinstance(reported, (int, float)) and not isinstance(reported, bool) and reported >= 0:
+    if isinstance(reported, (int, float)) and not isinstance(reported, bool) and math.isfinite(reported) and reported >= 0:
         return float(reported)
     inp = _tokens(usage, "inputTokens", "input_tokens")
     out = _tokens(usage, "outputTokens", "output_tokens")
@@ -165,28 +166,88 @@ class SpendCapExceeded(Exception):
     """Per-run spend cap breached. Intentionally NOT a RuntimeError subclass."""
 
 
+class UsageUnavailable(SpendCapExceeded):
+    """A metered call cannot be priced; no more calls may run on this budget."""
+
+
+def cap_from_env(name: str, default: float) -> float:
+    """Read a finite positive dollar limit; malformed values use the safe default."""
+    if not math.isfinite(default) or default <= 0:
+        raise ValueError("Default spend cap must be finite and positive")
+    raw = os.environ.get(name)
+    if not raw:
+        return float(default)
+    try:
+        value = float(raw)
+        if math.isfinite(value) and value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+    logger.warning("%s must be finite and > 0; using default $%.2f", name, default)
+    return float(default)
+
+
+def _require_usage(usage) -> None:
+    if not isinstance(usage, dict):
+        raise UsageUnavailable("Metered response has no usable usage; stopping this run")
+    reported = usage.get("total_cost_usd")
+    if reported is not None:
+        if isinstance(reported, bool) or not isinstance(reported, (int, float)) or not math.isfinite(reported) or reported < 0:
+            raise UsageUnavailable("Invalid reported model cost; stopping this run")
+    names = ("inputTokens", "input_tokens", "outputTokens", "output_tokens",
+             "cacheReadInputTokens", "cache_read_input_tokens",
+             "cacheWriteInputTokens", "cache_creation_input_tokens")
+    for name in names:
+        if name in usage and _int_or_none(usage[name]) is None:
+            raise UsageUnavailable("Invalid model token usage; stopping this run")
+    if reported is None and (
+        _tokens(usage, "inputTokens", "input_tokens") is None
+        or _tokens(usage, "outputTokens", "output_tokens") is None
+    ):
+        raise UsageUnavailable("Incomplete model token usage; stopping this run")
+
+
 class SpendTracker:
-    """Accumulates estimated spend for one run and enforces a hard cap."""
+    """Accumulate reported usage; stop after a response crosses the run cap.
+
+    This cannot bound an already in-flight call. Standalone corpus stages use
+    record_metered and ensure_available to stop after accounting gaps too.
+    """
 
     def __init__(self, cap_usd: float = DEFAULT_RUN_COST_CAP_USD):
         self.cap_usd = float(cap_usd)
+        if isinstance(cap_usd, bool) or not math.isfinite(self.cap_usd) or self.cap_usd <= 0:
+            raise ValueError("Spend cap must be finite and positive")
+        self.blocked_reason = None
         self.total_usd = 0.0
         self.calls = 0
 
     @classmethod
     def from_env(cls) -> "SpendTracker":
-        raw = os.environ.get("SECOND_BRAIN_RUN_COST_CAP_USD")
-        cap = DEFAULT_RUN_COST_CAP_USD
-        if raw:
-            try:
-                parsed = float(raw)
-                if parsed > 0:
-                    cap = parsed
-                else:
-                    logger.warning("SECOND_BRAIN_RUN_COST_CAP_USD=%r must be > 0; using default $%.2f", raw, cap)
-            except ValueError:
-                logger.warning("SECOND_BRAIN_RUN_COST_CAP_USD=%r is not a number; using default $%.2f", raw, cap)
-        return cls(cap_usd=cap)
+        return cls(cap_from_env("SECOND_BRAIN_RUN_COST_CAP_USD", DEFAULT_RUN_COST_CAP_USD))
+
+    def ensure_available(self) -> None:
+        """Stop before another call after a cap, kill switch or accounting gap."""
+        if kill_switch_engaged():
+            raise SpendCapExceeded("Second Brain model kill switch is engaged")
+        if self.blocked_reason:
+            raise UsageUnavailable(self.blocked_reason)
+        if self.total_usd >= self.cap_usd:
+            raise SpendCapExceeded("Per-run spend cap is exhausted")
+
+    def record_metered(self, model: str, usage, *, usage_source=None) -> float:
+        """Strict accounting for corpus stages. Unknown spend blocks this run."""
+        try:
+            if usage_source == "estimate":
+                raise UsageUnavailable("Estimated usage cannot establish metered spend")
+            _require_usage(usage)
+        except UsageUnavailable as exc:
+            self.blocked_reason = str(exc)
+            raise
+        cost = self.record(model, usage)
+        if cost == 0:
+            self.calls += 1
+        return cost
 
     def record(self, model: str, usage: dict | None) -> float:
         """Price one call, add it to the total, and enforce the cap.
@@ -217,3 +278,53 @@ class SpendTracker:
 def kill_switch_engaged() -> bool:
     """True when ``SECOND_BRAIN_KILL_SWITCH`` is set to a truthy value."""
     return os.environ.get("SECOND_BRAIN_KILL_SWITCH", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def invoke_metered(invoker, spec, tracker: SpendTracker, system_prompt: str,
+                   user_message: str, **kwargs):
+    """Invoke one corpus stage, recording returned usage exactly once.
+
+    A response with malformed output is still billed before its original error
+    propagates. A transport error has unknown spend and blocks further calls
+    on this tracker. This is a stop-after-call cap, not a guaranteed monetary
+    ceiling: a single in-flight request can cross it. Accurate preflight
+    reservation needs provider token counting and output/agent-turn bounds.
+    Legacy Dream Cycle callers retain their existing independent accounting.
+    """
+    from src.backends.base import CORPUS_ROLES, CorpusRoutingError, assert_corpus_route, assert_backend_supports_role
+    if spec.role not in CORPUS_ROLES:
+        raise ValueError("Unknown corpus stage")
+    assert_corpus_route(spec.backend, spec.model, spec.role)
+    assert_backend_supports_role(spec.backend, spec.role)
+    actual_model = getattr(invoker, "model", None)
+    actual_backend = getattr(invoker, "BACKEND_NAME", None)
+    if isinstance(actual_model, str) and actual_model != spec.model:
+        raise ValueError("Invoker model does not match resolved corpus role")
+    if isinstance(actual_backend, str) and actual_backend != spec.backend:
+        raise ValueError("Invoker backend does not match resolved corpus role")
+    tracker.ensure_available()
+    kwargs.setdefault("tools", False)
+    kwargs.setdefault("effort", spec.effort)
+    kwargs.setdefault("stage", spec.role)
+    try:
+        result = invoker.invoke(system_prompt, user_message, **kwargs)
+    except Exception as exc:
+        if getattr(exc, "model_response_received", False):
+            tracker.record_metered(spec.model, getattr(exc, "usage", None),
+                                   usage_source=getattr(exc, "usage_source", None))
+            if isinstance(exc, CorpusRoutingError):
+                tracker.blocked_reason = "Corpus model guarantee failed; no further calls permitted"
+        else:
+            # Do not claim zero dollars when the request may have reached the
+            # provider. Preserve the operational error but stop this run.
+            tracker.blocked_reason = "Model call failed without billable usage; spend is unknown"
+        raise
+    if not isinstance(result, dict):
+        tracker.blocked_reason = "Invalid metered response; spend is unknown"
+        raise UsageUnavailable(tracker.blocked_reason)
+    try:
+        tracker.record_metered(spec.model, result.get("usage"), usage_source=result.get("usage_source"))
+    except SpendCapExceeded as exc:
+        exc.invocation_result = result
+        raise
+    return result

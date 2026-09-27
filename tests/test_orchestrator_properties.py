@@ -25,7 +25,7 @@ from src.models import (
 # ---------------------------------------------------------------------------
 
 def _make_orchestrator():
-    """Instantiate DreamCycleOrchestrator (all-Kiro laptop profile; construction is subprocess-free)."""
+    """Instantiate the controlled profile without invoking a provider."""
     from src.dream_cycle import DreamCycleOrchestrator
     return DreamCycleOrchestrator()
 
@@ -190,14 +190,27 @@ class TestEvaluatorIndependence:
         orch = _make_orchestrator()
 
         captured_prompts = {}
+        captured_audits = []
+        audit_marker = "SYNTHETIC_PRIOR_AUDIT_DO_NOT_LEAK"
+        candidate.revision = {
+            "original_title": "Before repair",
+            "audit_score": 12,
+            "blocking_issues": [audit_marker],
+            "advisory_issues": ["SYNTHETIC_PRIOR_ADVISORY"],
+        }
 
         def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
+            assert tools is False
+            if kwargs.get("stage") == "grounding_audit":
+                captured_audits.append(system_prompt)
             # Determine which role this is for by checking the user_message
-            for role in EVALUATOR_ROLES:
-                if role in user_message:
-                    captured_prompts[role] = system_prompt
-                    break
-            return {"output": {"verdict": "ACCEPT", "reasoning": "looks good"}, "raw": "{}"}
+            else:
+                for role in EVALUATOR_ROLES:
+                    if role in user_message:
+                        captured_prompts[role] = system_prompt
+                        break
+            return {"output": {"verdict": "ACCEPT", "reasoning": "looks good"}, "raw": "{}",
+                    "usage": {"inputTokens": 0, "outputTokens": 0}, "usage_source": "real"}
 
         orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
 
@@ -210,6 +223,10 @@ class TestEvaluatorIndependence:
         # For each evaluator's prompt, verify it does not contain
         # another evaluator's verdict or reasoning text
         for role, prompt in captured_prompts.items():
+            assert audit_marker not in prompt
+            assert "SYNTHETIC_PRIOR_ADVISORY" not in prompt
+            assert '"revision"' not in prompt
+            assert '"audit_score"' not in prompt
             for other_role in EVALUATOR_ROLES:
                 if other_role == role:
                     continue
@@ -225,8 +242,13 @@ class TestEvaluatorIndependence:
         prompt_values = list(captured_prompts.values())
         assert len(set(prompt_values)) == 4, "All 4 evaluator prompts should be distinct"
 
-        # Verify no evaluator receives tool access
-        # (already tested by the mock — tools defaults to False for evaluators)
+        # The audit and stored candidate retain their context; projecting a vote
+        # must neither mutate the source record nor erase its review history.
+        orch.invoke_evaluator(candidate, "skeptic", stage="grounding_audit")
+        assert len(captured_audits) == 1
+        assert audit_marker in captured_audits[0]
+        assert '"audit_score": 12' in captured_audits[0]
+        assert candidate.revision["blocking_issues"] == [audit_marker]
 
 
 # ---------------------------------------------------------------------------

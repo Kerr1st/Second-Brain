@@ -44,13 +44,6 @@ from src import express
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 
 
-class _Deterministic:
-    """Sentinel invoker that forces the deterministic editor (no LLM call)."""
-
-    def invoke(self, *a, **k):
-        raise RuntimeError("--no-llm")
-
-
 def _print_prefs():
     prefs = express.list_feedback()
     if not prefs:
@@ -100,7 +93,7 @@ def main():
     if args.json:
         print(json.dumps(briefing, default=str, indent=2))
         return
-    briefing = express.edit_briefing(briefing, invoker=_Deterministic() if args.no_llm else None)
+    briefing = express.edit_briefing(briefing, use_llm=not args.no_llm)
     sys.stdout.write(express.render_markdown(briefing))
 
 

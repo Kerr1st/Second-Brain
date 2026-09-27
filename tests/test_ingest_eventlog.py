@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 SAMPLE_EVENTS = [
     {
-        "id": "evt_00001",
+        "id": "test-evt_00001",
         "timestamp": "2026-04-13T20:00:52.249329",
         "source": "agent:slack-monitor",
         "event_type": "notification",
@@ -30,7 +30,7 @@ SAMPLE_EVENTS = [
         },
     },
     {
-        "id": "evt_00002",
+        "id": "test-evt_00002",
         "timestamp": "2026-04-14T08:00:00.000000",
         "source": "agent:day-planner",
         "event_type": "day_plan",
@@ -41,7 +41,7 @@ SAMPLE_EVENTS = [
         },
     },
     {
-        "id": "evt_00003",
+        "id": "test-evt_00003",
         "timestamp": "2026-04-14T09:30:00.000000",
         "source": "agent:outlook-monitor",
         "event_type": "email_fyi",
@@ -77,14 +77,14 @@ class TestParseEvents:
         from scripts.migrate.ingest_eventlog import parse_events
         events = parse_events(eventlog_file)
         assert len(events) == 3
-        assert events[0]["id"] == "evt_00001"
+        assert events[0]["id"] == "test-evt_00001"
 
     def test_format_event_as_markdown(self):
         from scripts.migrate.ingest_eventlog import format_event_as_markdown
         md = format_event_as_markdown(SAMPLE_EVENTS[0])
         assert "# Ryan answered your FedRAMP questions" in md
         assert "Source-Type: quick_desktop_feed" in md
-        assert "evt_00001" in md
+        assert "test-evt_00001" in md
         assert "FedRAMP" in md
 
     def test_format_event_includes_full_message(self):
@@ -100,7 +100,7 @@ class TestParseEvents:
 
     def test_source_url_from_event(self):
         from scripts.migrate.ingest_eventlog import source_url_for_event
-        assert source_url_for_event(SAMPLE_EVENTS[0]) == "qd-feed://evt_00001"
+        assert source_url_for_event(SAMPLE_EVENTS[0]) == "qd-feed://test-evt_00001"
 
     def test_tags_from_event(self):
         from scripts.migrate.ingest_eventlog import tags_for_event
@@ -153,35 +153,18 @@ class TestEventProperties:
 # E2E Integration Tests
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def test_db():
-    """Connect to test database."""
-    import psycopg2
-    DB_CONFIG = {
-        "host": os.environ.get("DB_HOST", "localhost"),
-        "port": int(os.environ.get("DB_PORT", "5432")),
-        "dbname": "memory_bank_test",
-        "user": os.environ.get("DB_USER", "memory_bank"),
-        "password": os.environ.get("DB_PASSWORD", "memory_bank"),
-    }
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        conn.autocommit = True
-        yield conn
-        conn.close()
-    except psycopg2.OperationalError:
-        pytest.skip("PostgreSQL not available")
+
 
 
 class TestEventlogE2E:
     """End-to-end tests for eventlog ingestion."""
 
-    def test_ingest_events_creates_memories(self, test_db, eventlog_file):
+    def test_ingest_events_creates_memories(self, test_conn, eventlog_file):
         from scripts.migrate.ingest_eventlog import ingest_eventlog
 
         # Clean up any previous test data
-        with test_db.cursor() as cur:
-            cur.execute("DELETE FROM memories WHERE source_url LIKE 'qd-feed://evt_0000%'")
+        with test_conn.cursor() as cur:
+            cur.execute("DELETE FROM memories WHERE source_url LIKE 'qd-feed://test-evt_0000%'")
 
         with patch("scripts.migrate.ingest_eventlog.EVENTLOG_PATH", eventlog_file):
             with patch("scripts.migrate.ingest_eventlog.generate_embedding", return_value=[0.1] * 1024):
@@ -191,11 +174,11 @@ class TestEventlogE2E:
         assert stats["failed"] == 0
 
         # Verify in DB
-        with test_db.cursor() as cur:
-            cur.execute("SELECT count(*) FROM memories WHERE source_url LIKE 'qd-feed://evt_0000%'")
+        with test_conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM memories WHERE source_url LIKE 'qd-feed://test-evt_0000%'")
             assert cur.fetchone()[0] == 3
 
-    def test_ingest_is_idempotent(self, test_db, eventlog_file):
+    def test_ingest_is_idempotent(self, test_conn, eventlog_file):
         from scripts.migrate.ingest_eventlog import ingest_eventlog
 
         with patch("scripts.migrate.ingest_eventlog.EVENTLOG_PATH", eventlog_file):
@@ -206,17 +189,17 @@ class TestEventlogE2E:
         assert stats2["processed"] == 0
         assert stats2["skipped"] == 3
 
-    def test_dry_run_creates_nothing(self, test_db, eventlog_file):
+    def test_dry_run_creates_nothing(self, test_conn, eventlog_file):
         from scripts.migrate.ingest_eventlog import ingest_eventlog
 
-        with test_db.cursor() as cur:
-            cur.execute("DELETE FROM memories WHERE source_url LIKE 'qd-feed://evt_0000%'")
+        with test_conn.cursor() as cur:
+            cur.execute("DELETE FROM memories WHERE source_url LIKE 'qd-feed://test-evt_0000%'")
 
         with patch("scripts.migrate.ingest_eventlog.EVENTLOG_PATH", eventlog_file):
             stats = ingest_eventlog(dry_run=True)
 
         assert stats["processed"] == 3
 
-        with test_db.cursor() as cur:
-            cur.execute("SELECT count(*) FROM memories WHERE source_url LIKE 'qd-feed://evt_0000%'")
+        with test_conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM memories WHERE source_url LIKE 'qd-feed://test-evt_0000%'")
             assert cur.fetchone()[0] == 0

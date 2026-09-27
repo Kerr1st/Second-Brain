@@ -12,7 +12,7 @@ import uuid
 import pytest
 
 from scripts import skim_probe as sp
-from src.backends.cost import SpendCapExceeded, SpendTracker
+from src.backends.cost import SpendCapExceeded, SpendTracker, UsageUnavailable
 from src.prompts.skim import PROMPT_VERSION, SKIM_SYSTEM_PROMPT
 from src.skim.schema import SKIM_SCHEMA
 
@@ -37,6 +37,14 @@ def _record(summary="Meeting notes agreeing to move the beta launch to the 14th.
            "novelty": 2, "salience": salience, "contradiction_hint": None, "doc_kind": "conversation"}
     rec.update(over)
     return rec
+
+
+def _paid_error(message):
+    error = ValueError(message)
+    error.model_response_received = True
+    error.usage = {"inputTokens": 0, "outputTokens": 0}
+    error.usage_source = "real"
+    return error
 
 
 class _FakeInvoker:
@@ -95,9 +103,9 @@ class TestSkimDocument:
         assert rec["valid"] is True
 
     def test_invoker_error_is_recorded_not_fatal(self):
-        inv = _FakeInvoker([RuntimeError("Throttled: slow down")])
+        inv = _FakeInvoker([_paid_error("synthetic parse error")])
         rec = sp.skim_document(_doc(DOC_A), inv, MODEL, SpendTracker(cap_usd=1))
-        assert rec["error"].startswith("RuntimeError: Throttled") and rec["valid"] is None
+        assert rec["error"] == "ValueError" and rec["valid"] is None
         assert rec["cost_usd"] == 0.0
 
     def test_dry_run_makes_no_call(self):
@@ -114,7 +122,7 @@ class TestRunProbeAndAggregate:
             _record(summary="", salience=0, decisions=["the author recommends reading the second one",
                                                         "everyone must migrate by Monday"]),  # 1 verbatim, 1 fabricated
             _record(salience=4),                                                                # invalid
-            RuntimeError("boom"),                                                               # error
+            _paid_error("boom"),                                                               # error
         ])
         seen = []
         recs = sp.run_probe(docs, inv, MODEL, SpendTracker(cap_usd=1), sink=seen.append)
@@ -264,3 +272,28 @@ class TestNoWrites:
         src = open(sp.__file__, encoding="utf-8").read()
         assert not re.search(r"(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+memories", src, re.I)
         assert "SELECT id, title, source_type, created_at, content FROM memories" in src
+
+
+def test_probe_rejects_fable_before_invoker_constructor(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sp, "BedrockInvoker", lambda **kwargs: calls.append(kwargs))
+    with pytest.raises(ValueError):
+        sp.make_invoker("claude-fable-5-1", service_tier=None, temperature=None, max_tokens=100)
+    assert calls == []
+
+
+def test_probe_stops_unknown_transport_spend():
+    invoker = _FakeInvoker([TimeoutError("synthetic timeout"), _record()])
+    with pytest.raises(UsageUnavailable):
+        sp.run_probe([_doc(DOC_A), _doc(DOC_B)], invoker, MODEL, SpendTracker(1))
+    assert len(invoker.calls) == 1
+
+
+def test_failed_probe_response_is_still_billed():
+    failure = _paid_error("synthetic parse error")
+    failure.usage = {"inputTokens": 1000, "outputTokens": 100}
+    tracker = SpendTracker(1)
+    rec = sp.skim_document(_doc(DOC_A), _FakeInvoker([failure]), MODEL, tracker)
+    assert rec["error"] == "ValueError"
+    assert rec["cost_usd"] == pytest.approx(0.000605)
+    assert tracker.calls == 1

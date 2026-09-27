@@ -55,6 +55,48 @@ def _write_metrics_line(metrics: dict, run_id: str | None, metrics_dir: str) -> 
         logger.debug("Failed to record LLM call metrics", exc_info=True)
 
 
+# Corpus policy applies at resolution and immediately before invocation.
+AGENT_ROLES = ("explorer", "thinker", "skeptic", "advocate", "epistemologist", "methodologist")
+BEDROCK_ONLY_ROLES = frozenset({"skim", "distill", "codex_semantic", "editor"})
+CORPUS_ROLES = frozenset(AGENT_ROLES) | BEDROCK_ONLY_ROLES
+DENIED_BACKENDS_FOR_CORPUS = frozenset({"kiro"})
+DENIED_MODEL_SUBSTRINGS = frozenset({"fable"})
+
+
+class CorpusRoutingError(ValueError):
+    """A corpus route violates the configured data boundary."""
+
+
+class ModelRefusalError(ValueError):
+    """The provider explicitly refused or filtered the requested completion."""
+
+
+def corpus_role_for_stage(stage: str | None) -> str | None:
+    if stage in CORPUS_ROLES:
+        return stage
+    if isinstance(stage, str) and stage.startswith(("evaluator:", "replay:")):
+        return stage.split(":", 1)[1]
+    return {
+        "revision": "thinker", "grounding_audit": "epistemologist",
+        "weekly_digest": "skim", "skim_probe": "skim", "revise_probe": "thinker", "express_editor": "editor",
+        "distill_contradiction": "distill", "redistill": "distill",
+    }.get(stage)
+
+
+def assert_corpus_route(backend: str, model: str, role: str) -> None:
+    """Reject unsafe routes, including model overrides, before sending content."""
+    if role not in CORPUS_ROLES:
+        return
+    if backend in DENIED_BACKENDS_FOR_CORPUS:
+        raise CorpusRoutingError(f"Corpus role {role!r} cannot run on backend {backend!r}")
+    if not isinstance(model, str) or not model.strip():
+        raise CorpusRoutingError(f"Corpus role {role!r} requires an explicit model")
+    if any(needle in model.lower() for needle in DENIED_MODEL_SUBSTRINGS):
+        raise CorpusRoutingError(f"Corpus role {role!r} cannot run on model {model!r}")
+    if role in BEDROCK_ONLY_ROLES and backend != "bedrock":
+        raise CorpusRoutingError(f"Corpus role {role!r} must run on direct Bedrock")
+
+
 class InvocationResult(TypedDict):
     """Normalized return of every :meth:`Invoker.invoke`.
 
@@ -207,9 +249,9 @@ def assert_backend_supports_role(backend: str, role: str) -> None:
             f"(supports_mcp=False). Routing the Explorer to a Direct-API backend is the "
             f"deferred B1 decoupling — see docs/DREAM-CYCLE-MCP-DECOUPLING.md."
         )
-    if role == "skim" and caps.supports_mcp:
+    if role in BEDROCK_ONLY_ROLES and backend != "bedrock":
         raise ValueError(
-            f"The skim role must run on a tool-less Direct-API backend (bedrock), not on the "
+            f"The {role} role must run on a tool-less Direct-API backend (bedrock), not on the "
             f"agentic CLI {backend!r}: it sends every arriving document's text to its model, "
             f"and that text stays inside the AWS account — see docs/PLAN-skim-stage.md §3."
         )

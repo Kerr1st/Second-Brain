@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.backends.cost import SpendCapExceeded, SpendTracker
+from src.backends.cost import SpendCapExceeded, SpendTracker, UsageUnavailable
 from src.prompts.skim import PROMPT_VERSION, SKIM_SYSTEM_PROMPT
 from src.skim import runner
 from src.skim.runner import SkimResult, skim_window
@@ -131,13 +131,9 @@ class TestHappyPath:
         res, _, _ = _run([_doc(), _doc()], [_record(), _record()], tracker=tracker)
         assert tracker.calls == 2 and tracker.total_usd == pytest.approx(res.cost_usd)
 
-    def test_callable_tracker_is_accepted(self):
-        seen = []
-        def record_spend(model, usage):
-            seen.append((model, usage["inputTokens"]))
-            return 0.01
-        res, _, _ = _run([_doc()], [_record()], tracker=record_spend)
-        assert seen == [(MODEL, 3000)] and res.cost_usd == pytest.approx(0.01)
+    def test_bare_callback_cannot_bypass_accounting_guards(self):
+        with pytest.raises(TypeError, match="SpendTracker"):
+            _run([_doc()], [_record()], tracker=lambda model, usage: 0.0)
 
     def test_bad_tracker_type_is_rejected(self):
         with pytest.raises(TypeError):
@@ -202,12 +198,16 @@ class TestIdempotency:
 
 
 class TestFailureIsolation:
-    def test_model_error_counts_as_failed_and_the_rest_continue(self):
+    def test_unknown_model_spend_stops_before_further_documents(self):
         docs = [_doc(), _doc(DOC_B, "article"), _doc()]
-        res, inv, store = _run(docs, [RuntimeError("throttled"), _record(), TimeoutError("slow")])
-        assert (res.skimmed, res.failed, res.invalid) == (1, 2, 0)
-        assert len(inv.calls) == 3 and len(store.rows) == 1
-        assert res.cost_usd == pytest.approx(3000 * 0.165e-6 + 200 * 1.375e-6, abs=1e-7)  # only the reply
+        inv = FakeInvoker([RuntimeError("throttled"), _record(), _record()])
+        tracker = SpendTracker(9.0)
+        with pytest.raises(UsageUnavailable):
+            skim_window(WINDOW, invoker=inv, model=MODEL, prompt_version=PROMPT_VERSION,
+                        tracker=tracker, cap_usd=1.0, run_id="r",
+                        fetch_docs=lambda ws: docs, store=FakeStore())
+        assert len(inv.calls) == 1
+        assert tracker.blocked_reason
 
     def test_invalid_reply_counts_as_invalid_and_is_still_metered(self):
         res, _, store = _run([_doc(), _doc()], [_record(salience=4), _record()])
@@ -351,11 +351,28 @@ class TestLoggingIsCountsOnly:
         summary = "A summary sentence that must not be logged."
         quote = "we agreed to move the beta launch to the 14th"
         docs = [_doc(title=title), _doc(title=title), _doc(title=title, content="x" * 300)]
+        failure = ValueError(f"failed on {title}")
+        failure.model_response_received = True
+        failure.usage = {"inputTokens": 3000, "outputTokens": 100}
+        failure.usage_source = "real"
         with caplog.at_level(logging.DEBUG, logger="src.skim.runner"):
-            _run(docs, [_record(summary=summary, decisions=[quote]), RuntimeError(f"failed on {title}"),
+            _run(docs, [_record(summary=summary, decisions=[quote]), failure,
                         _record(doc_kind=title)], max_doc_chars=100)
         text = caplog.text
         for forbidden in (title, summary, quote, "Priya", "Tomasz", "Orrery", DOC_A.splitlines()[0]):
             assert forbidden not in text
         assert "1 skimmed" in text and "1 failed" in text and "1 invalid" in text and "3 truncated" in text
-        assert "RuntimeError" in text                    # the class is logged, not the message
+        assert "ValueError" in text                    # the class is logged, not the message
+
+
+def test_paid_invalid_provider_response_counts_toward_skim_subcap():
+    error = ValueError("synthetic malformed provider output")
+    error.model_response_received = True
+    error.usage = {"inputTokens": 2_000_000, "outputTokens": 0}
+    error.usage_source = "real"
+    result, invoker, store = _run([_doc(), _doc()], [error, _record()], cap=0.10)
+    assert result.failed == 1
+    assert result.cost_usd == pytest.approx(0.66)
+    assert result.aborted_on_cap
+    assert len(invoker.calls) == 1
+    assert store.rows == {}

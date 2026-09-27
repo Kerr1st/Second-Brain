@@ -51,7 +51,7 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
     k = 60  # RRF constant
     prefetch = limit * 4  # fetch more candidates for fusion
 
-    conditions = [sql.SQL("embedding IS NOT NULL")]
+    conditions = [sql.SQL("TRUE")]
     params_base = []
     if type:
         conditions.append(sql.SQL("type = %s"))
@@ -84,11 +84,12 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
                 "SELECT id, 1 - (embedding <=> %s::vector) AS similarity"
                 " FROM memories {where}"
                 " ORDER BY embedding <=> %s::vector LIMIT %s"
-            ).format(where=where)
+            ).format(where=where + sql.SQL(" AND embedding IS NOT NULL"))
             cur.execute(vec_query, vec_params)
             vec_results = {str(r["id"]): i + 1 for i, r in enumerate(cur.fetchall())}
 
-            # Full-text search — AND-first, OR as fallback. OR-ing every term lets a
+            # Full-text search includes unembedded sources and parent records.
+            # AND-first, OR as fallback. OR-ing every term lets a
             # common word ("stage") fill the whole leg with documents that never
             # mention the rare one ("skim"); the AND leg puts documents containing
             # every term first, and OR only tops the leg up when AND is short.

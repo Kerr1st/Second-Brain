@@ -709,9 +709,9 @@ def test_semantic_failure_is_atomic_and_retries_the_same_unprocessed_tail(
     assert retried.unchanged == 1
     assert retried.semantic_processed == 1
     assert retried.failed == 0
-    assert tuple(turn.turn_id for turn in semantic.calls[0][1]) == tuple(
-        turn.turn_id for turn in semantic.calls[1][1]
-    )
+    assert len(semantic.calls) == 1  # Validated output survives the embedding outage.
+    assert "semantic_pending" in metadata
+    assert "semantic_attempts" not in metadata
 
 
 def test_combined_pass_persists_searchable_segments_memories_and_exact_provenance(
@@ -1260,7 +1260,7 @@ def test_attempt_bound_honours_its_environment_override(
     assert metadata["semantic_abandoned"]["attempts"] == expected_calls
 
 
-def test_new_turns_reset_the_semantic_attempt_budget(
+def test_new_turns_do_not_revive_an_abandoned_semantic_batch(
     test_db, clean_tables, tmp_path, monkeypatch
 ):
     home = _real_codex_home(tmp_path, turn_indexes=(0, 1))
@@ -1275,16 +1275,16 @@ def test_new_turns_reset_the_semantic_attempt_budget(
         codex_capture.run_codex_capture(NOW, backfill=True)
     _, _, abandoned_metadata, _, _ = _task_row()
 
-    # A new Agent Turn is a new unprocessed tail, so the budget starts over.
+    # Later arrivals cannot revive the same failed batch and its paid retries.
     _write_rollout(home, turn_indexes=(0, 1, 2))
     resumed = codex_capture.run_codex_capture(NOW, backfill=True)
     _, _, resumed_metadata, _, _ = _task_row()
 
-    assert len(semantic.calls) == bound + 1
-    assert (resumed.refreshed, resumed.failed, resumed.semantic_abandoned) == (1, 1, 0)
+    assert len(semantic.calls) == bound
+    assert (resumed.refreshed, resumed.failed, resumed.semantic_abandoned) == (1, 0, 1)
     assert abandoned_metadata["semantic_abandoned"]["attempts"] == bound
-    assert "semantic_abandoned" not in resumed_metadata
-    assert resumed_metadata["semantic_attempts"]["count"] == 1
+    assert resumed_metadata["semantic_abandoned"] == abandoned_metadata["semantic_abandoned"]
+    assert resumed_metadata["semantic_attempts"]["count"] == bound
     assert len(resumed_metadata["turns"]) == 3
     assert resumed_metadata["semantic_cursor"] is None
 
@@ -1359,3 +1359,118 @@ def test_semantic_contract_identity_includes_prompt_version_and_model():
 
     assert contract == f"{codex_capture.SEMANTIC_PROMPT_VERSION}:anthropic.opus-5"
     assert fallback == codex_capture.SEMANTIC_PROMPT_VERSION
+
+
+def test_semantic_batches_commit_incremental_progress(test_db, clean_tables, tmp_path, monkeypatch):
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(*([lambda previous, turns: _one_segment(previous, turns)] * 3))
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+    monkeypatch.setattr(codex_capture, "SEMANTIC_BATCH_TURNS", 1)
+    for index in range(3):
+        report = codex_capture.run_codex_capture(NOW, backfill=True)
+        _, _, metadata, _, _ = _task_row()
+        assert report.semantic_processed == 1
+        assert metadata["semantic_cursor"] == metadata["turns"][index]["turn_id"]
+        assert "semantic_pending" not in metadata
+    assert [len(call[1]) for call in semantic.calls] == [1, 1, 1]
+
+
+def test_provider_outages_never_abandon_evidence(test_db, clean_tables, tmp_path, monkeypatch):
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(*([TimeoutError("provider unavailable")] * 4))
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+    for _ in range(4):
+        report = codex_capture.run_codex_capture(NOW, backfill=True)
+        assert report.failed == 1
+        assert report.semantic_abandoned == 0
+    _, _, metadata, _, _ = _task_row()
+    assert "semantic_attempts" not in metadata
+    assert metadata["semantic_cursor"] is None
+
+
+def test_oversized_turn_is_retained_without_model_call(test_db, clean_tables, tmp_path, monkeypatch):
+    home = _real_codex_home(tmp_path)
+    semantic = _AlwaysFailingSemanticPass()
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+    monkeypatch.setattr(codex_capture, "SEMANTIC_BATCH_CHARS", 1)
+    report = codex_capture.run_codex_capture(NOW, backfill=True)
+    assert report.captured == 1
+    assert report.failures[0].stage == "semantic_input"
+    assert semantic.calls == []
+    assert len(_task_row()[2]["turns"]) == 3
+
+
+def test_budget_stop_does_not_consume_contract_attempt(test_db, clean_tables, tmp_path, monkeypatch):
+    from src.backends.cost import SpendCapExceeded
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(SpendCapExceeded("batch cost exhausted"))
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+    report = codex_capture.run_codex_capture(NOW, backfill=True)
+    assert report.failed == 1
+    assert report.failures[0].stage == "semantic_budget"
+    assert "semantic_attempts" not in _task_row()[2]
+
+
+def test_semantic_backend_resolves_dedicated_role_and_uses_one_tracker(monkeypatch):
+    from src.backends.resolver import CODEX_SEMANTIC_ROLE
+    calls = []
+    spec = SimpleNamespace(effort=None, model="test-model")
+    invoker = object()
+    def resolve(role):
+        assert role == CODEX_SEMANTIC_ROLE
+        return invoker, spec
+    def invoke(actual, actual_spec, tracker, *args, **kwargs):
+        assert actual is invoker and actual_spec is spec
+        calls.append(tracker)
+        return {"output": {"segments": [{"title": "Synthetic", "turn_ids": ["turn-1"]}], "memories": []}}
+    monkeypatch.setattr(codex_capture, "resolve_stage", resolve)
+    monkeypatch.setattr(codex_capture, "invoke_metered", invoke)
+    semantic = codex_capture._BackendSemanticPass()
+    semantic.run(previous_segment=None, turns=())
+    semantic.run(previous_segment=None, turns=())
+    assert calls == [semantic.tracker, semantic.tracker]
+
+
+def test_malformed_empty_semantic_result_is_a_contract_failure():
+    with pytest.raises(codex_capture.SemanticResultError):
+        codex_capture._parse_semantic_output({"segments": [], "memories": []})
+
+
+@pytest.mark.parametrize("output", [
+    {"segments": [{"title": None, "turn_ids": ["t"]}], "memories": []},
+    {"segments": [{"title": 12, "turn_ids": ["t"]}], "memories": []},
+    {"segments": [{"title": "Title", "turn_ids": "t"}], "memories": []},
+    {"segments": [{"title": "Title", "turn_ids": ["t"]}],
+     "memories": [{"segment": 0, "kind": "insight", "title": "Title", "content": None, "supporting_turn_ids": ["t"]}]},
+])
+def test_wrong_field_types_consume_contract_budget(output):
+    with pytest.raises(codex_capture.SemanticResultError):
+        codex_capture._parse_semantic_output(output)
+
+
+def test_semantic_cap_does_not_starve_later_raw_capture(test_db, clean_tables, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from src.backends.cost import SpendCapExceeded
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(SpendCapExceeded("threshold reached"))
+    services = _services(home, semantic, tmp_path / "capture.lock")
+    reference = next(iter(services.source.enumerate_tasks(NOW)))
+    snapshot = services.source.fetch_task(reference)
+    later = replace(reference, native_task_id="synthetic-later-task", source_identity="synthetic://later")
+    later_snapshot = replace(snapshot, native_task_id=later.native_task_id, source_identity=later.source_identity)
+    services.source = SimpleNamespace(
+        enumerate_tasks=lambda now: (reference, later),
+        fetch_task=lambda ref: later_snapshot if ref is later else snapshot,
+        skipped_delegated=0, skipped_unknown_ownership=0,
+    )
+    _install_services(monkeypatch, services)
+    report = codex_capture.run_codex_capture(NOW, backfill=True)
+    assert report.captured == 2
+    assert report.failed == 1
+    assert report.semantic_skipped_budget == 1
+    assert len(semantic.calls) == 1
+    with db.get_connection() as conn, conn.cursor() as cursor:
+        cursor.execute("SELECT metadata FROM memories WHERE metadata->>'record_kind' = 'captured_task'")
+        rows = cursor.fetchall()
+    assert len(rows) == 2
+    assert all(row[0]["semantic_cursor"] is None and len(row[0]["turns"]) == 3 for row in rows)

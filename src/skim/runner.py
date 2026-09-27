@@ -35,7 +35,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
-from src.backends.cost import SpendCapExceeded, estimate_cost_usd
+from src.backends.cost import SpendCapExceeded, SpendTracker, UsageUnavailable, invoke_metered
+from src.backends.resolver import RoleBackend, SKIM_ROLE
 from src.prompts.skim import SKIM_SYSTEM_PROMPT, build_skim_request
 from src.skim import store as default_store
 from src.skim.faithfulness import stored_form
@@ -99,16 +100,6 @@ class SkimResult:
         return d
 
 
-def _record_fn(tracker: Any) -> Callable[[str, dict | None], float]:
-    """``tracker`` may be a SpendTracker (``.record(model, usage)``) or a bare
-    ``record_spend(model, usage) -> cost`` callable."""
-    if hasattr(tracker, "record"):
-        return tracker.record
-    if callable(tracker):
-        return tracker
-    raise TypeError("tracker must be a SpendTracker or a callable (model, usage) -> cost")
-
-
 def _first(output: Any) -> Any:
     if isinstance(output, list):
         return output[0] if output else None
@@ -156,8 +147,7 @@ def skim_window(
             ``invoke`` accepts ``schema=``.
         model: Model id, for pricing and the idempotency key.
         prompt_version: :data:`src.prompts.skim.PROMPT_VERSION` (idempotency key).
-        tracker: The run's ``SpendTracker`` or a ``record_spend(model, usage)``
-            callable; every call's usage goes through it (run cap).
+        tracker: The run's ``SpendTracker``; every call's usage goes through it (run cap).
         cap_usd: The skim's own sub-cap; the loop stops when its spend reaches it.
         run_id: Attribution for the stored rows and the metrics line.
         fetch_docs: Optional ``window_start -> [doc]`` override (tests); docs
@@ -167,7 +157,9 @@ def skim_window(
         max_doc_chars: Documents longer than this are cut and flagged.
     """
     store = store if store is not None else default_store
-    record_spend = _record_fn(tracker)
+    if not isinstance(tracker, SpendTracker):
+        raise TypeError("tracker must be a SpendTracker")
+    spec = RoleBackend(SKIM_ROLE, "bedrock", model, effort)
     t0 = time.monotonic()
     result = SkimResult(model=model, prompt_version=prompt_version, window_start=window_start)
     coercion_classes: dict[str, int] = {}
@@ -196,27 +188,33 @@ def skim_window(
         request = build_skim_request(content, doc.get("source_type"), doc.get("title"), doc.get("created_at"))
 
         cap_exc: SpendCapExceeded | None = None
+        before = tracker.total_usd
         try:
-            reply = invoker.invoke(SKIM_SYSTEM_PROMPT, request, tools=False, effort=effort, timeout=timeout,
-                                   stage="skim", run_id=run_id, schema=SKIM_SCHEMA)
-        except SpendCapExceeded:
+            reply = invoke_metered(
+                invoker, spec, tracker, SKIM_SYSTEM_PROMPT, request,
+                tools=False, effort=effort, timeout=timeout,
+                stage="skim", run_id=run_id, schema=SKIM_SCHEMA,
+            )
+        except UsageUnavailable:
             raise
-        except Exception as exc:  # noqa: BLE001 — one document must never stop the rest
+        except SpendCapExceeded as exc:
+            # A completed response that crossed the cap can still be stored.
+            # A failed/truncated response has no usable record to preserve.
+            reply = getattr(exc, "invocation_result", None)
+            if reply is None:
+                raise
+            cap_exc = exc
+        except Exception as exc:
             result.failed += 1
+            result.cost_usd += tracker.total_usd - before
+            if tracker.blocked_reason:
+                raise UsageUnavailable(tracker.blocked_reason) from exc
             logger.warning("Skim call failed for memory %s (%d/%d): %s", doc_id[:8], n, len(docs),
                            type(exc).__name__)
             continue
 
-        usage = reply.get("usage") if isinstance(reply, dict) else None
-        usage = usage if isinstance(usage, dict) else None
-        cost = 0.0
-        if usage is not None:
-            try:
-                cost = float(record_spend(model, usage) or 0.0)
-            except SpendCapExceeded as exc:
-                # The call was made and paid for: keep its record, then propagate.
-                cap_exc = exc
-                cost = estimate_cost_usd(model, usage)
+        usage = reply.get("usage")
+        cost = tracker.total_usd - before
         result.cost_usd += cost
 
         try:

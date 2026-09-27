@@ -33,8 +33,8 @@ from typing import Callable
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.backends.cost import SpendCapExceeded, SpendTracker  # noqa: E402
-from src.backends.base import BACKEND_CAPABILITIES  # noqa: E402
+from src.backends.cost import SpendCapExceeded, SpendTracker, UsageUnavailable, invoke_metered  # noqa: E402
+from src.backends.base import BACKEND_CAPABILITIES, assert_corpus_route  # noqa: E402
 from src.backends.resolver import DEFAULT_ADAPTERS, RoleBackend, default_resolver  # noqa: E402
 from src.dream_cycle.consensus import tally_consensus  # noqa: E402
 from src.dream_cycle.packet import (  # noqa: E402
@@ -139,11 +139,16 @@ def replay(rows: list[dict], seats: list[str], resolver, tracker: SpendTracker, 
     records: list[dict] = []
     for row in rows:
         cand = candidate_from_row(row, (candidate_overrides or {}).get(row["id"]))
-        candidate_json = json.dumps(asdict(cand), default=str)
+        projection = asdict(cand)
+        projection.pop("revision", None)
+        candidate_json = json.dumps(projection, default=str)
         sources = sources_fn(cand)
         for seat in seats:
             spec = overrides.get(seat) or resolver.spec_for(seat)
             _require_direct_api(seat, spec)
+            if spec.role != seat:
+                raise ValueError("Override role does not match requested seat")
+            assert_corpus_route(spec.backend, spec.model, seat)
             eff = effort or spec.effort
             prompt = prompt_fn(role=seat, candidate_json=candidate_json, source_memories_content=sources)
             rec = {"candidate_id": row["id"], "run_id": str(row["run_id"]), "title": cand.title[:120],
@@ -157,21 +162,26 @@ def replay(rows: list[dict], seats: list[str], resolver, tracker: SpendTracker, 
             invoker = (resolver.invoker_for(seat) if seat not in overrides
                        else DEFAULT_ADAPTERS[spec.backend](model=spec.model))
             t0 = time.time()
+            before = tracker.total_usd
             try:
-                result = invoker.invoke(
+                result = invoke_metered(invoker, spec, tracker,
                     system_prompt=prompt,
                     user_message=(f"Please evaluate this candidate insight as the {seat}. "
                                   "Return your verdict as JSON with 'verdict' and 'reasoning' fields."),
                     effort=eff, stage=f"replay:{seat}", schema=schema_for(variant))
-            except Exception as e:  # noqa: BLE001 — one bad call must not sink the experiment
-                rec.update({"verdict": "ERROR", "reasoning": f"{type(e).__name__}: {e}"[:400], "cost_usd": 0.0,
+            except SpendCapExceeded:
+                raise
+            except Exception as e:
+                if tracker.blocked_reason:
+                    raise UsageUnavailable(tracker.blocked_reason) from e
+                rec.update({"verdict": "ERROR", "reasoning": type(e).__name__, "cost_usd": round(tracker.total_usd - before, 6),
                             "latency_s": round(time.time() - t0, 1)})
                 records.append(rec); (sink or (lambda r: None))(rec)
                 continue
             output = result.get("output") or {}
             if isinstance(output, list):
                 output = output[0] if output else {}
-            cost = tracker.record(spec.model, result.get("usage")) if isinstance(result.get("usage"), dict) else 0.0
+            cost = tracker.total_usd - before
             rec.update({"verdict": output.get("verdict", "REJECT"), "reasoning": (output.get("reasoning") or "")[:4000],
                         "score": output.get("score"), "blocking_issues": output.get("blocking_issues"),
                         "advisory_issues": output.get("advisory_issues"),

@@ -16,21 +16,21 @@ SAMPLE_INTERACTIONS = [
         "id": "int_00001",
         "timestamp": "2026-04-13T20:03:51.935207",
         "interaction_type": "link_click",
-        "feed_event_id": "evt_00001",
+        "feed_event_id": "test-evt_00001",
         "details": {"label": "Open in Slack", "url": "https://slack.com/archives/C123"},
     },
     {
         "id": "int_00002",
         "timestamp": "2026-04-13T21:43:34.183034",
         "interaction_type": "card_resolve",
-        "feed_event_id": "evt_00002",
+        "feed_event_id": "test-evt_00002",
         "details": {"reason": "Done manually"},
     },
     {
         "id": "int_00003",
         "timestamp": "2026-04-14T06:16:04.708872",
         "interaction_type": "card_auto_resolve",
-        "feed_event_id": "evt_00003",
+        "feed_event_id": "test-evt_00003",
         "details": {"reason": "expired"},
     },
 ]
@@ -60,9 +60,9 @@ class TestParseInteractions:
     def test_group_by_event(self):
         from scripts.migrate.ingest_eventlog import group_interactions_by_event
         grouped = group_interactions_by_event(SAMPLE_INTERACTIONS)
-        assert "evt_00001" in grouped
-        assert len(grouped["evt_00001"]) == 1
-        assert grouped["evt_00001"][0]["interaction_type"] == "link_click"
+        assert "test-evt_00001" in grouped
+        assert len(grouped["test-evt_00001"]) == 1
+        assert grouped["test-evt_00001"][0]["interaction_type"] == "link_click"
 
     def test_classify_engagement(self):
         from scripts.migrate.ingest_eventlog import classify_engagement
@@ -118,28 +118,13 @@ class TestInteractionProperties:
 # E2E Tests
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def test_db():
-    import psycopg2
-    try:
-        conn = psycopg2.connect(
-            host=os.environ.get("DB_HOST", "localhost"),
-            port=int(os.environ.get("DB_PORT", "5432")),
-            dbname="memory_bank_test",
-            user=os.environ.get("DB_USER", "memory_bank"),
-            password=os.environ.get("DB_PASSWORD", "memory_bank"),
-        )
-        conn.autocommit = True
-        yield conn
-        conn.close()
-    except psycopg2.OperationalError:
-        pytest.skip("PostgreSQL not available")
+
 
 
 @pytest.fixture
-def seeded_feed_events(test_db):
+def seeded_feed_events(test_conn):
     """Insert feed event memories that interactions will enrich."""
-    with test_db.cursor() as cur:
+    with test_conn.cursor() as cur:
         for i in range(1, 4):
             cur.execute("""
                 INSERT INTO memories (type, title, content, source_url, source_type, metadata, tags)
@@ -147,29 +132,29 @@ def seeded_feed_events(test_db):
                 ON CONFLICT DO NOTHING
             """, (
                 f"Test Event {i}",
-                f"qd-feed://evt_0000{i}",
+                f"qd-feed://test-evt_0000{i}",
                 ["qd-feed"],
             ))
 
 
 class TestInteractionsE2E:
 
-    def test_enrich_adds_interaction_metadata(self, test_db, seeded_feed_events, interactions_file):
+    def test_enrich_adds_interaction_metadata(self, test_conn, seeded_feed_events, interactions_file):
         from scripts.migrate.ingest_eventlog import enrich_with_interactions
 
         with patch("scripts.migrate.ingest_eventlog.INTERACTIONS_PATH", interactions_file):
             stats = enrich_with_interactions(dry_run=False)
 
-        assert stats["enriched"] >= 2  # evt_00001 and evt_00002 have active interactions
+        assert stats["enriched"] >= 2  # test-evt_00001 and test-evt_00002 have active interactions
 
-        with test_db.cursor() as cur:
-            cur.execute("SELECT metadata FROM memories WHERE source_url = 'qd-feed://evt_00001'")
+        with test_conn.cursor() as cur:
+            cur.execute("SELECT metadata FROM memories WHERE source_url = 'qd-feed://test-evt_00001'")
             row = cur.fetchone()
-            if row:
-                meta = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                assert "interactions" in meta
+            assert row is not None
+            meta = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            assert "interactions" in meta
 
-    def test_enrich_is_idempotent(self, test_db, seeded_feed_events, interactions_file):
+    def test_enrich_is_idempotent(self, test_conn, seeded_feed_events, interactions_file):
         from scripts.migrate.ingest_eventlog import enrich_with_interactions
 
         with patch("scripts.migrate.ingest_eventlog.INTERACTIONS_PATH", interactions_file):
@@ -179,21 +164,21 @@ class TestInteractionsE2E:
         assert stats2["enriched"] == 0
         assert stats2["skipped"] > 0
 
-    def test_dry_run_changes_nothing(self, test_db, seeded_feed_events, interactions_file):
+    def test_dry_run_changes_nothing(self, test_conn, seeded_feed_events, interactions_file):
         from scripts.migrate.ingest_eventlog import enrich_with_interactions
 
         # Clear any previous enrichment
-        with test_db.cursor() as cur:
-            cur.execute("UPDATE memories SET metadata = '{}' WHERE source_url LIKE 'qd-feed://evt_0000%'")
+        with test_conn.cursor() as cur:
+            cur.execute("UPDATE memories SET metadata = '{}' WHERE source_url LIKE 'qd-feed://test-evt_0000%'")
 
         with patch("scripts.migrate.ingest_eventlog.INTERACTIONS_PATH", interactions_file):
             stats = enrich_with_interactions(dry_run=True)
 
         assert stats["enriched"] > 0
 
-        with test_db.cursor() as cur:
-            cur.execute("SELECT metadata FROM memories WHERE source_url = 'qd-feed://evt_00001'")
+        with test_conn.cursor() as cur:
+            cur.execute("SELECT metadata FROM memories WHERE source_url = 'qd-feed://test-evt_00001'")
             row = cur.fetchone()
-            if row:
-                meta = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                assert "interactions" not in meta
+            assert row is not None
+            meta = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            assert "interactions" not in meta

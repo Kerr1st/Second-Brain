@@ -2,6 +2,12 @@
 
 from unittest.mock import Mock, patch
 
+from src.backends.cost import SpendTracker
+from src.backends.resolver import DISTILL_ROLE, RoleBackend
+
+SPEC = RoleBackend(role=DISTILL_ROLE, backend="bedrock", model="global.anthropic.claude-sonnet-5", effort="medium")
+USAGE = {"inputTokens": 100, "outputTokens": 20}
+
 import scripts.distill_sessions as ds
 from scripts.distill_sessions import valid_items, build_user_message, MAX_CHARS, DISTILL_TYPES
 
@@ -66,13 +72,13 @@ class TestDetectAndLinkContradiction:
 
     def test_positive_creates_contradicts_link(self):
         invoker = Mock()
-        invoker.invoke.return_value = {"output": {"contradicts": True, "reason": "reverses earlier choice"}}
+        invoker.invoke.return_value = {"output": {"contradicts": True, "reason": "reverses earlier choice"}, "usage": USAGE}
         prior = _decision("prior-1", "Prior", "we will use X", distilled_from="sessB")
         with patch.object(ds, "hybrid_search", return_value=[prior]), \
              patch.object(ds, "rerank", side_effect=lambda r, q: r), \
              patch.object(ds, "create_relationship") as crel:
             out = ds.detect_and_link_contradiction(
-                invoker, "new-1", "New", "we will use Y instead", [0.1], "sessA")
+                invoker, "new-1", "New", "we will use Y instead", [0.1], "sessA", spec=SPEC, tracker=SpendTracker(1.0))
         assert out == "prior-1"
         crel.assert_called_once()
         src, tgt, rel, note = crel.call_args[0]
@@ -81,12 +87,12 @@ class TestDetectAndLinkContradiction:
 
     def test_negative_creates_no_link(self):
         invoker = Mock()
-        invoker.invoke.return_value = {"output": {"contradicts": False, "reason": "different topic"}}
+        invoker.invoke.return_value = {"output": {"contradicts": False, "reason": "different topic"}, "usage": USAGE}
         prior = _decision("prior-1", "Prior", "unrelated", distilled_from="sessB")
         with patch.object(ds, "hybrid_search", return_value=[prior]), \
              patch.object(ds, "rerank", side_effect=lambda r, q: r), \
              patch.object(ds, "create_relationship") as crel:
-            out = ds.detect_and_link_contradiction(invoker, "new-1", "New", "content", [0.1], "sessA")
+            out = ds.detect_and_link_contradiction(invoker, "new-1", "New", "content", [0.1], "sessA", spec=SPEC, tracker=SpendTracker(1.0))
         assert out is None
         crel.assert_not_called()
 
@@ -95,7 +101,7 @@ class TestDetectAndLinkContradiction:
         with patch.object(ds, "hybrid_search", return_value=[]), \
              patch.object(ds, "rerank", side_effect=lambda r, q: r), \
              patch.object(ds, "create_relationship") as crel:
-            out = ds.detect_and_link_contradiction(invoker, "new-1", "New", "content", [0.1], "sessA")
+            out = ds.detect_and_link_contradiction(invoker, "new-1", "New", "content", [0.1], "sessA", spec=SPEC, tracker=SpendTracker(1.0))
         assert out is None
         invoker.invoke.assert_not_called()
         crel.assert_not_called()
@@ -113,9 +119,9 @@ class TestDistillRunsContradictionForDecisionsOnly:
         invoker.invoke.return_value = {"output": [
             {"type": "decision", "title": "D", "content": "decision body"},
             {"type": "insight", "title": "I", "content": "insight body"},
-        ]}
+        ], "usage": USAGE}
         detector = Mock(return_value=None)
-        with patch.object(ds, "KiroInvoker", return_value=invoker), \
+        with patch.object(ds, "resolve_stage", return_value=(invoker, SPEC)), \
              patch.object(ds, "get_processed_source_urls", return_value=set()), \
              patch.object(ds, "fetch_sessions", return_value=[("sessX", "kiro_cli_chat", "transcript")]), \
              patch.object(ds, "generate_embedding", return_value=[0.1]), \
@@ -128,9 +134,9 @@ class TestDistillRunsContradictionForDecisionsOnly:
 
     def test_detection_skipped_when_disabled(self):
         invoker = Mock()
-        invoker.invoke.return_value = {"output": [{"type": "decision", "title": "D", "content": "body"}]}
+        invoker.invoke.return_value = {"output": [{"type": "decision", "title": "D", "content": "body"}], "usage": USAGE}
         detector = Mock(return_value=None)
-        with patch.object(ds, "KiroInvoker", return_value=invoker), \
+        with patch.object(ds, "resolve_stage", return_value=(invoker, SPEC)), \
              patch.object(ds, "get_processed_source_urls", return_value=set()), \
              patch.object(ds, "fetch_sessions", return_value=[("sessX", "kiro_cli_chat", "t")]), \
              patch.object(ds, "generate_embedding", return_value=[0.1]), \
@@ -145,12 +151,12 @@ class TestDistillInvokerSettings:
 
     def test_invokes_extraction_model_with_bounded_timeout(self):
         invoker = Mock()
-        invoker.invoke.return_value = {"output": []}
-        with patch.object(ds, "KiroInvoker", return_value=invoker) as ctor, \
+        invoker.invoke.return_value = {"output": [], "usage": USAGE}
+        with patch.object(ds, "resolve_stage", return_value=(invoker, SPEC)) as ctor, \
              patch.object(ds, "get_processed_source_urls", return_value=set()), \
              patch.object(ds, "fetch_sessions", return_value=[("sessX", "kiro_cli_chat", "transcript")]):
             ds.distill()
-        ctor.assert_called_once_with(model=ds.DISTILL_MODEL)
+        ctor.assert_called_once_with(DISTILL_ROLE, resolver=None, model_override=ds.DISTILL_MODEL)
         kwargs = invoker.invoke.call_args.kwargs
         assert kwargs["timeout"] == ds.DISTILL_TIMEOUT >= 600
         assert kwargs["effort"] == ds.DISTILL_EFFORT
@@ -161,7 +167,7 @@ class TestDistillInvokerSettings:
         sessions = [(f"s{i}", "kiro_cli_chat", "c") for i in range(5)]
         with patch.object(ds, "get_connection") as gc:
             cur = gc.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
-            cur.fetchall.return_value = [(u, st, c) for u, st, c in sessions]
+            cur.fetchall.return_value = [(u, st, c, {}) for u, st, c in sessions]
             out = ds.fetch_sessions(("kiro_cli_chat",), 2, set())
         assert [u for u, _, _ in out] == ["s0", "s1"]
         assert "ORDER BY created_at DESC" in cur.execute.call_args[0][0]

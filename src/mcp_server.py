@@ -19,6 +19,7 @@ tool's normal return type instead of raising:
 Real failures (connection loss, unexpected constraint violations) still propagate.
 """
 
+import json
 import psycopg2.errors
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta, timezone
@@ -492,19 +493,17 @@ def memory_brief(window_days: int = 14, use_llm: bool = False) -> str:
     Args:
         window_days: how far back to pull recent dream-cycle insights (default 14;
             clamped to 0–365).
-        use_llm: write polished headlines via an LLM editor pass (slower, spawns a
-            subprocess); default False uses fast deterministic ranking.
+        use_llm: write polished headlines via an LLM editor pass (metered, policy-checked Bedrock call); default False uses fast deterministic ranking.
 
     Returns a scannable Markdown briefing (headlines first, detail below).
     """
-    class _NoLLM:
-        def invoke(self, *a, **k):
-            raise RuntimeError("deterministic")
-
-    window_days = clamp_days(14 if window_days is None else window_days, "window_days")
-    briefing = express.compose_briefing(window_days=window_days)
-    briefing = express.edit_briefing(briefing, invoker=None if use_llm else _NoLLM())
-    return express.render_markdown(briefing)
+    try:
+        window_days = clamp_days(14 if window_days is None else window_days, "window_days")
+        briefing = express.compose_briefing(window_days=window_days)
+        briefing = express.edit_briefing(briefing, use_llm=use_llm)
+        return express.render_markdown(briefing)
+    except ValidationError as exc:
+        return json.dumps({"error": str(exc)})
 
 
 if __name__ == "__main__":

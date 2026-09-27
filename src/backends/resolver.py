@@ -2,13 +2,13 @@
 
 Reads the committed per-machine profiles in ``config/backends.toml`` (selected by
 the ``SECOND_BRAIN_PROFILE`` env var; unset => the default profile, which
-reproduces today's all-Kiro behavior) and hands the orchestrator a concrete
+selects the controlled corpus-safe profile) and hands the orchestrator a concrete
 :class:`~src.backends.base.Invoker` per role, plus the resolved
 ``(backend, model, effort)`` for provenance.
 
-Invokers are cached per ``(backend, model, options)``, so an all-Kiro profile
-yields a single shared KiroInvoker across all roles — identical to today — while a
-role-diverse map reuses one client per distinct backend+model. See
+Invokers are cached per ``(backend, model, options)``. Corpus roles reject Kiro
+and Fable before adapter construction; data-processing roles use direct Bedrock.
+A role-diverse map reuses one client per distinct backend+model. See
 ``docs/MODEL-BACKENDS.md``.
 
 Adapter options (``options = { ... }`` on a role, skim stage 2026-09-20): a role
@@ -21,11 +21,15 @@ an option on another backend, or an unknown key, is rejected at config load.
 from __future__ import annotations
 
 import os
+import math
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from src.backends.base import BACKEND_CAPABILITIES, Invoker, assert_backend_supports_role
+from src.backends.base import (
+    AGENT_ROLES, CORPUS_ROLES, DENIED_BACKENDS_FOR_CORPUS, DENIED_MODEL_SUBSTRINGS,
+    BACKEND_CAPABILITIES, Invoker, assert_backend_supports_role, assert_corpus_route,
+)
 from src.backends.bedrock import BedrockInvoker
 from src.backends.claude_code import ClaudeCodeInvoker
 from src.backends.codex import CodexInvoker
@@ -52,21 +56,12 @@ ADAPTER_OPTIONS: dict[str, frozenset[str]] = {
     "bedrock": frozenset({"temperature", "service_tier", "max_tokens"}),
 }
 
-#: The thinking roles: agents that read slices and judge candidates.
-AGENT_ROLES = (
-    "explorer",
-    "thinker",
-    "skeptic",
-    "advocate",
-    "epistemologist",
-    "methodologist",
-)
-
-#: The skim stage (docs/PLAN-skim-stage.md): data processing over every arrival,
-#: Bedrock-only in every profile — corpus text never goes through an agentic CLI.
 SKIM_ROLE = "skim"
-
-VALID_ROLES = (*AGENT_ROLES, SKIM_ROLE)
+DISTILL_ROLE = "distill"
+CODEX_SEMANTIC_ROLE = "codex_semantic"
+EDITOR_ROLE = "editor"
+DREAM_ROLES = (*AGENT_ROLES, SKIM_ROLE)
+VALID_ROLES = (*DREAM_ROLES, DISTILL_ROLE, CODEX_SEMANTIC_ROLE, EDITOR_ROLE)
 
 _REQUIRED_ROLES = frozenset(VALID_ROLES)
 
@@ -99,6 +94,7 @@ def _validate_profile(name: str, role_map: dict[str, "RoleBackend"]) -> None:
                 f"backend profile {name!r}: role {role!r} uses unknown backend "
                 f"{spec.backend!r}. Valid backends: {sorted(BACKEND_CAPABILITIES)}."
             )
+        assert_corpus_route(spec.backend, spec.model, role)
         _validate_options(name, spec)
         # Every role/backend capability rule (Explorer needs tools, skim is
         # Bedrock-only) is checked here too, so a bad profile fails at load.
@@ -108,6 +104,15 @@ def _validate_profile(name: str, role_map: dict[str, "RoleBackend"]) -> None:
 def _validate_options(profile_name: str, spec: "RoleBackend") -> None:
     if not spec.options:
         return
+    options = spec.options
+    if "max_tokens" in options:
+        tokens = options["max_tokens"]
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
+            raise ValueError("max_tokens must be a positive integer")
+    if "temperature" in options:
+        temperature = options["temperature"]
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not math.isfinite(temperature) or not 0 <= temperature <= 1:
+            raise ValueError("temperature must be finite and between 0 and 1")
     allowed = ADAPTER_OPTIONS.get(spec.backend, frozenset())
     unknown = set(spec.options) - allowed
     if unknown:
@@ -150,7 +155,7 @@ def load_profiles(
     )
     with open(path, "rb") as f:
         data = tomllib.load(f)
-    default_profile = data.get("default_profile", "laptop")
+    default_profile = data.get("default_profile", "controlled")
     profiles: dict[str, dict[str, RoleBackend]] = {}
     for pname, roles in data.get("profiles", {}).items():
         role_map: dict[str, RoleBackend] = {}
@@ -168,6 +173,7 @@ def load_profiles(
                 effort=spec.get("effort"),
                 options=dict(options) if options else None,
             )
+        _validate_profile(pname, role_map)
         profiles[pname] = role_map
     return profiles, default_profile
 
@@ -188,14 +194,14 @@ class Resolver:
         self._profile = profile
         self._adapters = adapters if adapters is not None else DEFAULT_ADAPTERS
         self._cache: dict[tuple, Invoker] = {}
-        # Eager fail-fast: a tool-less Direct-API backend cannot run the Explorer
-        # (it needs the live MCP tool-loop), and the skim must not leave Bedrock
-        # (corpus text through an agentic CLI). Reject such a profile at
-        # construction rather than only when the role is first resolved mid-run.
-        # The lazy guard in invoker_for() stays as defense-in-depth for every role.
-        for guarded in ("explorer", SKIM_ROLE):
-            if guarded in self._profile:
-                assert_backend_supports_role(self._profile[guarded].backend, guarded)
+        # Partial programmatic profiles are useful to callers and tests, but
+        # every supplied route still obeys the exact same corpus boundary.
+        for role, spec in self._profile.items():
+            if role not in VALID_ROLES or spec.role != role:
+                raise ValueError(f"Invalid role mapping: {role!r} -> {spec.role!r}")
+            assert_corpus_route(spec.backend, spec.model, role)
+            assert_backend_supports_role(spec.backend, role)
+            _validate_options("programmatic", spec)
 
     def spec_for(self, role: str) -> RoleBackend:
         try:
@@ -207,6 +213,7 @@ class Resolver:
 
     def invoker_for(self, role: str) -> Invoker:
         spec = self.spec_for(role)
+        assert_corpus_route(spec.backend, spec.model, role)
         # Capability guards (Explorer needs tools; skim is Bedrock-only).
         assert_backend_supports_role(spec.backend, role)
         key = (spec.backend, spec.model, spec.options_key())
@@ -237,3 +244,24 @@ def default_resolver(
     # builds — never abort mid-run (after LLM spend) on a missing/typo'd role.
     _validate_profile(pname, profiles[pname])
     return Resolver(profiles[pname], adapters=adapters)
+
+
+def resolve_stage(role: str, *, resolver=None, model_override: str | None = None):
+    """Resolve a corpus stage and validate optional overrides before construction.
+
+    Consumers use this together with cost.invoke_metered; neither function
+    invokes a model while resolving configuration.
+    """
+    resolver = resolver or default_resolver()
+    spec = resolver.spec_for(role)
+    if spec.role != role or role not in CORPUS_ROLES:
+        raise ValueError(f"Invalid corpus stage {role!r}")
+    if model_override is not None:
+        spec = replace(spec, model=model_override)
+    assert_corpus_route(spec.backend, spec.model, role)
+    assert_backend_supports_role(spec.backend, role)
+    _validate_options("stage", spec)
+    if model_override is not None:
+        adapter = DEFAULT_ADAPTERS[spec.backend]
+        return adapter(model=spec.model, **(spec.options or {})), spec
+    return resolver.invoker_for(role), spec

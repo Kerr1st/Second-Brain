@@ -306,7 +306,7 @@ class TestInvoke:
         inv, client = self._invoker(
             _converse_response(_reasoning_block(), {"text": json.dumps(payload)}, usage=(479, 150))
         )
-        result = inv.invoke("sys", "user", effort="high", stage="evaluator:skeptic", run_id="r1")
+        result = inv.invoke("sys", "user", effort="high", stage="synthetic_adapter", run_id="r1")
 
         assert result["output"] == payload
         assert result["raw"] == json.dumps(payload)

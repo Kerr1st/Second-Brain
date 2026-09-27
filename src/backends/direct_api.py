@@ -40,6 +40,7 @@ from typing import Any, Optional
 
 from src.backends.base import (
     METRICS_DIR,
+    ModelRefusalError, assert_corpus_route, corpus_role_for_stage,
     InvocationResult,
     _write_metrics_line,
     parse_json_output,
@@ -101,6 +102,10 @@ class DirectApiInvoker:
             RuntimeError: If the provider call fails (transport error, auth
                 failure, throttling after retries, etc.).
         """
+        corpus_role = corpus_role_for_stage(stage)
+        if corpus_role:
+            assert_corpus_route(self.BACKEND_NAME, self.model, corpus_role)
+
         # --- Tools guard (Req 3.2, 3.3) ---
         if tools:
             raise ValueError(
@@ -138,23 +143,31 @@ class DirectApiInvoker:
                     raise mapped from exc
                 raise
 
-            # --- Raw extraction ---
-            raw = self._extract_raw(response)
-            metrics["output_chars"] = len(raw)
-
-            # --- Parse backstop (Req 8.1, 8.3) ---
-            parsed = self._parse(raw, metrics)
-
-            # --- Usage extraction (tolerate-and-warn) ---
+            # Usage belongs to the provider response, including refusals,
+            # truncated output and malformed JSON. Extract before parsing.
             usage, usage_source = self._extract_usage(
-                response=response, parsed=parsed, metrics=metrics
+                response=response, parsed=None, metrics=metrics
             )
-
-            metrics["success"] = True
             metrics["usage_source"] = usage_source
             if usage is not None:
                 metrics["real_input_tokens"] = usage.get("inputTokens")
                 metrics["real_output_tokens"] = usage.get("outputTokens")
+            try:
+                stop_reason = response.get("stopReason") if isinstance(response, dict) else None
+                if stop_reason in {"content_filtered", "guardrail_intervened", "refusal"}:
+                    raise ModelRefusalError(f"Provider refused completion ({stop_reason})")
+                raw = self._extract_raw(response)
+                metrics["output_chars"] = len(raw)
+                parsed = self._parse(raw, metrics)
+            except Exception as exc:
+                # Keep the original exception type for existing callers. Stage
+                # consumers can meter and classify returned contract failures.
+                exc.model_response_received = True
+                exc.usage = usage
+                exc.usage_source = usage_source
+                metrics["error"] = metrics.get("error") or type(exc).__name__
+                raise
+            metrics["success"] = True
 
             return InvocationResult(
                 output=parsed,

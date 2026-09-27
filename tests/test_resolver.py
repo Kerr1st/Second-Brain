@@ -1,6 +1,6 @@
 """Tests for the role->backend resolver (src/backends/resolver.py).
 
-Validates profile loading, the all-Kiro default (default-preserving), invoker
+Validates profile loading, the controlled default and corpus policy, invoker
 caching, the Explorer-needs-tools guard, and unimplemented-backend errors.
 See docs/MODEL-BACKENDS.md.
 """
@@ -12,12 +12,12 @@ import pytest
 from src.backends.base import BACKEND_CAPABILITIES
 from src.backends.claude_code import ClaudeCodeInvoker
 from src.backends.codex import CodexInvoker
-from src.backends.kiro import KiroInvoker
+from src.backends.bedrock import BedrockInvoker
 from src.backends.resolver import (
     ADAPTER_OPTIONS,
     AGENT_ROLES,
     DEFAULT_ADAPTERS,
-    SKIM_ROLE,
+    SKIM_ROLE, DISTILL_ROLE, CODEX_SEMANTIC_ROLE, EDITOR_ROLE, DREAM_ROLES, resolve_stage,
     Resolver,
     RoleBackend,
     VALID_ROLES,
@@ -34,21 +34,22 @@ def _skim():
     return RoleBackend(role="skim", backend="bedrock", model=SKIM_MODEL, effort="low", options=dict(SKIM_OPTIONS))
 
 
-def _profile_rows(role_backend="kiro", skim_backend="bedrock", skim_model=SKIM_MODEL, skim_options=""):
+def _profile_rows(role_backend="claude_code", skim_backend="bedrock", skim_model=SKIM_MODEL, skim_options=""):
     """TOML lines for a complete profile: agent roles on ``role_backend``, skim as given."""
     rows = [f'{r} = {{ backend = "{role_backend}", model = "m", effort = "high" }}' for r in AGENT_ROLES]
     rows.append(f'skim = {{ backend = "{skim_backend}", model = "{skim_model}", effort = "low"{skim_options} }}')
+    rows.extend(f'{r} = {{ backend = "bedrock", model = "safe-model" }}' for r in (DISTILL_ROLE, CODEX_SEMANTIC_ROLE, EDITOR_ROLE))
     return "\n".join(rows) + "\n"
 
 
-def _kiro(role, effort="high"):
-    return RoleBackend(role=role, backend="kiro", model="claude-opus-4.8", effort=effort)
+def _claude(role, effort="high"):
+    return RoleBackend(role=role, backend="claude_code", model="global.anthropic.claude-opus-4-8", effort=effort)
 
 
 class TestLoadProfiles:
-    def test_committed_config_parses_with_laptop_default(self):
+    def test_committed_config_parses_with_controlled_default(self):
         profiles, default_profile = load_profiles()  # real config/backends.toml
-        assert default_profile == "laptop"
+        assert default_profile == "controlled"
         assert {"laptop", "mini", "bedrock"} <= set(profiles)
         assert set(profiles["laptop"]) >= set(VALID_ROLES)
 
@@ -61,24 +62,16 @@ class TestLoadProfiles:
         assert p["explorer"].backend == "claude_code"
         for role in ("thinker", "skeptic", "advocate", "epistemologist", "methodologist"):
             assert p[role].backend == "bedrock"
-        assert p["thinker"].model == "global.anthropic.claude-fable-5-1"
+        assert p["thinker"].model == "global.anthropic.claude-opus-5"
         panel_models = {p[r].model for r in ("skeptic", "advocate", "epistemologist", "methodologist")}
         assert any("openai." in m for m in panel_models) and any("anthropic." in m for m in panel_models)
         Resolver(p)  # eager Explorer guard passes
 
-    def test_hybrid_profile_meters_only_the_astra_seats(self):
-        """`hybrid`: Claude roles on Kiro (credits), only the two Astra evaluator
-        seats on Bedrock. Never Kiro's internal Fable preview for this workload."""
+    def test_unsafe_hybrid_profile_is_retired(self):
         profiles, _ = load_profiles()
-        p = profiles["hybrid"]
-        metered = {r for r in AGENT_ROLES if BACKEND_CAPABILITIES[p[r].backend].metered}
-        assert metered == {"skeptic", "epistemologist"}
-        assert all(p[r].model == "global.openai.gpt-6-astra" for r in metered)
-        assert all(p[r].backend == "kiro" for r in AGENT_ROLES if r not in metered)
-        assert not any("fable" in p[r].model for r in VALID_ROLES)
-        Resolver(p)
+        assert "hybrid" not in profiles
 
-    def test_controlled_profile_avoids_kiro_and_fable(self):
+    def test_controlled_profile_avoids_claude_and_fable(self):
         """`controlled` (nightly default since 2026-09-17): no role on Kiro — its
         server-side "Auto" routing served claude-fable-5.1 regardless of --model —
         and no Fable anywhere. Explorer keeps tools (Claude Code); Thinker is
@@ -94,13 +87,13 @@ class TestLoadProfiles:
         assert all("claude" in p[r].model for r in ("advocate", "methodologist"))
         Resolver(p)
 
-    def test_laptop_profile_reproduces_today(self):
-        """Default-preserving: laptop = all-Kiro/Opus; explorer+evaluators high, thinker max."""
+    def test_laptop_profile_uses_safe_compatibility_route(self):
+        """Compatibility: laptop keeps Opus/effort choices on Claude Code."""
         profiles, _ = load_profiles()
         laptop = profiles["laptop"]
         for role in AGENT_ROLES:
-            assert laptop[role].backend == "kiro"
-            assert laptop[role].model == "claude-opus-4.8"
+            assert laptop[role].backend == "claude_code"
+            assert laptop[role].model == "global.anthropic.claude-opus-4-8"
         assert laptop["explorer"].effort == "high"
         assert laptop["thinker"].effort == "max"
         for ev in EVALUATORS:
@@ -109,15 +102,15 @@ class TestLoadProfiles:
 
 class TestResolver:
     def _laptop(self):
-        return {role: _kiro(role) for role in AGENT_ROLES} | {"skim": _skim()}
+        return {role: _claude(role) for role in AGENT_ROLES} | {"skim": _skim()}
 
-    def test_invoker_for_returns_kiro(self):
+    def test_invoker_for_returns_claude(self):
         r = Resolver(self._laptop())
         inv = r.invoker_for("skeptic")
-        assert isinstance(inv, KiroInvoker)
-        assert inv.model == "claude-opus-4.8"
+        assert isinstance(inv, ClaudeCodeInvoker)
+        assert inv.model == "global.anthropic.claude-opus-4-8"
 
-    def test_all_kiro_profile_shares_one_invoker(self):
+    def test_all_claude_profile_shares_one_invoker(self):
         """All agent roles on the same (backend,model) reuse one cached invoker — like today."""
         r = Resolver(self._laptop())
         ids = {id(r.invoker_for(role)) for role in AGENT_ROLES}
@@ -125,8 +118,8 @@ class TestResolver:
 
     def test_distinct_models_get_distinct_invokers(self):
         profile = {
-            "skeptic": RoleBackend("skeptic", "kiro", "model-a", "high"),
-            "advocate": RoleBackend("advocate", "kiro", "model-b", "high"),
+            "skeptic": RoleBackend("skeptic", "claude_code", "model-a", "high"),
+            "advocate": RoleBackend("advocate", "claude_code", "model-b", "high"),
         }
         r = Resolver(profile)
         assert r.invoker_for("skeptic") is not r.invoker_for("advocate")
@@ -135,7 +128,7 @@ class TestResolver:
     def test_spec_for_returns_provenance(self):
         r = Resolver(self._laptop())
         spec = r.spec_for("thinker")
-        assert (spec.backend, spec.model) == ("kiro", "claude-opus-4.8")
+        assert (spec.backend, spec.model) == ("claude_code", "global.anthropic.claude-opus-4-8")
 
     def test_unknown_role_raises(self):
         r = Resolver(self._laptop())
@@ -154,25 +147,25 @@ class TestResolver:
         preserved (the metered adapter rejects a blank id, so a real id is used)."""
         from src.backends.bedrock import BedrockInvoker
 
-        profile = {"thinker": RoleBackend("thinker", "bedrock", "global.anthropic.claude-fable-5-1", "high")}
+        profile = {"thinker": RoleBackend("thinker", "bedrock", "global.anthropic.claude-opus-5", "high")}
         r = Resolver(profile)
         inv = r.invoker_for("thinker")
         assert isinstance(inv, BedrockInvoker)
-        assert inv.model == "global.anthropic.claude-fable-5-1"
+        assert inv.model == "global.anthropic.claude-opus-5"
 
     def test_backend_without_adapter_raises(self):
         """A backend name with no registered adapter fails loudly at resolution."""
-        profile = {"thinker": RoleBackend("thinker", "bedrock", "global.anthropic.claude-fable-5-1", "max")}
+        profile = {"thinker": RoleBackend("thinker", "bedrock", "global.anthropic.claude-opus-5", "max")}
         r = Resolver(profile, adapters={})
         with pytest.raises(NotImplementedError):
             r.invoker_for("thinker")
 
 
 class TestDefaultResolver:
-    def test_default_resolver_uses_laptop(self, monkeypatch):
+    def test_default_resolver_uses_controlled(self, monkeypatch):
         monkeypatch.delenv("SECOND_BRAIN_PROFILE", raising=False)
         r = default_resolver()
-        assert isinstance(r.invoker_for("skeptic"), KiroInvoker)
+        assert isinstance(r.invoker_for("skeptic"), BedrockInvoker)
 
     def test_profile_selected_by_env(self, monkeypatch):
         """mini routes to claude_code, whose adapter is now registered."""
@@ -214,7 +207,7 @@ class TestDefaultResolver:
         """A profile naming a backend that isn't a known capability key (a typo
         like 'kiroo') is rejected with a clear error before the resolver builds."""
         monkeypatch.delenv("SECOND_BRAIN_PROFILE", raising=False)
-        rows = _profile_rows().replace('skeptic = { backend = "kiro"', 'skeptic = { backend = "kiroo"')  # one typo
+        rows = _profile_rows().replace('skeptic = { backend = "claude_code"', 'skeptic = { backend = "kiroo"')  # one typo
         cfg = tmp_path / "backends.toml"
         cfg.write_text('default_profile = "p"\n[profiles.p]\n' + rows)
         with pytest.raises(ValueError, match="unknown backend"):
@@ -306,12 +299,13 @@ class TestSkimRole:
     options (temperature 0, Flex tier, 4096 tokens) are expressed in the toml."""
 
     def test_valid_roles_are_the_agent_roles_plus_skim(self):
-        assert VALID_ROLES == (*AGENT_ROLES, SKIM_ROLE) and SKIM_ROLE == "skim"
+        assert DREAM_ROLES == (*AGENT_ROLES, SKIM_ROLE)
+        assert VALID_ROLES == (*DREAM_ROLES, DISTILL_ROLE, CODEX_SEMANTIC_ROLE, EDITOR_ROLE)
         assert "skim" not in AGENT_ROLES
 
     def test_every_committed_profile_runs_the_skim_on_bedrock_nova(self):
         profiles, _ = load_profiles()
-        assert set(profiles) == {"laptop", "mini", "bedrock", "hybrid", "controlled"}
+        assert set(profiles) == {"laptop", "mini", "bedrock", "controlled"}
         for name, p in profiles.items():
             spec = p["skim"]
             assert spec.backend == "bedrock", name
@@ -321,7 +315,7 @@ class TestSkimRole:
             assert not BACKEND_CAPABILITIES[spec.backend].supports_mcp
             Resolver(p)  # eager guards pass for every committed profile
 
-    def test_controlled_profile_still_avoids_kiro_with_the_skim(self):
+    def test_controlled_profile_still_avoids_claude_with_the_skim(self):
         profiles, _ = load_profiles()
         p = profiles["controlled"]
         assert all(p[r].backend != "kiro" for r in VALID_ROLES) and p["skim"].backend == "bedrock"
@@ -348,14 +342,14 @@ class TestSkimRole:
     @pytest.mark.parametrize("backend", ["kiro", "claude_code", "codex"])
     def test_skim_on_an_agentic_cli_is_rejected_at_construction(self, backend):
         profile = {"skim": RoleBackend("skim", backend, "any-model", "low")}
-        with pytest.raises(ValueError, match="skim role must run on a tool-less Direct-API backend"):
+        with pytest.raises(ValueError, match="skim"):
             Resolver(profile)
 
-    def test_skim_on_kiro_in_the_active_profile_is_rejected_at_load(self, tmp_path, monkeypatch):
+    def test_skim_on_claude_in_the_active_profile_is_rejected_at_load(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SECOND_BRAIN_PROFILE", raising=False)
         cfg = tmp_path / "backends.toml"
         cfg.write_text('default_profile = "p"\n[profiles.p]\n' + _profile_rows(skim_backend="kiro", skim_model="m"))
-        with pytest.raises(ValueError, match="skim role must run on a tool-less Direct-API backend"):
+        with pytest.raises(ValueError, match="skim"):
             default_resolver(config_path=str(cfg))
 
     def test_profile_without_skim_is_rejected_at_load(self, tmp_path, monkeypatch):
@@ -363,7 +357,7 @@ class TestSkimRole:
         rows = "\n".join(f'{r} = {{ backend = "kiro", model = "m", effort = "high" }}' for r in AGENT_ROLES)
         cfg = tmp_path / "backends.toml"
         cfg.write_text('default_profile = "p"\n[profiles.p]\n' + rows + "\n")
-        with pytest.raises(ValueError, match=r"missing required role\(s\): \['skim'\]"):
+        with pytest.raises(ValueError, match="missing required role"):
             default_resolver(config_path=str(cfg))
 
     def test_lazy_guard_also_rejects_skim_on_agentic_cli(self):
@@ -397,8 +391,8 @@ class TestAdapterOptions:
 
     def test_options_on_a_backend_without_options_rejected_at_load(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SECOND_BRAIN_PROFILE", raising=False)
-        rows = _profile_rows().replace('thinker = { backend = "kiro", model = "m", effort = "high" }',
-                                       'thinker = { backend = "kiro", model = "m", effort = "high", options = { temperature = 0.0 } }')
+        rows = _profile_rows().replace('thinker = { backend = "claude_code", model = "m", effort = "high" }',
+                                       'thinker = { backend = "claude_code", model = "m", effort = "high", options = { temperature = 0.0 } }')
         cfg = tmp_path / "backends.toml"
         cfg.write_text('default_profile = "p"\n[profiles.p]\n' + rows)
         with pytest.raises(ValueError, match="does not accept"):
@@ -419,3 +413,35 @@ class TestAdapterOptions:
         r = Resolver({"skim": RoleBackend("skim", "bedrock", SKIM_MODEL, "low", {"service_tier": "turbo"})})
         with pytest.raises(ValueError, match="service_tier"):
             r.invoker_for("skim")
+
+
+@pytest.mark.parametrize("role", VALID_ROLES)
+def test_programmatic_corpus_routes_reject_kiro_and_fable(role):
+    for backend, model in (("kiro", "safe-model"), ("claude_code" if role == "explorer" else "bedrock", "GLOBAL.CLAUDE-FABLE-5-1")):
+        with pytest.raises(ValueError):
+            Resolver({role: RoleBackend(role, backend, model)})
+
+
+def test_all_committed_profiles_obey_corpus_boundary():
+    profiles, _ = load_profiles()
+    for profile in profiles.values():
+        for role, spec in profile.items():
+            assert spec.backend != "kiro", role
+            assert "fable" not in spec.model.lower(), role
+
+
+def test_denied_override_rejected_before_adapter_constructor(monkeypatch):
+    resolver = Resolver({EDITOR_ROLE: RoleBackend(EDITOR_ROLE, "bedrock", SKIM_MODEL)})
+    called = []
+    monkeypatch.setitem(DEFAULT_ADAPTERS, "bedrock", lambda **kwargs: called.append(kwargs))
+    with pytest.raises(ValueError, match="cannot run on model"):
+        resolve_stage(EDITOR_ROLE, resolver=resolver, model_override="claude-fable-5-1")
+    assert called == []
+
+
+def test_inactive_unsafe_profile_rejected_at_load(tmp_path):
+    config = tmp_path / "backends.toml"
+    config.write_text('default_profile="good"\n[profiles.good]\n' + _profile_rows()
+                      + '[profiles.bad]\n' + _profile_rows(role_backend="kiro"))
+    with pytest.raises(ValueError, match="cannot run on backend"):
+        load_profiles(str(config))

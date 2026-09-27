@@ -459,49 +459,56 @@ def _deterministic_edit(items: list[dict]) -> dict:
     return {"items": ordered, "lead_idx": 0 if ordered else None, "editor": "deterministic"}
 
 
-def edit_briefing(briefing: dict, invoker=None) -> dict:
-    """Rank items, attach one headline each, pick the lead.
+def edit_briefing(briefing: dict, invoker=None, *, use_llm=True, resolver=None, tracker=None) -> dict:
+    """Rank a briefing, optionally using the policy-checked, metered editor.
 
-    Uses an LLM editor pass via AgentInvoker; on any failure (no kiro-cli, parse
-    error, timeout) falls back to a deterministic ordering so `brief` always works.
-
-    Returns the briefing dict augmented with an ordered "ranked" list (each item
-    gains a "headline") and "lead_idx"/"editor" markers.
+    ``use_llm=False`` never resolves a backend. Recoverable editor failures use
+    deterministic ranking; spend/usage failures propagate without another call.
     """
+    from src.backends.cost import SpendTracker, cap_from_env, invoke_metered
+    from src.backends.resolver import EDITOR_ROLE, resolve_stage
+
     items = briefing.get("items", [])
     if not items:
-        briefing["ranked"] = []
-        briefing["lead_idx"] = None
-        briefing["editor"] = "empty"
+        briefing.update(ranked=[], lead_idx=None, editor="empty")
         return briefing
 
-    ranked: dict | None = None
-    try:
-        if invoker is None:
-            from src.agent_invoker import AgentInvoker
-
-            invoker = AgentInvoker()
-        res = invoker.invoke(_EDITOR_SYSTEM, _editor_user_message(items, briefing.get("pref_hint", "")), timeout=180)
-        out = res["output"] if isinstance(res.get("output"), dict) else {}
-        chosen = out.get("items") or []
-        ordered = []
-        for entry in chosen:
-            idx = entry.get("idx")
-            if isinstance(idx, int) and 0 <= idx < len(items):
-                it = dict(items[idx])
-                it["headline"] = (entry.get("headline") or it["title"]).strip()[:120]
-                ordered.append(it)
-        if ordered:
-            ranked = {"items": ordered[:MAX_ITEMS], "lead_idx": 0, "editor": "llm"}
-    except Exception as exc:  # noqa: BLE001 — degrade gracefully, never crash the brief
-        logger.warning("Editor LLM pass failed (%s); using deterministic fallback", exc)
+    ranked = None
+    if use_llm:
+        tracker = tracker if tracker is not None else SpendTracker(
+            cap_usd=cap_from_env("SECOND_BRAIN_EDITOR_CAP_USD", 0.25))
+        try:
+            resolved, spec = resolve_stage(EDITOR_ROLE, resolver=resolver)
+            res = invoke_metered(
+                invoker if invoker is not None else resolved, spec, tracker,
+                _EDITOR_SYSTEM, _editor_user_message(items, briefing.get("pref_hint", "")),
+                tools=False, timeout=180, effort=spec.effort, stage="express_editor")
+            out = res.get("output")
+            if not isinstance(out, dict) or not isinstance(out.get("items"), list):
+                raise ValueError("Editor response must contain an items array")
+            ordered, seen = [], set()
+            for entry in out["items"]:
+                if not isinstance(entry, dict):
+                    continue
+                idx = entry.get("idx")
+                if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(items) and idx not in seen:
+                    it = dict(items[idx])
+                    headline = entry.get("headline")
+                    it["headline"] = (headline if isinstance(headline, str) else it["title"]).strip()[:120]
+                    ordered.append(it)
+                    seen.add(idx)
+            if ordered:
+                ranked = {"items": ordered[:MAX_ITEMS], "lead_idx": 0, "editor": "llm"}
+        except (RuntimeError, OSError, ValueError) as exc:
+            logger.warning("Editor unavailable (%s); using deterministic ranking", type(exc).__name__)
+            briefing["editor_error"] = type(exc).__name__
+        finally:
+            briefing["editor_cost_usd"] = tracker.total_usd
+            briefing["editor_spend_unknown"] = bool(tracker.blocked_reason)
 
     if ranked is None:
         ranked = _deterministic_edit(items)
-
-    briefing["ranked"] = ranked["items"]
-    briefing["lead_idx"] = ranked["lead_idx"]
-    briefing["editor"] = ranked["editor"]
+    briefing.update(ranked=ranked["items"], lead_idx=ranked["lead_idx"], editor=ranked["editor"])
     return briefing
 
 

@@ -75,7 +75,7 @@ def test_edit_briefing_applies_llm_headlines_and_order():
             {"idx": 1, "headline": "Punchy headline for second"},
             {"idx": 0, "headline": "Punchy headline for first"},
         ]},
-        "raw": "{}",
+        "raw": "{}", "usage": {"inputTokens": 100, "outputTokens": 20},
     }
     out = express.edit_briefing({"items": items}, invoker=invoker)
     assert out["editor"] == "llm"
@@ -90,7 +90,7 @@ def test_edit_briefing_caps_llm_output_at_max_items():
     invoker = MagicMock()
     invoker.invoke.return_value = {
         "output": {"items": [{"idx": n, "headline": f"h{n}"} for n in range(8)]},
-        "raw": "{}",
+        "raw": "{}", "usage": {"inputTokens": 100, "outputTokens": 20},
     }
     out = express.edit_briefing({"items": items}, invoker=invoker)
     assert len(out["ranked"]) == express.MAX_ITEMS
@@ -101,7 +101,7 @@ def test_edit_briefing_ignores_out_of_range_indices():
     invoker = MagicMock()
     invoker.invoke.return_value = {
         "output": {"items": [{"idx": 5, "headline": "bad"}, {"idx": 0, "headline": "good"}]},
-        "raw": "{}",
+        "raw": "{}", "usage": {"inputTokens": 100, "outputTokens": 20},
     }
     out = express.edit_briefing({"items": items}, invoker=invoker)
     assert [it["headline"] for it in out["ranked"]] == ["good"]
@@ -133,7 +133,7 @@ def test_render_markdown_marks_lead_and_lists_all_headlines():
         invoke=MagicMock(return_value={"output": {"items": [
             {"idx": 0, "headline": "Lead headline"},
             {"idx": 1, "headline": "Second headline"},
-        ]}, "raw": "{}"})
+        ]}, "raw": "{}", "usage": {"inputTokens": 100, "outputTokens": 20}})
     ))
     md = express.render_markdown(briefing)
     assert "# Your briefing" in md
@@ -291,7 +291,7 @@ def test_should_push_false_when_no_runs(clean_dream_cycle):
 
 def _edited(items, invoke_return):
     invoker = MagicMock()
-    invoker.invoke.return_value = {"output": invoke_return, "raw": "{}"}
+    invoker.invoke.return_value = {"output": invoke_return, "raw": "{}", "usage": {"inputTokens": 100, "outputTokens": 20}}
     return express.edit_briefing({"items": items}, invoker=invoker)
 
 

@@ -24,4 +24,6 @@ BEGIN
 END $$;
 
 -- Higher ef_search trades a little latency for materially better recall (sub-ms at our scale).
-ALTER DATABASE memory_bank SET hnsw.ef_search = 200;
+DO $$ BEGIN
+  EXECUTE format('ALTER DATABASE %I SET hnsw.ef_search = 200', current_database());
+END $$;

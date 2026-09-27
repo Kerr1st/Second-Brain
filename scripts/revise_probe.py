@@ -1,4 +1,4 @@
-"""Offline probe for the revision step: ask the Thinker backend to repair a candidate
+"""Manual metered probe for the revision step: ask the Thinker backend to repair a candidate
 given the panel's blocking/advisory issues, then write the revised candidates as a
 --candidate-file for scripts/panel_replay.py.
 
@@ -21,7 +21,8 @@ from dataclasses import asdict
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scripts.panel_replay import candidate_from_row, fetch_candidates, sources_text_for  # noqa: E402
-from src.backends.resolver import default_resolver  # noqa: E402
+from src.backends.resolver import default_resolver, resolve_stage
+from src.backends.cost import SpendTracker, invoke_metered  # noqa: E402
 
 log = logging.getLogger("revise_probe")
 
@@ -74,14 +75,14 @@ def issues_for(replay_path: str, candidate_id: str) -> tuple[list[str], list[str
     return blocking, advisory
 
 
-def revise(candidate, sources_text: str, blocking: list[str], advisory: list[str], invoker, effort: str) -> dict:
+def revise(candidate, sources_text: str, blocking: list[str], advisory: list[str], invoker, effort: str, *, spec, tracker: SpendTracker) -> dict:
     user = json.dumps({
         "candidate": asdict(candidate),
         "cited_sources": sources_text,
         "blocking_issues": blocking,
         "advisory_issues": advisory,
     }, default=str)
-    result = invoker.invoke(system_prompt=REVISION_PROMPT, user_message=user, effort=effort,
+    result = invoke_metered(invoker, spec, tracker, system_prompt=REVISION_PROMPT, user_message=user, effort=effort,
                             stage="revise_probe", schema=REVISION_SCHEMA)
     out = result.get("output") or {}
     if isinstance(out, list):
@@ -103,7 +104,8 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s", datefmt="%H:%M:%S")
     os.environ["SECOND_BRAIN_PROFILE"] = args.profile
     resolver = default_resolver()
-    invoker = resolver.invoker_for("thinker")
+    invoker, spec = resolve_stage("thinker", resolver=resolver)
+    tracker = SpendTracker.from_env()
 
     revised: dict[str, dict] = {}
     for row in fetch_candidates(None, args.candidate, None):
@@ -112,7 +114,7 @@ def main() -> int:
         if not blocking and not advisory:
             log.warning("%s: no issues recorded in %s; skipping", row["id"], args.replay)
             continue
-        out = revise(cand, sources_text_for(cand), blocking, advisory, invoker, args.effort)
+        out = revise(cand, sources_text_for(cand), blocking, advisory, invoker, args.effort, spec=spec, tracker=tracker)
         if out.get("title") and out.get("content"):
             revised[row["id"]] = {k: out[k] for k in ("title", "content", "confidence", "confidence_reasoning") if k in out}
     json.dump(revised, open(args.out, "w"), indent=2)

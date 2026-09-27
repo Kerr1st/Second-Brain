@@ -202,7 +202,7 @@ class TestSpendCap:
 
     def test_exceeding_the_cap_aborts_before_the_memory_is_written(self, digest_env):
         expensive = {"inputTokens": 2_000_000, "outputTokens": 500_000}
-        r = _resolver("bedrock", "global.anthropic.claude-fable-5-1",
+        r = _resolver("bedrock", "global.anthropic.claude-sonnet-5",
                       adapters={"bedrock": lambda **kw: FakeInvoker(usage=expensive, **kw)})
         with pytest.raises(SpendCapExceeded):
             wd.run(days=7, resolver=r, tracker=SpendTracker(cap_usd=0.25))
@@ -305,11 +305,13 @@ class TestDigestStructureUnchanged:
     def test_missing_summary_writes_nothing(self, digest_env):
         class NoSummary(FakeInvoker):
             def invoke(self, *a, **k):
-                return {"output": {"title": "t"}, "raw": "junk", "usage": None,
+                return {"output": {"title": "t"}, "raw": "junk",
+                        "usage": {"inputTokens": 100, "outputTokens": 10},
                         "usage_source": "real"}
         r = _resolver("bedrock", "us.amazon.nova-2-lite-v1:0",
                       adapters={"bedrock": lambda **kw: NoSummary(**kw)})
-        assert wd.run(days=7, resolver=r, tracker=SpendTracker(cap_usd=1.0)) is None
+        with pytest.raises(ValueError, match="no summary"):
+            wd.run(days=7, resolver=r, tracker=SpendTracker(cap_usd=1.0))
         assert digest_env == []
 
 

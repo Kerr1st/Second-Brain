@@ -136,8 +136,8 @@ class TestBudgetAwareThinker:
     def test_remaining_budget_reads_the_tracker(self):
         orch = _orch(cap=9.0, spent=2.5)
         assert orch._budget_remaining() == pytest.approx(6.5)
-        orch._spend = SpendTracker(cap_usd=0)
-        assert orch._budget_remaining() is None
+        with pytest.raises(ValueError, match="finite and positive"):
+            SpendTracker(cap_usd=0)
 
     def test_slices_are_skipped_once_pending_judging_exhausts_the_budget(self, caplog):
         # $3.00 left. Slice 1 yields 3 candidates ($2.10 of judging pending); slice 2 would
@@ -167,9 +167,8 @@ class TestBudgetAwareThinker:
         stats = db.complete_run.call_args.kwargs["stats"]
         assert "slices_skipped_for_budget" not in stats and "candidates_unjudged_for_budget" not in stats
 
-    def test_no_cap_means_no_skipping(self):
-        orch = _orch(cap=9.0)
-        orch._spend = SpendTracker(cap_usd=0.0)          # nothing binds
+    def test_sufficient_finite_cap_means_no_skipping(self):
+        orch = _orch(cap=1000.0)
         slices = [_slice("first"), _slice("second"), _slice("third")]
         result, db, th, *_ = _run(orch, slices, [], thinker=lambda s: [_cand(f"{s.name}-{i}") for i in range(3)])
         assert th.call_count == 3 and result.candidates_generated == 9
@@ -183,6 +182,24 @@ class TestBudgetAwareThinker:
         assert result.candidates_generated == 0 and result.aborted_early is False
         assert db.complete_run.call_args.kwargs["stats"]["slices_skipped_for_budget"] == 1
 
+    def test_thinker_cap_stops_later_slices_and_preserves_generated_count(self, monkeypatch):
+        monkeypatch.setattr(o, "EST_THINKER_CALL_USD", 0.0)
+        monkeypatch.setattr(o, "EST_JUDGE_CANDIDATE_USD", 0.0)
+        orch = _orch(cap=1.0)
+        def thinker(memory_slice):
+            if memory_slice.name == "first":
+                return [_cand("already generated")]
+            raise SpendCapExceeded("synthetic budget stop")
+        result, db, th, ev, digest = _run(
+            orch, [_slice("first"), _slice("second"), _slice("never reached")], [], thinker)
+        assert th.call_count == 2
+        ev.assert_not_called()
+        digest.assert_not_called()
+        assert result.aborted_early is True
+        assert result.candidates_generated == 1
+        stats = db.complete_run.call_args.kwargs["stats"]
+        assert stats["candidates_generated"] == 1 and stats["aborted"] is True
+
 
 # --------------------------------------------------------------------------- #
 # Pipeline: soft stop in the panel                                             #
@@ -190,7 +207,7 @@ class TestBudgetAwareThinker:
 class TestPanelSoftStop:
     def _spending_evaluator(self, orch, per_vote):
         def evaluate(candidate, role):
-            orch._spend.total_usd += per_vote          # what _record_spend would have added
+            orch._spend.total_usd += per_vote          # what strict invocation accounting would have added
             return REJECT
         return evaluate
 
@@ -237,7 +254,8 @@ class TestPanelSoftStop:
         assert ev.call_count == 1 and result.aborted_early is True
         digest.assert_not_called()
         db.complete_run.assert_called_once()
-        assert db.complete_run.call_args.kwargs["stats"]["candidates_generated"] == 0   # _ZERO_STATS on abort
+        assert db.complete_run.call_args.kwargs["stats"]["candidates_generated"] == 1
+        assert db.complete_run.call_args.kwargs["stats"]["aborted"] is True
 
     def test_grounding_skip_band_still_votes(self):
         """Between 80% of cap (grounding audit skipped) and cap-$0.70 (soft stop) the panel still votes."""

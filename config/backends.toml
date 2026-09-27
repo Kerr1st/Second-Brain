@@ -3,8 +3,8 @@
 # Each role maps to (backend, model, effort). Select a profile with the
 # SECOND_BRAIN_PROFILE env var; unset => `default_profile` below.
 #
-# The `laptop` profile reproduces today's behavior exactly (all-Kiro / Opus 4.8,
-# $0 metered). The `mini` profile targets the Mac Mini (Claude Code on Bedrock).
+# The `laptop` and `mini` compatibility profiles use Claude Code on Bedrock.
+# `controlled` is the default; corpus roles never use Kiro or Fable.
 # The `bedrock` profile runs the Thinker and all four evaluators on the direct
 # Bedrock Converse API (metered; see the spend cap below).
 #
@@ -30,16 +30,19 @@
 # Credentials are NOT stored here — they stay out-of-band / gitignored.
 # See docs/MODEL-BACKENDS.md.
 
-default_profile = "laptop"
+default_profile = "controlled"
 
 [profiles.laptop]
-explorer       = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
-thinker        = { backend = "kiro", model = "claude-opus-4.8", effort = "max" }
-skeptic        = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
-advocate       = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
-epistemologist = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
-methodologist  = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
+explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+thinker        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "max" }
+skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
+distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
+codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
 [profiles.mini]
 # Mac Mini: no Kiro -> Claude Code on Bedrock. The claude_code adapter is
@@ -57,6 +60,9 @@ advocate       = { backend = "claude_code", model = "global.anthropic.claude-opu
 epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
+distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
+codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
 [profiles.bedrock]
 # Direct Bedrock Converse API for every tool-less role; the Explorer needs the
@@ -74,32 +80,15 @@ skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", ef
 #                                  adaptive thinking is billed as output)
 # Estimated ≈ $1.60/run from the June token counts, before thinking tokens.
 explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-5",    effort = "high" }
-thinker        = { backend = "bedrock",     model = "global.anthropic.claude-fable-5-1", effort = "high" }
+thinker        = { backend = "bedrock",     model = "global.anthropic.claude-opus-5", effort = "high" }
 skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
 advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
 epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
 methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
-
-[profiles.hybrid]
-# Everything Claude runs on Kiro (credits, no metered bill); only the two
-# GPT-6 Astra evaluator seats are metered, on Bedrock. Keeps the cross-family
-# consensus guarantee for ≈ $2.30/run (measured 2026-09-14: 18 Astra calls,
-# avg $0.128) instead of ≈ $7.50 for the all-Bedrock profile.
-#
-# Deliberately Opus 5 rather than Kiro's `claude-fable-5.1` for the Thinker:
-# Kiro lists Fable as an internal preview "NOT FOR CUSTOMER DATA, ITAR OR PII",
-# and this workload is the personal corpus. Fable is available à la carte via
-# the `bedrock` profile.
-explorer       = { backend = "kiro",    model = "claude-opus-5",              effort = "high" }
-thinker        = { backend = "kiro",    model = "claude-opus-5",              effort = "max" }
-skeptic        = { backend = "bedrock", model = "global.openai.gpt-6-astra",   effort = "high" }
-advocate       = { backend = "kiro",    model = "claude-sonnet-5",            effort = "high" }
-epistemologist = { backend = "bedrock", model = "global.openai.gpt-6-astra",   effort = "high" }
-methodologist  = { backend = "kiro",    model = "claude-sonnet-5",            effort = "high" }
-skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
-
-
+distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
+codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
 [profiles.controlled]
 # Every role on a backend that honours the requested model, all inside the AWS
@@ -124,3 +113,6 @@ advocate       = { backend = "bedrock",     model = "global.anthropic.claude-son
 epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
 methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
+distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
+codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }

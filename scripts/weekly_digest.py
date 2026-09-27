@@ -27,7 +27,6 @@ Usage: .venv/bin/python scripts/weekly_digest.py [--days N] [--dry-run]
 """
 
 import argparse
-import dataclasses
 import datetime
 import logging
 import os
@@ -37,26 +36,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.db import get_connection, create_memory, get_processed_source_urls
 from src.embeddings import generate_embedding
-from src.backends.base import BACKEND_CAPABILITIES, assert_backend_supports_role
-from src.backends.cost import SpendCapExceeded, SpendTracker, price_for
-from src.backends.resolver import DEFAULT_ADAPTERS, SKIM_ROLE, default_resolver
+from src.backends.cost import SpendCapExceeded, SpendTracker, cap_from_env, invoke_metered
+from src.backends.resolver import SKIM_ROLE, default_resolver, resolve_stage
 
-#: The role the digest borrows. It must be an existing role — every profile has to
-#: define all of resolver.VALID_ROLES, and inventing one would break
-#: tests/test_resolver.py — so the choice is among explorer / thinker / the four
-#: evaluators / skim. ``skim`` is the only defensible seat:
-#:   * Same kind of work. The skim is the system's faithful-summarisation stage:
-#:     read corpus material once with a cheap model, emit a small JSON record,
-#:     invent nothing. That is precisely this job.
-#:   * Bedrock by rule, in every profile. ``assert_backend_supports_role`` rejects
-#:     a skim on any MCP-capable backend (docs/PLAN-skim-stage.md §3), and the
-#:     resolver enforces it at config load — so the digest cannot reach Kiro or
-#:     Fable 5.1 under *any* profile, not just `controlled`. The thinker seat has
-#:     the opposite property (Kiro on `laptop`/`hybrid`, Fable 5.1 on `bedrock`).
-#:   * Cheap and priced. us.amazon.nova-2-lite-v1:0 has a `_PRICE_TABLE` entry
-#:     (src/backends/cost.py), standard $0.33/$2.75 per 1M, Flex $0.165/$1.375, so
-#:     one digest costs ~$0.002 rather than being billed at the unknown-model
-#:     $10/$50 ceiling.
+#: The digest uses the faithful-summarisation seat. Shared profile validation
+#: and resolve_stage enforce direct Bedrock and reject forbidden model overrides;
+#: invoke_metered applies one digest-specific spend threshold.
 DIGEST_ROLE = SKIM_ROLE
 
 #: Optional model override (same backend as the resolved role — the backend, and
@@ -102,69 +87,19 @@ class DigestBackendError(RuntimeError):
 
 
 def digest_cap_usd():
-    """The digest's spend cap: ``SECOND_BRAIN_DIGEST_CAP_USD`` or the default.
-
-    A non-numeric or non-positive value falls back to the default with a WARNING
-    (mirrors ``SpendTracker.from_env``) — a typo must not silently uncap spend.
-    """
-    raw = os.environ.get(DIGEST_CAP_ENV)
-    if not raw:
-        return DEFAULT_DIGEST_CAP_USD
-    try:
-        parsed = float(raw)
-    except ValueError:
-        log.warning("%s=%r is not a number; using default $%.2f", DIGEST_CAP_ENV, raw,
-                    DEFAULT_DIGEST_CAP_USD)
-        return DEFAULT_DIGEST_CAP_USD
-    if parsed <= 0:
-        log.warning("%s=%r must be > 0; using default $%.2f", DIGEST_CAP_ENV, raw,
-                    DEFAULT_DIGEST_CAP_USD)
-        return DEFAULT_DIGEST_CAP_USD
-    return parsed
+    return cap_from_env(DIGEST_CAP_ENV, DEFAULT_DIGEST_CAP_USD)
 
 
 def resolve_digest_backend(resolver=None, model_override=None):
-    """Resolve ``(invoker, spec)`` for the digest through the active profile.
-
-    ``SECOND_BRAIN_PROFILE`` selects the profile (see config/backends.toml; the
-    jobs pin ``controlled``, the only profile whose every seat is Bedrock inside
-    the account). Raises :class:`DigestBackendError` — loudly, before any model
-    call — when the resolved backend speaks MCP (Kiro, Claude Code, Codex),
-    because the digest reads the user's corpus and Kiro does not honour the model
-    we ask for.
-    """
+    """Resolve the digest through shared routing, including override validation."""
     resolver = resolver or default_resolver()
-    spec = resolver.spec_for(DIGEST_ROLE)
-    caps = BACKEND_CAPABILITIES.get(spec.backend)
-    if caps is None or caps.supports_mcp:
+    try:
+        return resolve_stage(DIGEST_ROLE, resolver=resolver, model_override=model_override)
+    except ValueError as exc:
         raise DigestBackendError(
-            f"Refusing to run the weekly digest on backend {spec.backend!r}: it is an "
-            f"agentic/MCP-capable CLI, and this job summarises the user's own corpus. "
-            f"kiro-cli 2.22 ignores --model, so its Auto routing has served "
-            f"claude-fable-5.1 ('NOT FOR CUSTOMER DATA, ITAR OR PII'); the corpus never "
-            f"runs on Kiro/Fable (docs/PLAN-panel-acceptance.md §3). Set "
-            f"SECOND_BRAIN_PROFILE=controlled (role {DIGEST_ROLE!r} must resolve to the "
-            f"direct Bedrock backend)."
-        )
-    # Defense in depth: the same rule, enforced by the shared guard (it is what
-    # makes the skim seat Bedrock-only in every profile at config load).
-    assert_backend_supports_role(spec.backend, DIGEST_ROLE)
-
-    if model_override and model_override != spec.model:
-        spec = dataclasses.replace(spec, model=model_override)
-        if not price_for(spec.model).known:
-            log.warning("DIGEST_MODEL=%r has no list price; it will be metered at the "
-                        "$10/$50 per-1M ceiling against a $%.2f cap.",
-                        spec.model, digest_cap_usd())
-        adapter_cls = DEFAULT_ADAPTERS.get(spec.backend)
-        if adapter_cls is None:
-            raise DigestBackendError(
-                f"Backend {spec.backend!r} has no adapter (see docs/MODEL-BACKENDS.md)."
-            )
-        invoker = adapter_cls(model=spec.model, **(spec.options or {}))
-    else:
-        invoker = resolver.invoker_for(DIGEST_ROLE)
-    return invoker, spec
+            f"Refusing weekly digest backend {resolver.spec_for(DIGEST_ROLE).backend!r}/model: " + str(exc)
+            + ". Use SECOND_BRAIN_PROFILE=controlled; Kiro/Fable are forbidden."
+        ) from exc
 
 
 def aggregate(days):
@@ -223,22 +158,18 @@ def run(days=7, dry_run=False, resolver=None, tracker=None):
              DIGEST_ROLE, spec.backend, spec.model, spec.effort or "low",
              DIGEST_TIMEOUT, tracker.cap_usd)
 
-    res = invoker.invoke(
-        SYSTEM_PROMPT, build_user_message(days, tags, projects, sources, decisions),
+    res = invoke_metered(
+        invoker, spec, tracker, SYSTEM_PROMPT, build_user_message(days, tags, projects, sources, decisions),
         tools=False, timeout=DIGEST_TIMEOUT, effort=spec.effort or "low",
         stage="weekly_digest")
-    # Metered: price the call and enforce the digest's own cap. SpendCapExceeded
-    # propagates (it is not a RuntimeError) and aborts before the memory is written.
-    cost = tracker.record(spec.model, res.get("usage"))
-    log.info("Digest call cost $%.4f (running total $%.4f of $%.2f cap)",
-             cost, tracker.total_usd, tracker.cap_usd)
+    log.info("Digest running cost $%.4f of $%.2f stop threshold",
+             tracker.total_usd, tracker.cap_usd)
 
     out = res["output"] if isinstance(res["output"], dict) else {}
     summary = (out.get("summary") or "").strip()
     title = (out.get("title") or f"Weekly digest {url}").strip()[:200]
     if not summary:
-        log.error("Digest LLM returned no summary; raw=%.200s", res.get("raw", ""))
-        return None
+        raise ValueError("Digest model returned no summary")
     # Anchor to the question it answers so it is retrievable for meta-queries
     # like "what am I spending my time on" (the summary alone is object-level).
     body = (f"What I've been spending my time working on and learning "
@@ -268,7 +199,8 @@ def run(days=7, dry_run=False, resolver=None, tracker=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=7)
-    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Metered model preview; does not store or deliver the digest.")
     args = ap.parse_args()
     # Every failure mode below is loud and non-zero: the job is monitored by
     # com.second-brain.liveness, and a silent skip is how the digest went missing
@@ -284,6 +216,9 @@ def main():
     except TimeoutError as exc:
         log.error("Weekly digest timed out after %ds: %s", DIGEST_TIMEOUT, exc)
         return 4
+    except (ValueError, RuntimeError, OSError) as exc:
+        log.error("Weekly digest failed (%s)", type(exc).__name__)
+        return 1
     return 0
 
 

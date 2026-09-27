@@ -27,8 +27,7 @@ def _cand(**kw):
 
 
 def _orch(cap=6.0, spent=0.0):
-    with patch("src.dream_cycle.orchestrator.default_resolver"):
-        orch = DreamCycleOrchestrator()
+    orch = DreamCycleOrchestrator()
     orch._spend = SpendTracker(cap_usd=cap)
     orch._spend.total_usd = spent
     orch._slice_memory_cache = {SRC_A: {"id": SRC_A, "title": "Notice 1", "content": "no action needed"},
@@ -51,8 +50,7 @@ class TestGradedVerdictParsing:
                                                   "advisory_issues": "overreach"},
                                        "usage": {"input_tokens": 10, "output_tokens": 5}}
         with patch.object(orch, "_invoker_for", return_value=invoker), patch.object(orch, "_role_has_tools", return_value=False), \
-             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
-            orch.resolver = MagicMock(); orch.resolver.spec_for.return_value.effort = "high"
+             patch.object(orch, "_capture"):
             v = orch.invoke_evaluator(_cand(), "skeptic", stage="grounding_audit")
         assert (v.verdict, v.score) == ("REJECT", 31)
         assert v.blocking_issues == ["fax number not in sources"] and v.advisory_issues == ["overreach"]
@@ -60,15 +58,14 @@ class TestGradedVerdictParsing:
         kwargs = invoker.invoke.call_args.kwargs
         assert kwargs["stage"] == "grounding_audit" and kwargs["schema"]["required"] == [
             "verdict", "score", "blocking_issues", "advisory_issues", "reasoning"]
-        assert "'score', 'blocking_issues'" in kwargs["user_message"]
+        assert "'score', 'blocking_issues'" in invoker.invoke.call_args.args[1]
 
     def test_legacy_output_without_graded_fields_still_parses(self):
         orch = _orch()
         invoker = MagicMock()
-        invoker.invoke.return_value = {"output": [{"verdict": "ACCEPT", "reasoning": "ok"}], "usage": None}
+        invoker.invoke.return_value = {"output": [{"verdict": "ACCEPT", "reasoning": "ok"}], "usage": {"input_tokens": 0, "output_tokens": 0}, "usage_source": "real"}
         with patch.object(orch, "_invoker_for", return_value=invoker), patch.object(orch, "_role_has_tools", return_value=True), \
-             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
-            orch.resolver = MagicMock(); orch.resolver.spec_for.return_value.effort = "high"
+             patch.object(orch, "_capture"):
             v = orch.invoke_evaluator(_cand(), "advocate")
         assert v.verdict == "ACCEPT" and v.score is None and v.blocking_issues == [] and not v.has_blocking
 
@@ -128,7 +125,7 @@ class TestReviseCandidate:
                              "confidence": "medium", "confidence_reasoning": "two notices from one day",
                              "source_memories": [SRC_A, "33333333-3333-3333-3333-333333333333"]})
         with patch.object(orch, "_invoker_for", return_value=inv), patch.object(orch, "_role_has_tools", return_value=False), \
-             patch.object(orch, "_record_spend") as spend, patch.object(orch, "_capture"):
+             patch.object(orch, "_capture"):
             out = orch._revise_candidate(cand, _audit(blocking=["fax number"], advisory=["every"], score=30))
         assert out.title.startswith("Two captured notices")
         assert out.confidence == "medium" and "claim_scope" in out.content
@@ -138,10 +135,11 @@ class TestReviseCandidate:
                                 "blocking_issues": ["fax number"], "advisory_issues": ["every"]}
         kwargs = inv.invoke.call_args.kwargs
         assert kwargs["tools"] is False and kwargs["stage"] == "revision" and kwargs["schema"] is REVISION_SCHEMA
-        assert kwargs["system_prompt"] == REVISION_PROMPT
-        req = json.loads(kwargs["user_message"])
+        assert inv.invoke.call_args.args[0] == REVISION_PROMPT
+        req = json.loads(inv.invoke.call_args.args[1])
         assert req["blocking_issues"] == ["fax number"] and "no action needed" in req["cited_sources"]
-        spend.assert_called_once_with("thinker", inv.invoke.return_value)
+        assert orch._spend.calls == 1
+        assert orch._spend.total_usd == pytest.approx(0.00175)  # 100 input + 50 output tokens, Opus 5
 
     def test_schema_note_and_relationship_notes_are_revised_but_targets_never_added(self):
         orch = _orch()
@@ -152,7 +150,7 @@ class TestReviseCandidate:
                              "relationships": [{"target_id": SRC_A, "relation_type": "extends", "note": "two notices, no mention"},
                                                {"target_id": "99999999-9999-9999-9999-999999999999", "relation_type": "supports", "note": "new"}]})
         with patch.object(orch, "_invoker_for", return_value=inv), patch.object(orch, "_role_has_tools", return_value=False), \
-             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
+             patch.object(orch, "_capture"):
             out = orch._revise_candidate(cand, _audit(blocking=["unsupported system-capability claim"]))
         assert out.schema_note == "the two captured notices did not mention the trigger"
         assert out.relationships == [{"target_id": SRC_A, "relation_type": "extends", "note": "two notices, no mention"}]
@@ -164,7 +162,7 @@ class TestReviseCandidate:
                  "source_memories": [SRC_A], "schema_note": "inner note"}
         inv = self._invoker({"title": "Outer", "content": json.dumps(inner), "confidence": "high", "source_memories": [SRC_A, SRC_B]})
         with patch.object(orch, "_invoker_for", return_value=inv), patch.object(orch, "_role_has_tools", return_value=False), \
-             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
+             patch.object(orch, "_capture"):
             out = orch._revise_candidate(_cand(), _audit(blocking=["x"]))
         assert out.content == "WHAT: the real body" and out.title == "Inner title"
         assert out.confidence == "medium" and out.source_memories == [SRC_A] and out.schema_note == "inner note"
@@ -173,7 +171,7 @@ class TestReviseCandidate:
         orch = _orch()
         inv = self._invoker({"title": "t", "content": "c", "confidence": "low", "source_memories": [SRC_A]})
         with patch.object(orch, "_invoker_for", return_value=inv), patch.object(orch, "_role_has_tools", return_value=True), \
-             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
+             patch.object(orch, "_capture"):
             orch._revise_candidate(_cand(), _audit(blocking=["x"]))
         assert "schema" not in inv.invoke.call_args.kwargs
 
@@ -181,7 +179,7 @@ class TestReviseCandidate:
         orch = _orch()
         inv = self._invoker({"title": "t"})
         with patch.object(orch, "_invoker_for", return_value=inv), patch.object(orch, "_role_has_tools", return_value=False), \
-             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
+             patch.object(orch, "_capture"):
             with pytest.raises(ValueError):
                 orch._revise_candidate(_cand(), _audit(blocking=["x"]))
 
@@ -189,7 +187,7 @@ class TestReviseCandidate:
         orch = _orch()
         inv = self._invoker({"title": "t", "content": "c", "confidence": "low", "source_memories": []})
         with patch.object(orch, "_invoker_for", return_value=inv), patch.object(orch, "_role_has_tools", return_value=False), \
-             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
+             patch.object(orch, "_capture"):
             out = orch._revise_candidate(_cand(), _audit(blocking=["x"]))
         assert out.source_memories == [SRC_A, SRC_B]
 

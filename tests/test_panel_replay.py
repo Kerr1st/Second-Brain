@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from scripts import panel_replay as pr
-from src.backends.cost import SpendCapExceeded, SpendTracker
+from src.backends.cost import SpendCapExceeded, SpendTracker, UsageUnavailable
 from src.backends.resolver import RoleBackend
 
 
@@ -105,10 +105,16 @@ class TestReplay:
 
     def test_one_failing_call_is_recorded_not_fatal(self):
         res = _FakeResolver({s: "ACCEPT" for s in pr.SEATS})
-        def boom(system_prompt, user_message, **kw): raise RuntimeError("throttled")
+        def boom(system_prompt, user_message, **kw):
+            error = ValueError("synthetic malformed output")
+            error.model_response_received = True
+            error.usage = {"inputTokens": 1000, "outputTokens": 100}
+            error.usage_source = "real"
+            raise error
         res.invoker_for = lambda role: types.SimpleNamespace(invoke=boom)
         recs = pr.replay([_row()], ["skeptic", "advocate"], res, SpendTracker(cap_usd=5), sources_fn=lambda c: "")
-        assert [r["verdict"] for r in recs] == ["ERROR", "ERROR"] and "throttled" in recs[0]["reasoning"]
+        assert [r["verdict"] for r in recs] == ["ERROR", "ERROR"] and recs[0]["reasoning"] == "ValueError"
+        assert all(record["cost_usd"] > 0 for record in recs)
         assert pr.matrix(recs, ["skeptic", "advocate"])["consensus"] == {}
 
     def test_dry_run_makes_no_calls_and_prompt_variant_is_used(self):
@@ -136,3 +142,25 @@ class TestNoWrites:
         src = open(pr.__file__, encoding="utf-8").read()
         assert not re.search(r"(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+dream_cycle_candidates", src, re.I)
         assert src.count("SELECT") >= 1                                   # it does read them
+
+
+@pytest.mark.parametrize("model", ["claude-fable-5-1", "GLOBAL.ANTHROPIC.CLAUDE-FABLE-5-1"])
+def test_forbidden_override_rejected_before_constructor(monkeypatch, model):
+    resolver = _FakeResolver({seat: "ACCEPT" for seat in pr.SEATS})
+    constructor = MagicMock()
+    monkeypatch.setitem(pr.DEFAULT_ADAPTERS, "bedrock", constructor)
+    with pytest.raises(ValueError):
+        pr.replay([_row()], ["skeptic"], resolver, SpendTracker(1), sources_fn=lambda c: "synthetic",
+                  overrides={"skeptic": RoleBackend("skeptic", "bedrock", model)})
+    constructor.assert_not_called()
+    assert resolver.calls == []
+
+
+def test_unknown_usage_stops_replay_before_next_seat():
+    resolver = _FakeResolver({seat: "ACCEPT" for seat in pr.SEATS})
+    invoker = MagicMock()
+    invoker.invoke.return_value = {"output": {"verdict": "ACCEPT"}, "usage": None}
+    resolver.invoker_for = lambda role: invoker
+    with pytest.raises(UsageUnavailable):
+        pr.replay([_row()], list(pr.SEATS), resolver, SpendTracker(1), sources_fn=lambda c: "synthetic")
+    assert invoker.invoke.call_count == 1

@@ -28,7 +28,7 @@ from src.dream_cycle.orchestrator import EVALUATOR_MAX_ATTEMPTS
 # ---------------------------------------------------------------------------
 
 def _make_orchestrator():
-    """Instantiate DreamCycleOrchestrator (all-Kiro laptop profile; construction is subprocess-free)."""
+    """Instantiate the controlled profile without invoking a provider."""
     from src.dream_cycle import DreamCycleOrchestrator
     return DreamCycleOrchestrator()
 
@@ -223,7 +223,7 @@ class TestEvaluatorIndependenceProperty:
                 "user_message": user_message,
                 "tools": tools,
             })
-            return {"output": {"verdict": "ACCEPT", "reasoning": "looks good"}, "raw": "{}"}
+            return {"output": {"verdict": "ACCEPT", "reasoning": "looks good"}, "raw": "{}", "usage": {"inputTokens": 0, "outputTokens": 0}}
 
         orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
 
@@ -284,7 +284,7 @@ class TestEvaluatorIndependenceExplicit:
 
         def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
             captured_tools.append(tools)
-            return {"output": {"verdict": "ACCEPT", "reasoning": "solid"}, "raw": "{}"}
+            return {"output": {"verdict": "ACCEPT", "reasoning": "solid"}, "raw": "{}", "usage": {"inputTokens": 0, "outputTokens": 0}}
 
         orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
 
@@ -318,7 +318,7 @@ class TestEvaluatorIndependenceExplicit:
         def mock_invoke(system_prompt, user_message, mcp_config=None, **kwargs):
             # Extract role from the call context
             captured_prompts[len(captured_prompts)] = system_prompt
-            return {"output": {"verdict": "ACCEPT", "reasoning": "good"}, "raw": "{}"}
+            return {"output": {"verdict": "ACCEPT", "reasoning": "good"}, "raw": "{}", "usage": {"inputTokens": 0, "outputTokens": 0}}
 
         orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
 
@@ -2420,7 +2420,7 @@ class TestFinalOrchestratorMethodSet:
             # Coordination glue for metered / tool-less backends: capability lookup
             # and delegation to SpendTracker (pricing itself lives in backends/cost.py).
             "_role_has_tools",
-            "_record_spend",
+            "_invoke_metered",
             # Attention allocation: slice budget + guaranteed arrivals slice + ledger
             # persistence, all through dream_cycle_db so unit tests stay hermetic.
             "_allocate_attention",
@@ -2531,12 +2531,21 @@ class TestToollessThinkerPacketAndSpendGuard:
         from src.backends.resolver import Resolver, RoleBackend
         return Resolver({
             "explorer": RoleBackend("explorer", "claude_code", "global.anthropic.claude-opus-5", "high"),
-            "thinker": RoleBackend("thinker", "bedrock", "global.anthropic.claude-fable-5-1", "high"),
+            "thinker": RoleBackend("thinker", "bedrock", "global.anthropic.claude-opus-5", "high"),
             "skeptic": RoleBackend("skeptic", "bedrock", "global.openai.gpt-6-astra", "high"),
             "advocate": RoleBackend("advocate", "bedrock", "global.anthropic.claude-sonnet-5", "high"),
             "epistemologist": RoleBackend("epistemologist", "bedrock", "global.openai.gpt-6-astra", "high"),
             "methodologist": RoleBackend("methodologist", "bedrock", "global.anthropic.claude-sonnet-5", "high"),
         })
+
+    def _tool_capable_orchestrator(self):
+        from src.backends.resolver import Resolver, RoleBackend
+        orch = _make_orchestrator()
+        orch.resolver = Resolver({
+            role: RoleBackend(role, "claude_code", "global.anthropic.claude-opus-5", "high")
+            for role in ("explorer", "thinker", "skeptic", "advocate", "epistemologist", "methodologist")
+        })
+        return orch
 
     def _slice(self):
         return MemorySlice(
@@ -2560,7 +2569,7 @@ class TestToollessThinkerPacketAndSpendGuard:
 
         def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
             captured.update(system_prompt=system_prompt, user_message=user_message, tools=tools, **kwargs)
-            return {"output": [], "raw": "[]", "usage": None}
+            return {"output": [], "raw": "[]", "usage": {"inputTokens": 0, "outputTokens": 0}}
 
         with patch("src.dream_cycle.orchestrator.load_memories_by_ids", return_value=self._fake_memories()) as loader:
             orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
@@ -2577,17 +2586,17 @@ class TestToollessThinkerPacketAndSpendGuard:
         assert orch._slice_memory_cache[self.MEM_B]["title"] == "Calendar note"
 
     def test_tool_capable_thinker_gets_packet_and_keeps_tools_for_search(self):
-        """Kiro / Claude Code / Codex Thinkers keep tools=True but now receive the
+        """An allowed Claude Code Thinker keeps tools=True but now receives the
         slice contents inline too: re-reading 10-20 memories over MCP at ~20s per
         turn timed out on episodic slices (2026-09-17). The note tells them to
         spend tools on CLS-interleaving searches, not on memory_read. Contents
         are still cached for the tool-less evaluators."""
-        orch = _make_orchestrator()  # default laptop profile: kiro
+        orch = self._tool_capable_orchestrator()
         captured = {}
 
         def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
             captured.update(user_message=user_message, tools=tools, timeout=kwargs.get("timeout"))
-            return {"output": [], "raw": "[]"}
+            return {"output": [], "raw": "[]", "usage": {"inputTokens": 0, "outputTokens": 0}}
 
         with patch("src.dream_cycle.orchestrator.load_memories_by_ids", return_value=self._fake_memories()) as loader:
             orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
@@ -2614,7 +2623,7 @@ class TestToollessThinkerPacketAndSpendGuard:
 
         def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
             captured["system_prompt"] = system_prompt
-            return {"output": {"verdict": "ACCEPT", "reasoning": "ok"}, "raw": "{}"}
+            return {"output": {"verdict": "ACCEPT", "reasoning": "ok"}, "raw": "{}", "usage": {"inputTokens": 0, "outputTokens": 0}}
 
         orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
         orch.invoke_evaluator(candidate, "skeptic")
@@ -2639,7 +2648,7 @@ class TestToollessThinkerPacketAndSpendGuard:
 
         def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
             captured.update(kwargs)
-            return {"output": {"verdict": "ACCEPT", "reasoning": "ok"}, "raw": "{}"}
+            return {"output": {"verdict": "ACCEPT", "reasoning": "ok"}, "raw": "{}", "usage": {"inputTokens": 0, "outputTokens": 0}}
 
         orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
         orch.invoke_evaluator(candidate, "methodologist")
@@ -2649,8 +2658,8 @@ class TestToollessThinkerPacketAndSpendGuard:
         assert set(schema["required"]) == {"verdict", "score", "blocking_issues", "advisory_issues", "reasoning"}
 
     def test_tool_capable_evaluator_gets_no_schema_option(self):
-        """Kiro's invoke() has a fixed signature; never pass it unknown kwargs."""
-        orch = _make_orchestrator()  # laptop profile: kiro
+        """An allowed CLI evaluator receives no Direct-API schema option."""
+        orch = self._tool_capable_orchestrator()
         candidate = CandidateInsight(
             title="q", type="insight", operation="CREATE", content="c",
             source_memories=[], relationships=[], strategy_that_found_it="pattern_emergence",
@@ -2659,7 +2668,7 @@ class TestToollessThinkerPacketAndSpendGuard:
 
         def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
             captured.update(kwargs)
-            return {"output": {"verdict": "ACCEPT", "reasoning": "ok"}, "raw": "{}"}
+            return {"output": {"verdict": "ACCEPT", "reasoning": "ok"}, "raw": "{}", "usage": {"inputTokens": 0, "outputTokens": 0}}
 
         orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
         orch.invoke_evaluator(candidate, "skeptic")
@@ -2705,6 +2714,7 @@ class TestToollessThinkerPacketAndSpendGuard:
             result = orch.run(run_type="scheduled")
 
         assert result.aborted_early is True
+        assert result.candidates_generated == 1
         assert result.candidates_accepted == 0 and result.candidates_rejected == 0
         assert expensive.invoke.call_count == 1, "a cap breach must not be retried"
         mock_db.complete_run.assert_called_once()  # run record is closed, not left dangling

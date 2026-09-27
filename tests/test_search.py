@@ -473,3 +473,35 @@ class TestSearchRowsExcludeVectorColumns:
                     "status", "parent_id", "created_at", "access_count", "mem_class",
                     "project", "last_accessed_at", "encoding_context", "rrf_score"):
             assert key in row, key
+
+
+class TestFullTextWithoutEmbedding:
+    def test_unembedded_source_is_reachable_and_filters_still_apply(
+        self, test_db, clean_tables, mock_embedding,
+    ):
+        target = db.create_memory(
+            type="source", title="Synthetic zephyr migration decision",
+            content="Zephyr migration approval requires regional evidence.",
+            source_type="codex_task", project="adoption", status="active",
+        )
+        db.create_memory(
+            type="source", title="Other project zephyr",
+            content="Zephyr migration in another project.",
+            source_type="codex_task", project="unrelated", status="active",
+        )
+        results = hybrid_search(
+            "zephyr migration", mock_embedding("zephyr migration"), limit=5,
+            source_type="codex_task", project="adoption", status="active",
+        )
+        assert [str(row["id"]) for row in results] == [str(target)]
+
+    def test_fts_and_vector_match_yields_one_result(
+        self, test_db, clean_tables, mock_embedding,
+    ):
+        query = "Synthetic zephyr migration evidence"
+        target = db.create_memory(
+            type="idea", title=query, content=query,
+            embedding=str(mock_embedding(query)),
+        )
+        results = hybrid_search(query, mock_embedding(query), limit=5)
+        assert [str(row["id"]) for row in results] == [str(target)]

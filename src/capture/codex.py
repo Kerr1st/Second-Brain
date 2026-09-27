@@ -6,16 +6,12 @@ The Captured Task commits before semantic processing so a transient model or
 embedding failure never loses source evidence; the unchanged cursor causes the
 whole unprocessed tail to retry on the next run.
 
-That retry is bounded. Each attempt on one unprocessed tail is counted in the
-Captured Task's ``metadata.semantic_attempts``; after
-``SEMANTIC_MAX_ATTEMPTS`` (default 3, overridden by the environment variable
-``SECOND_BRAIN_CODEX_SEMANTIC_MAX_ATTEMPTS``) the tail is marked
-``metadata.semantic_abandoned``, counted in the run summary as
-``semantic_abandoned``, and never sent to the model again. The verbatim
-Captured Task is always kept. The attempt counter is keyed by the semantic
-contract (prompt version plus resolved model) and the identity of the
-unprocessed tail, so new Agent Turns, a new prompt version, or a different
-Thinker model each start a fresh budget.
+Semantic work uses a dedicated controlled backend and one spend threshold per
+capture run. Fixed, persisted batches prevent newly arriving turns from reviving
+a failed batch. Only invalid model results consume the contract retry budget;
+provider, embedding, and database outages remain operational failures. Validated
+results are cached before embedding so a storage retry need not pay for the same
+generation again. The verbatim Captured Task is always retained.
 """
 
 from __future__ import annotations
@@ -32,7 +28,8 @@ import tempfile
 from typing import Any, Callable
 
 import src.db as db
-from src.backends.resolver import default_resolver
+from src.backends.cost import SpendCapExceeded, SpendTracker, cap_from_env, invoke_metered
+from src.backends.resolver import CODEX_SEMANTIC_ROLE, default_resolver, resolve_stage
 from src.capture.agent_tasks import (
     AgentTaskSnapshot,
     AgentTurn,
@@ -52,10 +49,17 @@ MEMORY_SOURCE_TYPE = "distilled_agent_task"
 #: Version of the semantic contract (system prompt below). Bumping it retires
 #: every recorded attempt count and abandonment, so a reworked prompt gets a
 #: fresh budget on tails an earlier prompt could never satisfy.
-SEMANTIC_PROMPT_VERSION = "codex-semantic-v1"
+SEMANTIC_PROMPT_VERSION = "codex-semantic-v2-bounded"
 
-#: Maximum model attempts spent on one unprocessed tail of one Codex Task
-#: before it is abandoned. Overridable at runtime by
+# Payload limits are deliberately conservative. Oversized individual turns stay
+# captured verbatim and are reported for review, never silently truncated.
+SEMANTIC_BATCH_TURNS = 8
+SEMANTIC_BATCH_CHARS = 48_000
+SEMANTIC_PREVIOUS_CHARS = 12_000
+SEMANTIC_COST_CAP_ENV = "SECOND_BRAIN_CODEX_SEMANTIC_COST_CAP_USD"
+
+#: Maximum invalid model results for one frozen batch of one Codex Task
+#: before semantic processing is abandoned. Overridable at runtime by
 #: ``SECOND_BRAIN_CODEX_SEMANTIC_MAX_ATTEMPTS`` (a positive integer).
 SEMANTIC_MAX_ATTEMPTS = 3
 SEMANTIC_MAX_ATTEMPTS_ENV = "SECOND_BRAIN_CODEX_SEMANTIC_MAX_ATTEMPTS"
@@ -135,6 +139,10 @@ class CaptureReport:
     semantic_processed: int = 0
     semantic_retried: int = 0
     semantic_abandoned: int = 0
+    semantic_skipped_budget: int = 0
+    semantic_cost_usd: float = 0.0
+    semantic_metered_calls: int = 0
+    semantic_spend_incomplete: bool = False
     failed: int = 0
     dry_run: bool = False
     failures: tuple[TaskFailure, ...] = ()
@@ -174,22 +182,27 @@ class SemanticResultError(ValueError):
     """The combined semantic result does not preserve the evidence contract."""
 
 
+class SemanticBatchTooLarge(ValueError):
+    """A complete turn cannot fit the bounded semantic payload."""
+
+
 class _BackendSemanticPass:
-    """Lazily resolve the configured Thinker only when semantic work exists."""
+    """One lazy, metered semantic stage shared by every task in this run."""
+
+    def __init__(self):
+        self.tracker = SpendTracker(cap_from_env(SEMANTIC_COST_CAP_ENV, 2.0))
 
     @property
     def contract_id(self) -> str:
         """Prompt version plus resolved model — the attempt budget's identity."""
         try:
-            model = default_resolver().spec_for("thinker").model
+            model = default_resolver().spec_for(CODEX_SEMANTIC_ROLE).model
         except Exception:  # pragma: no cover - resolution fails later anyway
             return SEMANTIC_PROMPT_VERSION
         return f"{SEMANTIC_PROMPT_VERSION}:{model}"
 
     def run(self, *, previous_segment, turns):
-        resolver = default_resolver()
-        spec = resolver.spec_for("thinker")
-        invoker = resolver.invoker_for("thinker")
+        invoker, spec = resolve_stage(CODEX_SEMANTIC_ROLE)
         payload = {
             "previous_segment": (
                 {
@@ -202,12 +215,20 @@ class _BackendSemanticPass:
             ),
             "new_turns": [_turn_dict(turn) for turn in turns],
         }
-        result = invoker.invoke(
-            _SEMANTIC_SYSTEM_PROMPT,
-            json.dumps(payload, ensure_ascii=False),
-            tools=False,
-            effort=spec.effort,
-        )
+        try:
+            result = invoke_metered(
+                invoker, spec, self.tracker,
+                _SEMANTIC_SYSTEM_PROMPT,
+                json.dumps(payload, ensure_ascii=False),
+                tools=False,
+                effort=spec.effort,
+            )
+        except SpendCapExceeded:
+            raise
+        except Exception as exc:
+            if getattr(exc, "model_response_received", False):
+                raise SemanticResultError("model response failed the semantic contract") from exc
+            raise
         return _parse_semantic_output(result["output"])
 
 
@@ -276,9 +297,11 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         "semantic_processed": 0,
         "semantic_retried": 0,
         "semantic_abandoned": 0,
+        "semantic_skipped_budget": 0,
         "failed": 0,
     }
     failures: list[TaskFailure] = []
+    semantic_budget_stopped = False
     refs = tuple(services.source.enumerate_tasks(now))
     counts["enumerated"] = len(refs)
     counts["skipped_delegated"] = services.source.skipped_delegated
@@ -323,6 +346,14 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         tail = _unprocessed_tail(captured.turns, captured.metadata.get("semantic_cursor"))
         if not tail:
             continue
+        if semantic_budget_stopped:
+            counts["semantic_skipped_budget"] += 1
+            continue
+        try:
+            tail = _semantic_batch(captured, tail, services)
+        except Exception as exc:
+            _record_failure(counts, failures, ref.native_task_id, "semantic_input", exc)
+            continue
         attempt_key = _attempt_key(captured, tail, services)
         bound = _semantic_max_attempts()
         spent = _recorded_attempts(captured.metadata, attempt_key)
@@ -351,11 +382,14 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         if captured.disposition == "unchanged":
             counts["semantic_retried"] += 1
         attempt = spent + 1
-        _record_attempt(captured, attempt_key, attempt, now, services.connect)
-
         try:
             _process_semantics(captured, tail, services)
-        except Exception as exc:
+        except SpendCapExceeded as exc:
+            _record_failure(counts, failures, ref.native_task_id, "semantic_budget", exc)
+            semantic_budget_stopped = True
+            continue  # Stop inference, but retain every remaining raw task.
+        except SemanticResultError as exc:
+            _record_attempt(captured, attempt_key, attempt, now, services.connect)
             if attempt >= bound:
                 _record_abandonment(
                     captured, attempt_key, attempt, type(exc).__name__, now,
@@ -373,12 +407,21 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
                 )
             _record_failure(counts, failures, ref.native_task_id, "semantic", exc)
             continue
+        except Exception as exc:
+            # Outages must not permanently abandon valid source evidence.
+            if getattr(getattr(services.semantic, "tracker", None), "blocked_reason", None):
+                semantic_budget_stopped = True
+            _record_failure(counts, failures, ref.native_task_id, "semantic", exc)
+            continue
         counts["semantic_processed"] += 1
 
     return CaptureReport(
         **counts,
         dry_run=dry_run,
         failures=tuple(failures),
+        semantic_cost_usd=getattr(getattr(services.semantic, "tracker", None), "total_usd", 0.0),
+        semantic_metered_calls=getattr(getattr(services.semantic, "tracker", None), "calls", 0),
+        semantic_spend_incomplete=bool(getattr(getattr(services.semantic, "tracker", None), "blocked_reason", None)),
     )
 
 
@@ -508,7 +551,7 @@ def _metadata_for_snapshot(
     }
     # The semantic retry budget lives beside the cursor and must survive a
     # refresh; its key, not this copy, decides when it resets.
-    for key in ("semantic_attempts", "semantic_abandoned"):
+    for key in ("semantic_attempts", "semantic_abandoned", "semantic_batch", "semantic_pending"):
         if key in previous:
             metadata[key] = previous[key]
     if native_title:
@@ -689,17 +732,45 @@ def _semantic_max_attempts() -> int:
     return value
 
 
-def _attempt_key(captured: _CapturedTask, tail, services) -> str:
-    """Identity of one retry budget: semantic contract plus unprocessed tail.
-
-    New Agent Turns move the tail's last turn ID, and a new prompt version or
-    Thinker model moves the contract, so either starts counting from zero.
-    """
+def _semantic_contract(services) -> str:
     contract = getattr(services.semantic, "contract_id", None)
-    if not isinstance(contract, str) or not contract:
-        contract = SEMANTIC_PROMPT_VERSION
+    return contract if isinstance(contract, str) and contract else SEMANTIC_PROMPT_VERSION
+
+
+def _semantic_batch(captured, tail, services):
+    """Freeze the oldest bounded prefix until it succeeds or is reviewed.
+
+    New arrivals cannot reset an abandoned batch. A changed prompt/model may
+    retry it under a new contract. Limits include the serialized turn structure.
+    """
+    prior = captured.metadata.get("semantic_batch")
+    ids = [turn.turn_id for turn in tail]
+    if isinstance(prior, dict) and prior.get("contract") == _semantic_contract(services):
+        frozen = prior.get("turn_ids")
+        if isinstance(frozen, list) and frozen and ids[:len(frozen)] == frozen:
+            return tail[:len(frozen)]
+    selected = []
+    size = 0
+    for turn in tail[:SEMANTIC_BATCH_TURNS]:
+        turn_size = len(json.dumps(_turn_dict(turn), ensure_ascii=False))
+        if size + turn_size > SEMANTIC_BATCH_CHARS:
+            if not selected:
+                raise SemanticBatchTooLarge("one Agent Turn exceeds the semantic input limit")
+            break
+        selected.append(turn)
+        size += turn_size
+    batch = tuple(selected)
+    _update_task_metadata(captured, {"semantic_batch": {
+        "contract": _semantic_contract(services),
+        "turn_ids": [turn.turn_id for turn in batch],
+    }}, services.connect, drop=("semantic_pending",))
+    return batch
+
+
+def _attempt_key(captured: _CapturedTask, tail, services) -> str:
+    """Identity of the frozen batch, independent of later arriving turns."""
     cursor = captured.metadata.get("semantic_cursor") or ""
-    return f"{contract}|{cursor}|{tail[-1].turn_id}"
+    return f"{_semantic_contract(services)}|{cursor}|{tail[-1].turn_id}"
 
 
 def _recorded_attempts(metadata: dict[str, Any], key: str) -> int:
@@ -718,7 +789,7 @@ def _is_abandoned(metadata: dict[str, Any], key: str) -> bool:
 
 
 def _record_attempt(captured, key, attempt, now, connect) -> None:
-    """Persist the attempt before spending it, so a crash still counts."""
+    """Persist only an observed model-contract failure, never an outage."""
     _update_task_metadata(
         captured,
         {
@@ -816,11 +887,25 @@ def _last_segment(captured: _CapturedTask, connect) -> _StoredSegment | None:
 
 def _process_semantics(captured, tail, services) -> None:
     previous = _last_segment(captured, services.connect)
-    result = services.semantic.run(
-        previous_segment=previous.segment if previous is not None else None,
-        turns=tail,
-    )
-    _validate_semantic_result(result, previous, tail)
+    # Long previous segments are retained, but cannot grow the next prompt
+    # without bound. A fresh segment is then required, with full provenance.
+    context = previous
+    if context is not None and len(json.dumps(asdict(context.segment), ensure_ascii=False)) > SEMANTIC_PREVIOUS_CHARS:
+        context = None
+    key = _attempt_key(captured, tail, services)
+    pending = captured.metadata.get("semantic_pending")
+    if isinstance(pending, dict) and pending.get("key") == key:
+        result = _parse_semantic_output(pending["result"])
+    else:
+        result = services.semantic.run(
+            previous_segment=context.segment if context is not None else None,
+            turns=tail,
+        )
+    _validate_semantic_result(result, context, tail)
+    if not isinstance(pending, dict) or pending.get("key") != key:
+        _update_task_metadata(captured, {"semantic_pending": {
+            "key": key, "result": asdict(result),
+        }}, services.connect)
 
     turn_lookup = {turn.turn_id: turn for turn in captured.turns}
     segment_contents = tuple(
@@ -1054,6 +1139,8 @@ def _store_semantic_result(
                 # The tail is processed: retire its retry budget.
                 current_metadata.pop("semantic_attempts", None)
                 current_metadata.pop("semantic_abandoned", None)
+                current_metadata.pop("semantic_batch", None)
+                current_metadata.pop("semantic_pending", None)
                 cursor.execute(
                     """
                     UPDATE memories
@@ -1075,6 +1162,19 @@ def _parse_semantic_output(output: Any) -> TaskSemanticResult:
     memories_value = output.get("memories")
     if not isinstance(segments_value, list) or not isinstance(memories_value, list):
         raise SemanticResultError("semantic output needs segments and memories arrays")
+    def strings(value):
+        return isinstance(value, list) and all(isinstance(item, str) and item for item in value)
+
+    for value in segments_value:
+        if (not isinstance(value, dict) or not isinstance(value.get("title"), str)
+                or not strings(value.get("turn_ids"))):
+            raise SemanticResultError("segment title and turn IDs have invalid types")
+    for value in memories_value:
+        if (not isinstance(value, dict)
+                or type(value.get("segment")) is not int
+                or not all(isinstance(value.get(key), str) for key in ("kind", "title", "content"))
+                or not strings(value.get("supporting_turn_ids"))):
+            raise SemanticResultError("memory fields have invalid types")
     try:
         segments = tuple(
             TopicSegment(
@@ -1095,4 +1195,7 @@ def _parse_semantic_output(output: Any) -> TaskSemanticResult:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SemanticResultError("semantic output has an invalid shape") from exc
-    return TaskSemanticResult(segments=segments, memories=memories)
+    try:
+        return TaskSemanticResult(segments=segments, memories=memories)
+    except (TypeError, ValueError) as exc:
+        raise SemanticResultError("semantic output has an invalid shape") from exc

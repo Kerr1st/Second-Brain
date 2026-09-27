@@ -586,12 +586,9 @@ class BedrockInvoker(DirectApiInvoker):
             if usage_block and isinstance(usage_block, dict):
                 return (
                     {
-                        "inputTokens": usage_block.get("input_tokens", 0),
-                        "outputTokens": usage_block.get("output_tokens", 0),
-                        "totalTokens": (
-                            usage_block.get("input_tokens", 0)
-                            + usage_block.get("output_tokens", 0)
-                        ),
+                        "inputTokens": usage_block.get("input_tokens"),
+                        "outputTokens": usage_block.get("output_tokens"),
+                        "totalTokens": usage_block.get("total_tokens"),
                     },
                     "real",
                 )
@@ -604,8 +601,8 @@ class BedrockInvoker(DirectApiInvoker):
             # only the uncached remainder and the bulk is reported as cache
             # reads/writes. Carry them so cost accounting sees the real input.
             usage = {
-                "inputTokens": usage_block.get("inputTokens", 0),
-                "outputTokens": usage_block.get("outputTokens", 0),
+                "inputTokens": usage_block.get("inputTokens"),
+                "outputTokens": usage_block.get("outputTokens"),
                 "totalTokens": usage_block.get("totalTokens", 0),
                 "cacheReadInputTokens": usage_block.get("cacheReadInputTokens", 0),
                 "cacheWriteInputTokens": usage_block.get("cacheWriteInputTokens", 0),

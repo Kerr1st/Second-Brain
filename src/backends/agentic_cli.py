@@ -39,6 +39,7 @@ from typing import Optional
 
 from src.backends.base import (
     METRICS_DIR as METRICS_DIR,
+    assert_corpus_route, corpus_role_for_stage, CorpusRoutingError, BACKEND_CAPABILITIES,
     _write_metrics_line as _write_metrics_line,
     parse_json_output as _parse_json_output,
 )
@@ -111,6 +112,9 @@ class AgenticCliInvoker:
                 tool-using calls — MCP tools failed to attach).
             ValueError: If no JSON is recoverable from the final text.
         """
+        corpus_role = corpus_role_for_stage(stage)
+        if corpus_role:
+            assert_corpus_route(self.BACKEND_NAME, self.model, corpus_role)
         needs_tools = tools
         name = self._make_invocation_name()
         config = self._build_config(name, system_prompt, needs_tools)
@@ -175,21 +179,32 @@ class AgenticCliInvoker:
                     continue
                 break
 
-            self._check_returncode(result, metrics)
-            self._note_model_honored(result, metrics)
-
-            raw = self._extract_raw(result)
-            metrics["output_chars"] = len(raw)
-            logger.debug("%s agent raw output length: %d chars", self.BACKEND_NAME, len(raw))
-            self._dump_raw_debug(name, raw)
-
-            parsed = self._parse(raw, metrics)
-            usage, usage_source = self._extract_usage(
-                parsed=parsed, raw=raw, result=result, metrics=metrics
-            )
-            self._run_probe(
-                name=name, needs_tools=needs_tools, result=result, parsed=parsed, raw=raw
-            )
+            metered = BACKEND_CAPABILITIES[self.BACKEND_NAME].metered
+            usage, usage_source = (None, "estimate")
+            if metered:
+                usage, usage_source = self._extract_usage(
+                    parsed=None, raw="", result=result, metrics=metrics
+                )
+            try:
+                self._check_returncode(result, metrics)
+                self._note_model_honored(result, metrics)
+                raw = self._extract_raw(result)
+                metrics["output_chars"] = len(raw)
+                logger.debug("%s agent raw output length: %d chars", self.BACKEND_NAME, len(raw))
+                self._dump_raw_debug(name, raw)
+                parsed = self._parse(raw, metrics)
+                if not metered:
+                    usage, usage_source = self._extract_usage(
+                        parsed=parsed, raw=raw, result=result, metrics=metrics
+                    )
+                self._run_probe(
+                    name=name, needs_tools=needs_tools, result=result, parsed=parsed, raw=raw
+                )
+            except Exception as exc:
+                if metered and usage is not None:
+                    exc.model_response_received = True
+                    exc.usage, exc.usage_source = usage, usage_source
+                raise
 
             metrics["success"] = True
             metrics["usage_source"] = usage_source
@@ -246,6 +261,9 @@ class AgenticCliInvoker:
                 "provenance for this call is the requested model, not the served one",
                 self.BACKEND_NAME, m.group(1),
             )
+            if corpus_role_for_stage(metrics.get("stage")):
+                metrics["error"] = "model_not_honored"
+                raise CorpusRoutingError("Requested corpus model was not honored")
 
     def _check_returncode(self, result, metrics: dict) -> None:
         """Map a non-zero exit to :class:`RuntimeError`. Shared failure mode."""

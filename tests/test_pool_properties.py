@@ -93,8 +93,8 @@ class TestLazyInitializationConsistency:
                 cur.execute("SELECT current_database()")
                 current_db = cur.fetchone()[0]
 
-        assert current_db == "memory_bank_test", (
-            f"Expected pool to connect to memory_bank_test, got {current_db}"
+        assert current_db == test_db["dbname"], (
+            f"Expected pool to connect to the disposable database, got {current_db}"
         )
         close_pool()
 

@@ -80,7 +80,7 @@ def _docs(n=2):
 
 
 def _profile(skim=True, skim_backend="bedrock"):
-    p = {r: RoleBackend(r, "kiro", "claude-opus-4.8", "high") for r in AGENT_ROLES}
+    p = {r: RoleBackend(r, "claude_code", "global.anthropic.claude-opus-4-8", "high") for r in AGENT_ROLES}
     if skim:
         p["skim"] = RoleBackend("skim", skim_backend, SKIM_MODEL, "low",
                                 {"temperature": 0.0, "service_tier": "flex", "max_tokens": 4096})
@@ -249,7 +249,8 @@ class TestSkimArrivalsHappyPath:
             db.get_memory_stats.return_value = {"total_count": 1, "recent_activity": 1, "date_range": {}}
             orch.run("scheduled")
         stats = db.complete_run.call_args.kwargs["stats"]
-        assert set(stats) == {"candidates_generated", "candidates_accepted", "candidates_rejected"}
+        assert not any(key.startswith("skim_") for key in stats)
+        assert stats["cost_usd"] == 0 and stats["spend_unknown"] is False
 
     def test_skim_runs_after_feedback_and_before_the_explorer(self):
         order = []
@@ -399,7 +400,7 @@ class TestExplorerInventory:
         with caplog.at_level(logging.INFO, logger="src.dream_cycle.orchestrator"), \
              patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
              patch.object(orch, "_invoker_for", return_value=invoker), \
-             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"):
+             patch.object(orch, "_invoke_metered", side_effect=lambda role, **kw: invoker.invoke(**kw)), patch.object(orch, "_capture"):
             db.get_previous_run_started_at.return_value = STARTED - timedelta(days=1)
             db.get_arrivals_summary.return_value = self.ARRIVALS
             db.get_strategy_usage.return_value = {}
@@ -443,7 +444,7 @@ class TestExplorerInventory:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
              patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "_invoker_for", return_value=invoker), \
-             patch.object(orch, "_record_spend"), patch.object(orch, "_capture"), \
+             patch.object(orch, "_invoke_metered", side_effect=lambda role, **kw: invoker.invoke(**kw)), patch.object(orch, "_capture"), \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""):
             db.create_run.return_value = "run-p"
             db.get_memory_stats.return_value = {"total_count": 1, "recent_activity": 1, "date_range": {}}

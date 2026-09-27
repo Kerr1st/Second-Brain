@@ -18,8 +18,8 @@ from datetime import datetime, timezone
 import psycopg2
 
 from src.backends.base import BACKEND_CAPABILITIES
-from src.backends.cost import SpendCapExceeded, SpendTracker, kill_switch_engaged
-from src.backends.resolver import SKIM_ROLE, VALID_ROLES, default_resolver
+from src.backends.cost import SpendCapExceeded, SpendTracker, kill_switch_engaged, invoke_metered, cap_from_env, UsageUnavailable
+from src.backends.resolver import SKIM_ROLE, DREAM_ROLES, default_resolver
 from src.models import (
     CandidateInsight,
     DreamCycleResult,
@@ -132,16 +132,7 @@ def _skim_cap_usd(run_cap_usd: float) -> float:
     bounded to SKIM_RUN_CAP_SHARE of the run cap. A bad env value falls back to the
     default with a warning, like SpendTracker.from_env."""
     cap = SKIM_SPEND_CAP_USD
-    raw = os.environ.get("SECOND_BRAIN_SKIM_CAP_USD")
-    if raw:
-        try:
-            parsed = float(raw)
-            if parsed > 0:
-                cap = parsed
-            else:
-                logger.warning("SECOND_BRAIN_SKIM_CAP_USD=%r must be > 0; using default $%.2f", raw, cap)
-        except ValueError:
-            logger.warning("SECOND_BRAIN_SKIM_CAP_USD=%r is not a number; using default $%.2f", raw, cap)
+    cap = cap_from_env("SECOND_BRAIN_SKIM_CAP_USD", cap)
     if run_cap_usd and run_cap_usd > 0:
         cap = min(cap, SKIM_RUN_CAP_SHARE * float(run_cap_usd))
     return cap
@@ -158,6 +149,7 @@ class DreamCycleOrchestrator:
         # Metered-spend guard (reset per run) and the slice contents delivered to
         # a tool-less Thinker, kept so evaluators can ground against the same text.
         self._spend = SpendTracker.from_env()
+        self._run_stats = dict(_ZERO_STATS)
         self._slice_memory_cache: dict[str, dict] = {}
         # Skim records for the run's arrivals window (Step 3.5 → Explorer inventory
         # and the weighted guaranteed slice) and what the Explorer was actually given.
@@ -178,21 +170,16 @@ class DreamCycleOrchestrator:
         caps = BACKEND_CAPABILITIES.get(backend)
         return caps.supports_mcp if caps is not None else True
 
-    def _record_spend(self, role: str, result) -> None:
-        """Price a call's real usage against the per-run cap.
-
-        Raises :class:`SpendCapExceeded` (not a RuntimeError, so the evaluator
-        retry loop cannot swallow it) once the cap is breached.
-        """
-        usage = result.get("usage") if isinstance(result, dict) else None
-        if not isinstance(usage, dict):
-            return
-        cost = self._spend.record(self.resolver.spec_for(role).model, usage)
-        if cost:
-            logger.info(
-                "Metered call %s: $%.4f (run total $%.4f of $%.2f cap)",
-                role, cost, self._spend.total_usd, self._spend.cap_usd,
+    def _invoke_metered(self, role: str, **kwargs):
+        """All Dream Cycle requests share strict accounting, including failures."""
+        try:
+            return invoke_metered(
+                self._invoker_for(role), self.resolver.spec_for(role), self._spend, **kwargs
             )
+        except (TimeoutError, RuntimeError, ValueError) as exc:
+            if self._spend.blocked_reason:
+                raise UsageUnavailable(self._spend.blocked_reason) from exc
+            raise
 
     def _budget_remaining(self) -> float | None:
         """Dollars left under the run cap, from the SpendTracker's real figures
@@ -214,7 +201,7 @@ class DreamCycleOrchestrator:
         backends lane. See docs/MODEL-BACKENDS.md.
         """
         provenance: dict[str, dict] = {}
-        for role in VALID_ROLES:
+        for role in DREAM_ROLES:
             try:
                 spec = self.resolver.spec_for(role)
             except KeyError:
@@ -256,15 +243,15 @@ class DreamCycleOrchestrator:
         run_type: str,
         started_at: datetime,
     ) -> DreamCycleResult:
-        """Build a DreamCycleResult for aborted/failed runs (all counts zero)."""
+        """Build an aborted result preserving work already produced/persisted."""
         return DreamCycleResult(
             run_id=run_id,
             run_type=run_type,
             started_at=started_at,
             completed_at=datetime.now(timezone.utc),
-            candidates_generated=0,
-            candidates_accepted=0,
-            candidates_rejected=0,
+            candidates_generated=self._run_stats["candidates_generated"],
+            candidates_accepted=self._run_stats["candidates_accepted"],
+            candidates_rejected=self._run_stats["candidates_rejected"],
             digest_path=None,
             aborted_early=True,
         )
@@ -285,6 +272,7 @@ class DreamCycleOrchestrator:
         started_at = datetime.now(timezone.utc)
         logger.info("Starting dream cycle: run_type=%s, scope=%s", run_type, scope)
 
+        self._run_stats = dict(_ZERO_STATS)
         # Kill switch: refuse to spend anything, before any record or LLM call.
         if kill_switch_engaged():
             logger.warning("SECOND_BRAIN_KILL_SWITCH is set — dream cycle run refused")
@@ -292,6 +280,7 @@ class DreamCycleOrchestrator:
 
         # Fresh per-run spend accounting and slice-content cache.
         self._spend = SpendTracker.from_env()
+        self._run_stats = dict(_ZERO_STATS)
         self._slice_memory_cache = {}
         self._skim_records = []
         self._explorer_input = {}
@@ -318,16 +307,21 @@ class DreamCycleOrchestrator:
         try:
             return self._run_pipeline(run_id, run_type, scope, started_at)
         except psycopg2.OperationalError:
-            logger.error(
-                "Database unreachable during pipeline execution (run_id=%s)", run_id
-            )
+            logger.error("Database unreachable during pipeline execution (run_id=%s)", run_id)
+            try:
+                dream_cycle_db.complete_run(run_id, stats=self._run_stats | {
+                    "aborted": True, "cost_usd": self._spend.total_usd,
+                    "spend_unknown": bool(self._spend.blocked_reason),
+                }, digest="")
+            except Exception:
+                logger.error("Could not persist aborted run while database unavailable")
             return self._aborted_result(run_id, run_type, started_at)
         except SpendCapExceeded as exc:
             # Hard stop: no more metered calls, no fabricated verdicts. Close the
             # run record so the abort is auditable, then report aborted_early.
             logger.error("Dream cycle aborted (run_id=%s): %s", run_id, exc)
             try:
-                dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
+                dream_cycle_db.complete_run(run_id, stats=self._run_stats | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_unknown": bool(self._spend.blocked_reason)}, digest="")
             except Exception:
                 logger.error("Failed to complete run record after spend-cap abort")
             return self._aborted_result(run_id, run_type, started_at)
@@ -339,7 +333,7 @@ class DreamCycleOrchestrator:
             try:
                 dream_cycle_db.complete_run(
                     run_id,
-                    stats=_ZERO_STATS,
+                    stats=self._run_stats | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_unknown": bool(self._spend.blocked_reason)},
                     digest="",
                 )
             except Exception:
@@ -379,6 +373,7 @@ class DreamCycleOrchestrator:
         # plain arrivals manifest, exactly as before. SpendCapExceeded propagates.
         skim = self._skim_arrivals(run_id, run_type, started_at)
         skim_stats = skim.to_stats() if skim is not None else {}
+        self._run_stats.update(skim_stats)
         # The window's skim records (this run's and earlier runs' — idempotent per
         # document) feed the Explorer's inventory and the weighted guaranteed slice.
         self._skim_records = self._load_skim_records(skim, run_id, run_type, started_at)
@@ -439,6 +434,8 @@ class DreamCycleOrchestrator:
                     break
             try:
                 candidates = self.invoke_thinker(s)
+            except SpendCapExceeded:
+                raise
             except Exception:
                 logger.error(
                     "Thinker failed for slice '%s', skipping", s.name, exc_info=True
@@ -453,6 +450,7 @@ class DreamCycleOrchestrator:
                 )
                 candidates = candidates[:cap]
             all_candidates.extend(candidates)
+            self._run_stats["candidates_generated"] = len(all_candidates)
         logger.info("Total candidates from Thinker: %d%s", len(all_candidates),
                     f" ({slices_skipped_for_budget} slice(s) skipped for budget)" if slices_skipped_for_budget else "")
 
@@ -494,6 +492,7 @@ class DreamCycleOrchestrator:
                     "REJECTED",
                 )
                 rejected.append(candidate)
+                self._run_stats["candidates_rejected"] = len(rejected)
                 continue
             try:
                 verdict_a = self._invoke_evaluator_safe(candidate, "skeptic")
@@ -548,11 +547,13 @@ class DreamCycleOrchestrator:
                     run_id, candidate_dict, verdicts_dict, "ACCEPTED", memory_id
                 )
                 accepted.append(candidate)
+                self._run_stats["candidates_accepted"] = len(accepted)
             else:  # REJECTED — no DEFERRED branch
                 dream_cycle_db.store_candidate(
                     run_id, candidate_dict, verdicts_dict, "REJECTED"
                 )
                 rejected.append(candidate)
+                self._run_stats["candidates_rejected"] = len(rejected)
 
             logger.info(
                 "Candidate '%s': %s", candidate.title, final
@@ -578,6 +579,8 @@ class DreamCycleOrchestrator:
         dream_cycle_db.complete_run(
             run_id,
             stats={
+                "cost_usd": self._spend.total_usd,
+                "spend_unknown": bool(self._spend.blocked_reason),
                 "candidates_generated": len(all_candidates),
                 "candidates_accepted": len(accepted),
                 "candidates_rejected": len(rejected),
@@ -729,7 +732,7 @@ class DreamCycleOrchestrator:
         )
 
         logger.info("Invoking Explorer agent (run_type=%s)", run_type)
-        result = self._invoker_for("explorer").invoke(
+        result = self._invoke_metered("explorer",
             system_prompt=prompt,
             user_message=user_message,
             tools=True,
@@ -738,7 +741,6 @@ class DreamCycleOrchestrator:
             stage="explorer",
             run_id=self._current_run_id,
         )
-        self._record_spend("explorer", result)
 
         self._capture("explorer", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
 
@@ -982,7 +984,7 @@ class DreamCycleOrchestrator:
             "Invoking Thinker agent (slice=%s, tools=%s)",
             slice.name, thinker_has_tools,
         )
-        result = self._invoker_for("thinker").invoke(
+        result = self._invoke_metered("thinker",
             system_prompt=prompt,
             user_message=user_message,
             tools=thinker_has_tools,
@@ -991,7 +993,6 @@ class DreamCycleOrchestrator:
             stage="thinker",
             run_id=self._current_run_id,
         )
-        self._record_spend("thinker", result)
 
         safe_name = slice.name.replace(" ", "_").replace("/", "_")[:50]
         self._capture(f"thinker_{safe_name}", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
@@ -1054,7 +1055,10 @@ class DreamCycleOrchestrator:
         Returns:
             EvaluatorVerdict with role, verdict, and reasoning.
         """
-        candidate_json_str = json.dumps(asdict(candidate), default=str)
+        projection = asdict(candidate)
+        if stage != "grounding_audit":
+            projection.pop("revision", None)
+        candidate_json_str = json.dumps(projection, default=str)
         source_memories_content = (
             f"Source memories: {candidate.source_memories}"
         )
@@ -1084,7 +1088,7 @@ class DreamCycleOrchestrator:
         # tool call — immune to the quote-escaping failures of JSON-in-prose.
         # Agentic CLIs (Kiro's invoke() has a fixed signature) get no extra option.
         extra: dict = {} if self._role_has_tools(role) else {"schema": EVALUATOR_VERDICT_SCHEMA}
-        result = self._invoker_for(role).invoke(
+        result = self._invoke_metered(role,
             system_prompt=prompt,
             user_message=user_message,
             effort=self.resolver.spec_for(role).effort,
@@ -1092,7 +1096,6 @@ class DreamCycleOrchestrator:
             run_id=self._current_run_id,
             **extra,
         )
-        self._record_spend(role, result)
 
         safe_title = candidate.title.replace(" ", "_").replace("/", "_")[:40]
         self._capture(f"{(stage or 'evaluator').replace(':', '_')}_{role}_{safe_title}",
@@ -1154,7 +1157,7 @@ class DreamCycleOrchestrator:
         sources_text = format_sources_for_evaluator(self._slice_memory_cache, candidate.source_memories)
         user_message = build_revision_request(candidate_json, sources_text, audit.blocking_issues,
                                               audit.advisory_issues)
-        result = self._invoker_for("thinker").invoke(
+        result = self._invoke_metered("thinker",
             system_prompt=REVISION_PROMPT,
             user_message=user_message,
             tools=False,
@@ -1164,7 +1167,6 @@ class DreamCycleOrchestrator:
             run_id=self._current_run_id,
             **({} if self._role_has_tools("thinker") else {"schema": REVISION_SCHEMA}),
         )
-        self._record_spend("thinker", result)
         out = result.get("output") or {}
         if isinstance(out, list):
             out = out[0] if out else {}

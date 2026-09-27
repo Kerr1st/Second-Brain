@@ -36,7 +36,9 @@ from typing import Callable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.backends.bedrock import SERVICE_TIERS, BedrockInvoker  # noqa: E402
-from src.backends.cost import SpendCapExceeded, SpendTracker, price_for  # noqa: E402
+from src.backends.cost import SpendCapExceeded, SpendTracker, UsageUnavailable, invoke_metered, price_for
+from src.backends.base import assert_corpus_route
+from src.backends.resolver import RoleBackend, SKIM_ROLE  # noqa: E402
 from src.prompts.skim import PROMPT_VERSION, SKIM_SYSTEM_PROMPT, build_skim_request  # noqa: E402
 from src.skim.faithfulness import check_record  # noqa: E402
 from src.skim.schema import SKIM_SCHEMA, SkimValidationError, validate_record  # noqa: E402
@@ -82,6 +84,7 @@ def fetch_documents(ids: list[str] | None, since: str | None, limit: int | None)
 # --------------------------------------------------------------------------- #
 def make_invoker(model: str, *, service_tier: str | None, temperature: float | None,
                  max_tokens: int) -> BedrockInvoker:
+    assert_corpus_route("bedrock", model, SKIM_ROLE)
     return BedrockInvoker(model=model, service_tier=service_tier, temperature=temperature,
                           max_tokens=max_tokens)
 
@@ -95,6 +98,8 @@ def skim_document(doc: dict, invoker, model: str, tracker: SpendTracker, *, effo
     are trimmed and listed under ``coercions``; ``--strict`` keeps Phase 1's
     reject-on-overrun behaviour so the raw overrun rate can still be measured.
     """
+    spec = RoleBackend(SKIM_ROLE, "bedrock", model, effort)
+    assert_corpus_route(spec.backend, spec.model, spec.role)
     content = doc.get("content") or ""
     request = build_skim_request(content, doc.get("source_type"), doc.get("title"), doc.get("created_at"))
     rec: dict = {
@@ -108,13 +113,17 @@ def skim_document(doc: dict, invoker, model: str, tracker: SpendTracker, *, effo
     if dry_run:
         return rec
     t0 = time.monotonic()
+    before = tracker.total_usd
     try:
-        result = invoker.invoke(SKIM_SYSTEM_PROMPT, request, effort=effort, timeout=timeout,
+        result = invoke_metered(invoker, spec, tracker, SKIM_SYSTEM_PROMPT, request, effort=effort, timeout=timeout,
                                 stage="skim_probe", run_id=run_id, schema=SKIM_SCHEMA)
     except SpendCapExceeded:
         raise
-    except Exception as e:  # noqa: BLE001 — one bad document must not sink the probe
-        rec.update({"error": f"{type(e).__name__}: {e}"[:400], "latency_s": round(time.monotonic() - t0, 2)})
+    except Exception as e:
+        if tracker.blocked_reason:
+            raise UsageUnavailable(tracker.blocked_reason) from e
+        rec.update({"error": type(e).__name__, "cost_usd": round(tracker.total_usd - before, 6),
+                    "latency_s": round(time.monotonic() - t0, 2)})
         return rec
     rec["latency_s"] = round(time.monotonic() - t0, 2)
     usage = result.get("usage")
@@ -122,7 +131,7 @@ def skim_document(doc: dict, invoker, model: str, tracker: SpendTracker, *, effo
         rec["input_tokens"] = usage.get("inputTokens", usage.get("input_tokens"))
         rec["output_tokens"] = usage.get("outputTokens", usage.get("output_tokens"))
         rec["service_tier_served"] = usage.get("serviceTier")
-        rec["cost_usd"] = round(tracker.record(model, usage), 6)   # may raise SpendCapExceeded
+        rec["cost_usd"] = round(tracker.total_usd - before, 6)   # may raise SpendCapExceeded
     output = result.get("output")
     if isinstance(output, list):
         output = output[0] if output else None

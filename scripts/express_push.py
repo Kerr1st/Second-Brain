@@ -49,11 +49,6 @@ def _write_last_pushed(run_id: str) -> None:
         log.warning("Could not persist last-push state: %s", exc)
 
 
-class _DeterministicInvoker:
-    def invoke(self, *a, **k):
-        raise RuntimeError("--no-llm")
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description="Proactive Express email (gated).")
     ap.add_argument("--dry-run", action="store_true", help="Compose + print, never send.")
@@ -68,18 +63,19 @@ def main() -> int:
         return 0
 
     log.info("Push triggered for run %s — %s", decision["run_id"][:8], decision["reason"])
+    # Delivery prerequisites precede even composition/model resolution. A dry
+    # run remains available without email configuration and is deterministic.
+    if not args.dry_run and not express.email_configured():
+        log.info("Email not configured (set %s / %s / %s); skipping.",
+                 express.ENV_TO, express.ENV_FROM, express.ENV_PASSWORD)
+        return 0
     briefing = express.compose_briefing()
-    briefing = express.edit_briefing(briefing, invoker=_DeterministicInvoker() if args.no_llm else None)
+    briefing = express.edit_briefing(briefing, use_llm=not (args.no_llm or args.dry_run))
     email = express.render_email(briefing)
 
     if args.dry_run:
         log.info("[DRY-RUN] would send: %s", email["subject"])
         sys.stdout.write("\n" + email["text"] + "\n")
-        return 0
-
-    if not express.email_configured():
-        log.info("Email not configured yet (set %s / %s / %s); composed but not sending.",
-                 express.ENV_TO, express.ENV_FROM, express.ENV_PASSWORD)
         return 0
 
     try:

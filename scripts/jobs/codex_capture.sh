@@ -40,7 +40,7 @@ export CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 
 cd "$REPO_ROOT"
 
-if ! pg_isready -h 127.0.0.1 -p 5432 -U memory_bank >/dev/null 2>&1; then
+if ! "${PG_ISREADY_BIN:-pg_isready}" -h "${DB_HOST:-127.0.0.1}" -p "${DB_PORT:-5432}" -U "${DB_USER:-memory_bank}" >/dev/null 2>&1; then
   echo "ABORT: PostgreSQL is not reachable" >&2
   exit 1
 fi
