@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "fixture": "synthetic-v1.json",
+  "fixture_sha256": "5c9a0a24297fbb8dc875264e6fb86f808af395f55de283390c99bc56e49de8fa",
+  "baseline_source_sha256": "523a5d7bf5ade488ad2ad37be30f253cc1619e32c773e92b6aa284ef813886c1",
+  "baseline_weights_sha256": "a68ab3f0c2aa0ff58efca5c2e4932d1903f7a1ceee2712ce4d5b6bba929bac14",
+  "clock": "2026-09-26T12:00:00+00:00",
+  "cases": 84,
+  "candidates_per_case": 6,
+  "calibration_cases": 28,
+  "holdout_cases": 56,
+  "calibration_families": 7,
+  "holdout_families": 14,
+  "model": "typesafe/jev-1.13",
+  "destination": "https://openrouter.ai/api/alpha/decisions",
+  "injection_threshold_options": [
+    0.5,
+    0.8,
+    0.95
+  ],
+  "omitted_stages": [
+    "native acquisition",
+    "conversation distillation",
+    "real embeddings",
+    "database retrieval",
+    "discovery generation",
+    "delivery",
+    "private corpus evaluation",
+    "human novelty/usefulness/uptake/outcome"
+  ],
+  "human_benefit": null,
+  "authorization": "Bundled synthetic fixture only; no private sources.",
+  "semantic_ranking": "max(evidence, conflict, transfer, 0.5 * relevance); baseline order breaks ties",
+  "client_source_sha256": "bea2abacbd7e0dfc9755694f01b49026e9f8337e3659dccd06816a79f04024ad",
+  "evaluator_source_sha256": "20538fbc9e4e413ec1024f1c0e9a27eaa58e9d0008bc907e175c4f47bc0cd13e",
+  "rubric_sha256": "4bc4dd7d386c478217646c2095076618308ff3a1a57115e48b1a0b6c2f573671"
+}

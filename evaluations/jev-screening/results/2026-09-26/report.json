@@ -1,0 +1,49 @@
+{
+  "manifest_sha256": "416fa14c3a1d3c3345ec05f47b5de98fef2595ab14a8040d2864e01cfdbc206c",
+  "fixture_sha256": "5c9a0a24297fbb8dc875264e6fb86f808af395f55de283390c99bc56e49de8fa",
+  "status": "incomplete",
+  "started_at": "2026-09-27T03:08:08.232607+00:00",
+  "expected_query_bundles": 84,
+  "expected_passage_judgments": 504,
+  "completed_query_bundles": 62,
+  "completed_passage_judgments": 377,
+  "automatic_promotion": false,
+  "human_benefit": null,
+  "omitted_stages": [
+    "native acquisition",
+    "conversation distillation",
+    "real embeddings",
+    "database retrieval",
+    "discovery generation",
+    "delivery",
+    "private corpus evaluation",
+    "human novelty/usefulness/uptake/outcome"
+  ],
+  "holdout": null,
+  "spend": {
+    "calls": 378,
+    "known_cost_usd": 0.01484758799999999,
+    "reserved_cost_usd": 0.000819,
+    "max_cost_usd": 0.1,
+    "spend_incomplete": true,
+    "blocked_reason": "transport_failure"
+  },
+  "status_counts": {
+    "ok": 377,
+    "error": 1
+  },
+  "recorded_passage_judgments": 378,
+  "finished_at": "2026-09-27T03:10:29.872111+00:00",
+  "elapsed_seconds": 141.6448503749998,
+  "aborted_reason": "transport_failure",
+  "complete": false,
+  "latency_ms": {
+    "successful_requests": 377,
+    "p50": 328.19,
+    "p95": 438.308
+  },
+  "served_models": {
+    "typesafe/jev-1.13-20260917": 377
+  },
+  "promotion_gate": false
+}

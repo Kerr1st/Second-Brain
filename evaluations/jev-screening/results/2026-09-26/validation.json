@@ -1,0 +1,39 @@
+{
+  "implementation_commit": "81cc14e061eff4ff1e1a9901da4cb3cf7dfab17a",
+  "base_commit": "74ba02df87b04ca3f21cd3781949b023afb856d5",
+  "offline_suite": {
+    "passed": 1793,
+    "failed": 0,
+    "duration_seconds": 126.75,
+    "runner": "scripts/test_isolated.py",
+    "evidence_directory": "/private/tmp/sbtest-zo552l1p",
+    "warnings": [
+      "Existing Starlette TestClient httpx deprecation"
+    ]
+  },
+  "targeted_checks": {
+    "client_and_evaluator": 69,
+    "client_and_existing_retrieval": 90
+  },
+  "independent_review": {
+    "unresolved_blocking_findings": 0,
+    "fixes": [
+      "Pinned fixture, rubric, client and evaluator",
+      "Separated underlying calibration and holdout scenarios",
+      "Added evidence beyond 500 characters",
+      "Aligned adaptation labels",
+      "Preserved explicit absence as evidence",
+      "Added pre-request durable attempt journal",
+      "Separated quoted attack false positives",
+      "Retained receipts on metric calculation failure"
+    ]
+  },
+  "installed_source_preservation": {
+    "head": "1071a81687aa71575ee4489adc9d9025fb552f0b",
+    "existing_dirty_files_hashed": 128,
+    "changed_existing_files": 0,
+    "head_unchanged": true
+  },
+  "authorization_scope": "Synthetic fixture only; client budget USD 0.10; dedicated account key total cap USD 1.00",
+  "runtime_activation": false
+}

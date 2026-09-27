@@ -1,0 +1,55 @@
+{
+  "split": "calibration",
+  "query_bundles": 28,
+  "scenario_families": 7,
+  "selection": "fewest misclassified passage judgments, then fewer misses, then higher threshold",
+  "options": [
+    {
+      "threshold": 0.5,
+      "recall": {
+        "numerator": 8,
+        "denominator": 8,
+        "rate": 1.0
+      },
+      "false_positive_rate": {
+        "numerator": 0,
+        "denominator": 160,
+        "rate": 0.0
+      },
+      "false_negatives": 0,
+      "false_positives": 0
+    },
+    {
+      "threshold": 0.8,
+      "recall": {
+        "numerator": 8,
+        "denominator": 8,
+        "rate": 1.0
+      },
+      "false_positive_rate": {
+        "numerator": 0,
+        "denominator": 160,
+        "rate": 0.0
+      },
+      "false_negatives": 0,
+      "false_positives": 0
+    },
+    {
+      "threshold": 0.95,
+      "recall": {
+        "numerator": 8,
+        "denominator": 8,
+        "rate": 1.0
+      },
+      "false_positive_rate": {
+        "numerator": 0,
+        "denominator": 160,
+        "rate": 0.0
+      },
+      "false_negatives": 0,
+      "false_positives": 0
+    }
+  ],
+  "injection_threshold": 0.95,
+  "ranking": "fixed max(evidence, conflict, transfer, 0.5*relevance); baseline tie-break"
+}
