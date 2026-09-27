@@ -12,6 +12,8 @@ Run only `SECOND_BRAIN_PROFILE=controlled .venv/bin/python scripts/test_isolated
 
 For the optional Jev component, see [the evidence-screening plan](JEV-EVIDENCE-SCREENING.md). Its offline failure/accounting tests run inside this same isolated suite. Its explicitly requested live evaluation uses only the versioned synthetic fixture through OpenRouter, outside the offline suite, and records calibration/holdout separation, baseline comparison, unknown spend and actual usage. A successful synthetic comparison is not authorization for a private source transfer or evidence of human usefulness.
 
+The [September 26 execution record](JEV-EVIDENCE-SCREENING-RESULTS-2026-09-26.md) records 1,793 full-suite tests plus six continuation tests, 504 completed synthetic judgments, and a failed injection-flagging gate. Automatic runtime screening remains off.
+
 ## Measure whether Second Brain improves work
 
 Freeze one current decision, such as Kiro and AI-DLC adoption planning, and a bounded source set from multiple projects. Record what is already known, the deliverable, source versions/roles/timestamps, exact providers, cost threshold, missing stages and baseline ordinary retrieval.

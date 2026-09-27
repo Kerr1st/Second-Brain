@@ -1,0 +1,10 @@
+{
+  "manifest_sha256": "416fa14c3a1d3c3345ec05f47b5de98fef2595ab14a8040d2864e01cfdbc206c",
+  "complete_unique_judgments": 504,
+  "unchanged_reused_results": 377,
+  "unchanged_calibration": true,
+  "network_attempts": 505,
+  "billing_reconciled": true,
+  "automatic_activation": false,
+  "credential_pattern_matches": 0
+}

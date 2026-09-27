@@ -2,6 +2,8 @@
 
 Prepared September 26, 2026. Implementation base: original Second Brain refactor `74ba02df87b04ca3f21cd3781949b023afb856d5`. Work branch: `codex/jev-evidence-screening`. This plan covers a working, evaluated optional component. Production activation is a separate evidence gate, not an automatic consequence of successful connectivity.
 
+Execution is complete. See the [measured results and decision](JEV-EVIDENCE-SCREENING-RESULTS-2026-09-26.md): 504 successful judgments, about two cents, a failed injection-flagging gate, and automatic runtime screening kept off.
+
 ## What the investigation found
 
 Second Brain is designed to capture work context, retrieve evidence, discover useful cross-project connections, review their grounding, and deliver suggestions that improve a current decision. Retrieval is one stage in that loop. Jev produces typed decisions, so its strongest fit is narrow evidence judgments between retrieval and generative discovery.

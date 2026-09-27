@@ -1,0 +1,13 @@
+{
+  "continuation_commit": "68be583",
+  "frozen_evaluation_commit": "81cc14e",
+  "full_suite_passed": 1793,
+  "full_suite_evidence_directory": "/private/tmp/sbtest-zo552l1p",
+  "continuation_tests_passed": 6,
+  "continuation_tests_duration_seconds": 0.93,
+  "continuation_tests_evidence_directory": "/private/tmp/sbtest-2xbx3g35",
+  "total_distinct_tests_passed_across_runs": 1799,
+  "review_unresolved_blockers": 0,
+  "runtime_activation": false,
+  "quality_gate_passed": false
+}

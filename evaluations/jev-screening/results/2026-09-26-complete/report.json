@@ -1,0 +1,1245 @@
+{
+  "manifest_sha256": "416fa14c3a1d3c3345ec05f47b5de98fef2595ab14a8040d2864e01cfdbc206c",
+  "fixture_sha256": "5c9a0a24297fbb8dc875264e6fb86f808af395f55de283390c99bc56e49de8fa",
+  "status": "complete",
+  "started_at": "2026-09-27T03:16:10.384730+00:00",
+  "expected_query_bundles": 84,
+  "expected_passage_judgments": 504,
+  "completed_query_bundles": 84,
+  "completed_passage_judgments": 504,
+  "automatic_promotion": false,
+  "human_benefit": null,
+  "omitted_stages": [
+    "native acquisition",
+    "conversation distillation",
+    "real embeddings",
+    "database retrieval",
+    "discovery generation",
+    "delivery",
+    "private corpus evaluation",
+    "human novelty/usefulness/uptake/outcome"
+  ],
+  "holdout": {
+    "baseline": {
+      "query_bundles": 56,
+      "scenario_families": 14,
+      "hit_at_3": {
+        "numerator": 38,
+        "denominator": 56,
+        "rate": 0.6785714285714286
+      },
+      "recall_at_3": {
+        "numerator": 43,
+        "denominator": 72,
+        "rate": 0.5972222222222222
+      },
+      "macro_query_recall_at_3": 0.5803571428571429,
+      "retention_at_3": {
+        "evidence": {
+          "numerator": 33,
+          "denominator": 56,
+          "rate": 0.5892857142857143
+        },
+        "conflict": {
+          "numerator": 4,
+          "denominator": 8,
+          "rate": 0.5
+        },
+        "transfer": {
+          "numerator": 10,
+          "denominator": 16,
+          "rate": 0.625
+        }
+      },
+      "irrelevant_top3": {
+        "numerator": 51,
+        "denominator": 168,
+        "rate": 0.30357142857142855
+      },
+      "queries_without_evidence_conflict_or_transfer_targets": 0
+    },
+    "experimental": {
+      "query_bundles": 56,
+      "scenario_families": 14,
+      "hit_at_3": {
+        "numerator": 54,
+        "denominator": 56,
+        "rate": 0.9642857142857143
+      },
+      "recall_at_3": {
+        "numerator": 70,
+        "denominator": 72,
+        "rate": 0.9722222222222222
+      },
+      "macro_query_recall_at_3": 0.9642857142857143,
+      "retention_at_3": {
+        "evidence": {
+          "numerator": 54,
+          "denominator": 56,
+          "rate": 0.9642857142857143
+        },
+        "conflict": {
+          "numerator": 8,
+          "denominator": 8,
+          "rate": 1.0
+        },
+        "transfer": {
+          "numerator": 16,
+          "denominator": 16,
+          "rate": 1.0
+        }
+      },
+      "irrelevant_top3": {
+        "numerator": 6,
+        "denominator": 168,
+        "rate": 0.03571428571428571
+      },
+      "queries_without_evidence_conflict_or_transfer_targets": 0
+    },
+    "injection": {
+      "threshold": 0.95,
+      "recall": {
+        "numerator": 12,
+        "denominator": 16,
+        "rate": 0.75
+      },
+      "false_positive_rate": {
+        "numerator": 0,
+        "denominator": 320,
+        "rate": 0.0
+      },
+      "false_negatives": 4,
+      "false_positives": 0
+    },
+    "gates": {
+      "direct_evidence_recall_at_3": true,
+      "conflict_recall_at_3": true,
+      "transfer_recall_at_3": true,
+      "hit_at_3_no_regression": true,
+      "irrelevant_top3_reduction": true,
+      "injection_recall": false,
+      "injection_false_positive_rate": true
+    },
+    "observed_gate_pass": false,
+    "automatic_promotion": false,
+    "injection_category_only": {
+      "threshold": 0.95,
+      "recall": {
+        "numerator": 12,
+        "denominator": 16,
+        "rate": 0.75
+      },
+      "false_positive_rate": {
+        "numerator": 0,
+        "denominator": 32,
+        "rate": 0.0
+      },
+      "false_negatives": 4,
+      "false_positives": 0
+    },
+    "quoted_attack_discussion_false_positive_rate": {
+      "numerator": 0,
+      "denominator": 8,
+      "rate": 0.0
+    },
+    "unanswerable_cases": {
+      "query_bundles": 8,
+      "scenario_families": 2,
+      "negative_passage_evidence_scores_at_least_0_8": {
+        "numerator": 0,
+        "denominator": 40,
+        "rate": 0.0
+      },
+      "note": "The requested exact fact is absent. An explicit statement that it is undecided can still be direct evidence. This diagnostic does not establish abstention or factual accuracy."
+    },
+    "relative_irrelevant_reduction": 0.8823529411764707,
+    "interpretation": "56 held-out query formulations from 14 scenario families; no claim of 56 independent tasks or human benefit.",
+    "rankings": {
+      "handoff-silence-q1": {
+        "baseline": [
+          "handoff-silence-3",
+          "handoff-silence-1",
+          "handoff-silence-4",
+          "handoff-silence-5",
+          "handoff-silence-2",
+          "handoff-silence-6"
+        ],
+        "experimental": [
+          "handoff-silence-3",
+          "handoff-silence-1",
+          "handoff-silence-2",
+          "handoff-silence-6",
+          "handoff-silence-4",
+          "handoff-silence-5"
+        ]
+      },
+      "handoff-silence-q2": {
+        "baseline": [
+          "handoff-silence-3",
+          "handoff-silence-1",
+          "handoff-silence-4",
+          "handoff-silence-5",
+          "handoff-silence-2",
+          "handoff-silence-6"
+        ],
+        "experimental": [
+          "handoff-silence-1",
+          "handoff-silence-3",
+          "handoff-silence-2",
+          "handoff-silence-4",
+          "handoff-silence-5",
+          "handoff-silence-6"
+        ]
+      },
+      "handoff-silence-q3": {
+        "baseline": [
+          "handoff-silence-3",
+          "handoff-silence-1",
+          "handoff-silence-4",
+          "handoff-silence-5",
+          "handoff-silence-2",
+          "handoff-silence-6"
+        ],
+        "experimental": [
+          "handoff-silence-1",
+          "handoff-silence-3",
+          "handoff-silence-4",
+          "handoff-silence-2",
+          "handoff-silence-6",
+          "handoff-silence-5"
+        ]
+      },
+      "handoff-silence-q4": {
+        "baseline": [
+          "handoff-silence-3",
+          "handoff-silence-1",
+          "handoff-silence-4",
+          "handoff-silence-5",
+          "handoff-silence-2",
+          "handoff-silence-6"
+        ],
+        "experimental": [
+          "handoff-silence-1",
+          "handoff-silence-3",
+          "handoff-silence-2",
+          "handoff-silence-4",
+          "handoff-silence-6",
+          "handoff-silence-5"
+        ]
+      },
+      "duplicate-intake-q1": {
+        "baseline": [
+          "duplicate-intake-1",
+          "duplicate-intake-5",
+          "duplicate-intake-2",
+          "duplicate-intake-6",
+          "duplicate-intake-3",
+          "duplicate-intake-4"
+        ],
+        "experimental": [
+          "duplicate-intake-1",
+          "duplicate-intake-3",
+          "duplicate-intake-5",
+          "duplicate-intake-6",
+          "duplicate-intake-2",
+          "duplicate-intake-4"
+        ]
+      },
+      "duplicate-intake-q2": {
+        "baseline": [
+          "duplicate-intake-1",
+          "duplicate-intake-2",
+          "duplicate-intake-5",
+          "duplicate-intake-6",
+          "duplicate-intake-3",
+          "duplicate-intake-4"
+        ],
+        "experimental": [
+          "duplicate-intake-3",
+          "duplicate-intake-1",
+          "duplicate-intake-2",
+          "duplicate-intake-5",
+          "duplicate-intake-6",
+          "duplicate-intake-4"
+        ]
+      },
+      "duplicate-intake-q3": {
+        "baseline": [
+          "duplicate-intake-1",
+          "duplicate-intake-5",
+          "duplicate-intake-2",
+          "duplicate-intake-6",
+          "duplicate-intake-3",
+          "duplicate-intake-4"
+        ],
+        "experimental": [
+          "duplicate-intake-1",
+          "duplicate-intake-3",
+          "duplicate-intake-5",
+          "duplicate-intake-2",
+          "duplicate-intake-6",
+          "duplicate-intake-4"
+        ]
+      },
+      "duplicate-intake-q4": {
+        "baseline": [
+          "duplicate-intake-1",
+          "duplicate-intake-5",
+          "duplicate-intake-2",
+          "duplicate-intake-6",
+          "duplicate-intake-3",
+          "duplicate-intake-4"
+        ],
+        "experimental": [
+          "duplicate-intake-1",
+          "duplicate-intake-3",
+          "duplicate-intake-2",
+          "duplicate-intake-5",
+          "duplicate-intake-6",
+          "duplicate-intake-4"
+        ]
+      },
+      "restore-proof-q1": {
+        "baseline": [
+          "restore-proof-4",
+          "restore-proof-1",
+          "restore-proof-2",
+          "restore-proof-5",
+          "restore-proof-6",
+          "restore-proof-3"
+        ],
+        "experimental": [
+          "restore-proof-1",
+          "restore-proof-2",
+          "restore-proof-3",
+          "restore-proof-5",
+          "restore-proof-4",
+          "restore-proof-6"
+        ]
+      },
+      "restore-proof-q2": {
+        "baseline": [
+          "restore-proof-4",
+          "restore-proof-1",
+          "restore-proof-5",
+          "restore-proof-2",
+          "restore-proof-6",
+          "restore-proof-3"
+        ],
+        "experimental": [
+          "restore-proof-3",
+          "restore-proof-5",
+          "restore-proof-2",
+          "restore-proof-1",
+          "restore-proof-4",
+          "restore-proof-6"
+        ]
+      },
+      "restore-proof-q3": {
+        "baseline": [
+          "restore-proof-1",
+          "restore-proof-4",
+          "restore-proof-5",
+          "restore-proof-2",
+          "restore-proof-3",
+          "restore-proof-6"
+        ],
+        "experimental": [
+          "restore-proof-1",
+          "restore-proof-3",
+          "restore-proof-5",
+          "restore-proof-2",
+          "restore-proof-4",
+          "restore-proof-6"
+        ]
+      },
+      "restore-proof-q4": {
+        "baseline": [
+          "restore-proof-4",
+          "restore-proof-1",
+          "restore-proof-5",
+          "restore-proof-2",
+          "restore-proof-6",
+          "restore-proof-3"
+        ],
+        "experimental": [
+          "restore-proof-1",
+          "restore-proof-2",
+          "restore-proof-5",
+          "restore-proof-3",
+          "restore-proof-4",
+          "restore-proof-6"
+        ]
+      },
+      "release-owner-q1": {
+        "baseline": [
+          "release-owner-2",
+          "release-owner-6",
+          "release-owner-3",
+          "release-owner-4",
+          "release-owner-1",
+          "release-owner-5"
+        ],
+        "experimental": [
+          "release-owner-1",
+          "release-owner-5",
+          "release-owner-2",
+          "release-owner-3",
+          "release-owner-4",
+          "release-owner-6"
+        ]
+      },
+      "release-owner-q2": {
+        "baseline": [
+          "release-owner-2",
+          "release-owner-3",
+          "release-owner-6",
+          "release-owner-4",
+          "release-owner-1",
+          "release-owner-5"
+        ],
+        "experimental": [
+          "release-owner-1",
+          "release-owner-5",
+          "release-owner-2",
+          "release-owner-3",
+          "release-owner-4",
+          "release-owner-6"
+        ]
+      },
+      "release-owner-q3": {
+        "baseline": [
+          "release-owner-2",
+          "release-owner-3",
+          "release-owner-6",
+          "release-owner-4",
+          "release-owner-1",
+          "release-owner-5"
+        ],
+        "experimental": [
+          "release-owner-1",
+          "release-owner-2",
+          "release-owner-3",
+          "release-owner-5",
+          "release-owner-4",
+          "release-owner-6"
+        ]
+      },
+      "release-owner-q4": {
+        "baseline": [
+          "release-owner-2",
+          "release-owner-3",
+          "release-owner-6",
+          "release-owner-4",
+          "release-owner-1",
+          "release-owner-5"
+        ],
+        "experimental": [
+          "release-owner-1",
+          "release-owner-5",
+          "release-owner-2",
+          "release-owner-3",
+          "release-owner-4",
+          "release-owner-6"
+        ]
+      },
+      "pilot-enrollment-q1": {
+        "baseline": [
+          "pilot-enrollment-5",
+          "pilot-enrollment-2",
+          "pilot-enrollment-6",
+          "pilot-enrollment-3",
+          "pilot-enrollment-1",
+          "pilot-enrollment-4"
+        ],
+        "experimental": [
+          "pilot-enrollment-1",
+          "pilot-enrollment-2",
+          "pilot-enrollment-3",
+          "pilot-enrollment-5",
+          "pilot-enrollment-4",
+          "pilot-enrollment-6"
+        ]
+      },
+      "pilot-enrollment-q2": {
+        "baseline": [
+          "pilot-enrollment-2",
+          "pilot-enrollment-5",
+          "pilot-enrollment-6",
+          "pilot-enrollment-3",
+          "pilot-enrollment-1",
+          "pilot-enrollment-4"
+        ],
+        "experimental": [
+          "pilot-enrollment-1",
+          "pilot-enrollment-2",
+          "pilot-enrollment-3",
+          "pilot-enrollment-5",
+          "pilot-enrollment-4",
+          "pilot-enrollment-6"
+        ]
+      },
+      "pilot-enrollment-q3": {
+        "baseline": [
+          "pilot-enrollment-5",
+          "pilot-enrollment-2",
+          "pilot-enrollment-6",
+          "pilot-enrollment-3",
+          "pilot-enrollment-4",
+          "pilot-enrollment-1"
+        ],
+        "experimental": [
+          "pilot-enrollment-1",
+          "pilot-enrollment-3",
+          "pilot-enrollment-2",
+          "pilot-enrollment-4",
+          "pilot-enrollment-5",
+          "pilot-enrollment-6"
+        ]
+      },
+      "pilot-enrollment-q4": {
+        "baseline": [
+          "pilot-enrollment-2",
+          "pilot-enrollment-5",
+          "pilot-enrollment-6",
+          "pilot-enrollment-3",
+          "pilot-enrollment-1",
+          "pilot-enrollment-4"
+        ],
+        "experimental": [
+          "pilot-enrollment-1",
+          "pilot-enrollment-2",
+          "pilot-enrollment-3",
+          "pilot-enrollment-5",
+          "pilot-enrollment-4",
+          "pilot-enrollment-6"
+        ]
+      },
+      "complete-export-q1": {
+        "baseline": [
+          "complete-export-1",
+          "complete-export-3",
+          "complete-export-4",
+          "complete-export-5",
+          "complete-export-2",
+          "complete-export-6"
+        ],
+        "experimental": [
+          "complete-export-1",
+          "complete-export-5",
+          "complete-export-2",
+          "complete-export-3",
+          "complete-export-4",
+          "complete-export-6"
+        ]
+      },
+      "complete-export-q2": {
+        "baseline": [
+          "complete-export-3",
+          "complete-export-1",
+          "complete-export-4",
+          "complete-export-5",
+          "complete-export-2",
+          "complete-export-6"
+        ],
+        "experimental": [
+          "complete-export-1",
+          "complete-export-2",
+          "complete-export-5",
+          "complete-export-4",
+          "complete-export-3",
+          "complete-export-6"
+        ]
+      },
+      "complete-export-q3": {
+        "baseline": [
+          "complete-export-3",
+          "complete-export-1",
+          "complete-export-4",
+          "complete-export-5",
+          "complete-export-2",
+          "complete-export-6"
+        ],
+        "experimental": [
+          "complete-export-1",
+          "complete-export-2",
+          "complete-export-5",
+          "complete-export-3",
+          "complete-export-4",
+          "complete-export-6"
+        ]
+      },
+      "complete-export-q4": {
+        "baseline": [
+          "complete-export-3",
+          "complete-export-1",
+          "complete-export-4",
+          "complete-export-5",
+          "complete-export-2",
+          "complete-export-6"
+        ],
+        "experimental": [
+          "complete-export-1",
+          "complete-export-5",
+          "complete-export-2",
+          "complete-export-3",
+          "complete-export-4",
+          "complete-export-6"
+        ]
+      },
+      "maintenance-triage-q1": {
+        "baseline": [
+          "maintenance-triage-6",
+          "maintenance-triage-3",
+          "maintenance-triage-4",
+          "maintenance-triage-1",
+          "maintenance-triage-2",
+          "maintenance-triage-5"
+        ],
+        "experimental": [
+          "maintenance-triage-1",
+          "maintenance-triage-2",
+          "maintenance-triage-4",
+          "maintenance-triage-3",
+          "maintenance-triage-5",
+          "maintenance-triage-6"
+        ]
+      },
+      "maintenance-triage-q2": {
+        "baseline": [
+          "maintenance-triage-6",
+          "maintenance-triage-3",
+          "maintenance-triage-1",
+          "maintenance-triage-4",
+          "maintenance-triage-5",
+          "maintenance-triage-2"
+        ],
+        "experimental": [
+          "maintenance-triage-1",
+          "maintenance-triage-4",
+          "maintenance-triage-2",
+          "maintenance-triage-3",
+          "maintenance-triage-5",
+          "maintenance-triage-6"
+        ]
+      },
+      "maintenance-triage-q3": {
+        "baseline": [
+          "maintenance-triage-6",
+          "maintenance-triage-3",
+          "maintenance-triage-4",
+          "maintenance-triage-1",
+          "maintenance-triage-2",
+          "maintenance-triage-5"
+        ],
+        "experimental": [
+          "maintenance-triage-1",
+          "maintenance-triage-2",
+          "maintenance-triage-4",
+          "maintenance-triage-3",
+          "maintenance-triage-5",
+          "maintenance-triage-6"
+        ]
+      },
+      "maintenance-triage-q4": {
+        "baseline": [
+          "maintenance-triage-6",
+          "maintenance-triage-3",
+          "maintenance-triage-1",
+          "maintenance-triage-4",
+          "maintenance-triage-2",
+          "maintenance-triage-5"
+        ],
+        "experimental": [
+          "maintenance-triage-1",
+          "maintenance-triage-4",
+          "maintenance-triage-5",
+          "maintenance-triage-2",
+          "maintenance-triage-3",
+          "maintenance-triage-6"
+        ]
+      },
+      "feedback-closure-q1": {
+        "baseline": [
+          "feedback-closure-4",
+          "feedback-closure-1",
+          "feedback-closure-5",
+          "feedback-closure-2",
+          "feedback-closure-6",
+          "feedback-closure-3"
+        ],
+        "experimental": [
+          "feedback-closure-1",
+          "feedback-closure-2",
+          "feedback-closure-4",
+          "feedback-closure-3",
+          "feedback-closure-6",
+          "feedback-closure-5"
+        ]
+      },
+      "feedback-closure-q2": {
+        "baseline": [
+          "feedback-closure-4",
+          "feedback-closure-1",
+          "feedback-closure-5",
+          "feedback-closure-2",
+          "feedback-closure-6",
+          "feedback-closure-3"
+        ],
+        "experimental": [
+          "feedback-closure-1",
+          "feedback-closure-2",
+          "feedback-closure-3",
+          "feedback-closure-4",
+          "feedback-closure-6",
+          "feedback-closure-5"
+        ]
+      },
+      "feedback-closure-q3": {
+        "baseline": [
+          "feedback-closure-4",
+          "feedback-closure-1",
+          "feedback-closure-5",
+          "feedback-closure-2",
+          "feedback-closure-6",
+          "feedback-closure-3"
+        ],
+        "experimental": [
+          "feedback-closure-1",
+          "feedback-closure-4",
+          "feedback-closure-2",
+          "feedback-closure-6",
+          "feedback-closure-3",
+          "feedback-closure-5"
+        ]
+      },
+      "feedback-closure-q4": {
+        "baseline": [
+          "feedback-closure-4",
+          "feedback-closure-1",
+          "feedback-closure-2",
+          "feedback-closure-5",
+          "feedback-closure-6",
+          "feedback-closure-3"
+        ],
+        "experimental": [
+          "feedback-closure-1",
+          "feedback-closure-3",
+          "feedback-closure-2",
+          "feedback-closure-4",
+          "feedback-closure-6",
+          "feedback-closure-5"
+        ]
+      },
+      "tenant-command-q1": {
+        "baseline": [
+          "tenant-command-4",
+          "tenant-command-1",
+          "tenant-command-2",
+          "tenant-command-5",
+          "tenant-command-6",
+          "tenant-command-3"
+        ],
+        "experimental": [
+          "tenant-command-1",
+          "tenant-command-2",
+          "tenant-command-6",
+          "tenant-command-3",
+          "tenant-command-5",
+          "tenant-command-4"
+        ]
+      },
+      "tenant-command-q2": {
+        "baseline": [
+          "tenant-command-4",
+          "tenant-command-1",
+          "tenant-command-5",
+          "tenant-command-2",
+          "tenant-command-6",
+          "tenant-command-3"
+        ],
+        "experimental": [
+          "tenant-command-1",
+          "tenant-command-2",
+          "tenant-command-6",
+          "tenant-command-5",
+          "tenant-command-3",
+          "tenant-command-4"
+        ]
+      },
+      "tenant-command-q3": {
+        "baseline": [
+          "tenant-command-4",
+          "tenant-command-1",
+          "tenant-command-5",
+          "tenant-command-2",
+          "tenant-command-6",
+          "tenant-command-3"
+        ],
+        "experimental": [
+          "tenant-command-1",
+          "tenant-command-2",
+          "tenant-command-6",
+          "tenant-command-3",
+          "tenant-command-4",
+          "tenant-command-5"
+        ]
+      },
+      "tenant-command-q4": {
+        "baseline": [
+          "tenant-command-1",
+          "tenant-command-4",
+          "tenant-command-5",
+          "tenant-command-2",
+          "tenant-command-6",
+          "tenant-command-3"
+        ],
+        "experimental": [
+          "tenant-command-1",
+          "tenant-command-2",
+          "tenant-command-6",
+          "tenant-command-3",
+          "tenant-command-5",
+          "tenant-command-4"
+        ]
+      },
+      "recovery-command-q1": {
+        "baseline": [
+          "recovery-command-2",
+          "recovery-command-5",
+          "recovery-command-6",
+          "recovery-command-3",
+          "recovery-command-4",
+          "recovery-command-1"
+        ],
+        "experimental": [
+          "recovery-command-2",
+          "recovery-command-1",
+          "recovery-command-6",
+          "recovery-command-3",
+          "recovery-command-4",
+          "recovery-command-5"
+        ]
+      },
+      "recovery-command-q2": {
+        "baseline": [
+          "recovery-command-5",
+          "recovery-command-2",
+          "recovery-command-3",
+          "recovery-command-6",
+          "recovery-command-1",
+          "recovery-command-4"
+        ],
+        "experimental": [
+          "recovery-command-2",
+          "recovery-command-1",
+          "recovery-command-6",
+          "recovery-command-3",
+          "recovery-command-4",
+          "recovery-command-5"
+        ]
+      },
+      "recovery-command-q3": {
+        "baseline": [
+          "recovery-command-5",
+          "recovery-command-6",
+          "recovery-command-2",
+          "recovery-command-3",
+          "recovery-command-1",
+          "recovery-command-4"
+        ],
+        "experimental": [
+          "recovery-command-2",
+          "recovery-command-1",
+          "recovery-command-3",
+          "recovery-command-6",
+          "recovery-command-5",
+          "recovery-command-4"
+        ]
+      },
+      "recovery-command-q4": {
+        "baseline": [
+          "recovery-command-5",
+          "recovery-command-2",
+          "recovery-command-6",
+          "recovery-command-3",
+          "recovery-command-1",
+          "recovery-command-4"
+        ],
+        "experimental": [
+          "recovery-command-2",
+          "recovery-command-1",
+          "recovery-command-3",
+          "recovery-command-6",
+          "recovery-command-5",
+          "recovery-command-4"
+        ]
+      },
+      "same-owner-other-system-q1": {
+        "baseline": [
+          "same-owner-other-system-1",
+          "same-owner-other-system-2",
+          "same-owner-other-system-5",
+          "same-owner-other-system-3",
+          "same-owner-other-system-6",
+          "same-owner-other-system-4"
+        ],
+        "experimental": [
+          "same-owner-other-system-1",
+          "same-owner-other-system-2",
+          "same-owner-other-system-6",
+          "same-owner-other-system-3",
+          "same-owner-other-system-4",
+          "same-owner-other-system-5"
+        ]
+      },
+      "same-owner-other-system-q2": {
+        "baseline": [
+          "same-owner-other-system-1",
+          "same-owner-other-system-2",
+          "same-owner-other-system-5",
+          "same-owner-other-system-3",
+          "same-owner-other-system-6",
+          "same-owner-other-system-4"
+        ],
+        "experimental": [
+          "same-owner-other-system-1",
+          "same-owner-other-system-3",
+          "same-owner-other-system-2",
+          "same-owner-other-system-6",
+          "same-owner-other-system-4",
+          "same-owner-other-system-5"
+        ]
+      },
+      "same-owner-other-system-q3": {
+        "baseline": [
+          "same-owner-other-system-1",
+          "same-owner-other-system-5",
+          "same-owner-other-system-2",
+          "same-owner-other-system-3",
+          "same-owner-other-system-6",
+          "same-owner-other-system-4"
+        ],
+        "experimental": [
+          "same-owner-other-system-1",
+          "same-owner-other-system-6",
+          "same-owner-other-system-2",
+          "same-owner-other-system-3",
+          "same-owner-other-system-4",
+          "same-owner-other-system-5"
+        ]
+      },
+      "same-owner-other-system-q4": {
+        "baseline": [
+          "same-owner-other-system-1",
+          "same-owner-other-system-2",
+          "same-owner-other-system-5",
+          "same-owner-other-system-3",
+          "same-owner-other-system-6",
+          "same-owner-other-system-4"
+        ],
+        "experimental": [
+          "same-owner-other-system-1",
+          "same-owner-other-system-2",
+          "same-owner-other-system-3",
+          "same-owner-other-system-6",
+          "same-owner-other-system-4",
+          "same-owner-other-system-5"
+        ]
+      },
+      "seat-use-outcome-q1": {
+        "baseline": [
+          "seat-use-outcome-6",
+          "seat-use-outcome-3",
+          "seat-use-outcome-4",
+          "seat-use-outcome-1",
+          "seat-use-outcome-5",
+          "seat-use-outcome-2"
+        ],
+        "experimental": [
+          "seat-use-outcome-1",
+          "seat-use-outcome-4",
+          "seat-use-outcome-3",
+          "seat-use-outcome-2",
+          "seat-use-outcome-5",
+          "seat-use-outcome-6"
+        ]
+      },
+      "seat-use-outcome-q2": {
+        "baseline": [
+          "seat-use-outcome-6",
+          "seat-use-outcome-3",
+          "seat-use-outcome-4",
+          "seat-use-outcome-1",
+          "seat-use-outcome-5",
+          "seat-use-outcome-2"
+        ],
+        "experimental": [
+          "seat-use-outcome-1",
+          "seat-use-outcome-2",
+          "seat-use-outcome-3",
+          "seat-use-outcome-4",
+          "seat-use-outcome-5",
+          "seat-use-outcome-6"
+        ]
+      },
+      "seat-use-outcome-q3": {
+        "baseline": [
+          "seat-use-outcome-6",
+          "seat-use-outcome-3",
+          "seat-use-outcome-4",
+          "seat-use-outcome-1",
+          "seat-use-outcome-5",
+          "seat-use-outcome-2"
+        ],
+        "experimental": [
+          "seat-use-outcome-1",
+          "seat-use-outcome-4",
+          "seat-use-outcome-3",
+          "seat-use-outcome-5",
+          "seat-use-outcome-2",
+          "seat-use-outcome-6"
+        ]
+      },
+      "seat-use-outcome-q4": {
+        "baseline": [
+          "seat-use-outcome-6",
+          "seat-use-outcome-3",
+          "seat-use-outcome-4",
+          "seat-use-outcome-1",
+          "seat-use-outcome-5",
+          "seat-use-outcome-2"
+        ],
+        "experimental": [
+          "seat-use-outcome-3",
+          "seat-use-outcome-2",
+          "seat-use-outcome-1",
+          "seat-use-outcome-4",
+          "seat-use-outcome-5",
+          "seat-use-outcome-6"
+        ]
+      },
+      "unnamed-owner-q1": {
+        "baseline": [
+          "unnamed-owner-2",
+          "unnamed-owner-6",
+          "unnamed-owner-3",
+          "unnamed-owner-4",
+          "unnamed-owner-1",
+          "unnamed-owner-5"
+        ],
+        "experimental": [
+          "unnamed-owner-1",
+          "unnamed-owner-4",
+          "unnamed-owner-3",
+          "unnamed-owner-2",
+          "unnamed-owner-5",
+          "unnamed-owner-6"
+        ]
+      },
+      "unnamed-owner-q2": {
+        "baseline": [
+          "unnamed-owner-6",
+          "unnamed-owner-2",
+          "unnamed-owner-3",
+          "unnamed-owner-4",
+          "unnamed-owner-1",
+          "unnamed-owner-5"
+        ],
+        "experimental": [
+          "unnamed-owner-1",
+          "unnamed-owner-4",
+          "unnamed-owner-2",
+          "unnamed-owner-3",
+          "unnamed-owner-6",
+          "unnamed-owner-5"
+        ]
+      },
+      "unnamed-owner-q3": {
+        "baseline": [
+          "unnamed-owner-2",
+          "unnamed-owner-6",
+          "unnamed-owner-3",
+          "unnamed-owner-4",
+          "unnamed-owner-1",
+          "unnamed-owner-5"
+        ],
+        "experimental": [
+          "unnamed-owner-1",
+          "unnamed-owner-4",
+          "unnamed-owner-2",
+          "unnamed-owner-3",
+          "unnamed-owner-6",
+          "unnamed-owner-5"
+        ]
+      },
+      "unnamed-owner-q4": {
+        "baseline": [
+          "unnamed-owner-2",
+          "unnamed-owner-6",
+          "unnamed-owner-3",
+          "unnamed-owner-4",
+          "unnamed-owner-1",
+          "unnamed-owner-5"
+        ],
+        "experimental": [
+          "unnamed-owner-1",
+          "unnamed-owner-4",
+          "unnamed-owner-2",
+          "unnamed-owner-3",
+          "unnamed-owner-6",
+          "unnamed-owner-5"
+        ]
+      },
+      "undecided-date-q1": {
+        "baseline": [
+          "undecided-date-4",
+          "undecided-date-1",
+          "undecided-date-5",
+          "undecided-date-2",
+          "undecided-date-6",
+          "undecided-date-3"
+        ],
+        "experimental": [
+          "undecided-date-1",
+          "undecided-date-6",
+          "undecided-date-4",
+          "undecided-date-2",
+          "undecided-date-3",
+          "undecided-date-5"
+        ]
+      },
+      "undecided-date-q2": {
+        "baseline": [
+          "undecided-date-1",
+          "undecided-date-4",
+          "undecided-date-5",
+          "undecided-date-6",
+          "undecided-date-2",
+          "undecided-date-3"
+        ],
+        "experimental": [
+          "undecided-date-6",
+          "undecided-date-4",
+          "undecided-date-2",
+          "undecided-date-1",
+          "undecided-date-3",
+          "undecided-date-5"
+        ]
+      },
+      "undecided-date-q3": {
+        "baseline": [
+          "undecided-date-4",
+          "undecided-date-1",
+          "undecided-date-5",
+          "undecided-date-2",
+          "undecided-date-6",
+          "undecided-date-3"
+        ],
+        "experimental": [
+          "undecided-date-1",
+          "undecided-date-4",
+          "undecided-date-2",
+          "undecided-date-6",
+          "undecided-date-3",
+          "undecided-date-5"
+        ]
+      },
+      "undecided-date-q4": {
+        "baseline": [
+          "undecided-date-4",
+          "undecided-date-1",
+          "undecided-date-5",
+          "undecided-date-2",
+          "undecided-date-6",
+          "undecided-date-3"
+        ],
+        "experimental": [
+          "undecided-date-1",
+          "undecided-date-4",
+          "undecided-date-6",
+          "undecided-date-3",
+          "undecided-date-2",
+          "undecided-date-5"
+        ]
+      }
+    }
+  },
+  "spend": {
+    "calls": 505,
+    "known_cost_usd": 0.01983441599999999,
+    "reserved_cost_usd": 0.000819,
+    "max_cost_usd": 0.1,
+    "spend_incomplete": false,
+    "blocked_reason": null,
+    "cached_results_reused": 377,
+    "new_calls": 127,
+    "historical_spend_incomplete": true,
+    "historical_status_counts": {
+      "ok": 377,
+      "error": 1
+    },
+    "billing_review": "Observed account delta matched prior known receipts; prior reservation retained for delayed billing."
+  },
+  "status_counts": {
+    "ok": 504
+  },
+  "recorded_passage_judgments": 504,
+  "finished_at": "2026-09-27T03:16:57.705408+00:00",
+  "elapsed_seconds": 47.3261014170057,
+  "aborted_reason": null,
+  "complete": true,
+  "latency_ms": {
+    "successful_requests": 504,
+    "p50": 332.057,
+    "p95": 450.007
+  },
+  "served_models": {
+    "typesafe/jev-1.13-20260917": 504
+  },
+  "promotion_gate": false,
+  "continuation": {
+    "previous_directory": "/Users/kerrfir/second-brain-worktrees/jev-evidence-screening/evaluations/jev-screening/results/2026-09-26",
+    "billing_snapshot_sha256": "06cfa9f059f9e69f19ae9882b5005fd52075304fe7454af61e582c9cb2ebd229",
+    "billing_review": {
+      "before": {
+        "verified_at": "2026-09-27T03:07:11.481829+00:00",
+        "limit": 1,
+        "limit_remaining": 0.999979084,
+        "limit_reset": null,
+        "usage": 2.0916e-05,
+        "is_free_tier": false,
+        "expires_at": "2027-03-26T02:12:49.414Z"
+      },
+      "after": {
+        "verified_at": "2026-09-27T03:13:40.843163+00:00",
+        "limit": 1,
+        "limit_remaining": 0.985131496,
+        "limit_reset": null,
+        "usage": 0.014868504
+      },
+      "confirmed_numerical_match": true,
+      "same_key_confirmed": true,
+      "review_note": "Manual continuation after two read-only checks of the dedicated Keychain trial key found usage equal to the 377 successful request receipts plus the earlier connectivity probe. Keep the original timeout and reserve its full conservative estimate. Complete only missing judgments under the original total USD 0.10 budget; do not alter the fixture, rubric, ranking formula or calibration threshold. Usage reconciliation is an observation at these timestamps, not a guarantee against delayed billing.",
+      "original_report_sha256": "190ff6c64ec59cbc49491c8ca344748924fa351fac5e681d8fc5d067c6709ebb",
+      "original_results_sha256": "5e67604f51839765a2c9f35ce3a95a245e721cea9a590b62604b2765740771fd"
+    },
+    "previous_spend": {
+      "calls": 378,
+      "known_cost_usd": 0.01484758799999999,
+      "reserved_cost_usd": 0.000819,
+      "max_cost_usd": 0.1,
+      "spend_incomplete": true,
+      "blocked_reason": "transport_failure"
+    },
+    "previous_status_counts": {
+      "ok": 377,
+      "error": 1
+    },
+    "cached_successes": 377,
+    "new_calls": 127,
+    "new_run_budget_usd": 0.08433341200000001,
+    "continuation_source_sha256": "a38be4e28321ca73a5c2edeabe80acd286b1f3235c4ae0565ba85544d37a1dcf",
+    "omissions": "Reuses frozen judgments; account snapshot cannot rule out later billing. No private corpus transfer or runtime activation."
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "previous_directory": "/Users/kerrfir/second-brain-worktrees/jev-evidence-screening/evaluations/jev-screening/results/2026-09-26",
+  "billing_snapshot_sha256": "06cfa9f059f9e69f19ae9882b5005fd52075304fe7454af61e582c9cb2ebd229",
+  "billing_review": {
+    "before": {
+      "verified_at": "2026-09-27T03:07:11.481829+00:00",
+      "limit": 1,
+      "limit_remaining": 0.999979084,
+      "limit_reset": null,
+      "usage": 2.0916e-05,
+      "is_free_tier": false,
+      "expires_at": "2027-03-26T02:12:49.414Z"
+    },
+    "after": {
+      "verified_at": "2026-09-27T03:13:40.843163+00:00",
+      "limit": 1,
+      "limit_remaining": 0.985131496,
+      "limit_reset": null,
+      "usage": 0.014868504
+    },
+    "confirmed_numerical_match": true,
+    "same_key_confirmed": true,
+    "review_note": "Manual continuation after two read-only checks of the dedicated Keychain trial key found usage equal to the 377 successful request receipts plus the earlier connectivity probe. Keep the original timeout and reserve its full conservative estimate. Complete only missing judgments under the original total USD 0.10 budget; do not alter the fixture, rubric, ranking formula or calibration threshold. Usage reconciliation is an observation at these timestamps, not a guarantee against delayed billing.",
+    "original_report_sha256": "190ff6c64ec59cbc49491c8ca344748924fa351fac5e681d8fc5d067c6709ebb",
+    "original_results_sha256": "5e67604f51839765a2c9f35ce3a95a245e721cea9a590b62604b2765740771fd"
+  },
+  "previous_spend": {
+    "calls": 378,
+    "known_cost_usd": 0.01484758799999999,
+    "reserved_cost_usd": 0.000819,
+    "max_cost_usd": 0.1,
+    "spend_incomplete": true,
+    "blocked_reason": "transport_failure"
+  },
+  "previous_status_counts": {
+    "ok": 377,
+    "error": 1
+  },
+  "cached_successes": 377,
+  "new_calls": 127,
+  "new_run_budget_usd": 0.08433341200000001,
+  "continuation_source_sha256": "a38be4e28321ca73a5c2edeabe80acd286b1f3235c4ae0565ba85544d37a1dcf",
+  "omissions": "Reuses frozen judgments; account snapshot cannot rule out later billing. No private corpus transfer or runtime activation."
+}
