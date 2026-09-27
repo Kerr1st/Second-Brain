@@ -16,17 +16,20 @@ tool's normal return type instead of raising:
 * memory_list returns ``list[dict]`` and raises ``ValueError`` instead — FastMCP
   reports that as an ``isError`` result carrying only the message.
 
-Real failures (connection loss, unexpected constraint violations) still propagate.
+Database failures return a safe message without SQL, credentials or private values.
+Programming errors remain visible to developers.
 """
 
 import json
+from functools import wraps
+from psycopg2.pool import PoolError
 import psycopg2.errors
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta, timezone
 from src.db import (
-    create_memory, get_memory, update_memory, list_memories, get_arrivals_summary,
+    create_memory, get_memory, update_memory, list_memories, get_arrivals_summary, iso as _iso,
     create_relationship, get_relationships, find_temporal_neighbors,
-    find_schemas_for_memories, get_schema_with_constituents,
+    find_schemas_for_memories,
 )
 from src.search import hybrid_search, rerank, increment_access_count
 from src.embeddings import generate_embedding
@@ -34,9 +37,9 @@ from src.classify import classify_memory
 from src.depth import compute_depth_score
 from src.project import normalize_project_tag
 from src.validation import (
-    MEMORY_TYPES, FILTERABLE_TYPES, MEMORY_STATUSES, RELATION_TYPES, ValidationError,
+    MEMORY_TYPES, FILTERABLE_TYPES, MEMORY_STATUSES, RELATION_TYPES, SOURCE_TYPES, ValidationError,
     uuid_or_error, one_of, optional_one_of, require_text, require_mapping,
-    clamp_limit, clamp_days, clean_tags,
+    clamp_limit, clamp_days, clean_tags, clean_topics,
 )
 from src import express
 
@@ -44,20 +47,39 @@ mcp = FastMCP("Second Brain")
 
 
 def _guarded(fn, *args, **kwargs):
-    """Call a ``src.db`` function, translating the two data-shape errors Postgres can
-    still raise after boundary validation into :class:`ValidationError`, so the client
-    sees a one-line message and never SQL text or a constraint name. Every other
-    exception (connection loss, unexpected constraint) propagates unchanged."""
+    """Translate residual data-shape errors without exposing database diagnostics."""
     try:
         return fn(*args, **kwargs)
-    except psycopg2.errors.InvalidTextRepresentation as e:
-        detail = (e.diag.message_primary or "a value has the wrong format").strip()
-        raise ValidationError(f"Invalid value: {detail}") from e
-    except psycopg2.errors.ForeignKeyViolation as e:
-        raise ValidationError("A referenced memory does not exist") from e
+    except psycopg2.errors.InvalidTextRepresentation as exc:
+        raise ValidationError("Invalid value format") from exc
+    except psycopg2.errors.ForeignKeyViolation as exc:
+        raise ValidationError("A referenced memory does not exist") from exc
+
+
+def _boundary(shape):
+    """Keep PostgreSQL and pool diagnostics off the tool wire, preserving signatures."""
+    def decorate(fn):
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except ValidationError as exc:
+                message = str(exc)
+            except (psycopg2.OperationalError, psycopg2.InterfaceError, PoolError):
+                message = "Memory storage is temporarily unavailable; retry shortly"
+            except psycopg2.Error:
+                message = "Memory storage could not complete this operation"
+            if shape == "dict":
+                return {"error": message}
+            if shape == "str":
+                return f"Error: {message}"
+            raise ValueError(message) from None
+        return wrapped
+    return decorate
 
 
 @mcp.tool()
+@_boundary("str")
 def memory_create(
     type: str,
     title: str,
@@ -90,6 +112,7 @@ def memory_create(
         content = require_text(content, "content")
         tags = clean_tags(tags)
         metadata = require_mapping(metadata, "metadata")
+        source_type = optional_one_of(source_type, SOURCE_TYPES, "source_type")
     except ValidationError as e:
         return f"Error: {e}"
 
@@ -119,6 +142,7 @@ def memory_create(
 
 
 @mcp.tool()
+@_boundary("dict")
 def memory_search(query: str, type: str | None = None, limit: int = 10, project: str | None = None,
                   source_type: str | None = None, since_days: int | None = None,
                   status: str | None = None) -> dict:
@@ -144,6 +168,7 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
         query = require_text(query, "query")
         type = optional_one_of(type, FILTERABLE_TYPES, "type")
         status = optional_one_of(status, MEMORY_STATUSES, "status")
+        source_type = optional_one_of(source_type, SOURCE_TYPES, "source_type")
         limit = clamp_limit(limit)
         since_days = clamp_days(since_days, "since_days")
     except ValidationError as e:
@@ -212,6 +237,7 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
 
 
 @mcp.tool()
+@_boundary("dict")
 def memory_read(memory_id: str) -> dict:
     """Read a single memory by ID and return its full content. Use this to expand a
     memory_search hit whose 500-char preview was truncated, before acting on it.
@@ -238,6 +264,7 @@ def memory_read(memory_id: str) -> dict:
 
 
 @mcp.tool()
+@_boundary("str")
 def memory_update(
     memory_id: str,
     title: str | None = None,
@@ -296,6 +323,7 @@ def memory_update(
 
 
 @mcp.tool()
+@_boundary("str")
 def memory_relate(
     source_id: str, target_id: str, relation_type: str, note: str | None = None
 ) -> str:
@@ -323,6 +351,7 @@ def memory_relate(
 
 
 @mcp.tool()
+@_boundary("list")
 def memory_list(
     type: str | None = None,
     source_type: str | None = None,
@@ -341,6 +370,7 @@ def memory_list(
     silent [] would look like "nothing matched"."""
     type = optional_one_of(type, FILTERABLE_TYPES, "type")
     status = optional_one_of(status, MEMORY_STATUSES, "status")
+    source_type = optional_one_of(source_type, SOURCE_TYPES, "source_type")
     limit = clamp_limit(limit)
     since_days = clamp_days(since_days, "since_days")
     created_after = None
@@ -358,6 +388,7 @@ def memory_list(
 
 
 @mcp.tool()
+@_boundary("dict")
 def memory_recent_activity(days: int = 7, samples_per_source: int = 5) -> dict:
     """What arrived in the last N days, by capture channel: document and memory counts
     per source_type plus the newest document titles for each. Channels are the user's
@@ -367,9 +398,12 @@ def memory_recent_activity(days: int = 7, samples_per_source: int = 5) -> dict:
     (syntheses, distilled insights). Call this first to orient exploration on what is
     new, then memory_list(source_type=..., since_days=...) or memory_search(...,
     since_days=...) to drill into a channel."""
-    days = max(1, min(int(days), 90))
+    days = clamp_days(days, "days", lo=1, hi=90)
+    if days is None:
+        raise ValidationError("days must be an integer")
+    samples_per_source = clamp_limit(samples_per_source, lo=0, hi=20)
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    by_source = get_arrivals_summary(since, samples_per_source=max(0, min(int(samples_per_source), 20)))
+    by_source = get_arrivals_summary(since, samples_per_source=samples_per_source)
     return {
         "since": _iso(since), "days": days,
         "total_documents": sum(s["documents"] for s in by_source),
@@ -378,13 +412,9 @@ def memory_recent_activity(days: int = 7, samples_per_source: int = 5) -> dict:
     }
 
 
-def _iso(value) -> str | None:
-    if value is None:
-        return None
-    return value.isoformat() if hasattr(value, "isoformat") else str(value)
-
 
 @mcp.tool()
+@_boundary("dict")
 def memory_graph(memory_id: str) -> dict:
     """Get a memory plus its linked relationships (target_id, relation_type, note).
     Use it to traverse from a memory_search hit to related memories, then memory_read
@@ -402,13 +432,17 @@ def memory_graph(memory_id: str) -> dict:
     return {
         "memory": {"id": str(mem["id"]), "title": mem["title"], "type": mem["type"]},
         "relationships": [
-            {"target_id": str(r["target_id"]), "relation_type": r["relation_type"], "note": r["note"]}
+            {"target_id": str(r.get("neighbor_id") or (r["source_id"] if str(r["target_id"]) == memory_id else r["target_id"])),
+             "relation_type": r["relation_type"], "note": r["note"],
+             "direction": "incoming" if str(r["target_id"]) == memory_id else "outgoing",
+             "title": r.get("title"), "type": r.get("type")}
             for r in rels
         ],
     }
 
 
 @mcp.tool()
+@_boundary("str")
 def memory_learn(
     content: str,
     topics: str,
@@ -437,13 +471,9 @@ def memory_learn(
     """
     try:
         content = require_text(content, "content")
-        topics = require_text(topics, "topics")
+        topic_list = clean_topics(topics)
     except ValidationError as e:
         return f"Error: {e}"
-    topic_list = [t.strip() for t in topics.split(",") if t.strip()]
-    if not topic_list:
-        return "Error: topics must contain at least one non-empty, comma-separated topic"
-
     # Search existing memories for each topic
     related_sections = []
     for topic in topic_list:
@@ -479,6 +509,7 @@ def memory_learn(
 
 
 @mcp.tool()
+@_boundary("str")
 def memory_brief(window_days: int = 14, use_llm: bool = False) -> str:
     """Surface what the second brain has synthesized but hasn't told you yet.
 

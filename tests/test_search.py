@@ -267,12 +267,12 @@ class TestHybridSearchSourceTypeProperty:
     channel leaks through the filter.
     """
 
-    @given(source_type=st.sampled_from(["distilled_chat", "cli_chat", "kiro_ide_chat", "article"]))
+    @given(source_type=st.sampled_from(["distilled_chat", "kiro_cli_chat", "kiro_ide_chat", "article"]))
     @settings(max_examples=20, deadline=None)
     def test_only_matching_source_type_in_results(self, source_type, test_db):
         from tests.conftest import _deterministic_embedding
 
-        other_type = "other_" + source_type
+        other_type = "manual"
         base = "Event sourcing and CQRS tradeoffs in distributed systems"
         try:
             tgt = base + " target " + source_type

@@ -1,0 +1,312 @@
+{
+  "adapters": [
+    "bedrock",
+    "claude_code",
+    "codex",
+    "kiro"
+  ],
+  "default_profile": "controlled",
+  "profiles": [
+    "bedrock",
+    "controlled",
+    "laptop",
+    "mini"
+  ],
+  "roles": [
+    "advocate",
+    "codex_semantic",
+    "distill",
+    "editor",
+    "epistemologist",
+    "explorer",
+    "grounding_auditor",
+    "methodologist",
+    "skeptic",
+    "skim",
+    "thinker"
+  ],
+  "migration_high_water": "016_data_integrity.sql",
+  "scheduled_spend_threshold_usd": 9.0,
+  "library_spend_threshold_usd": 5.0,
+  "schedules": [
+    {
+      "file": "com.second-brain.backup.plist",
+      "label": "com.second-brain.backup",
+      "calendar": {
+        "Hour": 2,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/backup.sh",
+        "backup"
+      ]
+    },
+    {
+      "file": "com.second-brain.bookmarks.plist",
+      "label": "com.second-brain.bookmarks",
+      "calendar": {
+        "Weekday": 6,
+        "Hour": 1,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/scrape_bookmarks.py",
+        "bookmarks"
+      ]
+    },
+    {
+      "file": "com.second-brain.capture-api.plist",
+      "label": "com.second-brain.capture-api",
+      "calendar": null,
+      "interval_seconds": null,
+      "keep_alive": true,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/capture_api.sh",
+        "capture-api"
+      ]
+    },
+    {
+      "file": "com.second-brain.capture-browser.plist",
+      "label": "com.second-brain.capture-browser",
+      "calendar": {
+        "Hour": 1,
+        "Minute": 15
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/capture_browser.sh",
+        "capture-browser"
+      ]
+    },
+    {
+      "file": "com.second-brain.capture-outlook.plist",
+      "label": "com.second-brain.capture-outlook",
+      "calendar": {
+        "Hour": 0,
+        "Minute": 45
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/capture_outlook.sh",
+        "capture-outlook"
+      ]
+    },
+    {
+      "file": "com.second-brain.capture-slack.plist",
+      "label": "com.second-brain.capture-slack",
+      "calendar": {
+        "Hour": 1,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/capture_slack.sh",
+        "capture-slack"
+      ]
+    },
+    {
+      "file": "com.second-brain.chat-extract.plist",
+      "label": "com.second-brain.chat-extract",
+      "calendar": {
+        "Hour": 2,
+        "Minute": 30
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/capture_chats.sh",
+        "chat-capture"
+      ]
+    },
+    {
+      "file": "com.second-brain.codex-capture.plist",
+      "label": "com.second-brain.codex-capture",
+      "calendar": null,
+      "interval_seconds": 21600,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/codex_capture.sh",
+        "codex-capture"
+      ]
+    },
+    {
+      "file": "com.second-brain.credentials.plist",
+      "label": "com.second-brain.credentials",
+      "calendar": {
+        "Hour": 7,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/verify_credentials.sh",
+        "credentials"
+      ]
+    },
+    {
+      "file": "com.second-brain.distill.plist",
+      "label": "com.second-brain.distill",
+      "calendar": {
+        "Hour": 5,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/distill_sessions.py",
+        "distill"
+      ]
+    },
+    {
+      "file": "com.second-brain.dream-cycle.plist",
+      "label": "com.second-brain.dream-cycle",
+      "calendar": [
+        {
+          "Weekday": 1,
+          "Hour": 2,
+          "Minute": 0
+        },
+        {
+          "Weekday": 3,
+          "Hour": 2,
+          "Minute": 0
+        },
+        {
+          "Weekday": 5,
+          "Hour": 2,
+          "Minute": 0
+        }
+      ],
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/dream_cycle_scheduled.sh",
+        "dream-cycle"
+      ]
+    },
+    {
+      "file": "com.second-brain.ingest.plist",
+      "label": "com.second-brain.ingest",
+      "calendar": {
+        "Hour": 3,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/crawlee_ingest.py",
+        "crawlee-ingest"
+      ]
+    },
+    {
+      "file": "com.second-brain.liveness.plist",
+      "label": "com.second-brain.liveness",
+      "calendar": {
+        "Hour": 9,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/verify_liveness.sh",
+        "liveness"
+      ]
+    },
+    {
+      "file": "com.second-brain.qd-sync.plist",
+      "label": "com.second-brain.qd-sync",
+      "calendar": null,
+      "interval_seconds": 3600,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/qd_sync.sh",
+        "qd-sync"
+      ]
+    },
+    {
+      "file": "com.second-brain.verify.plist",
+      "label": "com.second-brain.verify",
+      "calendar": {
+        "Weekday": 0,
+        "Hour": 3,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/verify_backup.sh",
+        "verify"
+      ]
+    },
+    {
+      "file": "com.second-brain.weekly-digest.plist",
+      "label": "com.second-brain.weekly-digest",
+      "calendar": {
+        "Weekday": 1,
+        "Hour": 6,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/weekly_digest.sh",
+        "weekly-digest"
+      ]
+    },
+    {
+      "file": "com.second-brain.youtube.plist",
+      "label": "com.second-brain.youtube",
+      "calendar": {
+        "Hour": 1,
+        "Minute": 30
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
+        "/Users/kerrfir/second-brain/scripts/jobs/youtube_scrape.sh",
+        "youtube"
+      ]
+    }
+  ]
+}

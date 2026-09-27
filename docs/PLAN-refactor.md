@@ -1,6 +1,8 @@
-# Refactor plan: streamlining Second Brain (v3)
+# Refactor plan: streamlining Second Brain (v4)
 
-**Status (2026-09-26):** Phase 0 mitigations were committed in `54b191d`. The isolated execution foundation and routing repairs are implemented in `bf854cd` on `codex/refactor-safety-routing`, based on `1071a81`; 1,745 tests pass. Phase 1 as a whole remains incomplete. Nothing is deployed or pushed. See [REFACTOR-EXECUTION-2026-09-26.md](REFACTOR-EXECUTION-2026-09-26.md) for exact implementation and verification boundaries. D1 is handled by preserving the installed checkout and its dirty-file hash manifest; D2, D4 and D5 operational decisions remain open. D3 retains the configured controlled inference route for these repairs.
+**Status (2026-09-26):** The user authorized implementation of the entire revised plan. The foundation is committed in `bf854cd`; the remaining seven-phase integration is tracked in [REFACTOR-COMPLETION-2026-09-26.md](REFACTOR-COMPLETION-2026-09-26.md). D1 is resolved by preserving the installed dirty tree and a private dated documentation snapshot. The user authorized OneDrive recovery-key custody. Live corpus rewrites, credential revocation and deployment require their measured release evidence; no passing component count substitutes for those gates. Nothing is pushed or deployed.
+
+**Execution disposition:** phases 1, 2, 4, 5, 6 and 7 have implemented source repairs and a final isolated result of **1,724 passing tests**. Phase 3 code retirement is implemented; live graph/artifact retirement remains gated. The full backup restored and migrations plus unpaid repairs passed on a disposable copy. Live installation, static-key replacement, paid corpus maintenance and human evaluation remain separate gates. The phase 4d 20,000-test-line target was not met; meaningful integrity and isolation regressions were retained. Exact per-item status is in the completion ledger.
 
 **Evidence:** [AUDIT-2026-09-24.md](AUDIT-2026-09-24.md) and the [findings register](audit-2026-09-24/00-FINDINGS-REGISTER.md). Three independent code reviews on September 26 support the correctness-first direction with the amendments below. Historical corpus counts in this plan are audit observations, not current measurements.
 
@@ -8,7 +10,7 @@
 
 **Constraints that hold throughout**
 - Use isolated branches. Nothing is pushed. The installed `/Users/kerrfir/second-brain` checkout is a job target: merging into its `main` is deployment even without a restart and requires a separately qualified release.
-- Working-tree edits under `docs/`, `README.md`, `scheduling/README.md`, `.kiro/specs/**`, `src/backends/kiro.py` are yours; nothing touches them until decision D1 resolves. Phase 6 is blocked on it.
+- Working-tree edits under `docs/`, `README.md`, `scheduling/README.md`, `.kiro/specs/**`, `src/backends/kiro.py` are yours; the installed originals remain untouched. Phase 6 reconciles a preserved copy into this isolated branch.
 - Corpus content never reaches Kiro or Fable 5.1 — including while doing this work. Use `SECOND_BRAIN_PROFILE=controlled` in every shell.
 - Run tests only through the disposable database/offline runner documented in the execution record. Clearing AWS environment variables alone is not isolation. The old 1,630-test result is a historical baseline, not permission to use the installed database.
 - No schema change without a migration; no migration that names a database literally; `migrate.sh` is ported (item 1.13) before any new migration runs.
@@ -133,10 +135,10 @@ After 3 and 4. `dream_cycle/orchestrator.py` (1,201 lines, 7 responsibilities) �
 
 ---
 
-## Phase 6 — Documentation reconciliation (blocked on D1)
+## Phase 6 — Documentation reconciliation (D1 preserved)
 
 1. Promote the six ownerless contracts into canonical docs: panel acceptance; the `controlled` profile and the Kiro-`--model`/Fable-PII hazard (today only a TOML comment); the $9 cap (today only a shell script); the `quick_desktop_doc` retirement; the four newer capture channels; the Codex data-locality decision (D3). (F-153)
-2. Re-pin layer A to HEAD: adapters 4, profiles 5, roles 7, plists 18, migrations 014, cadence Mon/Wed/Fri 02:00; delete START-HERE's "Current local observation"; add Step 3.5 and the audit/revision stage to ARCHITECTURE; regenerate OPERATIONS' schedule table from the plists; delete CAPTURE-COMPONENTS' "no native Codex/Outlook collector"; README drops "do not merge" (the histories are disjoint — it is a port, and two upstream fixes are now in Phase 1). Correct "233 commits" → 67 wherever it appears. (F-151, F-152, F-161)
+2. Re-pin layer A to HEAD: counts generated from current code, configuration and plists, including roles, migration high-water, cadence and spend thresholds; delete START-HERE's "Current local observation"; add Step 3.5 and the audit/revision stage to ARCHITECTURE; regenerate OPERATIONS' schedule table from the plists; delete CAPTURE-COMPONENTS' "no native Codex/Outlook collector"; README drops "do not merge" (the histories are disjoint — it is a port, and two upstream fixes are now in Phase 1). Correct "233 commits" → 67 wherever it appears. (F-151, F-152, F-161)
 3. Add a **known-hazards list with owners** to VALIDATION.md, checked by `test_repo_hygiene.py` — the actual failure was that layer A recorded the 009 and fixture hazards on 09-10 and nobody closed them. (F-163)
 4. Delete the 35 redirect stubs (archive holds the originals); archive the four completed `PLAN-*.md` and `RESEARCH-skim-model.md` after promoting their contracts; ~50 files → ~18 with content. Terminate the authority chain on code; remove every deferral to the non-existent "local operational inventory". (F-162, F-154)
 5. Specs: per track 08a/08b's verdict table — archive the drifted, update the four still-load-bearing, and create the eight missing families the refactor needs (routing enforcement, corpus dedup, relationship lifecycle, run ledger, capture framework, observability, retrieval regression gate, data-locality policy). Fix SPEC-INDEX (13 families; the `direct-api-backends` prose is inverted). (F-155…F-160)

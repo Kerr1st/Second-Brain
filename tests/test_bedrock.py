@@ -64,7 +64,7 @@ def _reasoning_block(text="thinking..."):
 
 @pytest.fixture(autouse=True)
 def _isolated_metrics_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.backends.direct_api.METRICS_DIR", str(tmp_path / "llm_metrics"))
+    monkeypatch.setattr("src.backends.base.METRICS_DIR", str(tmp_path / "llm_metrics"))
     return tmp_path / "llm_metrics"
 
 
@@ -126,17 +126,6 @@ class TestStructuredOutputShape:
         assert cfg["tools"][0]["toolSpec"]["name"] == "structured_output"
         assert cfg["tools"][0]["toolSpec"]["inputSchema"] == {"json": {"type": "object"}}
 
-    def test_gemma_uses_json_schema_output_format(self):
-        """Gemma 3 12B: structured outputs yes, client-side tool calling only on
-        bedrock-mantle → Converse outputConfig.textFormat (structured-output.html)."""
-        inv = BedrockInvoker(model="google.gemma-3-12b-it")
-        shape = inv._shape_structured_output(schema={"type": "object", "properties": {"a": {"type": "string"}}})
-        assert "toolConfig" not in shape
-        fmt = shape["outputConfig"]["textFormat"]
-        assert fmt["type"] == "json_schema"
-        js = fmt["structure"]["jsonSchema"]
-        assert js["name"] == "structured_output"
-        assert json.loads(js["schema"]) == {"type": "object", "properties": {"a": {"type": "string"}}}
 
     def test_openai_keeps_auto_tool_choice(self):
         inv = BedrockInvoker(model="global.openai.gpt-6-astra")
@@ -256,20 +245,6 @@ class TestPerModelRequestShape:
             "additionalModelRequestFields": {"reasoning": {"effort": "high"}},
         }]
 
-    def test_gemma_request_uses_output_config(self):
-        """Gemma 3 12B: JSON-schema output format, no toolConfig, no reasoning
-        fields (doc-verified only; Phase 1 spends on Nova alone)."""
-        client = _FakeBedrockClient(response=_converse_response({"text": json.dumps({"summary": "s"})}))
-        inv = BedrockInvoker(model="google.gemma-3-12b-it", client=client, max_tokens=2048,
-                             temperature=0.0, service_tier="flex")
-        result = inv.invoke("sys", "doc", schema=_SCHEMA)
-        assert result["output"] == {"summary": "s"}
-        call = client.calls[0]
-        assert "toolConfig" not in call and "additionalModelRequestFields" not in call
-        assert call["outputConfig"]["textFormat"]["type"] == "json_schema"
-        assert json.loads(call["outputConfig"]["textFormat"]["structure"]["jsonSchema"]["schema"]) == _SCHEMA
-        assert call["serviceTier"] == {"type": "flex"}
-        assert call["inferenceConfig"] == {"maxTokens": 2048, "temperature": 0.0}
 
     def test_served_service_tier_is_carried_in_usage(self):
         """Converse echoes serviceTier; cost.py prices Flex from this echo only."""
@@ -392,9 +367,8 @@ class TestEffortMapping:
              {"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}),
             # Claude 4.x keeps the extended-thinking budget mapping.
             ("global.anthropic.claude-opus-4-8", "high",
-             {"thinking": {"type": "enabled", "budget_tokens": 8192}}),
-            ("global.anthropic.claude-opus-4-8", "low",
-             {"thinking": {"type": "disabled"}}),
+             None),
+            ("global.anthropic.claude-opus-4-8", "low", None),
             # OpenAI on Bedrock: reasoning.effort (live-verified; reasoning_effort rejected).
             ("global.openai.gpt-6-astra", "high", {"reasoning": {"effort": "high"}}),
             ("us.openai.gpt-5.6-sol", "xhigh", {"reasoning": {"effort": "xhigh"}}),

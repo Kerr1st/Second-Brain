@@ -122,10 +122,10 @@ class TestReplay:
         seen = []
         def variant(role, candidate_json, source_memories_content):
             seen.append(role); return f"VARIANT {role}"
-        recs = pr.replay([_row()], ["skeptic"], res, SpendTracker(cap_usd=5), prompt_fn=variant, variant="standard",
+        recs = pr.replay([_row()], ["skeptic"], res, SpendTracker(cap_usd=5), prompt_fn=variant,
                          dry_run=True, sources_fn=lambda c: "")
         assert res.calls == [] and seen == ["skeptic"]
-        assert recs[0]["verdict"] is None and recs[0]["variant"] == "standard" and recs[0]["prompt_chars"] == len("VARIANT skeptic")
+        assert recs[0]["verdict"] is None and recs[0]["prompt_chars"] == len("VARIANT skeptic")
 
 
 class TestDirectApiOnly:
@@ -164,3 +164,15 @@ def test_unknown_usage_stops_replay_before_next_seat():
     with pytest.raises(UsageUnavailable):
         pr.replay([_row()], list(pr.SEATS), resolver, SpendTracker(1), sources_fn=lambda c: "synthetic")
     assert invoker.invoke.call_count == 1
+
+
+def test_grounded_withdrawal_does_not_fabricate_votes():
+    from src.models import CandidateInsight
+    service = MagicMock()
+    service.audit_and_revise.return_value = CandidateInsight(
+        title="Withdrawn", type="insight", operation="CREATE", content="")
+    records = pr.replay_grounded([_row()], list(pr.SEATS), service, loader=lambda _: [])
+    service.evaluate.assert_not_called()
+    assert {record["verdict"] for record in records} == {"WITHDRAWN"}
+    assert all(record["score"] is None for record in records)
+    assert pr.matrix(records, list(pr.SEATS))["consensus"] == {}

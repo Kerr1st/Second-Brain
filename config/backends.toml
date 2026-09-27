@@ -16,7 +16,7 @@
 #   max_tokens    int             Converse inferenceConfig.maxTokens (default 32768)
 # Roles sharing backend+model but not options get separate invokers.
 #
-# The `skim` role (docs/PLAN-skim-stage.md, Step 3.5 of a run) reads every
+# The `skim` role (docs/SKIM-STAGE.md, Step 3.5 of a run) reads every
 # parent-level arrival in the run's window with a cheap, faithful model and is
 # the same in every profile: Amazon Nova 2 Lite on the direct Bedrock API, Flex
 # tier, temperature 0, extended reasoning off (effort = "low"), 4096 output
@@ -25,7 +25,8 @@
 # its model, and that text stays inside the AWS account. Its own sub-cap is
 # SKIM_SPEND_CAP_USD ($1.00, env SECOND_BRAIN_SKIM_CAP_USD, at most 15% of the
 # run cap) and it is metered against the run cap like every other stage; any
-# skim failure is non-fatal (the Explorer gets the plain arrivals manifest).
+# isolated skim failures are counted; reaching the configured failure threshold
+# aborts the run with partial statistics.
 #
 # Credentials are NOT stored here — they stay out-of-band / gitignored.
 # See docs/MODEL-BACKENDS.md.
@@ -42,14 +43,15 @@ methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opu
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
 codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+grounding_auditor = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "high", options = { max_tokens = 8192 } }
 editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
 [profiles.mini]
 # Mac Mini: no Kiro -> Claude Code on Bedrock. The claude_code adapter is
-# implemented and validated end-to-end against the local ASBX `claude` build.
+# implemented; current read-only/bare-mode behavior needs installed qualification.
 #
 # Model ids are Bedrock inference-profile ids the Claude Code CLI accepts on
-# this build (confirmed live): `global.anthropic.claude-opus-4-8` is the latest
+# the September 14 build accepted: `global.anthropic.claude-opus-4-8` was the selected
 # Opus. The short/dotted forms (`claude-opus-4.8`, `claude-opus-4-8`) and the
 # `opus` alias (which resolves to the older 4-6) are NOT used. For a cheaper /
 # faster instance, swap to `global.anthropic.claude-sonnet-4-6`.
@@ -62,6 +64,7 @@ methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opu
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
 codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+grounding_auditor = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "high", options = { max_tokens = 8192 } }
 editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
 [profiles.bedrock]
@@ -74,11 +77,11 @@ editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", ef
 # accepted unless both Claude and GPT-6 Astra vote for it.
 #
 # All of this is metered. Guardrails (src/backends/cost.py):
-#   SECOND_BRAIN_RUN_COST_CAP_USD  per-run hard stop, default 5.00
+#   SECOND_BRAIN_RUN_COST_CAP_USD  post-call stop threshold, default 5.00
 #   SECOND_BRAIN_KILL_SWITCH=1     refuse to start a run
 #   BEDROCK_MAX_TOKENS             output budget per call (default 32768;
 #                                  adaptive thinking is billed as output)
-# Estimated ≈ $1.60/run from the June token counts, before thinking tokens.
+# Historical token estimates exclude changing workload and embedding spend.
 explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-5",    effort = "high" }
 thinker        = { backend = "bedrock",     model = "global.anthropic.claude-opus-5", effort = "high" }
 skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
@@ -88,6 +91,7 @@ methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-son
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
 codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+grounding_auditor = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "high", options = { max_tokens = 8192 } }
 editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
 [profiles.controlled]
@@ -104,8 +108,8 @@ editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", ef
 # Explorer keeps tools via Claude Code (Bedrock-billed; honours inference-profile
 # ids). Thinker is tool-less on direct Bedrock: every Thinker now receives the
 # slice contents inline (B2 packet), so it no longer needs memory_read. Cost
-# estimate ≈ $3-4/run (Explorer ~$0.5-1, Thinker ~$1, Claude evaluators ~$0.4,
-# Astra ~$1.6) — under the $6/run cap; ~$100/month nightly.
+# and actual spend depend on input/output usage. The scheduled threshold is
+# generated from the job script; an in-flight call can overshoot it.
 explorer       = { backend = "claude_code", model = "global.anthropic.claude-sonnet-5",  effort = "high" }
 thinker        = { backend = "bedrock",     model = "global.anthropic.claude-opus-5",    effort = "high" }
 skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
@@ -115,4 +119,5 @@ methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-son
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
 codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+grounding_auditor = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "high", options = { max_tokens = 8192 } }
 editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }

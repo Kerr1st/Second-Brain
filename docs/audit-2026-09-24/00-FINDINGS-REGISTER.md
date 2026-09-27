@@ -4,6 +4,16 @@ Repo `/Users/kerrfir/second-brain` @ `6b8c2d2`. Inputs: tracks 01, 02, 03, 04, 0
 Severity: **S1** corrupts/hides data, spends unmetered, or violates the routing rule · **S2** rule unenforced or failure invisible · **S3** duplication / dead / drift.
 "vs prior audit": CONFIRMS §x · REFUTES §x · RE-GRADES §x Sa→Sb · NEW. Track ids in "Source" column are the file prefixes (01…12c); `static` = static/ outputs; `psql` = tie-break query in this consolidation.
 
+## September 26 implementation disposition
+
+This register preserves the September 24 audit evidence. Current implementation and operational states are tracked by original plan item number in the [full-plan ledger](../REFACTOR-COMPLETION-2026-09-26.md). Historical line numbers and recommendations below are not current runtime claims.
+
+- Routing/spend, transactional ingestion and discovery, relationship lifecycle, MCP boundaries, offline test isolation and failure reporting have source repairs with isolated regressions.
+- Dedup, metadata/run-ledger repairs, rechunking, role/index separation, ignored-file retirement and graph retirement have inspectable manifests. Live application is a separate state and is not marked closed by source tests.
+- Recovery now has encrypted bundles, file-mode validation and isolated restore verification; original plaintext cloud copies and scheduled legacy backup behavior remain release work until replaced and retired explicitly.
+- Capture consolidation, backend mechanics, database/module decomposition and canonical docs/specs are implemented. The requested 20,000-test-line ceiling is not met; substantive new integrity and isolation coverage is retained rather than deleted to meet a line count.
+- Discovery quality and human benefit remain unknown until the bounded trial receives user judgments and an observed outcome. Synthetic scripted-provider acceptance is not that evidence.
+
 ---
 
 ## A. Routing & spend safety

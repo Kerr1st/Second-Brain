@@ -1,4 +1,6 @@
-# Refactor execution, September 26, 2026
+# Foundation execution record, September 26, 2026
+
+**Historical first slice:** this file records `bf854cd` and its then-current verification/gates. Read the [full-plan completion ledger](REFACTOR-COMPLETION-2026-09-26.md) for the subsequent seven-phase work, new verification, synthetic provider probes and remaining operational gates. Statements below about no provider calls and outstanding source work apply only to that first slice.
 
 ## Judgment and purpose
 

@@ -25,7 +25,8 @@ set -uo pipefail
 export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 cd "$(dirname "$0")/../.."
 
-CONTAINER="${DB_CONTAINER:-second-brain-db}"
+DB_HOST="${DB_HOST:-127.0.0.1}"
+DB_PORT="${DB_PORT:-5432}"
 DB_USER="${DB_USER:-memory_bank}"
 DB_NAME="${DB_NAME:-memory_bank}"
 PSQL_BIN="${PSQL_BIN:-psql}"
@@ -65,6 +66,9 @@ CHANNELS=(
   # not firing on normal upstream idleness.
   "quick_desktop_synth|source_type LIKE 'quick_desktop_%' AND source_type NOT IN ('quick_desktop_doc','quick_desktop_session_event')|21|required"
   "web_articles|source_type = 'article'|9|required"
+  "ide_chat|source_type = 'kiro_ide_chat'|7|required"
+  "distilled_chat|source_type = 'distilled_chat'|7|required"
+  "weekly_digest|source_type = 'weekly_digest'|14|required"
   "cli_chat|source_type = 'kiro_cli_chat'|4|required"
   "youtube|source_type = 'youtube'|9|required"
   "outlook_email|source_type = 'outlook_email'|3|required"
@@ -88,7 +92,7 @@ CHANNELS=(
 #                             cause and there is nothing to repair in this repo.
 QD_MAX_AGE_DAYS="${QD_MAX_AGE_DAYS:-7}"
 
-if ! "$PG_ISREADY_BIN" -h 127.0.0.1 -p 5432 -U "$DB_USER" &>/dev/null; then
+if ! "$PG_ISREADY_BIN" -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" &>/dev/null; then
   log "ABORT: database not reachable"
   notify "Liveness check could not reach the database"
   exit 1
@@ -99,19 +103,46 @@ SILENT_MSG=""
 ADVISORY_MSG=""
 for entry in "${CHANNELS[@]}"; do
   IFS='|' read -r label pred max_age sev <<< "$entry"
-  age=$("$PSQL_BIN" -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -tAc \
-    "SELECT COALESCE(now()::date - MAX(created_at)::date, 99999) FROM memories WHERE $pred;" 2>/dev/null)
-  [[ "$age" =~ ^[0-9]+$ ]] || age=99999
+  age=$("$PSQL_BIN" -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc \
+    "SELECT COALESCE(now()::date - MAX(COALESCE((metadata->>'capture_updated_at')::timestamptz,created_at))::date, 99999) FROM memories WHERE $pred;" 2>/dev/null)
+  if [[ ! "$age" =~ ^[0-9]+$ ]]; then
+    log "❌ $label QUERY_FAILED: cannot establish capture liveness"
+    printf '{"channel":"%s","state":"query_failed","healthy":false}\n' "$label"
+    SILENT_MSG="$SILENT_MSG ${label}(query-failed)"
+    continue
+  fi
+  state=healthy
+  healthy=true
   if [ "$sev" = retired ]; then
     log "⚠ $label retired — dormant since 2026-06-04, last capture ${age}d ago (not monitored)"
     ADVISORY_MSG="$ADVISORY_MSG ${label}(retired)"
+    state=retired
   elif [ "$age" -gt "$max_age" ]; then
     log "❌ $label SILENT — last capture ${age}d ago (max ${max_age}d)"
     SILENT_MSG="$SILENT_MSG ${label}(${age}d)"
+    state=silent
+    healthy=false
+    [ "$age" = 99999 ] && state=never_produced
   else
     log "✅ $label ok (${age}d / max ${max_age}d)"
   fi
+  printf '{"channel":"%s","state":"%s","healthy":%s,"age_days":%s,"max_age_days":%s}\n' "$label" "$state" "$healthy" "$age" "$max_age"
 done
+
+# The synthesis run itself can fail without any candidate being produced.
+dream_age=$("$PSQL_BIN" -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc \
+  "SELECT COALESCE(now()::date - MAX(completed_at)::date, 99999) FROM dream_cycle_runs WHERE completed_at IS NOT NULL;" 2>/dev/null)
+if [[ "$dream_age" =~ ^[0-9]+$ ]] && [ "$dream_age" -le 7 ]; then
+  printf '{"channel":"dream_cycle","state":"healthy","healthy":true,"age_days":%s}\n' "$dream_age"
+else
+  printf '{"channel":"dream_cycle","state":"silent_or_query_failed","healthy":false}\n'
+  SILENT_MSG="$SILENT_MSG dream_cycle(stalled)"
+fi
+
+# Persisted status survives headless operation and catches repeated nonzero exits.
+if ! "$PYTHON_BIN" -m src.operations.liveness; then
+  SILENT_MSG="$SILENT_MSG scheduled_job(failed-or-overdue)"
+fi
 
 # --- upstream Quick export freshness (stat only, no reads) ---
 QD_DB="${QD_DB_PATH:-}"

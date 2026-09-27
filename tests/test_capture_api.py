@@ -29,7 +29,7 @@ WRONG_AUTH = {"Authorization": "Bearer wrong-token"}
 
 @pytest.fixture()
 def client(test_db, clean_tables):
-    with patch("src.capture_api.generate_embedding", side_effect=_deterministic_embedding):
+    with patch("src.ingest.generate_embedding", side_effect=_deterministic_embedding):
         yield TestClient(app)
 
 
@@ -159,7 +159,7 @@ class TestSlackCapture:
         resp = client.post("/capture/slack", json={"text": "msg"}, headers=AUTH)
         from src.db import get_memory
         mem = get_memory(resp.json()["memory_id"])
-        assert mem["source_type"] == "slack"
+        assert mem["source_type"] == "api_slack"
 
     def test_optional_metadata_omitted_when_not_provided(self, client):
         resp = client.post("/capture/slack", json={"text": "msg"}, headers=AUTH)
@@ -213,7 +213,7 @@ class TestBrowserCapture:
         }, headers=AUTH)
         from src.db import get_memory
         mem = get_memory(resp.json()["memory_id"])
-        assert mem["source_type"] == "browser_extension"
+        assert mem["source_type"] == "api_browser"
         assert mem["source_url"] == "https://example.com/page"
 
 
@@ -255,7 +255,7 @@ class TestEmailCapture:
         resp = client.post("/capture/email", json={"subject": "s", "body": "b"}, headers=AUTH)
         from src.db import get_memory
         mem = get_memory(resp.json()["memory_id"])
-        assert mem["source_type"] == "email"
+        assert mem["source_type"] == "api_email"
 
     def test_sender_omitted_when_not_provided(self, client):
         resp = client.post("/capture/email", json={"subject": "s", "body": "b"}, headers=AUTH)
@@ -275,7 +275,7 @@ class TestHealthCheck:
         assert resp.json() == {"status": "healthy", "database": "connected"}
 
     def test_unhealthy_when_db_unreachable(self, test_db, clean_tables):
-        with patch("src.capture_api.generate_embedding", side_effect=_deterministic_embedding), \
+        with patch("src.ingest.generate_embedding", side_effect=_deterministic_embedding), \
              patch("src.capture_api.is_reachable", return_value=False):
             c = TestClient(app)
             resp = c.get("/health")
@@ -289,26 +289,26 @@ class TestHealthCheck:
 
 class TestErrorHandling:
     def test_embedding_failure_returns_500(self, test_db, clean_tables):
-        with patch("src.capture_api.generate_embedding", side_effect=RuntimeError("Bedrock down")):
+        with patch("src.ingest.generate_embedding", side_effect=RuntimeError("Bedrock down")):
             c = TestClient(app, raise_server_exceptions=False)
             resp = c.post("/capture", json={"title": "t", "content": "c"}, headers=AUTH)
         assert resp.status_code == 500
         assert resp.json()["detail"] == "Internal server error"
 
     def test_slack_embedding_failure_returns_500(self, test_db, clean_tables):
-        with patch("src.capture_api.generate_embedding", side_effect=RuntimeError("Bedrock down")):
+        with patch("src.ingest.generate_embedding", side_effect=RuntimeError("Bedrock down")):
             c = TestClient(app, raise_server_exceptions=False)
             resp = c.post("/capture/slack", json={"text": "msg"}, headers=AUTH)
         assert resp.status_code == 500
 
     def test_browser_embedding_failure_returns_500(self, test_db, clean_tables):
-        with patch("src.capture_api.generate_embedding", side_effect=RuntimeError("Bedrock down")):
+        with patch("src.ingest.generate_embedding", side_effect=RuntimeError("Bedrock down")):
             c = TestClient(app, raise_server_exceptions=False)
             resp = c.post("/capture/browser", json={"url": "https://x.com", "content": "c"}, headers=AUTH)
         assert resp.status_code == 500
 
     def test_email_embedding_failure_returns_500(self, test_db, clean_tables):
-        with patch("src.capture_api.generate_embedding", side_effect=RuntimeError("Bedrock down")):
+        with patch("src.ingest.generate_embedding", side_effect=RuntimeError("Bedrock down")):
             c = TestClient(app, raise_server_exceptions=False)
             resp = c.post("/capture/email", json={"subject": "s", "body": "b"}, headers=AUTH)
         assert resp.status_code == 500
@@ -329,8 +329,8 @@ class TestErrorHandling:
 # DB-safe text: letters, numbers, punctuation, spaces. No NUL, no surrogates,
 # no control characters that PostgreSQL text columns reject.
 _db_safe_chars = st.characters(whitelist_categories=("L", "N", "P", "Z"))
-_db_safe_text = st.text(min_size=1, max_size=500, alphabet=_db_safe_chars)
-_db_safe_content = st.text(min_size=1, max_size=1000, alphabet=_db_safe_chars)
+_db_safe_text = st.text(min_size=1, max_size=500, alphabet=_db_safe_chars).filter(lambda value: bool(value.strip()))
+_db_safe_content = st.text(min_size=1, max_size=1000, alphabet=_db_safe_chars).filter(lambda value: bool(value.strip()))
 
 valid_type_st = st.sampled_from(sorted(VALID_TYPES))
 
@@ -409,3 +409,47 @@ class TestPropertyAuth:
     def test_wrong_token_never_succeeds(self, client, title, content):
         resp = client.post("/capture", json={"title": title, "content": content}, headers=WRONG_AUTH)
         assert resp.status_code == 401
+
+
+def test_api_retains_raw_markdown_and_encoding_context(client):
+    from src.db import get_memory
+    body = "  # A raw heading\nNot metadata\n---\nThe evidence body.  "
+    result = client.post('/capture', json={'title':'Synthetic','content':body,'encoding_context':'testing'}, headers=AUTH)
+    assert result.status_code == 201
+    memory = get_memory(result.json()['memory_id'])
+    assert memory['content'] == body
+    assert memory['encoding_context'] == 'testing'
+
+
+def test_api_retry_returns_same_source_identity(client):
+    payload={'text':'Synthetic selected message','channel_name':'synthetic','thread_ts':'1.2'}
+    one=client.post('/capture/slack',json=payload,headers=AUTH)
+    two=client.post('/capture/slack',json=payload,headers=AUTH)
+    assert one.status_code == two.status_code == 201
+    assert one.json()['memory_id'] == two.json()['memory_id']
+
+
+def test_api_long_capture_is_chunked_and_partial_embedding_does_not_store_parent(test_db, clean_tables):
+    from src.db import get_connection
+    calls = 0
+    def fail_second(_text):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError('synthetic embedding failure')
+        return [0.1] * 1024
+    with patch('src.ingest.generate_embedding',side_effect=fail_second):
+        response = TestClient(app,raise_server_exceptions=False).post('/capture/browser',json={
+            'url':'https://synthetic.example/atomic','content':'paragraph text. ' * 1000},headers=AUTH)
+    assert response.status_code == 500 and calls == 2
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM memories WHERE source_url=%s",('https://synthetic.example/atomic',))
+            assert cur.fetchone()[0] == 0
+
+
+def test_unknown_api_source_is_rejected_before_embedding(client):
+    with patch('src.ingest.generate_embedding') as embed:
+        response=client.post('/capture',json={'title':'T','content':'C','source_type':'unknown-source'},headers=AUTH)
+    assert response.status_code == 422
+    embed.assert_not_called()

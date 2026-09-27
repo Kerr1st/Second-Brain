@@ -35,16 +35,12 @@ export PATH="$HOME/.toolbox/bin:/opt/homebrew/opt/postgresql@17/bin:/opt/homebre
 export AWS_PROFILE="${AWS_PROFILE:-second-brain-jobs}"
 export SECOND_BRAIN_PROFILE="${SECOND_BRAIN_PROFILE:-controlled}"
 export SECOND_BRAIN_DIGEST_CAP_USD="${SECOND_BRAIN_DIGEST_CAP_USD:-0.25}"
+export DIGEST_TIMEOUT="${DIGEST_TIMEOUT:-600}"
 export BEDROCK_REGION="${BEDROCK_REGION:-us-east-1}"
 
 cd "$REPO_ROOT"
 
-# PostgreSQL runs natively (Homebrew postgresql@17); start it if launchd woke us first.
-if ! pg_isready -h 127.0.0.1 -p 5432 -U memory_bank >/dev/null 2>&1; then
-  brew services start postgresql@17 >/dev/null 2>&1
-  sleep 5
-fi
-if ! pg_isready -h 127.0.0.1 -p 5432 -U memory_bank >/dev/null 2>&1; then
+if ! "${PG_ISREADY_BIN:-pg_isready}" -h "${DB_HOST:-127.0.0.1}" -p "${DB_PORT:-5432}" -U "${DB_USER:-memory_bank}" >/dev/null 2>&1; then
   echo "ABORT: PostgreSQL is not reachable" >&2
   exit 1
 fi

@@ -22,7 +22,7 @@ class TestBackendCapabilities:
         — never run a metered seat you can't meter."""
         with pytest.raises(ValueError):
             BackendCapabilities(
-                supports_mcp=False, metered=True, structured_output=False, reports_usage=False
+                supports_mcp=False, metered=True, reports_usage=False
             )
 
     def test_all_declared_backends_satisfy_invariant(self):
@@ -54,7 +54,8 @@ class TestExplorerGuard:
 
     def test_explorer_allowed_on_agentic_backend(self):
         # Should not raise.
-        assert_backend_supports_role("kiro", "explorer")
+        with pytest.raises(ValueError):
+            assert_backend_supports_role("kiro", "explorer")
         assert_backend_supports_role("claude_code", "explorer")
 
     def test_toolless_stage_allowed_on_toolless_backend(self):

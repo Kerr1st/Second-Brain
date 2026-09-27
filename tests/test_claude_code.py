@@ -53,7 +53,7 @@ def _isolate_llm_metrics(tmp_path, monkeypatch):
     """Redirect per-call metrics writes to a temp dir so invoke tests don't
     pollute the real logs/llm_metrics/ directory."""
     monkeypatch.setattr(
-        "src.backends.agentic_cli.METRICS_DIR", str(tmp_path / "llm_metrics")
+        "src.backends.base.METRICS_DIR", str(tmp_path / "llm_metrics")
     )
 
 
@@ -284,17 +284,6 @@ class TestSystemPromptDelivery:
         assert "--system-prompt-file" not in cmd
         assert cmd[2] == "msg"
 
-    @patch("src.backends.claude_code.subprocess.run")
-    def test_prepend_fallback(self, mock_run):
-        """Req 3.3: fallback folds the system prompt into the user message."""
-        mock_run.return_value = _ok(_stream_ok('{"ok": 1}'))
-        ClaudeCodeInvoker(model="m", system_prompt_delivery="prepend").invoke(
-            "SYS ROLE", "USER MSG"
-        )
-        cmd = _last_cmd(mock_run)
-        assert "--system-prompt-file" not in cmd
-        assert "--append-system-prompt" not in cmd
-        assert cmd[2] == "SYS ROLE\n\nUSER MSG"
 
 
 class TestResultExtraction:
@@ -361,6 +350,7 @@ class TestToolLessEnforcement:
         # --strict-mcp-config present, but no MCP server config loaded at all.
         assert "--strict-mcp-config" in cmd
         assert "--mcp-config" not in cmd
+        assert "--allowedTools" not in cmd
 
     @patch("src.backends.claude_code.subprocess.run")
     def test_tools_false_disables_builtin_tools(self, mock_run):
@@ -397,8 +387,23 @@ class TestMcpAttach:
         cmd = _last_cmd(mock_run)
         assert "--mcp-config" in cmd
         assert "--strict-mcp-config" in cmd
-        # tool-less flag must NOT appear on a tool-using call
-        assert "--tools" not in cmd
+        # Built-ins stay disabled while only explicit read-only MCP tools run.
+        assert cmd[cmd.index("--tools") + 1] == ""
+
+    @patch("src.backends.claude_code.subprocess.run")
+    def test_headless_permissions_grant_only_exact_readonly_endpoints(self, mock_run):
+        mock_run.return_value = _ok(_stream_with_tool_result())
+        ClaudeCodeInvoker(model="m").invoke("sys", "msg", tools=True)
+        cmd = _last_cmd(mock_run)
+        grants = cmd[cmd.index("--allowedTools") + 1:]
+        assert set(grants) == {
+            "mcp__second-brain__memory_search", "mcp__second-brain__memory_read",
+            "mcp__second-brain__memory_list", "mcp__second-brain__memory_recent_activity",
+            "mcp__second-brain__memory_graph",
+        }
+        assert len(grants) == 5
+        assert "--dangerously-skip-permissions" not in cmd
+        assert "--permission-mode" not in cmd
 
     @patch("src.backends.claude_code.subprocess.run")
     def test_mcp_config_file_contents(self, mock_run):
@@ -421,7 +426,7 @@ class TestMcpAttach:
         entry = servers["second-brain"]
         # python -m src.mcp_server launched in the current venv (Req 4.1)
         assert entry["command"] == _sys.executable
-        assert entry["args"] == ["-m", "src.mcp_server"]
+        assert entry["args"] == ["-m", "src.mcp_readonly"]
         # cwd mirrors KiroInvoker's _SECOND_BRAIN_MCP exactly (Req 4.2) so both
         # agentic-CLI adapters launch the server identically.
         assert entry["cwd"] == _KIRO_MCP["second-brain"]["cwd"]
@@ -438,21 +443,6 @@ class TestMcpAttach:
         ClaudeCodeInvoker(model="m").invoke("sys", "msg", tools=True)
         assert not os.path.exists(seen["path"])
 
-    @patch("src.backends.claude_code.subprocess.run")
-    def test_mcp_config_cleaned_up_with_prepend_delivery(self, mock_run):
-        # No system-prompt temp file in prepend mode, so the base wouldn't clean
-        # anything — the adapter must still remove the MCP config file.
-        seen = {}
-
-        def _capture(cmd, **kwargs):
-            seen["path"] = cmd[cmd.index("--mcp-config") + 1]
-            return _ok(_stream_with_tool_result())
-
-        mock_run.side_effect = _capture
-        ClaudeCodeInvoker(model="m", system_prompt_delivery="prepend").invoke(
-            "sys", "msg", tools=True
-        )
-        assert not os.path.exists(seen["path"])
 
     @patch("src.backends.claude_code.subprocess.run")
     def test_probe_instruction_prepended_on_tools_true(self, mock_run):
@@ -550,7 +540,7 @@ class TestUsageCapture:
     @patch("src.backends.claude_code.subprocess.run")
     def test_real_usage_recorded_in_metrics(self, mock_run, tmp_path, monkeypatch):
         metrics_dir = tmp_path / "m"
-        monkeypatch.setattr("src.backends.agentic_cli.METRICS_DIR", str(metrics_dir))
+        monkeypatch.setattr("src.backends.base.METRICS_DIR", str(metrics_dir))
         usage = {"input_tokens": 11, "output_tokens": 22}
         mock_run.return_value = _ok(
             _stream_with_usage(usage=usage, total_cost_usd=0.5)
@@ -697,3 +687,100 @@ class TestMockedSubprocessCoverage:
         inv.invoke("sys", "msg", tools=True)
         inv.invoke("sys", "msg", tools=True)
         assert mock_run.call_count == 2
+
+
+@pytest.mark.parametrize("needs_tools", [False, True])
+def test_native_call_disables_ambient_context_and_uses_private_files(tmp_path, monkeypatch, needs_tools):
+    from pathlib import Path
+    monkeypatch.setattr("src.backends.claude_code.tempfile.gettempdir", lambda: str(tmp_path))
+    observed = []
+    def subprocess_result(cmd, **kwargs):
+        assert "--bare" in cmd and "--no-session-persistence" in cmd
+        assert "--disable-slash-commands" in cmd
+        assert cmd[cmd.index("--setting-sources") + 1] == ""
+        assert "--add-dir" not in cmd
+        flags = ["--system-prompt-file"] + (["--mcp-config"] if needs_tools else [])
+        for flag in flags:
+            path = Path(cmd[cmd.index(flag) + 1])
+            observed.append(path)
+            assert path.stat().st_mode & 0o777 == 0o600
+        return _ok(_stream_with_tool_result() if needs_tools else _stream_ok())
+    with patch("src.backends.claude_code.subprocess.run", side_effect=subprocess_result):
+        ClaudeCodeInvoker("safe-model").invoke("Synthetic private prompt", "test", tools=needs_tools)
+    assert all(not path.exists() for path in observed)
+
+
+def test_existing_temp_path_is_never_overwritten_or_cleaned(tmp_path, monkeypatch):
+    path = tmp_path / "preexisting.txt"
+    path.write_text("Keep existing content")
+    inv = ClaudeCodeInvoker("safe-model")
+    monkeypatch.setattr(inv, "_config_path", lambda _: str(path))
+    with patch("src.backends.claude_code.subprocess.run") as spawn:
+        with pytest.raises(FileExistsError):
+            inv.invoke("new prompt", "test")
+    spawn.assert_not_called()
+    assert path.read_text() == "Keep existing content"
+
+
+@pytest.mark.parametrize("requested,cli_model", [
+    ("global.anthropic.claude-sonnet-5", "claude-sonnet-5"),
+    ("global.anthropic.claude-opus-5", "claude-opus-5"),
+    ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
+    ("claude-sonnet-5", "claude-sonnet-5"),
+    ("arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/ExplicitProfile", "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/ExplicitProfile"),
+])
+def test_cli_model_uses_canonical_version_without_changing_requested_provenance(requested, cli_model):
+    inv = ClaudeCodeInvoker(requested)
+    with patch("src.backends.claude_code.subprocess.run", return_value=_ok(_stream_ok())) as spawn:
+        inv.invoke("synthetic", "test", tools=False)
+    cmd = _last_cmd(spawn)
+    assert cmd[cmd.index("--model") + 1] == cli_model
+    assert inv.model == requested
+
+
+@pytest.mark.parametrize("served", ["claude-fable-5-1", "claude-sonnet-4-5"])
+def test_wrong_served_model_is_metered_then_stops_corpus_run(served):
+    from src.backends.cost import invoke_metered, SpendTracker, UsageUnavailable, estimate_cost_usd
+    from src.backends.base import CorpusRoutingError
+    from src.backends.resolver import RoleBackend
+    requested = "global.anthropic.claude-sonnet-5"
+    result = _result_event('{"ok":1}', usage={"input_tokens": 100, "output_tokens": 20})
+    result["modelUsage"] = {served: {"inputTokens": 100, "outputTokens": 20}}
+    tracker = SpendTracker(1)
+    inv = ClaudeCodeInvoker(requested)
+    with patch("src.backends.claude_code.subprocess.run", return_value=_ok(_stream([result]))) as spawn:
+        with pytest.raises(CorpusRoutingError):
+            invoke_metered(inv, RoleBackend("thinker", "claude_code", requested), tracker,
+                           "synthetic", "test", stage="thinker")
+        assert tracker.calls == 1
+        assert tracker.total_usd == pytest.approx(estimate_cost_usd(served, result["usage"]))
+        with pytest.raises(UsageUnavailable):
+            invoke_metered(inv, RoleBackend("thinker", "claude_code", requested), tracker,
+                           "synthetic", "test", stage="thinker")
+        assert spawn.call_count == 1
+
+
+def test_served_model_accepts_only_explicit_provider_profile_aliases():
+    from src.backends.cost import invoke_metered, SpendTracker
+    from src.backends.resolver import RoleBackend
+    requested = "global.anthropic.claude-sonnet-5-v1:0"
+    result = _result_event('{"ok":1}', usage={"input_tokens": 100, "output_tokens": 20})
+    assistant = {"type": "assistant", "message": {"model": "claude-sonnet-5", "content": []}}
+    with patch("src.backends.claude_code.subprocess.run", return_value=_ok(_stream([assistant, result]))):
+        output = invoke_metered(ClaudeCodeInvoker(requested), RoleBackend("thinker", "claude_code", requested),
+                                SpendTracker(1), "synthetic", "test", stage="thinker")
+    assert output["output"] == {"ok": 1}
+
+
+def test_mixed_served_models_without_reported_cost_fail_closed():
+    from src.backends.cost import invoke_metered, SpendTracker, UsageUnavailable
+    from src.backends.resolver import RoleBackend
+    requested = "global.anthropic.claude-sonnet-5"
+    result = _result_event('{"ok":1}', usage={"input_tokens": 100, "output_tokens": 20})
+    result["modelUsage"] = {"claude-sonnet-5": {}, "claude-fable-5-1": {}}
+    tracker = SpendTracker(1)
+    with patch("src.backends.claude_code.subprocess.run", return_value=_ok(_stream([result]))):
+        with pytest.raises(UsageUnavailable):
+            invoke_metered(ClaudeCodeInvoker(requested), RoleBackend("thinker", "claude_code", requested),
+                            tracker, "synthetic", "test", stage="thinker")
+    assert tracker.blocked_reason and tracker.total_usd == 0

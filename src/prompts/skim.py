@@ -1,6 +1,6 @@
 """Skim prompt — read one arriving document, fill in the skim record faithfully.
 
-The skim stage (docs/PLAN-skim-stage.md) is data processing, not insight: a
+The skim stage (docs/SKIM-STAGE.md) is data processing, not insight: a
 cheap model reads every parent-level arrival and emits one
 :data:`~src.skim.schema.SKIM_SCHEMA` record stating only what the document
 says. Frontier models downstream (Explorer, Thinker, panel) do the thinking.

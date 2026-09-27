@@ -1,69 +1,8 @@
-"""Codex backend adapter — ``codex exec`` subprocesses.
+"""Codex subprocess adapter retained for future explicit qualification.
 
-Wraps the ``codex exec`` CLI as an :class:`src.backends.base.Invoker`, so the
-dream-cycle orchestrator can run on Codex with no orchestrator change. Like
-:class:`src.backends.kiro.KiroInvoker` and
-:class:`src.backends.claude_code.ClaudeCodeInvoker`, it drives the shared
-:class:`src.backends.agentic_cli.AgenticCliInvoker` template and overrides only
-the Codex-specific hooks; the subprocess mechanics (spawn, timeout/exit mapping,
-metrics JSONL, raw-debug dump, temp-config cleanup, and the ``parse_json_output``
-backstop) are inherited unchanged so failure-mode parity is structural (Req 17).
-
-Codex is **not installed locally**, so this adapter is built against the
-*documented* ``codex exec`` surface and verified by mocked-subprocess tests plus
-a manual smoke checklist (Req 22.4/22.5) — never a live CLI in CI.
-
-This sub-task (5.1) implements **command construction, Invoker conformance,
-system-prompt delivery, and final-text extraction**:
-
-* Command surface (Req 11): ``codex exec <user_message> -m <id>``,
-  ``[-c model_reasoning_effort=<level>]``, final text via
-  ``--output-last-message <file>`` (preferred) or the ``--json`` event stream,
-  ``[--output-schema <file>]`` where schema-constrained output is required. The
-  ``codex`` binary path is configurable via ``CODEX_CLI`` (default ``codex``),
-  mirroring ``KiroInvoker``'s ``KIRO_CLI`` and ``ClaudeCodeInvoker``'s
-  ``CLAUDE_CLI``; auth/provider routing is left to out-of-band environment.
-* System-prompt delivery (Req 12): natively via ``model_instructions_file``
-  (preferred — a temp file, mirroring Claude Code's ``--system-prompt-file``),
-  ``developer_instructions``, or ``instructions`` (both inline ``-c`` config
-  values), with a prepend-to-user-message fallback. Selectable at construction
-  via ``system_prompt_delivery``.
-* Final-text extraction (Req 11.3): the ``--output-last-message`` file
-  (preferred) or the final ``agent_message`` event from the ``--json`` stream,
-  then parsed with the shared ``parse_json_output`` backstop (Req 18.1).
-
-Later sub-tasks complete the adapter on top of this command surface:
-
-* 5.2 (Req 13/14/15): MCP attach with ``mcp_servers.second_brain``
-  (``cwd``=repo, ``required=true``), the ``--sandbox workspace-write`` +
-  ``sandbox_workspace_write.network_access=true`` agentic sandbox vs the
-  ``--sandbox read-only`` tool-less sandbox, and the fail-loud
-  MCP_Startup_Probe. The :meth:`_tool_and_sandbox_args`, :meth:`_prompt_input`,
-  and the base ``_run_probe`` hooks are the seams it fills.
-This sub-task (5.3) implements **real usage capture, the tolerate-and-warn
-fallback, failure-mode parity, and parser reuse** via the base
-:meth:`_extract_usage` hook (Req 16/17/18):
-
-* Real usage (Req 16.1): when the ``--json`` event stream is on stdout, the
-  ``token_count`` / ``turn.completed`` usage events are parsed (via the
-  :meth:`_events_from` helper) to populate ``usage`` and set
-  ``usage_source="real"``, and the real token counts are folded into the metrics
-  line. With the default ``final_message_source="output-last-message"`` the
-  ``--json`` stream is not on stdout, so no usage events are available.
-* Tolerate-and-warn (Req 16.2, 17.1): no usage events ⇒ keep ``output``/``raw``,
-  return ``usage=None`` / ``usage_source="estimate"`` (the char/4 fallback), emit
-  a loud warning, and never raise.
-* Failure-mode parity (Req 17.2, 17.3, 18.3): the timeout →
-  :class:`TimeoutError` / non-zero exit → :class:`RuntimeError` / unrecoverable
-  JSON → :class:`ValueError` rows are mapped by the shared base, so parity is
-  structural; ``--output-schema``-constrained output is preferred and the shared
-  ``parse_json_output`` stays the backstop (Req 18.1, 18.2).
-
-See ``docs/MODEL-BACKENDS.md`` and the design section "3. CodexInvoker".
-
-Requirements: 10.1, 10.2, 10.3, 10.4, 11.1, 11.2, 11.3, 11.4, 12.1, 12.2, 12.3,
-16.1, 16.2, 16.3, 16.4, 17.1, 17.2, 17.3, 18.1, 18.2, 18.3, 21.2
-"""
+Configured corpus profiles do not select it. Corpus tool access is denied until
+an enforceable read-only boundary is implemented. Native file/inline instruction
+delivery and JSON event usage parsing remain available for synthetic tests."""
 
 from __future__ import annotations
 
@@ -76,7 +15,7 @@ import tempfile
 from typing import Any, Optional
 
 from src.backends.agentic_cli import AgenticCliInvoker
-from src.backends.base import parse_json_output as _parse_json_output
+from src.backends.base import write_private_text, parse_json_output as _parse_json_output
 from src.backends.mcp_probe import MCPStartupProbe
 
 logger = logging.getLogger(__name__)
@@ -113,13 +52,10 @@ _MCP_SERVER_ARGS = ["-m", "src.mcp_server"]
 #       round-trips intact. This is the Codex analogue of Claude Code's
 #       ``--system-prompt-file``.
 #   "developer_instructions" / "instructions" — inline ``-c <key>=<prompt>``.
-#   "prepend" — the no-native-support fallback that folds the prompt into the
-#       user message (Req 12.3).
 _VALID_DELIVERY = (
     "model_instructions_file",
     "developer_instructions",
     "instructions",
-    "prepend",
 )
 
 # Where the final assistant text comes from (Req 11.3):
@@ -146,8 +82,7 @@ class CodexInvoker(AgenticCliInvoker):
         system_prompt_delivery: One of ``"model_instructions_file"`` (default,
             ``-c model_instructions_file=<temp file>``),
             ``"developer_instructions"`` / ``"instructions"`` (inline ``-c``
-            config values), or ``"prepend"`` (fold the system prompt into the
-            user message — the fallback for Req 12.3).
+            config values).
         final_message_source: One of ``"output-last-message"`` (default,
             ``--output-last-message <temp file>``) or ``"json"`` (recover the
             final ``agent_message`` from the ``--json`` event stream).
@@ -219,7 +154,7 @@ class CodexInvoker(AgenticCliInvoker):
 
         Returning the prompt string makes the base write it (via
         :meth:`_write_config`) and pass its path to :meth:`_build_command` as
-        ``config_path``; the inline and prepend modes need no temp file and
+        ``config_path``; the inline modes need no temp file and
         return ``None``.
         """
         if self._system_prompt_delivery == "model_instructions_file":
@@ -231,9 +166,7 @@ class CodexInvoker(AgenticCliInvoker):
 
     def _write_config(self, path: str, config) -> None:
         """Write the system-prompt temp file as raw text (not JSON)."""
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(config)
+        write_private_text(path, config)
 
     # --- command construction (Req 11) -------------------------------------
     def _build_command(
@@ -258,8 +191,7 @@ class CodexInvoker(AgenticCliInvoker):
         prompt_input = self._prompt_input(system_prompt, user_message, needs_tools)
         cmd = [CODEX_CLI, "exec", prompt_input, "-m", self.model]
 
-        # System-prompt delivery (Req 12.1): native config flags, or nothing for
-        # the prepend fallback (already folded into prompt_input).
+        # Native system-prompt delivery keeps instructions separate from input.
         cmd += self._system_prompt_args(config_path, system_prompt)
 
         # Reasoning effort as provenance only — level names are NOT assumed
@@ -288,15 +220,11 @@ class CodexInvoker(AgenticCliInvoker):
         *result* that comes back is what :meth:`_run_probe` later confirms as the
         SECONDARY sandbox-reachability check (``required=true`` is the PRIMARY
         startup guard; process-attach alone is insufficient — Req 14.3, 14.4).
-        The system prompt is folded in only for the ``"prepend"`` fallback
-        (Req 12.3); otherwise the user message is kept verbatim and distinct from
-        the system prompt (Req 12.2).
+        Native system instructions remain separate from the user message.
         """
         parts: list[str] = []
         if needs_tools:
             parts.append(MCPStartupProbe.instruction())
-        if self._system_prompt_delivery == "prepend" and system_prompt:
-            parts.append(system_prompt)
         parts.append(user_message)
         return "\n\n".join(parts)
 
@@ -305,8 +233,7 @@ class CodexInvoker(AgenticCliInvoker):
 
         ``model_instructions_file`` points at the temp file the base wrote;
         ``developer_instructions`` / ``instructions`` pass the prompt inline as a
-        ``-c`` config value. The prepend fallback emits no flag (the prompt is in
-        the positional input).
+        ``-c`` config value.
         """
         mode = self._system_prompt_delivery
         if mode == "model_instructions_file":
@@ -315,7 +242,7 @@ class CodexInvoker(AgenticCliInvoker):
             return ["-c", f"developer_instructions={system_prompt}"]
         if mode == "instructions":
             return ["-c", f"instructions={system_prompt}"]
-        return []  # prepend: folded into prompt_input
+        raise ValueError("Unsupported native system-prompt delivery mode")
 
     def _final_text_args(self, name: str) -> list:
         """Final-text source flags (Req 11.3).
@@ -327,6 +254,7 @@ class CodexInvoker(AgenticCliInvoker):
         """
         if self._final_message_source == "output-last-message":
             path = self._last_message_path(name)
+            write_private_text(path, "")
             self._pending_last_message = path
             self._pending_temp_files.append(path)
             return ["--output-last-message", path]
@@ -376,25 +304,7 @@ class CodexInvoker(AgenticCliInvoker):
 
     # --- usage capture (Req 16/17/18) -------------------------------------
     def _extract_usage(self, *, parsed, raw, result, metrics):
-        """Capture real token usage from ``--json`` events, tolerating-and-warning
-        when none are present (Req 16, 17).
-
-        Codex reports usage through the ``--json`` event stream (``token_count`` /
-        ``turn.completed`` usage events). When those events are on stdout, parse
-        them, populate ``usage``, fold real counts into the metrics line, and
-        report ``usage_source="real"`` (Req 16.1) — Codex is a metered backend
-        that reports real counts, unlike Kiro's char/4 estimate.
-
-        With the default ``final_message_source="output-last-message"`` the
-        ``--json`` event stream is **not** on stdout (the final text rides a temp
-        file instead), so no usage events are available. That is a metering gap,
-        not an infrastructure failure: keep ``output``/``raw``, return
-        ``usage=None`` / ``usage_source="estimate"`` (the char/4 fallback), emit a
-        loud warning, and **never raise, discard the result, or route into the
-        failure/retry/abort path** (Req 16.2, 17.1). That cardinal split
-        (telemetry gap ≠ infrastructure failure) is what preserves the
-        failure-mode parity of Req 17.
-        """
+        """Preserve event usage; absent usage makes corpus metering stop the run."""
         usage = self._usage_from_events(self._events_from(result.stdout or ""))
         if usage is not None:
             # Record real counts in the metrics line (the shared JSONL writer is
@@ -410,20 +320,7 @@ class CodexInvoker(AgenticCliInvoker):
                 metrics["total_cost_usd"] = cost
             return usage, "real"
 
-        # Tolerate-and-warn: a parseable payload reached this point (the base
-        # already raised ValueError if no JSON was recoverable), so the turn
-        # succeeded — only the telemetry is missing (e.g. the default
-        # output-last-message mode emits no --json usage events on stdout).
-        logger.warning(
-            "CodexInvoker: backend %r is metered and real token usage was "
-            "expected, but no '--json' usage events were present on stdout "
-            "(final_message_source=%r). Preserving the result and falling back "
-            "to usage=None / usage_source='estimate' (char/4). This is a metering "
-            "gap, not an infrastructure failure — not raising.",
-            self.BACKEND_NAME,
-            self._final_message_source,
-        )
-        return None, "estimate"
+        return self._warn_missing_usage("missing usage events")
 
     def _usage_from_events(self, events: Optional[list]) -> Optional[dict]:
         """Return the real token-usage dict from a ``--json`` event list, or ``None``.

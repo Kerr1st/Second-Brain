@@ -1,49 +1,11 @@
 #!/bin/bash
-export PATH="$HOME/.toolbox/bin:/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
-# Thin wrapper for launchd-scheduled dream cycle runs.
-# Runs the dream cycle (synthesis), then chains the Express push (delivery, P2)
-# so the freshest synthesis can reach the user. job_wrapper.sh expects a single
-# script path.
-
-# Ensure PostgreSQL container is running
-if ! pg_isready -h 127.0.0.1 -p 5432 -U memory_bank &>/dev/null; then
-  brew services start postgresql@17 &>/dev/null
-  sleep 5
-fi
-
-PY=/Users/kerrfir/second-brain/.venv/bin/python
-
-# Model backends for the nightly run (see config/backends.toml):
-#   hybrid = Claude roles on Kiro (credits), only the two GPT-6 Astra evaluator
-#   seats metered on Bedrock (≈ $2.30/run measured). Bedrock auth is the CLI
-#   `default` profile (kiro-admin-session SSO; boto3 refreshes the token).
-# Cost controls, two layers:
-#   - Real-time (here): SECOND_BRAIN_RUN_COST_CAP_USD=9 is the per-run budget (a 10-candidate
-#     night with the grounding audit costs ~$8.50; runs Mon/Wed/Fri only, see the plist)
-#     (≈ 2.6x a typical $2.30 run; a p95 night is ≈ $5). Exceeding it aborts
-#     the rest of the panel — candidates already accepted are kept, the digest
-#     is skipped. BEDROCK_MAX_TOKENS bounds a single Astra call at ~$0.90.
-#   - Monthly/daily (AWS Budgets, emailed): `second-brain-bedrock-daily` $6/day,
-#     `second-brain-bedrock-monthly` $100 with alerts at 50/80/100% + forecast,
-#     `account-monthly-total` $175; Cost Anomaly Detection for anomalies ≥ $10.
-#     Billing data lags 8–24h, so the daily email is next-day confirmation of
-#     a cap trip, not the thing that stops it.
-#   Emergency stop: SECOND_BRAIN_KILL_SWITCH=1 refuses to start a run.
+# Scheduled synthesis only. Delivery remains disabled until configured/deployed.
+# Shared job_wrapper.sh owns the environment, logs, lock and timeout.
+set -uo pipefail
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 export SECOND_BRAIN_PROFILE="${SECOND_BRAIN_PROFILE:-controlled}"
 export SECOND_BRAIN_RUN_COST_CAP_USD="${SECOND_BRAIN_RUN_COST_CAP_USD:-9}"
 export BEDROCK_MAX_TOKENS="${BEDROCK_MAX_TOKENS:-16384}"
 export BEDROCK_REGION="${BEDROCK_REGION:-us-east-1}"
-
-# 1. The dream cycle (synthesis).
-"$PY" /Users/kerrfir/second-brain/scripts/dream_cycle_run.py --run-type scheduled
-dc_status=$?
-
-# 2. Express push (delivery) — DISABLED 2026-09-24 (PLAN-refactor.md Phase 0, item 0.2; F-001).
-#    express.py:481 builds AgentInvoker() = Kiro (server-routed to claude-fable-5.1 since
-#    kiro-cli 2.22 ignores --model), sending briefing content outside the profile system;
-#    and email has never been configured, so every result was discarded anyway.
-#    Re-enable only after Phase 1 item 1 routes the editor through the resolver and
-#    gates on email_configured() BEFORE the LLM pass.
-# "$PY" /Users/kerrfir/second-brain/scripts/express_push.py || true
-
-exit $dc_status
+cd "$REPO_ROOT" || exit 2
+exec "${SECOND_BRAIN_PYTHON:-$REPO_ROOT/.venv/bin/python}" scripts/dream_cycle_run.py --run-type scheduled "$@"

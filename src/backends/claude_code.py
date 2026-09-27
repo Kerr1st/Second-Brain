@@ -1,71 +1,14 @@
-"""Claude Code backend adapter — ``claude -p`` subprocesses.
+"""Claude Code subprocess adapter with isolated read-only MCP discovery tools.
 
-Wraps the public ``claude -p`` CLI as an :class:`src.backends.base.Invoker`, so
-the dream-cycle orchestrator can run on Claude Code with no orchestrator change.
-Like :class:`src.backends.kiro.KiroInvoker`, it drives the shared
-:class:`src.backends.agentic_cli.AgenticCliInvoker` template and overrides only
-the Claude-Code-specific hooks; the subprocess mechanics (spawn, timeout/exit
-mapping, metrics JSONL, raw-debug dump, temp-config cleanup, and the
-``parse_json_output`` backstop) are inherited unchanged so failure-mode parity
-is structural (Req 8).
-
-This sub-task (4.1) implements **command construction, Invoker conformance,
-system-prompt delivery, and ``.result`` extraction**:
-
-* Command surface (Req 2): ``claude -p <user_message> --model <id>
-  --output-format json``, ``[--effort <level>]``, ``[--json-schema <file>]``,
-  built from the **public** Claude Code CLI flag surface only — it depends on
-  none of the ASBX Cecelia wrapper's surface (``--aws-profile``, Bedrock
-  routing, ``--claude-help``). The ``claude`` binary path is configurable via
-  ``CLAUDE_CLI`` (default ``claude``), mirroring ``KIRO_CLI`` (Req 2.7), and
-  auth/provider routing is left to out-of-band environment (Req 2.8).
-* System-prompt delivery (Req 3): natively via ``--system-prompt-file``
-  (preferred) or ``--append-system-prompt``, with a prepend-to-user-message
-  fallback. Selectable at construction via ``system_prompt_delivery``.
-* Final-text extraction (Req 2.3): the envelope ``.result`` field, then parsed
-  with the shared ``parse_json_output`` backstop (Req 9.1).
-
-This sub-task (4.2) implements **MCP attach, fail-loud, and tool-less
-enforcement** on top of 4.1's command surface, via the extension points
-:meth:`_tool_flags`, :meth:`_run_probe`, and :meth:`_envelope_from`:
-
-* tools=True (Explorer/Thinker — Req 4): emit ``--mcp-config <temp json>``
-  ``--strict-mcp-config``, where the temp JSON declares the Second Brain MCP
-  server (``python -m src.mcp_server`` with ``cwd`` = repo root, mirroring
-  :data:`src.backends.kiro._SECOND_BRAIN_MCP`). The
-  :class:`~src.backends.mcp_probe.MCPStartupProbe` instruction is folded into
-  the agentic turn so the model issues one trivial tool call, then
-  :meth:`_run_probe` confirms a tool *result* actually returned — raising
-  :class:`RuntimeError` on probe failure or an ``is_error`` envelope, never
-  trusting process-attach alone (Req 5).
-* tools=False (evaluators/Express — Req 6): pass ``--strict-mcp-config``
-  **without** ``--mcp-config`` (so no MCP servers load at all) plus ``--tools
-  ""`` (built-in tools off). ``--tools ""`` alone is insufficient — per the
-  public Claude Code reference it disables only built-in tools, not MCP tools —
-  so the ``--strict-mcp-config``-without-``--mcp-config`` form is what
-  guarantees no MCP tools load. The probe is skipped (Req 5.5).
-
-Real-usage capture (Req 7) and the full ``is_error``/failure-mode mapping
-(Req 8) are completed in sub-task 4.3 via the :meth:`_extract_usage` override
-(tolerate-and-warn: real ``usage``/``total_cost_usd`` → ``usage_source="real"``;
-a parseable turn with no ``usage`` → ``usage=None``/``"estimate"`` + a loud
-warning, never a raise). The failure-mode rows are mapped across the base and
-this adapter: timeout → :class:`TimeoutError` and non-zero exit →
-:class:`RuntimeError` (base :class:`~src.backends.agentic_cli.AgenticCliInvoker`),
-``is_error`` → :class:`RuntimeError` (:meth:`_run_probe`), and unrecoverable
-JSON → :class:`ValueError` (the shared ``parse_json_output`` backstop). See
-``docs/MODEL-BACKENDS.md`` and the design sections "2. ClaudeCodeInvoker" and
-"4. The MCP_Startup_Probe".
-
-Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8,
-3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.2, 5.3, 5.5, 6.1, 6.2, 6.3, 7.1, 7.2, 7.3, 7.4,
-8.1, 8.2, 8.3, 8.4, 9.1, 9.2, 9.3, 21.1
-"""
+System prompts use native file or append delivery. Tool calls load only the
+read-only Second Brain MCP server, disable all built-in tools and set database
+transactions read-only. Metered response failures preserve provider usage."""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import os
 import subprocess  # noqa: F401 — kept so tests can patch src.backends.claude_code.subprocess.run
 import sys
@@ -73,7 +16,8 @@ import tempfile
 from typing import Optional
 
 from src.backends.agentic_cli import AgenticCliInvoker
-from src.backends.base import parse_json_output as _parse_json_output
+from src.backends.base import (write_private_text, parse_json_output as _parse_json_output,
+                               corpus_role_for_stage, assert_corpus_route, CorpusRoutingError)
 from src.backends.mcp_probe import MCPStartupProbe
 
 logger = logging.getLogger(__name__)
@@ -87,30 +31,34 @@ CLAUDE_CLI = os.environ.get("CLAUDE_CLI", os.path.expanduser("~/.toolbox/bin/cla
 
 # How the system prompt is delivered to the CLI. "file" (preferred) writes the
 # prompt to a temp file and passes --system-prompt-file; "append" passes it
-# inline via --append-system-prompt; "prepend" is the no-native-support fallback
-# that folds it into the user message (Req 3.3).
-_VALID_DELIVERY = ("file", "append", "prepend")
+# inline via --append-system-prompt.
+_VALID_DELIVERY = ("file", "append")
 
-# Repo root for the MCP server's cwd — dirname twice from src/backends/*.py,
-# identical to KiroInvoker's computation so both adapters launch the same
-# ``python -m src.mcp_server`` from the same working directory (Req 4.2). Repo
-# root is dirname THREE times from src/backends/claude_code.py.
+# Resolve the repository root independently of the process working directory.
 _REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 
-# Second Brain MCP server entry for Claude Code's ``--mcp-config`` file. Mirrors
-# src.backends.kiro._SECOND_BRAIN_MCP: launch the server with the *current*
-# interpreter (sys.executable) so it runs inside the same venv, ``python -m
-# src.mcp_server`` with cwd = repo root (Req 4.1, 4.2). Claude Code's
-# --mcp-config consumes the standard ``{"mcpServers": {...}}`` shape.
+# Dedicated read-only server with database writes disabled as an additional
+# boundary. Strict MCP configuration excludes ambient user/project servers.
 _SECOND_BRAIN_MCP = {
     "second-brain": {
         "command": sys.executable,
-        "args": ["-m", "src.mcp_server"],
+        "args": ["-m", "src.mcp_readonly"],
+        "env": {"PGOPTIONS": "-c default_transaction_read_only=on"},
         "cwd": _REPO_ROOT,
     }
 }
+
+# Print mode cannot ask a person to approve tools. Grant only the explicit
+# read-only server endpoints, never a wildcard or a permission bypass mode.
+_READONLY_MCP_TOOLS = (
+    "mcp__second-brain__memory_search",
+    "mcp__second-brain__memory_read",
+    "mcp__second-brain__memory_list",
+    "mcp__second-brain__memory_recent_activity",
+    "mcp__second-brain__memory_graph",
+)
 
 __all__ = ["ClaudeCodeInvoker", "CLAUDE_CLI"]
 
@@ -126,8 +74,7 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
     Args:
         model: The Claude model id (required; metered backend, no default).
         system_prompt_delivery: One of ``"file"`` (default, ``--system-prompt-file``),
-            ``"append"`` (``--append-system-prompt``), or ``"prepend"`` (fold the
-            system prompt into the user message — the fallback for Req 3.3).
+            or ``"append"`` (``--append-system-prompt``).
     """
 
     BACKEND_NAME = "claude_code"
@@ -179,8 +126,7 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
 
         Returning the prompt string makes the base write it (via
         :meth:`_write_config`) and pass its path to :meth:`_build_command` as
-        ``config_path``; the ``"append"`` / ``"prepend"`` modes need no temp
-        file and return ``None``.
+        ``config_path``; the inline ``"append"`` mode returns ``None``.
         """
         if self._system_prompt_delivery == "file":
             return system_prompt
@@ -191,9 +137,7 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
 
     def _write_config(self, path: str, config) -> None:
         """Write the system-prompt temp file as raw text (not JSON)."""
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(config)
+        write_private_text(path, config)
 
     def _build_command(
         self,
@@ -216,14 +160,15 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         prompt_input = self._prompt_input(system_prompt, user_message, needs_tools)
         cmd = [
             CLAUDE_CLI, "-p", prompt_input,
-            "--model", self.model,
+            "--model", self._cli_model_id(),
             "--output-format", "stream-json", "--verbose",
+            "--bare", "--no-session-persistence",
+            "--disable-slash-commands", "--setting-sources", "",
         ]
         if self._system_prompt_delivery == "file":
             cmd += ["--system-prompt-file", config_path]
         elif self._system_prompt_delivery == "append":
             cmd += ["--append-system-prompt", system_prompt]
-        # "prepend": already folded into prompt_input; no native flag.
 
         if effort:
             # Provenance only — level names are NOT assumed equivalent across
@@ -238,22 +183,31 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         cmd += self._tool_flags(name=name, needs_tools=needs_tools)
         return cmd
 
+    def _cli_model_id(self) -> str:
+        """Use the canonical version ID for Claude's model allowlist/mapping.
+
+        The ASBX wrapper injects modelOverrides and availableModels. Claude
+        evaluates that allowlist against canonical IDs, before resolving the
+        configured Bedrock profile. Supplying the profile ID itself can fall
+        back to the default model. Only remove recognized provider wrapping;
+        preserve the exact family/version and the original provenance model.
+        Custom inference-profile ARNs and aliases remain explicit and unchanged.
+        """
+        if re.fullmatch(r"(?:(?:global|us|eu|apac)\.)?anthropic\.claude-[a-z0-9-]+(?:-v\d+:\d+)?", self.model):
+            return self._canonical_model_id(self.model)
+        return self.model
+
     def _prompt_input(self, system_prompt: str, user_message: str, needs_tools: bool = False) -> str:
         """The ``-p`` prompt argument.
 
         On tool-using calls the :class:`~src.backends.mcp_probe.MCPStartupProbe`
         instruction is prepended so the stage opens with one trivial, read-only
         tool call — the tool *result* that comes back is what :meth:`_run_probe`
-        later confirms (process-attach alone is insufficient — Req 5.4). The
-        system prompt is folded in only for the ``"prepend"`` fallback (Req 3.3);
-        otherwise the user message is kept verbatim and distinct from the system
-        prompt (Req 3.2).
+        later confirms. The system prompt uses its own native delivery flag.
         """
         parts: list[str] = []
         if needs_tools:
             parts.append(MCPStartupProbe.instruction())
-        if self._system_prompt_delivery == "prepend" and system_prompt:
-            parts.append(system_prompt)
         parts.append(user_message)
         return "\n\n".join(parts)
 
@@ -262,8 +216,10 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
 
         tools=True: ``--mcp-config <temp json>`` ``--strict-mcp-config`` — the
         temp JSON declares the Second Brain MCP server (``python -m
-        src.mcp_server``, cwd = repo root) and ``--strict-mcp-config`` ignores
-        any ambient user/project MCP config so only ours loads.
+        src.mcp_readonly``, cwd = repo root) and ``--strict-mcp-config`` ignores
+        any ambient user/project MCP config so only ours loads. The five exact
+        read-only endpoint names receive ``--allowedTools`` grants so print
+        mode can execute them without a person answering a permission prompt.
 
         tools=False: ``--strict-mcp-config`` WITHOUT ``--mcp-config`` (no MCP
         servers load at all) plus ``--tools ""`` (built-in tools off). ``--tools
@@ -274,7 +230,8 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         if not needs_tools:
             return ["--strict-mcp-config", "--tools", ""]
         config_path = self._write_mcp_config(name)
-        return ["--mcp-config", config_path, "--strict-mcp-config"]
+        return ["--mcp-config", config_path, "--strict-mcp-config", "--tools", "",
+                "--allowedTools", *_READONLY_MCP_TOOLS]
 
     def _mcp_config_path(self, name: str) -> str:
         """Filesystem path for the temp ``--mcp-config`` JSON file."""
@@ -290,8 +247,7 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         regardless of system-prompt delivery mode.
         """
         path = self._mcp_config_path(name)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"mcpServers": _SECOND_BRAIN_MCP}, f)
+        write_private_text(path, json.dumps({"mcpServers": _SECOND_BRAIN_MCP}))
         self._pending_mcp_configs.append(path)
         return path
 
@@ -339,23 +295,52 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
             raw=result.stdout or "",
         )
 
+    @staticmethod
+    def _canonical_model_id(model: str) -> str:
+        """Only provider/profile wrapping aliases; never collapse model versions."""
+        value = model.strip().lower()
+        value = re.sub(r"^(?:global|us|eu|apac)\.", "", value)
+        value = re.sub(r"^anthropic\.", "", value)
+        return re.sub(r"-v\d+:\d+$", "", value)
+
+    def _note_model_honored(self, result, metrics: dict) -> None:
+        super()._note_model_honored(result, metrics)
+        role = corpus_role_for_stage(metrics.get("stage"))
+        if not role:
+            return
+        observed = set()
+        for event in self._events_from(result.stdout or "") or []:
+            if not isinstance(event, dict):
+                continue
+            if isinstance(event.get("modelUsage"), dict):
+                observed.update(m for m in event["modelUsage"] if isinstance(m, str) and m)
+            message = event.get("message")
+            if event.get("type") == "assistant" and isinstance(message, dict) and isinstance(message.get("model"), str):
+                observed.add(message["model"])
+        metrics["served_models"] = sorted(observed)
+        metrics["model_honored"] = None if not observed else True
+        if not observed:
+            return  # Unreported is unknown; qualification must separately verify routing.
+        try:
+            for served in observed:
+                assert_corpus_route(self.BACKEND_NAME, served, role)
+                if self._canonical_model_id(served) != self._canonical_model_id(self.model):
+                    raise CorpusRoutingError("Served corpus model differs from the requested model")
+        except CorpusRoutingError as exc:
+            metrics["model_honored"] = False
+            metrics["error"] = "model_not_honored"
+            if len(observed) == 1:
+                exc.usage_model = metrics["usage_model"] = next(iter(observed))
+            elif (self._envelope_from(result) or {}).get("total_cost_usd") is None:
+                # Aggregate token counts cannot price a mixed-model fallback.
+                exc.usage_pricing_unknown = True
+            raise
+
     def _extract_usage(self, *, parsed, raw, result, metrics):
-        """Capture real token usage, tolerating-and-warning when absent (Req 7).
+        """Preserve reported usage on every response, including failed turns.
 
-        On a successful turn whose envelope carries a ``usage`` object, populate
-        ``usage`` from the envelope's ``usage`` fields plus ``total_cost_usd``
-        and report ``usage_source="real"`` (Req 7.1) — Claude Code is a metered
-        backend that reports real counts, unlike Kiro's char/4 estimate. Real
-        counts are also folded into the metrics line so cross-backend cost
-        analysis never silently mixes estimates with measurements.
-
-        On a successful, parseable turn whose envelope omits ``usage`` (a
-        metering gap, not an infrastructure failure), keep ``output``/``raw``,
-        return ``usage=None`` / ``usage_source="estimate"`` (the char/4 fallback
-        KiroInvoker uses), and emit a loud warning — but **never raise, discard
-        the result, or route into the failure/retry/abort path** (Req 7.2, 7.3).
-        That cardinal split (telemetry gap ≠ infrastructure failure) is what
-        preserves the failure-mode parity of Req 8.
+        Missing usage is returned as unknown; the shared corpus metering boundary
+        then stops the run before another call.
         """
         envelope = self._envelope_from(result)
         if isinstance(envelope, dict) and isinstance(envelope.get("usage"), dict):
@@ -375,18 +360,7 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
                 metrics["total_cost_usd"] = cost
             return usage, "real"
 
-        # Tolerate-and-warn: a parseable payload reached this point (the base
-        # already raised ValueError if no JSON was recoverable), so the turn
-        # succeeded — only the telemetry is missing.
-        logger.warning(
-            "ClaudeCodeInvoker: backend %r is metered and real token usage was "
-            "expected, but the response envelope contained no 'usage' field. "
-            "Preserving the result and falling back to usage=None / "
-            "usage_source='estimate' (char/4). This is a metering gap, not an "
-            "infrastructure failure — not raising.",
-            self.BACKEND_NAME,
-        )
-        return None, "estimate"
+        return self._warn_missing_usage("missing usage object")
 
     def _extract_raw(self, result) -> str:
         """Final text = the terminal result event's ``.result`` field (Req 2.3, 2.4).

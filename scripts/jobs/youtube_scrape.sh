@@ -1,11 +1,6 @@
 #!/bin/bash
-# YouTube capture — self-contained yt-dlp + curl_cffi path.
-#
-# Enumerates the user's Liked + Watch Later playlists (cookies) and ingests
-# English transcripts (anonymous fetch + browser impersonation) via
-# src.capture.youtube. Replaces the former Crawlee/Node scrape (see git history).
-# Invoked nightly by launchd through job_wrapper.sh; args pass through for
-# manual runs, e.g.:  scripts/jobs/youtube_scrape.sh --dry-run --limit 5
+# Command adapter; launchd invokes this through job_wrapper.sh.
 set -uo pipefail
-cd "$(dirname "$0")/../.."          # repo root, so `-m src.capture.youtube` resolves
-exec .venv/bin/python -m src.capture.youtube "$@"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$REPO_ROOT" || exit 2
+exec "${SECOND_BRAIN_PYTHON:-$REPO_ROOT/.venv/bin/python}" -m src.capture.youtube "$@"

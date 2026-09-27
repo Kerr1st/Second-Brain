@@ -263,8 +263,8 @@ class TestCli:
         sp.main(["--limit", "1"])
         assert made == {"model": MODEL, "service_tier": "flex", "temperature": 0.0, "max_tokens": 4096}
         sp.main(["--limit", "1", "--service-tier", "none", "--temperature", "0.3", "--max-tokens", "512",
-                 "--model", "google.gemma-3-12b-it"])
-        assert made == {"model": "google.gemma-3-12b-it", "service_tier": None, "temperature": 0.3, "max_tokens": 512}
+                 "--model", "global.anthropic.claude-sonnet-5"])
+        assert made == {"model": "global.anthropic.claude-sonnet-5", "service_tier": None, "temperature": 0.3, "max_tokens": 512}
 
 
 class TestNoWrites:

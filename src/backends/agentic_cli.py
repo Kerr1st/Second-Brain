@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.backends.base import (
-    METRICS_DIR as METRICS_DIR,
+    InvocationBase, write_private_text,
     assert_corpus_route, corpus_role_for_stage, CorpusRoutingError, BACKEND_CAPABILITIES,
     _write_metrics_line as _write_metrics_line,
     parse_json_output as _parse_json_output,
@@ -48,23 +48,7 @@ logger = logging.getLogger(__name__)
 
 # --- Phase 0 LLM-call instrumentation (see docs/FABLE5-THINKER-PLAN.md) ---
 # Canonical definitions now live in src.backends.base (backend-agnostic).
-# METRICS_DIR is re-exported above so existing monkeypatch targets
-# (src.backends.agentic_cli.METRICS_DIR) keep working — tests for Claude Code and
-# Codex patch this module-level name. _write_metrics_line is likewise re-exported.
-
-
-def _record_call_metrics(metrics: dict, run_id: str | None) -> None:
-    """Append one JSONL record of an LLM call's metrics. Never raises.
-
-    Captures per-call stage, model, effort, latency, and token counts. For
-    backends that report no real usage (Kiro), token counts are char-based
-    ESTIMATES (chars / 4) and ``usage_source`` is ``"estimate"``; metered
-    backends record real counts with ``usage_source="real"``.
-    """
-    _write_metrics_line(metrics, run_id, METRICS_DIR)
-
-
-class AgenticCliInvoker:
+class AgenticCliInvoker(InvocationBase):
     """Template-method base for agentic-CLI backends.
 
     Implements the :class:`src.backends.base.Invoker` contract via a shared
@@ -115,6 +99,8 @@ class AgenticCliInvoker:
         corpus_role = corpus_role_for_stage(stage)
         if corpus_role:
             assert_corpus_route(self.BACKEND_NAME, self.model, corpus_role)
+            if tools and self.BACKEND_NAME != "claude_code":
+                raise CorpusRoutingError("Corpus tool calls require an enforced read-only tool surface")
         needs_tools = tools
         name = self._make_invocation_name()
         config = self._build_config(name, system_prompt, needs_tools)
@@ -131,10 +117,12 @@ class AgenticCliInvoker:
             run_id=run_id,
         )
         t0 = time.monotonic()
+        config_written = False
 
         try:
             if config is not None:
                 self._write_config(config_path, config)
+                config_written = True
 
             cmd = self._build_command(
                 name=name,
@@ -201,11 +189,17 @@ class AgenticCliInvoker:
                     name=name, needs_tools=needs_tools, result=result, parsed=parsed, raw=raw
                 )
             except Exception as exc:
+                metrics["_usage"] = usage
+                metrics["usage_source"] = usage_source
                 if metered and usage is not None:
                     exc.model_response_received = True
                     exc.usage, exc.usage_source = usage, usage_source
+                    if getattr(exc, "usage_pricing_unknown", False):
+                        exc.usage = metrics["_usage"] = None
+                        exc.usage_source = metrics["usage_source"] = "unavailable"
                 raise
 
+            metrics["_usage"] = usage
             metrics["success"] = True
             metrics["usage_source"] = usage_source
             return {"output": parsed, "raw": raw, "usage": usage, "usage_source": usage_source}
@@ -215,7 +209,7 @@ class AgenticCliInvoker:
             metrics["est_input_tokens"] = metrics["input_chars"] // 4
             metrics["est_output_tokens"] = metrics["output_chars"] // 4
             self._record_metrics(metrics, run_id)
-            if config_path is not None:
+            if config_written:
                 self._cleanup(config_path)
 
     # ------------------------------------------------------------------ #
@@ -277,73 +271,31 @@ class AgenticCliInvoker:
                 f"{result.stderr}"
             )
 
-    def _parse(self, raw: str, metrics: dict):
-        """Recover the JSON payload via the shared backstop; ``ValueError`` if none."""
-        try:
-            return self.parse_json_output(raw)
-        except ValueError:
-            metrics["error"] = "json_parse_failed"
-            logger.error(
-                "Failed to parse JSON from agent output (%d chars).", len(raw)
-            )
-            raise
 
     def _dump_raw_debug(self, name: str, raw: str) -> None:
-        """Best-effort dump of the raw output to /tmp for debugging."""
-        path = os.path.join("/tmp", self._raw_debug_filename(name))
+        """Explicit opt-in only; private directory and exclusive 0600 files."""
+        import tempfile
+        from pathlib import Path
+        debug_dir = os.environ.get("SECOND_BRAIN_RAW_DEBUG_DIR")
+        if not debug_dir:
+            return
+        directory = Path(debug_dir).expanduser()
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(raw)
-            logger.debug("Raw output saved to %s", path)
+            if not directory.is_absolute() or directory.is_symlink():
+                raise OSError("Raw debug directory must be absolute and not a symlink")
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if directory.stat().st_mode & 0o077:
+                raise OSError("Raw debug directory must have mode 0700")
+            fd, path = tempfile.mkstemp(prefix="model-response-", suffix=".txt", dir=directory)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(raw)
         except OSError:
-            pass
+            logger.warning("Private raw debug output unavailable")
 
-    def _record_metrics(self, metrics: dict, run_id: str | None) -> None:
-        """Append the per-call metrics line to :meth:`_metrics_dir`. Never raises."""
-        _write_metrics_line(metrics, run_id, self._metrics_dir())
-
-    def _metrics_dir(self) -> str:
-        """Directory the per-call metrics JSONL is written to."""
-        return METRICS_DIR
-
-    def _init_metrics(
-        self,
-        *,
-        name: str,
-        system_prompt: str,
-        user_message: str,
-        needs_tools: bool,
-        timeout: int,
-        effort: str | None,
-        stage: str | None,
-        run_id: str | None,
-    ) -> dict:
-        """Build the common per-call metrics dict (merging adapter extras)."""
-        metrics = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "run_id": run_id,
-            "stage": stage,
-            "agent_name": name,
-            "model": self.model,
-            "effort": effort,
-            "tools": needs_tools,
-            "timeout_s": timeout,
-            "system_prompt_chars": len(system_prompt),
-            "user_message_chars": len(user_message),
-            "input_chars": len(system_prompt) + len(user_message),
-            "output_chars": 0,
-            "success": False,
-            "error": None,
-            "usage_source": None,
-        }
-        metrics.update(self._adapter_metrics_defaults())
-        return metrics
 
     def _write_config(self, path: str, config) -> None:
         """Write the temp agent/config file as JSON (default delivery)."""
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(config, f)
+        write_private_text(path, json.dumps(config))
 
     def _cleanup(self, path: str) -> None:
         """Remove the temp config file. Never raises."""
@@ -357,7 +309,7 @@ class AgenticCliInvoker:
     # ------------------------------------------------------------------ #
     def _make_invocation_name(self) -> str:
         """Unique per-invocation name (config filename / metrics agent_name)."""
-        return f"{self.BACKEND_NAME}_{uuid.uuid4().hex[:8]}"
+        return f"{self.BACKEND_NAME}_{uuid.uuid4().hex}"
 
     def _build_config(self, name: str, system_prompt: str, needs_tools: bool):
         """Return the temp-config payload to write, or ``None`` for no file."""

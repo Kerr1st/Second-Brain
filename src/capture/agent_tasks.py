@@ -65,10 +65,15 @@ class AgentTaskRef:
     last_activity_at: datetime
     archived: bool = False
     current_workspace: str | None = None
+    observed_at: datetime | None = None
+    provenance: tuple[ProvenanceField, ...] = ()
+    native_git: tuple[str | None, str | None, str | None] | None = None
 
     def __post_init__(self) -> None:
         _aware(self.source_created_at, "source_created_at")
         _aware(self.last_activity_at, "last_activity_at")
+        if self.observed_at is not None:
+            _aware(self.observed_at, "observed_at")
         if not self.native_task_id or not self.source_identity:
             raise ValueError("a Task reference needs native and source identities")
 

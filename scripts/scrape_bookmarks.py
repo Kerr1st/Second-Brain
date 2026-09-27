@@ -6,7 +6,11 @@ Reads Chrome's Bookmarks JSON, filters to scrapable URLs,
 deduplicates against Crawlee's knowledge index, and scrapes new URLs.
 Internal Amazon links use Chrome cookies for authentication.
 """
-import json, os, subprocess, re, sys
+import json, os, subprocess, re, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.capture.filters import SKIP_PATTERNS, INTERNAL_DOMAINS, load_indexed_urls as _load_indexed_urls
+from src.capture.render import html_to_text, render_document
 from urllib.parse import urlparse
 from datetime import datetime
 
@@ -16,27 +20,6 @@ BOOKMARKS_PATH = os.path.expanduser(
 CRAWLEE_DIR = os.path.expanduser("~/Work/Tools/Crawlee")
 INDEX_PATH = os.path.join(CRAWLEE_DIR, "knowledge", "index.md")
 KNOWLEDGE_DIR = os.path.join(CRAWLEE_DIR, "knowledge", "sources")
-
-# URLs to always skip (not useful content)
-SKIP_PATTERNS = re.compile(
-    r"^(chrome|about|javascript|mailto|file|data):|"
-    r"(mail\.google|accounts\.google|"
-    r"localhost|127\.0\.0\.1|\.pdf$|"
-    r"login|signin|/ap/signin|"
-    r"quicksight\.aws|phonetool|isengard|"
-    r"conduit\.security|sim\.amazon|"
-    r"issues\.amazon|cr\.amazon|code\.amazon)"
-)
-
-# Internal Amazon domains that need cookies
-INTERNAL_DOMAINS = re.compile(
-    r"(w\.amazon\.com|quip-amazon\.com|highspot|"
-    r"broadcast\.amazon|atoz\.amazon|amazon\.awsapps|"
-    r"ivy-help-center|talent\.a2z|docs\.hub\.amazon|"
-    r"meetings\.amazon|inside\.amazon|pathfinder\.legal\.amazon|"
-    r"idp\.federate\.amazon|amazon-mentoring|"
-    r"console\.harmony\.a2z)"
-)
 
 
 def extract_urls(node):
@@ -49,10 +32,7 @@ def extract_urls(node):
 
 
 def load_indexed_urls():
-    if not os.path.exists(INDEX_PATH):
-        return set()
-    with open(INDEX_PATH) as f:
-        return {m.group(1) for m in re.finditer(r"\((https?://[^)]+)\)", f.read())}
+    return _load_indexed_urls(INDEX_PATH, sources_dir=KNOWLEDGE_DIR)
 
 
 def slugify(text):
@@ -72,55 +52,54 @@ def scrape_with_cookies(name, url):
         if resp.status_code != 200 or "signin" in resp.url.lower():
             return False
 
-        # Simple HTML to text extraction
-        text = re.sub(r"<script[^>]*>.*?</script>", "", resp.text, flags=re.DOTALL)
-        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
-        text = re.sub(r"<[^>]+>", "\n", text)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        text = html_to_text(resp.text)
 
         if len(text) < 200:
             return False
 
         # Write with metadata header
         date = datetime.now().strftime("%Y-%m-%d")
-        filename = f"{slugify(name)}.md"
-        content = f"# {name}\n\nSource: {url}\nType: web-page\nDate: {date}\n\n---\n\n{text}\n"
+        import hashlib
+        filename = f"{slugify(name)}-{hashlib.sha256(url.encode()).hexdigest()[:12]}.md"
+        content = render_document(name, {"Source": url, "Type": "web-page", "Date": date}, text)
 
         os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
         with open(os.path.join(KNOWLEDGE_DIR, filename), "w") as f:
             f.write(content)
         return True
 
-    except Exception as e:
+    except (OSError, ValueError, requests.RequestException) as e:
         print(f"    ✗ Cookie fetch failed: {e}")
         return False
 
 
 def scrape_with_crawlee(urls):
-    """Scrape public pages via Crawlee batch scraper (single instance)."""
+    """Report only verified index additions as successful public scrapes."""
     if not urls:
-        return
-    url_file = os.path.join(CRAWLEE_DIR, ".bookmark-urls.txt")
-    with open(url_file, "w") as f:
-        for _, url in urls:
-            f.write(url + "\n")
-
-    print(f"\nScraping {len(urls)} public URLs via Crawlee (batch)...")
+        return {"processed": 0, "failed": 0, "skipped": 0}
+    before = load_indexed_urls()
+    fd, url_file = tempfile.mkstemp(prefix=".sb-urls-", suffix=".txt", dir=CRAWLEE_DIR)
     try:
+        with os.fdopen(fd, "w") as handle:
+            for _, url in urls:
+                handle.write(url + "\n")
         result = subprocess.run(
-            ["node", "batch-scrape.js", url_file],
-            cwd=CRAWLEE_DIR, timeout=3600, capture_output=True, text=True,
+            ["node", "batch-scrape.js", url_file], cwd=CRAWLEE_DIR,
+            timeout=3600, capture_output=True, text=True,
         )
-        # Count results from stderr
-        ok = result.stderr.count("✓")
-        fail = result.stderr.count("✗")
-        skip = result.stderr.count("⚠")
-        print(f"  Crawlee batch: {ok} scraped, {fail} failed, {skip} skipped")
-        print(result.stderr[-500:] if len(result.stderr) > 500 else result.stderr)
+        after = load_indexed_urls()
+        requested = {url for _, url in urls}
+        skipped = len(requested & before)
+        processed = len((requested - before) & after)
+        failed = len(requested - after)
+        # A nonzero subprocess remains failure even when partial output exists.
+        if result.returncode:
+            failed = max(1, failed)
+        return {"processed": processed, "skipped": skipped, "failed": failed}
     except subprocess.TimeoutExpired:
-        print("  ⚠ Batch scrape timed out after 1 hour")
+        return {"processed": 0, "skipped": 0, "failed": len(urls)}
     finally:
-        os.remove(url_file) if os.path.exists(url_file) else None
+        os.unlink(url_file)
 
 
 def main():
@@ -156,11 +135,12 @@ def main():
                 fail += 1
 
     # Public links with Crawlee (single batch)
-    scrape_with_crawlee(public)
+    public_stats = scrape_with_crawlee(public)
 
     print(f"\nInternal: {ok} scraped, {fail} failed")
-    print(f"Public: {len(public)} sent to Crawlee batch")
+    print(f"Public: {public_stats}")
+    return int(bool(fail or public_stats["failed"]))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

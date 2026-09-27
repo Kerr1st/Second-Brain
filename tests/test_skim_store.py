@@ -22,12 +22,8 @@ MODEL, PV = "us.amazon.nova-2-lite-v1:0", "skim-v1"
 
 def _conn(fetchall=None, fetchone=None):
     """A fake connection whose cursor returns the given rows."""
-    cur = MagicMock()
-    cur.fetchall.return_value = fetchall if fetchall is not None else []
-    cur.fetchone.return_value = fetchone
-    conn = MagicMock()
-    conn.cursor.return_value.__enter__ = lambda s: cur
-    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+    from tests.conftest import mock_conn
+    conn, cur = mock_conn(rows=fetchall or (), first=fetchone)
     get_conn = MagicMock()
     get_conn.return_value.__enter__ = MagicMock(return_value=conn)
     get_conn.return_value.__exit__ = MagicMock(return_value=False)
@@ -110,26 +106,6 @@ class TestUpsertSkim:
 
 
 class TestFetchAndMissing:
-    def test_fetch_records_keys_by_string_id(self):
-        a, b, rid = uuid4(), uuid4(), uuid4()
-        get_conn, _, cur = _conn(fetchall=[
-            {"memory_id": a, "run_id": rid, "skim": {"summary": "x"}, "cluster_id": None,
-             "input_tokens": 1, "output_tokens": 2, "cost_usd": 0.001, "truncated": False, "created_at": WINDOW},
-        ])
-        with patch("src.skim.store.get_connection", get_conn):
-            recs = store.fetch_records([a, b], MODEL, PV)
-        sql, params = cur.execute.call_args[0]
-        assert "FROM memory_skim" in sql and "model = %s AND prompt_version = %s" in sql
-        assert params == ([str(a), str(b)], MODEL, PV)
-        assert set(recs) == {str(a)} and recs[str(a)]["run_id"] == str(rid)
-        assert recs[str(a)]["skim"] == {"summary": "x"}
-
-    def test_fetch_records_empty_ids(self):
-        get_conn, _, cur = _conn()
-        with patch("src.skim.store.get_connection", get_conn):
-            assert store.fetch_records([], MODEL, PV) == {}
-        cur.execute.assert_not_called()
-
     def test_missing_ids_keeps_order_drops_duplicates_and_known(self):
         a, b, c = str(uuid4()), str(uuid4()), str(uuid4())
         get_conn, _, cur = _conn(fetchall=[(b,)])
@@ -147,7 +123,7 @@ class TestFetchAndMissing:
         cur.execute.assert_not_called()
 
 
-class TestWindowAndSummary:
+class TestWindow:
     def test_fetch_window_records_joins_memories_with_the_arrivals_filter(self):
         a = uuid4()
         get_conn, _, cur = _conn(fetchall=[
@@ -163,22 +139,6 @@ class TestWindowAndSummary:
         assert params == (WINDOW, MODEL, PV, 5000)
         assert rows == [{"id": str(a), "title": "T", "source_type": "article", "created_at": WINDOW,
                          "skim": {"summary": "s"}, "cluster_id": "c1", "truncated": False}]
-
-    def test_run_summary_shape(self):
-        rid = str(uuid4())
-        get_conn, _, cur = _conn(fetchone=(12, 1, 30000, 4000, 0.0123))
-        with patch("src.skim.store.get_connection", get_conn):
-            s = store.run_summary(rid)
-        sql, params = cur.execute.call_args[0]
-        assert "FROM memory_skim WHERE run_id = %s" in sql and params == (rid,)
-        assert s == {"records": 12, "truncated": 1, "input_tokens": 30000, "output_tokens": 4000,
-                     "cost_usd": pytest.approx(0.0123)}
-
-    def test_run_summary_with_no_rows_is_zero(self):
-        get_conn, _, _ = _conn(fetchone=(0, 0, 0, 0, 0))
-        with patch("src.skim.store.get_connection", get_conn):
-            assert store.run_summary("r") == {"records": 0, "truncated": 0, "input_tokens": 0,
-                                              "output_tokens": 0, "cost_usd": 0.0}
 
 
 

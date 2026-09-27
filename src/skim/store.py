@@ -147,35 +147,6 @@ def upsert_skim(
     return str(row_id)
 
 
-def fetch_records(memory_ids: Iterable[Any], model: str, prompt_version: str) -> dict[str, dict]:
-    """``{memory_id: row}`` for the ids already skimmed with ``(model, prompt_version)``.
-
-    Each row: ``memory_id, run_id, skim, cluster_id, input_tokens, output_tokens,
-    cost_usd, truncated, created_at``.
-    """
-    ids = _ids(memory_ids)
-    if not ids:
-        return {}
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT memory_id, run_id, skim, cluster_id, input_tokens, output_tokens,
-                       cost_usd, truncated, created_at
-                FROM memory_skim
-                WHERE memory_id = ANY(%s::uuid[]) AND model = %s AND prompt_version = %s
-                """,
-                (ids, model, prompt_version),
-            )
-            rows = [dict(r) for r in cur.fetchall()]
-    out: dict[str, dict] = {}
-    for r in rows:
-        r["memory_id"] = str(r["memory_id"])
-        if r.get("run_id") is not None:
-            r["run_id"] = str(r["run_id"])
-        out[r["memory_id"]] = r
-    return out
-
 
 def missing_ids(memory_ids: Iterable[Any], model: str, prompt_version: str) -> list[str]:
     """The ids in ``memory_ids`` (order kept, duplicates dropped) with no skim yet
@@ -312,29 +283,3 @@ def set_cluster_ids(cluster_ids: dict[str, str | None], model: str, prompt_versi
             updated = cur.rowcount or 0
         conn.commit()
     return int(updated)
-
-
-def run_summary(run_id: str) -> dict:
-    """Counts and cost of the skims a run paid for:
-    ``records, truncated, input_tokens, output_tokens, cost_usd``."""
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT count(*),
-                       count(*) FILTER (WHERE truncated),
-                       COALESCE(sum(input_tokens), 0),
-                       COALESCE(sum(output_tokens), 0),
-                       COALESCE(sum(cost_usd), 0)
-                FROM memory_skim WHERE run_id = %s
-                """,
-                (run_id,),
-            )
-            row = cur.fetchone() or (0, 0, 0, 0, 0)
-    return {
-        "records": int(row[0] or 0),
-        "truncated": int(row[1] or 0),
-        "input_tokens": int(row[2] or 0),
-        "output_tokens": int(row[3] or 0),
-        "cost_usd": float(row[4] or 0.0),
-    }

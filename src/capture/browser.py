@@ -27,12 +27,17 @@ import collections
 import logging
 import os
 import re
-import shutil
 import sqlite3
 import sys
 import tempfile
 from datetime import date, datetime, time, timedelta, timezone
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit, parse_qs, urlencode
+
+from src.capture.common import exit_code
+from src.capture.framework import run_channel
+from src.capture.render import render_header_lines
+from src.capture.window import completed_days, day_bounds
+from src.capture.filters import SKIP_PATTERNS, INTERNAL_DOMAINS
 
 logger = logging.getLogger(__name__)
 
@@ -93,18 +98,6 @@ _SECRET_PARAM_RE = re.compile(
 _INTERNAL_SUFFIXES = (".amazon.com", ".a2z.com", ".aws.dev", ".amazon.work", ".amazon.dev", ".amazon-corp.com")
 
 
-def _import_bookmark_filters():
-    """Reuse SKIP_PATTERNS / INTERNAL_DOMAINS from the bookmark scraper (single source of truth)."""
-    try:
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-        from scripts.scrape_bookmarks import SKIP_PATTERNS, INTERNAL_DOMAINS  # type: ignore
-        return SKIP_PATTERNS, INTERNAL_DOMAINS
-    except Exception:  # pragma: no cover - the scraper is part of this repo
-        return re.compile(r"^(chrome|about|javascript|mailto|file|data):"), re.compile(r"\.amazon\.com")
-
-
-SKIP_PATTERNS, INTERNAL_DOMAINS = _import_bookmark_filters()
-
 
 # --------------------------------------------------------------------------- #
 # Pure helpers                                                                 #
@@ -151,7 +144,7 @@ def canonical_url(url: str) -> str:
         keep = [(k, v) for k, v in parse_qs(parts.query, keep_blank_values=True).items()
                 if not k.lower().startswith(("utm_", "fbclid", "gclid", "mc_", "ref", "sxsrf", "ved", "ei", "oq", "gs_l", "sca_esv", "rlz"))
                 and not _SECRET_PARAM_RE.match(k)]
-        query = "&".join(f"{k}={v[0]}" for k, v in keep)
+        query = urlencode(keep, doseq=True)
     else:
         query = ""
     return parts._replace(query=query, fragment="").geturl()
@@ -162,10 +155,6 @@ def search_query(url: str) -> str | None:
     return q[0].strip() if q and q[0].strip() else None
 
 
-def completed_days(days_back: int, today: date | None = None) -> list[date]:
-    today = today or datetime.now().astimezone().date()
-    return [today - timedelta(days=i) for i in range(days_back, 0, -1)]
-
 
 def day_source_url(day: date) -> str:
     return f"browser://history/{day.isoformat()}"
@@ -175,15 +164,20 @@ def snapshot_history(path: str = CHROME_HISTORY) -> str:
     """Copy the (locked) History DB to a temp file; caller removes it."""
     fd, tmp = tempfile.mkstemp(prefix="sb-history-", suffix=".db")
     os.close(fd)
-    shutil.copyfile(path, tmp)
-    return tmp
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as source:
+            with sqlite3.connect(tmp) as target:
+                source.backup(target)
+        return tmp
+    except (OSError, sqlite3.Error):
+        os.unlink(tmp)
+        raise
 
 
 def load_visits(db_path: str, day: date) -> list[dict]:
     """Visits on ``day`` (local), joined with url/title, oldest first."""
-    tz = datetime.now().astimezone().tzinfo
-    start = datetime.combine(day, time.min, tzinfo=tz)
-    end = start + timedelta(days=1)
+    start, end = day_bounds(day)
+    tz = start.tzinfo
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         rows = conn.execute(
@@ -271,7 +265,7 @@ def render_day(day: date, summary: dict) -> tuple[str, str] | None:
             flags = {"internal": " (internal)", "app": " (app)"}.get(p["kind"], "")
             body.append(f"- {p['first']:%H:%M} [{_fmt_dwell(p['dwell'])}] {title}{flags}\n  {p['url']}")
         body.append("")
-    return day_source_url(day), "\n".join(header) + "\n\n---\n\n" + "\n".join(body).rstrip() + "\n"
+    return day_source_url(day), render_header_lines(header, "\n".join(body).rstrip() + "\n")
 
 
 def reading_urls(summary: dict, read_secs: int = READ_SECS) -> list[tuple[str, str]]:
@@ -290,7 +284,7 @@ def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
 
     if not os.path.exists(history_path):
         logger.error("Chrome History not found: %s", history_path)
-        return {"processed": 0, "skipped": 0, "failed": 0, "reading": 0}
+        return {"processed": 0, "skipped": 0, "failed": 1, "reading": 0}
 
     already = set(get_processed_source_urls(SOURCE_TYPE))
     days = completed_days(days_back)
@@ -316,6 +310,7 @@ def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
 
     # Full text of read pages via the bookmark pipeline (dedup against Crawlee's index).
     reading_sent = 0
+    reading_failed = 0
     if scrape and to_read:
         from scripts.scrape_bookmarks import load_indexed_urls, scrape_with_crawlee  # type: ignore
         indexed = load_indexed_urls()
@@ -331,14 +326,13 @@ def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
             for _, url in fresh:
                 logger.info("[DRY] read -> crawlee: %s", url)
         elif fresh:
-            scrape_with_crawlee(fresh)
+            scrape_stats = scrape_with_crawlee(fresh)
+            reading_failed = scrape_stats["failed"]
+            reading_sent = scrape_stats["processed"]
 
-    if dry_run:
-        for url, _ in items:
-            logger.info("[DRY] %s", url)
-        return {"new": len(items), "reading": reading_sent}
-    stats = ingest_batch(items, SOURCE_TYPE) if items else {"processed": 0, "skipped": 0, "failed": 0}
-    stats["reading"] = reading_sent
+    stats = run_channel(SOURCE_TYPE, items, dry_run=dry_run, ingest=ingest_batch)
+    stats["reading_planned" if dry_run else "reading"] = reading_sent
+    stats["failed"] += reading_failed
     logger.info("%s: %s", SOURCE_TYPE, stats)
     return stats
 
@@ -352,8 +346,9 @@ def main():
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s", datefmt="%H:%M:%S")
     stats = capture(days_back=args.days_back, dry_run=args.dry_run, scrape=not args.no_scrape)
     logger.info("captures_this_cycle: browser=%d reading_sent=%d",
-                stats.get("processed", stats.get("new", 0)), stats.get("reading", 0))
+                stats.get("processed", 0), stats.get("reading", 0))
+    return exit_code(stats)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

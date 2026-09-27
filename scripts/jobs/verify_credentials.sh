@@ -27,11 +27,10 @@
 #     human — never by the unattended pipeline. Failing the nightly job on it
 #     guarantees a permanently red monitor. It is ADVISORY now: reported, never fatal.
 #
-# A TOOL-MISSING result is also non-fatal: it means the *check* could not run, which
-# is a monitoring defect rather than evidence of lost capture, and verify_liveness.sh
-# (which measures the database, not the tooling) is the backstop for actual data loss.
-# Silence from a monitor is the thing we are trying to avoid, so it is printed loudly
-# as ⚠ with a fix hint instead of being folded into the failure list.
+# TOOL-MISSING is distinct from an expired credential. A missing REQUIRED check
+# returns 2 (unknown health); a performed required check that fails returns 1.
+# Interactive SSO remains advisory. Required health is never reported as valid
+# when its probe could not run.
 #
 # Debugging aid born from cause (1): `verify_credentials.sh --print-tools` prints the
 # effective PATH and where each binary resolves. Run it the way launchd does
@@ -65,17 +64,19 @@ if command -v timeout >/dev/null 2>&1; then TIMEOUT="timeout 90"; else
 fi
 
 REQUIRED_FAILED=""
+REQUIRED_UNKNOWN=""
 ADVISORY=""
 
 # check <required|advisory> <label> <command...>
-# Three outcomes: OK / EXPIRED-or-BROKEN / TOOL-MISSING. Only a REQUIRED credential
-# that answered and answered badly is a failure.
+# Three outcomes: OK / EXPIRED-or-BROKEN / TOOL-MISSING. Unavailable required
+# probes fail distinctly rather than inventing a valid or expired credential.
 check() {
   local sev="$1" label="$2"; shift 2
   local bin="$1"
   if ! command -v "$bin" >/dev/null 2>&1; then
     log "⚠ $label tool not found on PATH ($bin) — check NOT RUN (not an expired credential)"
-    ADVISORY="$ADVISORY ${label}[tool-missing]"
+    if [ "$sev" = required ]; then REQUIRED_UNKNOWN="$REQUIRED_UNKNOWN ${label}[tool-missing]";
+    else ADVISORY="$ADVISORY ${label}[tool-missing]"; fi
     return 0
   fi
   local rc=0
@@ -84,7 +85,8 @@ check() {
     log "✅ $label"
   elif [ "$rc" -eq 127 ]; then
     log "⚠ $label tool not found (exit 127) — check NOT RUN (not an expired credential)"
-    ADVISORY="$ADVISORY ${label}[tool-missing]"
+    if [ "$sev" = required ]; then REQUIRED_UNKNOWN="$REQUIRED_UNKNOWN ${label}[tool-missing]";
+    else ADVISORY="$ADVISORY ${label}[tool-missing]"; fi
   elif [ "$sev" = required ]; then
     log "❌ $label EXPIRED/BROKEN (exit $rc)"
     REQUIRED_FAILED="$REQUIRED_FAILED $label"
@@ -125,9 +127,33 @@ async def main():
 asyncio.run(main())
 EOF
 
+# File mtime does not reveal an IAM key's creation or rotation date. This local
+# metadata check reads only configuration presence; it never sends or prints keys.
+if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  "$PYTHON_BIN" - <<'PYTHON_METADATA'
+import configparser, os
+from pathlib import Path
+path = Path(os.environ.get("AWS_SHARED_CREDENTIALS_FILE", str(Path.home()/".aws/credentials")))
+profile = "second-brain-jobs"
+try:
+    config = configparser.RawConfigParser()
+    config.read(path)
+    static = config.has_option(profile, "aws_access_key_id") and not config.has_option(profile, "aws_session_token")
+    if static:
+        print("WARNING aws:second-brain-jobs STATIC KEY AGE UNKNOWN: local file mtime does not establish IAM creation or rotation; inspect the identified key before retirement")
+except (OSError, configparser.Error):
+    print("WARNING credential metadata could not be inspected; IAM key age remains unknown")
+PYTHON_METADATA
+fi
+
 if [ -n "$ADVISORY" ]; then
   log "=== advisory, NOT failing the job:$ADVISORY ==="
   hints "$ADVISORY"
+fi
+
+if [ -n "$REQUIRED_UNKNOWN" ]; then
+  log "=== REQUIRED CHECK UNKNOWN:$REQUIRED_UNKNOWN ==="
+  hints "$REQUIRED_UNKNOWN"
 fi
 
 if [ -n "$REQUIRED_FAILED" ]; then
@@ -135,5 +161,9 @@ if [ -n "$REQUIRED_FAILED" ]; then
   hints "$REQUIRED_FAILED"
   notify "Expired:$REQUIRED_FAILED — see logs/credentials-$(date +%Y%m%d).log"
   exit 1
+fi
+if [ -n "$REQUIRED_UNKNOWN" ]; then
+  notify "Required credential check unavailable:$REQUIRED_UNKNOWN"
+  exit 2
 fi
 log "=== all required credentials valid ==="

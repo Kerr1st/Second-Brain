@@ -2,7 +2,7 @@
 
 :func:`skim_window` is what the dream cycle's Step 3.5 calls
 (``DreamCycleOrchestrator._skim_arrivals``). Contract, from
-docs/PLAN-skim-stage.md §2:
+docs/SKIM-STAGE.md §2:
 
 * **Selection** — parent-level, non-superseded arrivals with
   ``created_at >= window_start``, excluding the dream cycle's own outputs
@@ -12,8 +12,9 @@ docs/PLAN-skim-stage.md §2:
   run type over an overlapping window pays nothing twice.
 * **Isolated** — every document is skimmed in its own ``try``; a model error,
   an invalid reply or a storage failure counts against that document and the
-  loop goes on. Only :class:`~src.backends.cost.SpendCapExceeded` (the run cap)
-  propagates, after the call that tripped it has been stored.
+  loop continues until the configurable failure threshold (default three).
+  Repeated failures, unknown usage and the run cap stop the operation with
+  partial counters. A usable over-cap response may be stored before stopping.
 * **Bounded** — documents longer than ``max_doc_chars`` are cut and flagged
   ``truncated``; the skim's own spend is summed and the loop stops cleanly
   (``aborted_on_cap``) once it reaches ``cap_usd``. Every call is also metered
@@ -30,6 +31,8 @@ docs/PLAN-skim-stage.md §2:
 from __future__ import annotations
 
 import logging
+import os
+import psycopg2
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -48,6 +51,13 @@ DEFAULT_MAX_DOC_CHARS = 120_000
 DEFAULT_TIMEOUT_S = 120
 
 
+class SkimFailureThreshold(RuntimeError):
+    """Repeated failures stopped the skim; partial counts remain available."""
+    def __init__(self, result):
+        super().__init__("Skim stopped after repeated call, validation or storage failures")
+        self.skim_result = result
+
+
 @dataclass
 class SkimResult:
     """Counts of one :func:`skim_window` pass — safe to log and persist as run stats."""
@@ -55,7 +65,10 @@ class SkimResult:
     docs_total: int = 0        # arrivals in the window (after the filter)
     skimmed: int = 0           # records stored by this pass
     reused: int = 0            # already skimmed for (model, prompt_version) — skipped
-    failed: int = 0            # model/transport/storage error for the document
+    failed: int = 0            # aggregate failure compatibility counter
+    call_failed: int = 0
+    store_failed: int = 0
+    aborted_on_failures: bool = False
     invalid: int = 0           # reply was not a valid skim record
     coerced: int = 0           # stored records that needed trimming
     truncated: int = 0         # documents cut to max_doc_chars before the call
@@ -81,6 +94,9 @@ class SkimResult:
             "skim_skimmed": self.skimmed,
             "skim_reused": self.reused,
             "skim_failed": self.failed,
+            "skim_call_failed": self.call_failed,
+            "skim_store_failed": self.store_failed,
+            "skim_aborted_on_failures": self.aborted_on_failures,
             "skim_invalid": self.invalid,
             "skim_coerced": self.coerced,
             "skim_truncated": self.truncated,
@@ -172,7 +188,18 @@ def skim_window(
                 result.docs_total, window_start.isoformat() if hasattr(window_start, "isoformat") else window_start,
                 result.reused, len(docs), model, prompt_version, cap_usd)
 
+    try:
+        max_failures = int(os.environ.get("SECOND_BRAIN_SKIM_MAX_FAILURES", "3"))
+        if max_failures < 1:
+            raise ValueError("Skim failure threshold must be positive")
+    except ValueError:
+        raise ValueError("SECOND_BRAIN_SKIM_MAX_FAILURES must be a positive integer") from None
+
     for n, doc in enumerate(docs, 1):
+        if result.failed + result.invalid >= max_failures:
+            result.aborted_on_failures = True
+            result.duration_s = time.monotonic() - t0
+            raise SkimFailureThreshold(result)
         if cap_usd is not None and result.cost_usd >= cap_usd:
             result.aborted_on_cap = True
             logger.warning("Skim stopped at its sub-cap: $%.4f >= $%.2f after %d/%d document(s)",
@@ -195,20 +222,31 @@ def skim_window(
                 tools=False, effort=effort, timeout=timeout,
                 stage="skim", run_id=run_id, schema=SKIM_SCHEMA,
             )
-        except UsageUnavailable:
+        except UsageUnavailable as exc:
+            result.call_failed += 1
+            result.failed += 1
+            result.cost_usd += tracker.total_usd - before
+            exc.skim_result = result
             raise
         except SpendCapExceeded as exc:
             # A completed response that crossed the cap can still be stored.
             # A failed/truncated response has no usable record to preserve.
             reply = getattr(exc, "invocation_result", None)
             if reply is None:
+                result.cost_usd += tracker.total_usd - before
+                result.call_failed += 1
+                result.failed += 1
+                exc.skim_result = result
                 raise
             cap_exc = exc
-        except Exception as exc:
+        except (RuntimeError, TimeoutError, ValueError, OSError) as exc:
+            result.call_failed += 1
             result.failed += 1
             result.cost_usd += tracker.total_usd - before
             if tracker.blocked_reason:
-                raise UsageUnavailable(tracker.blocked_reason) from exc
+                failure = UsageUnavailable(tracker.blocked_reason)
+                failure.skim_result = result
+                raise failure from exc
             logger.warning("Skim call failed for memory %s (%d/%d): %s", doc_id[:8], n, len(docs),
                            type(exc).__name__)
             continue
@@ -225,6 +263,7 @@ def skim_window(
             logger.warning("Skim reply invalid for memory %s (%d/%d): %s", doc_id[:8], n, len(docs),
                            str(exc).split(", got")[0][:120])
             if cap_exc is not None:
+                cap_exc.skim_result = result
                 raise cap_exc
             continue
 
@@ -239,11 +278,13 @@ def skim_window(
                 output_tokens=usage.get("outputTokens", usage.get("output_tokens")) if usage else None,
                 cost_usd=cost, truncated=truncated,
             )
-        except Exception as exc:  # noqa: BLE001
+        except (psycopg2.Error, OSError, ValueError, KeyError) as exc:
+            result.store_failed += 1
             result.failed += 1
             logger.warning("Skim store failed for memory %s (%d/%d): %s", doc_id[:8], n, len(docs),
                            type(exc).__name__)
             if cap_exc is not None:
+                cap_exc.skim_result = result
                 raise cap_exc
             continue
 
@@ -256,8 +297,13 @@ def skim_window(
             for c in record.coercions:
                 coercion_classes[c] = coercion_classes.get(c, 0) + 1
         if cap_exc is not None:
+            cap_exc.skim_result = result
             raise cap_exc
 
+    if result.failed + result.invalid >= max_failures:
+        result.aborted_on_failures = True
+        result.duration_s = time.monotonic() - t0
+        raise SkimFailureThreshold(result)
     result.coercion_classes = coercion_classes
     result.duration_s = time.monotonic() - t0
     logger.info("Skim done: %d skimmed, %d reused, %d failed, %d invalid, %d coerced, %d truncated; "

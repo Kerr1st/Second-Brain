@@ -22,7 +22,7 @@ paths establish that, tried in order:
 
 Both paths accept only what the document says; neither can turn a paraphrase
 into a verbatim quote. This is the primary quality metric of the skim
-(docs/PLAN-skim-stage.md §2, Decisions): it is free, it needs no second model,
+(docs/SKIM-STAGE.md §2, Decisions): it is free, it needs no second model,
 and it catches exactly the failure mode — invented detail — that the panel's
 grounding audit exists for.
 

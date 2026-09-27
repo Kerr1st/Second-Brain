@@ -57,7 +57,7 @@ def _write_metrics_line(metrics: dict, run_id: str | None, metrics_dir: str) -> 
 
 # Corpus policy applies at resolution and immediately before invocation.
 AGENT_ROLES = ("explorer", "thinker", "skeptic", "advocate", "epistemologist", "methodologist")
-BEDROCK_ONLY_ROLES = frozenset({"skim", "distill", "codex_semantic", "editor"})
+BEDROCK_ONLY_ROLES = frozenset({"skim", "distill", "codex_semantic", "editor", "grounding_auditor"})
 CORPUS_ROLES = frozenset(AGENT_ROLES) | BEDROCK_ONLY_ROLES
 DENIED_BACKENDS_FOR_CORPUS = frozenset({"kiro"})
 DENIED_MODEL_SUBSTRINGS = frozenset({"fable"})
@@ -77,7 +77,7 @@ def corpus_role_for_stage(stage: str | None) -> str | None:
     if isinstance(stage, str) and stage.startswith(("evaluator:", "replay:")):
         return stage.split(":", 1)[1]
     return {
-        "revision": "thinker", "grounding_audit": "epistemologist",
+        "revision": "thinker", "grounding_audit": "grounding_auditor",
         "weekly_digest": "skim", "skim_probe": "skim", "revise_probe": "thinker", "express_editor": "editor",
         "distill_contradiction": "distill", "redistill": "distill",
     }.get(stage)
@@ -93,6 +93,8 @@ def assert_corpus_route(backend: str, model: str, role: str) -> None:
         raise CorpusRoutingError(f"Corpus role {role!r} requires an explicit model")
     if any(needle in model.lower() for needle in DENIED_MODEL_SUBSTRINGS):
         raise CorpusRoutingError(f"Corpus role {role!r} cannot run on model {model!r}")
+    if role == "explorer" and backend != "claude_code":
+        raise CorpusRoutingError("Explorer requires the enforced read-only Claude Code tool surface")
     if role in BEDROCK_ONLY_ROLES and backend != "bedrock":
         raise CorpusRoutingError(f"Corpus role {role!r} must run on direct Bedrock")
 
@@ -181,7 +183,6 @@ class BackendCapabilities:
 
     supports_mcp: bool
     metered: bool
-    structured_output: bool
     reports_usage: bool
 
     def __post_init__(self) -> None:
@@ -200,17 +201,17 @@ class BackendCapabilities:
 BACKEND_CAPABILITIES: dict[str, BackendCapabilities] = {
     # Agentic CLI families (speak MCP).
     "kiro": BackendCapabilities(
-        supports_mcp=True, metered=False, structured_output=False, reports_usage=False
+        supports_mcp=True, metered=False, reports_usage=False
     ),
     "claude_code": BackendCapabilities(
-        supports_mcp=True, metered=True, structured_output=True, reports_usage=True
+        supports_mcp=True, metered=True, reports_usage=True
     ),
     "codex": BackendCapabilities(
-        supports_mcp=True, metered=True, structured_output=True, reports_usage=True
+        supports_mcp=True, metered=True, reports_usage=True
     ),
     # Direct-API family (tool-less by design).
     "bedrock": BackendCapabilities(
-        supports_mcp=False, metered=True, structured_output=True, reports_usage=True
+        supports_mcp=False, metered=True, reports_usage=True
     ),
 }
 
@@ -220,10 +221,10 @@ def assert_backend_supports_role(backend: str, role: str) -> None:
 
     The Explorer needs a live tool-loop (memory_search/read), so it requires an
     MCP-capable backend. Routing it to a tool-less Direct-API backend is the
-    deferred "B1" decoupling (see ``docs/DREAM-CYCLE-MCP-DECOUPLING.md``); we
+    deferred "B1" decoupling (see ``docs/MODEL-BACKENDS.md``); we
     reject it loudly rather than let the Explorer run blind.
 
-    The skim (``docs/PLAN-skim-stage.md`` constraint 1) is the inverse: it feeds
+    The skim (``docs/SKIM-STAGE.md`` constraint 1) is the inverse: it feeds
     every arriving document's full text to its model, so it may run only on a
     tool-less Direct-API backend inside the AWS account (``bedrock``) — never on
     an agentic CLI (Kiro, Claude Code, Codex), which is what ``supports_mcp``
@@ -247,13 +248,15 @@ def assert_backend_supports_role(backend: str, role: str) -> None:
         raise ValueError(
             f"Explorer requires an MCP-capable backend, but {backend!r} is tool-less "
             f"(supports_mcp=False). Routing the Explorer to a Direct-API backend is the "
-            f"deferred B1 decoupling — see docs/DREAM-CYCLE-MCP-DECOUPLING.md."
+            f"deferred B1 decoupling — see docs/MODEL-BACKENDS.md."
         )
+    if role == "explorer" and backend != "claude_code":
+        raise CorpusRoutingError("Explorer requires the enforced read-only Claude Code tool surface")
     if role in BEDROCK_ONLY_ROLES and backend != "bedrock":
         raise ValueError(
             f"The {role} role must run on a tool-less Direct-API backend (bedrock), not on the "
             f"agentic CLI {backend!r}: it sends every arriving document's text to its model, "
-            f"and that text stays inside the AWS account — see docs/PLAN-skim-stage.md §3."
+            f"and that text stays inside the AWS account — see docs/SKIM-STAGE.md §3."
         )
 
 
@@ -357,4 +360,93 @@ def parse_json_output(raw: str) -> dict | list:
     if best is not None:
         return best[1]
 
-    raise ValueError(f"No valid JSON found in agent output: {raw[:200]}")
+    raise ValueError(f"No valid JSON found in agent output ({len(raw)} chars)")
+
+def write_private_text(path: str, text: str) -> None:
+    """Create a private artifact exclusively; never follow or replace an existing file."""
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+    except BaseException:
+        os.unlink(path)
+        raise
+
+
+def normalize_usage(usage: dict | None) -> dict | None:
+    """One token vocabulary; missing required counts stay missing, never zero."""
+    if not isinstance(usage, dict):
+        return None
+    result = {}
+    for canonical, aliases in {
+        "input_tokens": ("input_tokens", "inputTokens"),
+        "output_tokens": ("output_tokens", "outputTokens"),
+        "cache_read_input_tokens": ("cache_read_input_tokens", "cacheReadInputTokens"),
+        "cache_creation_input_tokens": ("cache_creation_input_tokens", "cacheWriteInputTokens"),
+        "total_cost_usd": ("total_cost_usd",), "serviceTier": ("serviceTier",),
+    }.items():
+        for alias in aliases:
+            if alias in usage:
+                result[canonical] = usage[alias]
+                break
+    return result
+
+
+def price_and_record(metrics: dict, run_id: str | None, *, usage=None, metrics_dir=None) -> None:
+    """Price telemetry and write one row. SpendTracker alone owns budget charging."""
+    from src.backends.cost import estimate_cost_usd, _require_usage, UsageUnavailable
+    usage = normalize_usage(usage)
+    if usage is not None:
+        metrics["real_input_tokens"] = usage.get("input_tokens")
+        metrics["real_output_tokens"] = usage.get("output_tokens")
+        try:
+            _require_usage(usage)
+            metrics["total_cost_usd"] = estimate_cost_usd(metrics.get("usage_model") or metrics["model"], usage)
+        except UsageUnavailable:
+            metrics["spend_unknown"] = True
+    elif metrics.get("usage_source") != "estimate":
+        metrics["spend_unknown"] = True
+    _write_metrics_line(metrics, run_id, metrics_dir or METRICS_DIR)
+
+
+class InvocationBase:
+    """Shared response parsing and metrics across CLI and direct API families."""
+    parse_json_output = staticmethod(parse_json_output)
+
+    def _init_metrics(self, *, system_prompt, user_message, timeout, effort, stage, run_id,
+                      name=None, needs_tools=False):
+        from datetime import datetime, timezone
+        metrics = {"ts": datetime.now(timezone.utc).isoformat(), "run_id": run_id,
+            "stage": stage, "agent_name": name, "backend": self.BACKEND_NAME,
+            "model": self.model, "effort": effort, "tools": needs_tools,
+            "timeout_s": timeout, "system_prompt_chars": len(system_prompt),
+            "user_message_chars": len(user_message),
+            "input_chars": len(system_prompt) + len(user_message), "output_chars": 0,
+            "success": False, "error": None, "usage_source": None,
+            "real_input_tokens": None, "real_output_tokens": None, "latency_s": None}
+        defaults = getattr(self, "_adapter_metrics_defaults", None)
+        if defaults:
+            metrics.update(defaults())
+        return metrics
+
+    def _parse(self, raw: str, metrics: dict):
+        try:
+            return self.parse_json_output(raw)
+        except ValueError:
+            metrics["error"] = "json_parse_failed"
+            logger.warning("Unparseable %s response (%d chars)", self.BACKEND_NAME, len(raw))
+            raise
+
+    def _warn_missing_usage(self, context=""):
+        logger.warning("%s real usage is absent (%s); metered callers must stop", self.BACKEND_NAME, context)
+        return None, "estimate"
+
+    def _metrics_dir(self):
+        return METRICS_DIR
+
+    def _record_metrics(self, metrics, run_id):
+        usage = metrics.pop("_usage", None)
+        metrics["est_input_tokens"] = metrics["input_chars"] // 4
+        metrics["est_output_tokens"] = metrics["output_chars"] // 4
+        price_and_record(metrics, run_id, usage=usage, metrics_dir=self._metrics_dir())

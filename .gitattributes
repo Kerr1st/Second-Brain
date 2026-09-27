@@ -1,0 +1,2 @@
+# Historical reference documents are preserved verbatim, including whitespace.
+docs/archive/** -whitespace

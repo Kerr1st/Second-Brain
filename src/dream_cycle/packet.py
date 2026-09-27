@@ -17,15 +17,16 @@ to an empty packet rather than aborting the run.
 from __future__ import annotations
 
 import logging
+import psycopg2
 import uuid
 
-from src.db import get_memories_by_ids
+from src.db import get_memories_by_ids, iso as _iso
 
 logger = logging.getLogger(__name__)
 
 #: Per-memory content cap (chars). ~1K tokens; enough for grounding, not a dump.
 MAX_CONTENT_CHARS_PER_MEMORY = 4_000
-#: Whole-packet content cap (chars). ~30K tokens ≈ $0.30 of Fable input per slice.
+#: Whole-packet content cap (chars). Cost depends on the selected model and usage.
 MAX_TOTAL_CONTENT_CHARS = 120_000
 
 TOOLLESS_NOTE = (
@@ -76,19 +77,15 @@ def _valid_uuids(ids) -> list[str]:
 
 
 def load_memories_by_ids(memory_ids) -> list[dict]:
-    """Fetch memories for a packet. Never raises; returns [] on any failure."""
+    """Fetch packet memories; expected storage/data errors return no content."""
     ids = _valid_uuids(memory_ids)
     if not ids:
         return []
     try:
         return get_memories_by_ids(ids)
-    except Exception:
+    except (psycopg2.Error, OSError, ValueError, KeyError):
         logger.exception("Failed to load %d memories for context packet; continuing without contents", len(ids))
         return []
-
-
-def _iso(value) -> str | None:
-    return value.isoformat() if hasattr(value, "isoformat") else (str(value) if value is not None else None)
 
 
 def packet_entry(memory: dict, content_cap: int = MAX_CONTENT_CHARS_PER_MEMORY) -> dict:

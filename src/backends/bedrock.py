@@ -1,58 +1,8 @@
-"""Amazon Bedrock Direct-API adapter (Converse API).
+"""Bedrock Converse adapter with native system prompts and metered structured output.
 
-Wraps the ``bedrock-runtime`` Converse API as an :class:`Invoker`. Registered in
-:data:`DEFAULT_ADAPTERS` as ``bedrock``.
-
-The boto3/botocore imports are deferred (not at module level) so the module can
-be imported — and tests can inject a fake client — without requiring real AWS
-credentials or ``boto3`` on the import path.
-
-Model-specific rules baked in here were confirmed live against Bedrock Runtime
-(us-east-1, 2026-09-14):
-
-* ``converse`` serves ``openai.*`` inference profiles (GPT-6 Astra) directly;
-  their reasoning depth is ``additionalModelRequestFields.reasoning.effort``.
-* Claude 5-series (Fable 5.1, Opus 5, Sonnet 5) use adaptive thinking:
-  ``{"thinking": {"type": "adaptive"}, "output_config": {"effort": ...}}``.
-  They reject ``thinking.type=enabled`` / ``budget_tokens``.
-* Fable 5.1 rejects forced tool choice (``toolChoice.tool`` / ``.any``), so
-  structured output uses ``toolChoice.auto`` and validates the reply instead.
-* Thinking is billed as output and counts against ``maxTokens``; the default
-  budget is therefore large, and a ``max_tokens`` stop is a loud failure.
-
-Skim-stage models (docs/PLAN-skim-stage.md Phase 1, verified against the AWS
-docs on 2026-09-20; the Nova request below was confirmed live on the same day
-with three calls on a synthetic document — every field accepted, response
-``serviceTier.type`` echoed ``flex``, ~2.5k input / ~340 output tokens,
-$0.0009 per call at the Flex rate):
-
-* Amazon Nova 2 Lite (``us.amazon.nova-2-lite-v1:0``) is served by Converse
-  (model card: https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-2-lite.html).
-  Forced tool choice ``toolChoice: {"tool": {"name": ...}}`` is supported for
-  Amazon Nova (and Claude 3) only —
-  https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolChoice.html ;
-  Nova serves it by constrained decoding, "ideal for structured output" —
-  https://docs.aws.amazon.com/nova/latest/nova2-userguide/using-tools.html .
-  Extended reasoning is controlled by
-  ``additionalModelRequestFields.reasoningConfig`` (``type: enabled|disabled``,
-  default disabled; ``maxReasoningEffort: low|medium|high`` when enabled) —
-  https://docs.aws.amazon.com/nova/latest/nova2-userguide/extended-thinking.html .
-  ``inferenceConfig.temperature`` accepts 0.0–1.0 (default 0.7) —
-  https://docs.aws.amazon.com/nova/latest/nova2-userguide/using-converse-api.html .
-* The Converse request field for the processing tier is
-  ``serviceTier: {"type": "default" | "flex" | "priority" | "reserved"}`` and the
-  response echoes the tier actually used —
-  https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ServiceTier.html ,
-  https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html .
-* Google Gemma 3 12B IT (``google.gemma-3-12b-it``) supports Bedrock's native
-  structured outputs on bedrock-runtime but lists client-side tool calling only
-  on the bedrock-mantle endpoint (model card:
-  https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-google-gemma-3-12b-it.html),
-  and forced tool choice is Nova/Claude-3-only (above). Gemma therefore gets
-  the JSON-schema output format ``outputConfig.textFormat`` —
-  https://docs.aws.amazon.com/bedrock/latest/userguide/structured-output.html
-  (not live-verified; Phase 1 only spends on Nova).
-"""
+Nova uses forced tool output, other current models use auto tool output.
+Only supported current reasoning controls are sent. No InvokeModel fallback.
+Token usage is captured before output parsing so failed responses are billable."""
 
 from __future__ import annotations
 
@@ -78,7 +28,6 @@ _CLAUDE_GENERATION_RE = re.compile(r"claude-(?:fable|opus|sonnet|haiku)-(\d+)")
 
 _ANTHROPIC_ADAPTIVE_EFFORTS = frozenset({"low", "medium", "high", "max"})
 _OPENAI_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
-_LEGACY_THINKING_BUDGETS = {"medium": 2048, "high": 8192, "max": 32768}
 
 #: Converse ``serviceTier.type`` values (API_runtime_ServiceTier.html).
 SERVICE_TIERS = frozenset({"default", "flex", "priority", "reserved"})
@@ -93,38 +42,7 @@ _NOVA2_REASONING_EFFORTS = {"medium": "medium", "high": "high", "max": "high"}
 
 
 class BedrockInvoker(DirectApiInvoker):
-    """Direct-API adapter for Amazon Bedrock (Converse API).
-
-    Constructed as ``BedrockInvoker(model=<id>)``. A metered backend: blank model
-    ids are rejected at construction.
-
-    Parameters:
-        model: Bedrock model id (base id or inference-profile id). Required.
-        region: AWS region override. Defaults to ``BEDROCK_REGION`` env var,
-            then ``us-east-1``.
-        client: An injected ``bedrock-runtime`` client (for tests). When
-            ``None``, a lazy singleton is built on first call.
-        max_tokens: Maximum output tokens for ``inferenceConfig``. Defaults to
-            the ``BEDROCK_MAX_TOKENS`` env var, then :data:`DEFAULT_MAX_TOKENS`.
-            Thinking tokens count against this budget on adaptive models.
-        max_retries: ``botocore`` adaptive retry ``max_attempts``.
-        system_prompt_delivery: ``"native"`` (default) delivers the system
-            prompt via the Converse ``system`` field; ``"prepend"`` folds it
-            into the user message (fallback for models that reject a native
-            system field).
-        use_invoke_model: When ``True``, ``_invoke_provider`` calls
-            ``client.invoke_model(...)`` instead of ``client.converse(...)``,
-            and ``_extract_raw`` handles the different response format. This is
-            the isolated seam for models the Converse API does not serve.
-        temperature: Optional ``inferenceConfig.temperature``. ``None`` (the
-            default) sends nothing and keeps the model's own default. The skim
-            stage uses ``0.0`` for deterministic extraction.
-        service_tier: Optional Converse ``serviceTier.type`` (one of
-            :data:`SERVICE_TIERS`). ``None`` sends nothing (= standard tier).
-            The skim stage requests ``"flex"``; the tier the request was
-            actually served on is carried back in ``usage["serviceTier"]`` so
-            :mod:`src.backends.cost` prices what was billed, not what was asked.
-    """
+    """Direct Bedrock Converse execution. All models require an explicit ID."""
 
     BACKEND_NAME: str = "bedrock"
     DEFAULT_MODEL: str = ""  # metered → must be set explicitly
@@ -137,8 +55,6 @@ class BedrockInvoker(DirectApiInvoker):
         client: Any | None = None,
         max_tokens: int | None = None,
         max_retries: int = 4,
-        system_prompt_delivery: str = "native",
-        use_invoke_model: bool = False,
         temperature: float | None = None,
         service_tier: str | None = None,
     ) -> None:
@@ -156,13 +72,6 @@ class BedrockInvoker(DirectApiInvoker):
             max_tokens = int(os.environ.get("BEDROCK_MAX_TOKENS", DEFAULT_MAX_TOKENS))
         self._max_tokens = max_tokens
         self._max_retries = max_retries
-        if system_prompt_delivery not in ("native", "prepend"):
-            raise ValueError(
-                f"system_prompt_delivery must be 'native' or 'prepend', "
-                f"got {system_prompt_delivery!r}"
-            )
-        self._system_prompt_delivery = system_prompt_delivery
-        self._use_invoke_model = use_invoke_model
         if temperature is not None and not (0.0 <= float(temperature) <= 1.0):
             raise ValueError(f"temperature must be within [0.0, 1.0], got {temperature!r}")
         self._temperature = None if temperature is None else float(temperature)
@@ -184,24 +93,11 @@ class BedrockInvoker(DirectApiInvoker):
         """Any Amazon Nova text model (Nova 1 and 2): forced tool choice supported."""
         return "amazon.nova-" in self.model.lower()
 
-    def _is_gemma(self) -> bool:
-        return "google.gemma" in self.model.lower()
 
     def _structured_output_mode(self) -> str:
-        """How this model is asked for schema-shaped JSON.
-
-        ``forced_tool``: Amazon Nova — ``toolChoice.tool`` (constrained decoding).
-        ``json_schema``: Google Gemma — Converse ``outputConfig.textFormat``
-        (no client-side tool calling on bedrock-runtime; forced tool choice is
-        Nova/Claude-3-only per the ToolChoice API reference).
-        ``auto_tool``: everything else (Claude 5, GPT) — the offered tool under
-        ``toolChoice.auto``; Fable 5.1 rejects ``tool``/``any`` (live-verified
-        2026-09-14) and every current model calls the offered tool anyway.
-        """
+        """Nova supports forced tool choice; current other models use automatic choice."""
         if self._is_nova():
             return "forced_tool"
-        if self._is_gemma():
-            return "json_schema"
         return "auto_tool"
 
     # ------------------------------------------------------------------ #
@@ -238,49 +134,12 @@ class BedrockInvoker(DirectApiInvoker):
     # Provider hook: structured-output shaping                           #
     # ------------------------------------------------------------------ #
     def _shape_structured_output(self, **adapter_opts) -> Optional[dict]:
-        """Build the Converse request fragment for native structured output.
-
-        When ``adapter_opts`` contains a ``schema`` key (a JSON Schema dict),
-        returns a dict of request kwargs that ``_invoke_provider`` merges into
-        the call — the shape depends on :meth:`_structured_output_mode`:
-
-        * ``forced_tool`` (Nova): ``toolConfig`` with one ``ToolSpecification``
-          carrying the schema as ``inputSchema`` and
-          ``toolChoice: {"tool": {"name": "structured_output"}}``, so the model
-          must answer with a schema-valid tool call.
-        * ``auto_tool`` (Claude 5 / GPT): the same ``toolConfig`` with
-          ``toolChoice: {"auto": {}}``. Claude Fable 5.1 rejects
-          ``toolChoice.tool`` / ``.any`` with a ValidationException
-          (live-verified), while every current model reliably calls the offered
-          tool under ``auto``. If a model answers in text instead,
-          ``_extract_raw`` falls back to the text and the shared JSON backstop
-          validates it; an unparseable reply raises ``ValueError`` so the caller
-          retries or aborts rather than storing garbage.
-        * ``json_schema`` (Gemma): ``outputConfig.textFormat`` of type
-          ``json_schema`` (Bedrock structured outputs); the reply is a text
-          block holding the JSON.
-        """
+        """Offer the requested schema as a forced Nova tool or an automatic tool."""
         schema = adapter_opts.get("schema")
         if schema is None:
             return None
 
         mode = self._structured_output_mode()
-        if mode == "json_schema":
-            return {
-                "outputConfig": {
-                    "textFormat": {
-                        "type": "json_schema",
-                        "structure": {
-                            "jsonSchema": {
-                                "name": STRUCTURED_OUTPUT_TOOL,
-                                "description": "Respond with structured output matching the schema.",
-                                "schema": json.dumps(schema),
-                            }
-                        },
-                    }
-                }
-            }
-
         tool_choice = (
             {"tool": {"name": STRUCTURED_OUTPUT_TOOL}} if mode == "forced_tool" else {"auto": {}}
         )
@@ -311,37 +170,10 @@ class BedrockInvoker(DirectApiInvoker):
         timeout: int,
         structured_schema: Optional[dict],
     ) -> Any:
-        """Build and execute the Converse API call (or InvokeModel fallback).
-
-        Constructs the request per Req 4 (modelId, system, messages,
-        inferenceConfig). Keeps user_message distinct from the system prompt
-        (Req 5.2). Supports native and prepend system-prompt delivery (Req 5.1,
-        5.3). When ``use_invoke_model`` is True, calls ``invoke_model`` instead.
-        """
-        if self._use_invoke_model:
-            return self._invoke_model_fallback(
-                system_prompt=system_prompt,
-                user_message=user_message,
-                effort=effort,
-                timeout=timeout,
-            )
-
+        """Build and execute one Converse request with distinct system and user messages."""
         client = self._get_client(timeout)
-
-        # --- Build messages ---
-        if self._system_prompt_delivery == "prepend":
-            # Fallback: fold system prompt into user message.
-            combined = f"{system_prompt}\n\n{user_message}"
-            messages = [
-                {"role": "user", "content": [{"text": combined}]}
-            ]
-            system_field: list[dict] | None = None
-        else:
-            # Native delivery (default).
-            messages = [
-                {"role": "user", "content": [{"text": user_message}]}
-            ]
-            system_field = [{"text": system_prompt}]
+        messages = [{"role": "user", "content": [{"text": user_message}]}]
+        system_field = [{"text": system_prompt}]
 
         # --- Build request kwargs ---
         inference_config: dict[str, Any] = {"maxTokens": self._max_tokens}
@@ -392,26 +224,7 @@ class BedrockInvoker(DirectApiInvoker):
     # Effort → native reasoning control mapping (Req 11)                 #
     # ------------------------------------------------------------------ #
     def _map_effort_to_model_fields(self, effort: str) -> dict[str, Any] | None:
-        """Map an effort level onto ``additionalModelRequestFields``.
-
-        The control differs by vendor and model generation (all live-verified
-        against Bedrock Runtime on 2026-09-14):
-
-        * OpenAI (``openai.gpt-*``): ``{"reasoning": {"effort": <level>}}``.
-          (``reasoning_effort`` is rejected as an unknown parameter.)
-        * Claude 5-series (``claude-{fable,opus,sonnet}-5*``): adaptive thinking,
-          ``{"thinking": {"type": "adaptive"}, "output_config": {"effort": ...}}``.
-          (``thinking.type=enabled`` + ``budget_tokens`` is rejected.)
-        * Claude 4.x: extended thinking with a token budget per effort level;
-          ``low`` disables thinking.
-        * Amazon Nova 2 (``amazon.nova-2-*``): ``{"reasoningConfig": {"type":
-          "disabled"}}`` for ``low``; ``{"type": "enabled", "maxReasoningEffort":
-          medium|high}`` for ``medium`` / ``high`` (``max`` → ``high``). Nova 1
-          models have no reasoning control and stay provenance-only.
-
-        The mapping is best-effort and never raises — an unrecognized model or
-        effort level records effort as provenance only (Req 11.2).
-        """
+        """Use current Nova, OpenAI and Claude 5 reasoning controls. Older models retain effort as provenance only."""
         model_lower = self.model.lower()
         effort_lower = effort.lower()
 
@@ -443,14 +256,7 @@ class BedrockInvoker(DirectApiInvoker):
                 return {"thinking": {"type": "adaptive"}, "output_config": {"effort": effort_lower}}
             return self._unrecognized_effort(effort)
 
-        # Claude 4.x: extended thinking budgets (heuristic; no cross-backend
-        # equivalence is assumed — Req 11.3).
-        if effort_lower == "low":
-            return {"thinking": {"type": "disabled"}}
-        budget = _LEGACY_THINKING_BUDGETS.get(effort_lower)
-        if budget is None:
-            return self._unrecognized_effort(effort)
-        return {"thinking": {"type": "enabled", "budget_tokens": budget}}
+        return None  # Older generations retain effort as provenance only.
 
     def _unrecognized_effort(self, effort: str) -> None:
         logger.debug(
@@ -460,77 +266,13 @@ class BedrockInvoker(DirectApiInvoker):
         return None
 
     # ------------------------------------------------------------------ #
-    # InvokeModel fallback seam (Req 4.5)                                #
     # ------------------------------------------------------------------ #
-    def _invoke_model_fallback(
-        self,
-        *,
-        system_prompt: str,
-        user_message: str,
-        effort: str | None,
-        timeout: int,
-    ) -> Any:
-        """Call ``client.invoke_model(...)`` for models Converse does not serve.
-
-        Returns a dict with the JSON-decoded response body under the key
-        ``_invoke_model_body`` so that ``_extract_raw`` can distinguish it from
-        a Converse response.
-        """
-        client = self._get_client(timeout)
-
-        # Build a generic request body (Anthropic Messages API format as the
-        # most common Bedrock provider; subclasses can override for other
-        # providers).
-        request_body: dict[str, Any] = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": self._max_tokens,
-            "messages": [{"role": "user", "content": user_message}],
-        }
-        if self._system_prompt_delivery == "native":
-            request_body["system"] = system_prompt
-
-        response = client.invoke_model(
-            modelId=self.model,
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps(request_body),
-        )
-
-        # Read the streaming body and parse as JSON.
-        body_bytes = response["body"].read()
-        body_json = json.loads(body_bytes)
-
-        # Wrap in a sentinel so _extract_raw can identify InvokeModel responses.
-        return {"_invoke_model_body": body_json}
 
     # ------------------------------------------------------------------ #
     # Provider hook: extract final text from response                     #
     # ------------------------------------------------------------------ #
     def _extract_raw(self, response: Any) -> str:
-        """Extract final text from a Converse or InvokeModel response.
-
-        For Converse responses:
-        - If structured output was requested and the response contains a
-          ``toolUse`` block, prefer its ``input`` payload (a dict serialized to
-          JSON string).
-        - Otherwise, concatenate ``text`` blocks from ``output.message.content``.
-
-        For InvokeModel responses (``_invoke_model_body`` sentinel):
-        - Extract text from the provider-specific body (Anthropic Messages
-          format: ``content[].text``).
-        """
-        # --- InvokeModel fallback response ---
-        if isinstance(response, dict) and "_invoke_model_body" in response:
-            body = response["_invoke_model_body"]
-            # Anthropic Messages API format: {"content": [{"type": "text", "text": "..."}]}
-            content_blocks = body.get("content", [])
-            text_parts = [
-                block.get("text", "")
-                for block in content_blocks
-                if block.get("type") == "text"
-            ]
-            return "".join(text_parts)
-
+        """Extract native tool output or text; reject truncated completions."""
         # --- Converse response ---
         # A max_tokens stop means the reply is incomplete — on adaptive-thinking
         # models often thinking-only, with no answer at all. Never parse it as
@@ -579,21 +321,6 @@ class BedrockInvoker(DirectApiInvoker):
         ``outputTokens``, ``totalTokens``. If present, return real usage; if
         absent, tolerate-and-warn (Req 6.2, 6.3).
         """
-        # InvokeModel fallback responses may carry usage differently.
-        if isinstance(response, dict) and "_invoke_model_body" in response:
-            body = response["_invoke_model_body"]
-            usage_block = body.get("usage")
-            if usage_block and isinstance(usage_block, dict):
-                return (
-                    {
-                        "inputTokens": usage_block.get("input_tokens"),
-                        "outputTokens": usage_block.get("output_tokens"),
-                        "totalTokens": usage_block.get("total_tokens"),
-                    },
-                    "real",
-                )
-            return self._warn_missing_usage("InvokeModel response missing usage")
-
         # Standard Converse response path.
         usage_block = response.get("usage") if isinstance(response, dict) else None
         if usage_block and isinstance(usage_block, dict):

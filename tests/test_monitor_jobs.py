@@ -15,7 +15,7 @@ broken for days. The failures were not the ones being reported:
 
 So these tests pin the distinctions that make the monitors readable again: OK vs
 EXPIRED vs TOOL-MISSING, REQUIRED vs ADVISORY, and ❌ vs ⚠ with an exit code that
-follows only the ❌ column. Everything is stubbed — no AWS call, no MCP server, no
+distinguishes failed credentials from unavailable required checks. Everything is stubbed — no AWS call, no MCP server, no
 database, no Quick corpus is touched.
 """
 
@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import shlex
 import time
 
 import pytest
@@ -102,7 +103,7 @@ def _fake_psql(tmp_path: Path) -> Path:
     """
     return _script(
         tmp_path / "psql",
-        f"#!{sys.executable}\n"
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} - \"$@\" <<'PYTHON'\n"
         "import json, os, sys\n"
         'rules = json.loads(os.environ.get("FAKE_PSQL_AGES", "{}"))\n'
         "sql = sys.argv[-1]\n"
@@ -110,7 +111,7 @@ def _fake_psql(tmp_path: Path) -> Path:
         "for key, value in rules.items():\n"
         '    if key != "__default__" and key in sql:\n'
         "        age = value\n"
-        "print(age)\n",
+        "print(age)\nPYTHON\n",
     )
 
 
@@ -160,14 +161,16 @@ def test_missing_tool_is_reported_distinctly_and_is_not_called_an_expired_creden
     """The regression that made this job cry wolf: exit 127 read as "EXPIRED"."""
     result = _run_credentials(tmp_path, AWS_BIN=str(tmp_path / "no-such-aws"))
 
-    assert result.returncode == 0, result.stdout
+    assert result.returncode == 2, result.stdout
+    assert "REQUIRED CHECK UNKNOWN" in result.stdout
+    assert "all required credentials valid" not in result.stdout
     assert "tool not found on PATH" in result.stdout
     assert "check NOT RUN" in result.stdout
     assert "EXPIRED/BROKEN" not in result.stdout
     assert "❌" not in result.stdout
     # The hint must name the real cause so the next reader does not re-derive it.
     assert "PATH=/usr/bin:/bin:/usr/sbin:/sbin" in result.stdout
-    assert _notifications(tmp_path) == []
+    assert len(_notifications(tmp_path)) == 1
 
 
 def test_broken_required_credential_fails_the_job_and_notifies(tmp_path: Path):
@@ -319,3 +322,28 @@ def test_the_upstream_check_never_reads_the_quick_corpus(tmp_path: Path):
 
     assert result.returncode == 0, result.stdout
     assert "✅ quick_upstream ok" in result.stdout
+
+
+def test_required_probe_exit127_is_unknown_not_expired(tmp_path):
+    aws = _script(tmp_path / "broken-aws", "#!/bin/bash\nexit 127\n")
+    result = _run_credentials(tmp_path, AWS_BIN=str(aws))
+    assert result.returncode == 2
+    assert "REQUIRED CHECK UNKNOWN" in result.stdout
+    assert "EXPIRED/BROKEN" not in result.stdout
+    assert "all required credentials valid" not in result.stdout
+
+
+def test_local_static_key_warning_does_not_guess_age_or_print_values(tmp_path):
+    # Real Python handles only the local metadata block; MCP probe blocks are
+    # intercepted before imports, so no provider or source store is contacted.
+    import shlex
+    interpreter = _script(tmp_path / "metadata-python", "#!/bin/bash\n"
+                          "PAYLOAD=$(cat)\n"
+                          "if [[ \"$PAYLOAD\" == *'from src.capture.mcp_client'* ]]; then exit 0; fi\n"
+                          f"exec {shlex.quote(sys.executable)} -c \"$PAYLOAD\"\n")
+    credentials = tmp_path / "credentials"
+    credentials.write_text("[second-brain-jobs]\naws_access_key_id=AKIASYNTHETIC\naws_secret_access_key=never-print-this\n")
+    result = _run_credentials(tmp_path, SECOND_BRAIN_PYTHON=str(interpreter), AWS_SHARED_CREDENTIALS_FILE=str(credentials))
+    assert result.returncode == 0
+    assert "STATIC KEY AGE UNKNOWN" in result.stdout
+    assert "never-print-this" not in result.stdout and "AKIASYNTHETIC" not in result.stdout

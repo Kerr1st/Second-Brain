@@ -152,7 +152,7 @@ def test_build_source_map_duplicate_source_first_sorted_wins(populated):
 
 def test_parse_all_yields_only_entries_with_source_file(populated):
     items = list(crawlee.parse_all())
-    assert [(u, t) for u, t, _ in items] == [(URL_A, "article"), (URL_B, "youtube")]
+    assert [(u, t) for u, t, _ in items] == [(URL_A, "article"), (URL_B, "youtube"), (URL_ORPHAN, "article")]
     contents = {u: c for u, _, c in items}
     assert contents[URL_A].startswith("# A\n\nSource: https://example.org/a\n")
     assert "Transcript." in contents[URL_B]
@@ -167,11 +167,11 @@ def test_parse_all_never_yields_empty_or_non_http_url(populated):
 
 def test_parse_all_honours_already_processed(populated):
     items = list(crawlee.parse_all(already_processed={URL_A}))
-    assert [u for u, _, _ in items] == [URL_B]
-    assert list(crawlee.parse_all(already_processed={URL_A, URL_B})) == []
+    assert [u for u, _, _ in items] == [URL_B, URL_ORPHAN]
+    assert list(crawlee.parse_all(already_processed={URL_A, URL_B, URL_ORPHAN})) == []
 
 
-def test_parse_all_regression_42_empty_url_rows_yield_nothing(store):
+def test_parse_all_regression_empty_url_rows_do_not_duplicate_valid_source(store):
     """Old bug: 42 rows with an empty source cell parsed to url "" and every one
     of them matched the first source file by substring ('' in text)."""
     rows = "".join(_row(f"Row {i}", "", date="2026-06-02") for i in range(42))
@@ -181,8 +181,9 @@ def test_parse_all_regression_42_empty_url_rows_yield_nothing(store):
 
     assert crawlee.parse_index() == []
     assert crawlee.last_parse_stats["skipped_no_url"] == 42
-    assert list(crawlee.parse_all()) == []
-    assert list(crawlee.parse_all(already_processed={""})) == []
+    assert [(url, kind) for url, kind, _ in crawlee.parse_all()] == [("https://example.org/first", "article")]
+    assert len(list(crawlee.parse_all(already_processed={""}))) == 1
+    assert list(crawlee.parse_all(already_processed={"https://example.org/first"})) == []
 
 
 def test_parse_all_empty_source_header_never_matches(store):
@@ -211,7 +212,7 @@ def test_find_unindexed_output_files_ignores_indexed_and_bad_urls(populated):
 
 def test_parse_all_wraps_unindexed_output_file(populated):
     (populated["output"] / "new.md").write_text("# New page\n\nSource: https://example.org/new\n\n---\n\nnew body\n")
-    items = list(crawlee.parse_all(already_processed={URL_A, URL_B}))
+    items = list(crawlee.parse_all(already_processed={URL_A, URL_B, URL_ORPHAN}))
     assert [(u, t) for u, t, _ in items] == [("https://example.org/new", "article")]
     content = items[0][2]
     assert content.startswith("# New page\n\nSource: https://example.org/new\nType: web-page\nDate: ")
@@ -229,3 +230,19 @@ def test_is_http_url_rejects(bad):
 @pytest.mark.parametrize("good", ["https://example.org", "http://x.y/z?q=1|2", URL_B])
 def test_is_http_url_accepts(good):
     assert crawlee.is_http_url(good) is True
+
+
+def test_unindexed_cookie_source_is_captured_once_and_shared_filter_knows_it(store):
+    from src.capture.filters import load_indexed_urls
+    from src.capture.crawlee import capture
+    content = _source_file(URL_ORPHAN, "Cookie page", "Saved internal page.")
+    (store["sources"] / "cookie.md").write_text(content)
+    (store["output"] / "duplicate.md").write_text(content)
+    assert list(crawlee.parse_all()) == [(URL_ORPHAN, "article", content)]
+    assert crawlee.last_parse_stats["unindexed_sources"] == 1
+    assert crawlee.last_parse_stats["unindexed_output"] == 0
+    assert load_indexed_urls(store["index"], sources_dir=store["sources"]) == {URL_ORPHAN}
+    assert list(crawlee.parse_all(already_processed={URL_ORPHAN})) == []
+    result = capture(dry_run=True)
+    assert result["article"]["planned"] == 1
+    assert result["source_files"]["unindexed_sources"] == 1

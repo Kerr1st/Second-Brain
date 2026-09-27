@@ -29,12 +29,18 @@ import logging
 import os
 import re
 import sys
+from mcp.shared.exceptions import McpError
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from src.capture.mcp_client import (
     CaptureFailure, McpClient, McpToolError, auth_error_in_payload, classify_error, report_failure,
 )
+
+from src.capture.common import CaptureBatch, exit_code
+from src.capture.framework import run_channel
+from src.capture.render import render_header_lines
+from src.capture.window import completed_days, day_bounds_utc, local_zone
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +91,8 @@ def display_name(user: Any) -> str:
 
 
 def day_source_url(conversation_id: str, day: date) -> str:
+    if not conversation_id or not conversation_id.strip():
+        raise ValueError("Slack conversation identity is required")
     return f"slack://{conversation_id}/{day.isoformat()}"
 
 
@@ -94,7 +102,7 @@ def _hhmm(ts: str | None) -> str:
         return "--:--"
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return dt.astimezone().strftime("%H:%M")
+        return dt.astimezone(local_zone()).strftime("%H:%M")
     except ValueError:
         return ts[11:16] if len(ts) >= 16 else ts
 
@@ -152,22 +160,8 @@ def render_day(conv: dict, day: date, messages: list[dict]) -> tuple[str, str] |
         header.append(f"Purpose: {conv['purpose']}")
     if conv.get("topic"):
         header.append(f"Topic: {conv['topic']}")
-    return day_source_url(conv["id"], day), "\n".join(header) + "\n\n---\n\n" + body
+    return day_source_url(conv["id"], day), render_header_lines(header, body)
 
-
-def completed_days(days_back: int, today: date | None = None) -> list[date]:
-    """The ``days_back`` most recent *completed* local days, oldest first."""
-    today = today or datetime.now().astimezone().date()
-    return [today - timedelta(days=i) for i in range(days_back, 0, -1)]
-
-
-def day_bounds_utc(day: date) -> tuple[str, str]:
-    """Local-midnight bounds of ``day`` as UTC ISO strings for since/until."""
-    tz = datetime.now().astimezone().tzinfo
-    start = datetime.combine(day, time.min, tzinfo=tz)
-    end = start + timedelta(days=1)
-    fmt = "%Y-%m-%dT%H:%M:%SZ"
-    return start.astimezone(timezone.utc).strftime(fmt), end.astimezone(timezone.utc).strftime(fmt)
 
 
 # --------------------------------------------------------------------------- #
@@ -274,7 +268,7 @@ def _dm_inactive_for(conv: dict, days: list[date]) -> bool:
 
 async def collect(call: Call, days: list[date], already: set[str],
                   max_conversations: int = MAX_CONVERSATIONS) -> list[tuple[str, str]]:
-    items: list[tuple[str, str]] = []
+    items = CaptureBatch()
     convs = await list_conversations(call, max_conversations)
     logger.info("Slack: %d conversations, days %s", len(convs), [d.isoformat() for d in days])
     for conv in convs:
@@ -287,7 +281,8 @@ async def collect(call: Call, days: list[date], already: set[str],
             try:
                 meta, messages = await fetch_day(call, conv, day)
             except McpToolError as e:
-                logger.warning("get_messages failed for %s on %s: %s", conv.get("name"), day, e)
+                logger.warning("Slack conversation-day fetch failed: %s", type(e).__name__)
+                items.failed += 1
                 continue
             if not messages:
                 continue
@@ -318,14 +313,10 @@ async def _run_async(days_back: int, max_conversations: int, dry_run: bool) -> d
             items = await collect(client.call_json, days, already, max_conversations)
     except CaptureFailure:
         raise
-    except Exception as e:  # noqa: BLE001 - classify, then exit with the right code
+    except (OSError, ValueError, RuntimeError, asyncio.TimeoutError, McpError) as e:
         raise CaptureFailure(classify_error(e), str(e),
                              AUTH_FIX if classify_error(e) == "auth" else None) from e
-    if dry_run:
-        for url, _ in items:
-            logger.info("[DRY] %s", url)
-        return {"new": len(items)}
-    stats = ingest_batch(items, SOURCE_TYPE) if items else {"processed": 0, "skipped": 0, "failed": 0}
+    stats = run_channel(SOURCE_TYPE, items, dry_run=dry_run, ingest=ingest_batch)
     logger.info("%s: %s", SOURCE_TYPE, stats)
     return stats
 
@@ -346,8 +337,8 @@ def main() -> int:
         stats = capture(days_back=args.days_back, max_conversations=args.max_conversations, dry_run=args.dry_run)
     except CaptureFailure as failure:
         return report_failure(failure, SOURCE_TYPE)
-    logger.info("captures_this_cycle: slack=%d", stats.get("processed", stats.get("new", 0)))
-    return 0
+    logger.info("captures_this_cycle: slack=%d", stats.get("processed", 0))
+    return exit_code(stats)
 
 
 if __name__ == "__main__":

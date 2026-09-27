@@ -1,8 +1,6 @@
 #!/bin/bash
-# Nightly browser history + reading capture. Daily browsing-log documents from
-# Chrome's History DB; pages actually read are sent to the Crawlee batch scraper
-# (needs node on PATH), and the 03:00 ingest job lands their full text.
+# Command adapter; launchd invokes this through job_wrapper.sh.
 set -uo pipefail
-export PATH="/opt/homebrew/bin:$PATH"
-cd "$(dirname "$0")/../.."          # repo root, so `-m src.capture.browser` resolves
-exec .venv/bin/python -m src.capture.browser "$@"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$REPO_ROOT" || exit 2
+exec "${SECOND_BRAIN_PYTHON:-$REPO_ROOT/.venv/bin/python}" -m src.capture.browser "$@"

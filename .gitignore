@@ -32,3 +32,9 @@ evaluations/results/
 backups/
 logs/
 .coverage
+# Local encrypted recovery and Dream artifacts
+*.tar.gpg
+*.receipt.json
+/.dream/
+
+/.maintenance/

@@ -86,7 +86,7 @@ class FakeStore:
     def upsert_skim(self, memory_id, **kw):
         self.calls.append("upsert_skim")
         if memory_id in self.fail_upsert_for:
-            raise RuntimeError("db down")
+            raise OSError("db down")
         self.rows[(memory_id, kw["model"], kw["prompt_version"])] = {"memory_id": memory_id, **kw}
         return "row-id"
 
@@ -376,3 +376,17 @@ def test_paid_invalid_provider_response_counts_toward_skim_subcap():
     assert result.aborted_on_cap
     assert len(invoker.calls) == 1
     assert store.rows == {}
+
+
+def test_storage_failures_stop_at_threshold_with_partial_counts(monkeypatch):
+    from src.skim.runner import SkimFailureThreshold
+    store = FakeStore()
+    monkeypatch.setattr(store, "upsert_skim", lambda *a, **kw: (_ for _ in ()).throw(OSError("disk")))
+    inv = FakeInvoker([_record()] * 5)
+    with pytest.raises(SkimFailureThreshold) as stopped:
+        skim_window(WINDOW, invoker=inv, model=MODEL, prompt_version=PROMPT_VERSION,
+                    tracker=SpendTracker(9), cap_usd=1, run_id="fixture", fetch_docs=lambda _: [_doc() for _ in range(5)], store=store)
+    stats = stopped.value.skim_result.to_stats()
+    assert len(inv.calls) == 3 and stats["skim_store_failed"] == 3
+    assert stats["skim_call_failed"] == 0 and stats["skim_aborted_on_failures"]
+    assert stats["skim_cost_usd"] > 0

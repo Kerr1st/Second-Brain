@@ -126,7 +126,9 @@ def test_launch_agent_runs_general_capture_every_six_hours_without_backfill():
     assert job["StartInterval"] == 21600
     assert job["ProgramArguments"] == [
         "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
         "/Users/kerrfir/second-brain/scripts/jobs/codex_capture.sh",
+        "codex-capture",
     ]
     assert "--backfill" not in job["ProgramArguments"]
     assert "CODEX_CAPTURE_CANARY_TASK_ID" not in job.get("EnvironmentVariables", {})

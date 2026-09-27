@@ -153,6 +153,6 @@ class TestLedgerRoundTrip:
         rows = dream_cycle_db.get_slices_for_run(rid)
         assert [r["name"] for r in rows] == ["second"]
 
-    def test_ledger_never_raises(self):
-        with patch.object(dream_cycle_db, "record_slices", side_effect=RuntimeError("db down")):
+    def test_ledger_recovers_from_storage_failure(self):
+        with patch.object(dream_cycle_db, "record_slices", side_effect=OSError("db down")):
             assert ledger.record_run_slices(str(uuid.uuid4()), "scheduled", [], started_at=NOW) == {}

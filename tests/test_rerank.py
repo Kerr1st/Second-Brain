@@ -233,6 +233,8 @@ class TestCompleteRerankFormula:
         mem_class=st.one_of(st.none(), st.sampled_from(["semantic", "episodic", "procedural"])),
         query_project=st.one_of(st.none(), st.just("project-a")),
         mem_project=st.one_of(st.none(), st.just("project-a"), st.just("project-b")),
+        encoding_context=st.sampled_from([None, "alpha beta gamma", "beta unrelated", "no match"]),
+        status=st.sampled_from(["active", "superseded", "archived"]),
     )
     @settings(max_examples=100)
     def test_rerank_score_matches_v2_formula(
@@ -246,6 +248,8 @@ class TestCompleteRerankFormula:
         mem_class,
         query_project,
         mem_project,
+        encoding_context,
+        status,
     ):
         """For any memory with known component values, rerank_score matches V2 formula."""
         import math
@@ -272,14 +276,14 @@ class TestCompleteRerankFormula:
             "content": content,
             "title": title,
             "type": mem_type,
-            "status": "active",
+            "status": status,
             "created_at": created_at,
             "access_count": access_count,
             "last_accessed_at": last_accessed_at,
             "mem_class": mem_class,
             "project": mem_project,
             "metadata": {"depth_score": depth_score},
-            "encoding_context": None,
+            "encoding_context": encoding_context,
         }
 
         # Independently compute expected score using the same logic as rerank()
@@ -291,8 +295,8 @@ class TestCompleteRerankFormula:
         expected_overlap = _oracle_overlap(query_tokens, all_tokens)
         expected_title_overlap = _oracle_overlap(query_tokens, title_tokens)
 
-        # Context overlap (None encoding_context → 0.0)
-        expected_context_overlap = 0.0
+        context_tokens = set(re.sub(r"[^\w\s]", " ", encoding_context or "").lower().split())
+        expected_context_overlap = _oracle_overlap(query_tokens, context_tokens)
 
         # Recency — power law: R = (1 + t/S)^(-b)
         expected_days_old = max(0, (fixed_now - created_at).total_seconds() / 86400)
@@ -318,8 +322,7 @@ class TestCompleteRerankFormula:
         # Project penalty
         expected_project_penalty = -0.15 if (query_project and mem_project and mem_project != query_project) else 0.0
 
-        # Superseded penalty (status is "active" → 0.0)
-        expected_superseded_penalty = 0.0
+        expected_superseded_penalty = -0.20 if status == "superseded" else 0.0
 
         # Staleness penalty (active forgetting)
         if access_count == 0 and created_at:

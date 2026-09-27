@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from src.backends.base import (
-    METRICS_DIR,
+    InvocationBase,
     ModelRefusalError, assert_corpus_route, corpus_role_for_stage,
     InvocationResult,
     _write_metrics_line,
@@ -49,7 +49,7 @@ from src.backends.base import (
 logger = logging.getLogger(__name__)
 
 
-class DirectApiInvoker:
+class DirectApiInvoker(InvocationBase):
     """Template-method base for direct-API (tool-less) backends.
 
     Implements the :class:`src.backends.base.Invoker` contract via a shared
@@ -162,11 +162,13 @@ class DirectApiInvoker:
             except Exception as exc:
                 # Keep the original exception type for existing callers. Stage
                 # consumers can meter and classify returned contract failures.
+                metrics["_usage"] = usage
                 exc.model_response_received = True
                 exc.usage = usage
                 exc.usage_source = usage_source
                 metrics["error"] = metrics.get("error") or type(exc).__name__
                 raise
+            metrics["_usage"] = usage
             metrics["success"] = True
 
             return InvocationResult(
@@ -177,78 +179,16 @@ class DirectApiInvoker:
             )
 
         finally:
-            metrics["duration_s"] = round(time.monotonic() - t0, 3)
+            metrics["latency_s"] = round(time.monotonic() - t0, 3)
             self._record_metrics(metrics, run_id)
 
     # ------------------------------------------------------------------ #
     # Shared mechanics (the base owns these)                             #
     # ------------------------------------------------------------------ #
-    def _init_metrics(
-        self,
-        *,
-        system_prompt: str,
-        user_message: str,
-        timeout: int,
-        effort: str | None,
-        stage: str | None,
-        run_id: str | None,
-    ) -> dict:
-        """Build the per-call metrics dict."""
-        return {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "run_id": run_id,
-            "backend": self.BACKEND_NAME,
-            "model": self.model,
-            "stage": stage,
-            "effort": effort,
-            "timeout_s": timeout,
-            "system_prompt_chars": len(system_prompt),
-            "user_message_chars": len(user_message),
-            "input_chars": len(system_prompt) + len(user_message),
-            "output_chars": 0,
-            "success": False,
-            "error": None,
-            "usage_source": None,
-            "real_input_tokens": None,
-            "real_output_tokens": None,
-            "duration_s": None,
-        }
 
-    def _parse(self, raw: str, metrics: dict) -> Any:
-        """Recover the JSON payload via the shared backstop; ``ValueError`` if none."""
-        try:
-            return self.parse_json_output(raw)
-        except ValueError:
-            metrics["error"] = "json_parse_failed"
-            logger.error(
-                "Failed to parse JSON from %s output (%d chars).",
-                self.BACKEND_NAME, len(raw),
-            )
-            raise
 
-    def _record_metrics(self, metrics: dict, run_id: str | None) -> None:
-        """Append the per-call metrics line. Never raises."""
-        _write_metrics_line(metrics, run_id, self._metrics_dir())
 
-    def _metrics_dir(self) -> str:
-        """Directory the per-call metrics JSONL is written to."""
-        return METRICS_DIR
 
-    def _warn_missing_usage(self, context: str = "") -> tuple[None, str]:
-        """Tolerate-and-warn: log a loud warning, return (None, "estimate").
-
-        Called when a successful, parseable response is missing the usage block.
-        This is a metering gap, not an infrastructure failure — so it never raises.
-        (Req 6.2, 6.3)
-        """
-        msg = (
-            f"[{self.BACKEND_NAME}] Real usage expected from a metered backend "
-            f"but absent in the response."
-        )
-        if context:
-            msg += f" Context: {context}"
-        logger.warning(msg)
-        return (None, "estimate")
 
     # ------------------------------------------------------------------ #
     # Hooks adapters override                                            #

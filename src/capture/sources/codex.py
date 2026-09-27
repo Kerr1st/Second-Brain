@@ -121,48 +121,9 @@ def _task_ownership(
     return _TaskOwnership.UNKNOWN
 
 
-def _fallback_turn_key(task_id: str, timestamp: str) -> str:
-    """Derive a content-independent ID from a native event timestamp."""
-    evidence = f"{task_id}\n{timestamp}".encode("utf-8")
-    return "event-" + hashlib.sha256(evidence).hexdigest()
-
-
-def _authored_text_message(payload: dict) -> tuple[str, str, str] | None:
-    """Read the verified Desktop text shape, not arbitrary user-role context.
-
-    The native metadata distinguishes authored text from injected context. Keep
-    unknown/multimodal shapes out until their authorship and descriptors have a
-    reference integration; never copy attachment bytes into prompt text.
-    """
-    metadata = payload.get("internal_chat_message_metadata_passthrough")
-    if not isinstance(metadata, dict) or metadata.get("content_item_kinds") != ["user.text"]:
-        return None
-    turn_id = metadata.get("turn_id")
-    message_id = payload.get("id")
-    if not all(isinstance(value, str) and value for value in (turn_id, message_id)):
-        return None
-    content = payload.get("content")
-    if not isinstance(content, list) or not content or not all(
-        isinstance(item, dict)
-        and item.get("type") == "input_text"
-        and isinstance(item.get("text"), str)
-        for item in content
-    ):
-        return None
-    prompt = "\n".join(item["text"] for item in content)
-    return (prompt, message_id, turn_id) if prompt.strip() else None
-
-
-def _record_timestamp(value: object) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return None
-    return parsed.astimezone(UTC)
+from src.capture.sources.codex_turns import (
+    RolloutTurnAssembler, _fallback_turn_key, _authored_text_message, _record_timestamp,
+)
 
 
 def _load_sidebar_titles(path: Path) -> dict[str, _TitleObservation]:
@@ -216,44 +177,44 @@ def _load_sidebar_titles(path: Path) -> dict[str, _TitleObservation]:
     return observations
 
 
-def _rollout_records(source_locator: str):
-    """Yield complete JSONL records, ignoring only an in-progress final append."""
+def _fingerprint(path):
+    stat = Path(path).stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+
+def _read_rollout(source_locator):
+    """Return a bounded streaming reader plus its verified source fingerprint.
+
+    The caller must consume the iterator before constructing a snapshot. Any
+    concurrent rewrite aborts the capture, so no cursor advances over stale data.
+    """
     path = Path(source_locator)
-    before = path.stat()
-    before_fingerprint = (
-        before.st_dev,
-        before.st_ino,
-        before.st_size,
-        before.st_mtime_ns,
-    )
-    with path.open(encoding="utf-8") as rollout:
-        lines = rollout.readlines()
-    records = []
-    for line_number, line in enumerate(lines, start=1):
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError as exc:
-            is_final_partial = (
-                line_number == len(lines)
-                and not line.endswith(("\n", "\r"))
-            )
-            if is_final_partial:
-                break
-            raise CodexSourceParseError(
-                "invalid Codex rollout JSONL: malformed interior record "
-                f"at line {line_number}"
-            ) from exc
-    after = path.stat()
-    after_fingerprint = (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_mtime_ns,
-    )
-    if after_fingerprint != before_fingerprint:
-        raise CodexSourceChangedDuringRead(
-            "Codex rollout changed during read; retry the task"
-        )
+    fingerprint = _fingerprint(path)
+    def records():
+        with path.open(encoding="utf-8") as handle:
+            number = 0
+            while True:
+                line = handle.readline(8 * 1024 * 1024 + 1)
+                if not line:
+                    break
+                number += 1
+                if len(line) > 8 * 1024 * 1024:
+                    raise CodexSourceParseError("Codex rollout record exceeds bounded reader limit")
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    if not line.endswith(("\n", "\r")):
+                        break  # an in-progress final append
+                    raise CodexSourceParseError(f"invalid Codex rollout JSONL: malformed interior record at line {number}") from exc
+                yield record
+        if _fingerprint(path) != fingerprint:
+            raise CodexSourceChangedDuringRead("Codex rollout changed during read; retry the task")
+    return records(), fingerprint
+
+
+def _rollout_records(source_locator):
+    """Compatibility iterator; new captures also persist the returned fingerprint."""
+    records, _ = _read_rollout(source_locator)
     yield from records
 
 
@@ -290,20 +251,23 @@ def _local_image_descriptors(
     return tuple(descriptors)
 
 
+def _project_state(codex_home):
+    try:
+        with (codex_home / ".codex-global-state.json").open(encoding="utf-8") as handle:
+            state = json.load(handle)
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def _explicit_codex_project(
     codex_home: Path,
     task_id: str,
+    state: dict | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Resolve only an explicit, internally consistent Codex Project assignment."""
-    state_path = codex_home / ".codex-global-state.json"
-    try:
-        with state_path.open(encoding="utf-8") as state_file:
-            state = json.load(state_file)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None, None, None
-    if not isinstance(state, dict):
-        return None, None, None
-
+    if state is None:
+        state = _project_state(codex_home)
     assignments = state.get("thread-project-assignments")
     projects = state.get("local-projects")
     if not isinstance(assignments, dict) or not isinstance(projects, dict):
@@ -372,19 +336,17 @@ class CodexDesktopSource:
     def __init__(self, codex_home: str | Path):
         self.codex_home = Path(codex_home).expanduser()
         self._state_path = self.codex_home / "state_5.sqlite"
-        self._observed_at: datetime | None = None
+        self._project_state = None
         self.skipped_delegated = 0
         self.skipped_unknown_ownership = 0
-        self._title_provenance: dict[str, tuple[ProvenanceField, ...]] = {}
 
     def enumerate_tasks(self, now: datetime) -> Iterable[AgentTaskRef]:
         """Enumerate user-owned task references from Codex's local index."""
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("now must include a timezone")
-        self._observed_at = now.astimezone(UTC)
         self.skipped_delegated = 0
         self.skipped_unknown_ownership = 0
-        self._title_provenance = {}
+        self._project_state = _project_state(self.codex_home)
         sidebar_titles = _load_sidebar_titles(
             self.codex_home / "session_index.jsonl"
         )
@@ -402,6 +364,8 @@ class CodexDesktopSource:
                 row["name"] for row in conn.execute("PRAGMA table_info(threads)")
             }
             name_selection = "t.name" if "name" in thread_columns else "NULL"
+            git_selection = ", ".join(f"t.{key}" if key in thread_columns else f"NULL AS {key}"
+                                      for key in ("git_origin_url", "git_branch", "git_sha"))
             rows = conn.execute(
                 f"""
                 SELECT
@@ -413,6 +377,7 @@ class CodexDesktopSource:
                     t.cwd,
                     t.title,
                     {name_selection} AS name,
+                    {git_selection},
                     t.archived,
                     t.agent_path,
                     t.created_at_ms,
@@ -468,7 +433,6 @@ class CodexDesktopSource:
                         title_updated_at.isoformat(),
                     )
                 )
-            self._title_provenance[task_id] = tuple(title_provenance)
             sqlite_activity = _utc_timestamp(
                 row["updated_at_ms"], row["updated_at"]
             )
@@ -485,6 +449,10 @@ class CodexDesktopSource:
                     last_activity_at=sqlite_activity,
                     archived=bool(row["archived"]),
                     current_workspace=row["cwd"] or None,
+                    observed_at=now.astimezone(UTC),
+                    provenance=tuple(title_provenance),
+                    native_git=tuple(row[key] if isinstance(row[key], str) and row[key] else None
+                                     for key in ("git_origin_url", "git_branch", "git_sha")),
                 )
             )
         return tuple(refs)
@@ -496,195 +464,40 @@ class CodexDesktopSource:
                 f"cannot fetch {ref.source_type!r} with {self.source_type!r} source"
             )
 
-        workspaces: list[str] = []
-        pending_prompts: list[
-            tuple[str | None, str, tuple[AttachmentDescriptor, ...]]
-        ] = []
-        # Prefer legacy prompt events when both representations accompany a
-        # final answer: their IDs may already be persisted by earlier readers.
-        pending_messages: list[tuple[str, str, tuple[AttachmentDescriptor, ...]]] = []
-        message_turn_id: str | None = None
-        active_turn_id: str | None = None
-        unsupported_message_turns: set[str] = set()
-        turns: list[AgentTurn] = []
-        rollout_activity: datetime | None = None
-        git_repository, git_branch, git_commit = _sqlite_git_provenance(
-            self._state_path,
-            ref.native_task_id,
-        )
-
-        for record in _rollout_records(ref.source_locator):
-            record_activity = _record_timestamp(record.get("timestamp"))
-            if record_activity is not None and (
-                rollout_activity is None or record_activity > rollout_activity
-            ):
-                rollout_activity = record_activity
-            record_type = record.get("type")
-            payload = record.get("payload")
-            if not isinstance(payload, dict):
-                continue
-
-            if record_type == "session_meta":
-                workspace = payload.get("cwd")
-                if isinstance(workspace, str) and workspace and workspace not in workspaces:
-                    workspaces.append(workspace)
-                git = payload.get("git")
-                if isinstance(git, dict):
-                    repository = git.get("repository_url")
-                    branch = git.get("branch")
-                    commit = git.get("commit_hash")
-                    if isinstance(repository, str) and repository:
-                        git_repository = repository
-                    if isinstance(branch, str) and branch:
-                        git_branch = branch
-                    if isinstance(commit, str) and commit:
-                        git_commit = commit
-                continue
-
-            if record_type == "event_msg" and payload.get("type") in (
-                "task_started", "task_complete", "turn_aborted",
-            ):
-                native_turn_id = payload.get("turn_id")
-                if payload["type"] == "task_started":
-                    if native_turn_id != message_turn_id:
-                        pending_messages.clear()
-                        message_turn_id = None
-                    active_turn_id = native_turn_id
-                elif native_turn_id == message_turn_id or payload["type"] == "turn_aborted":
-                    pending_messages.clear()
-                    message_turn_id = None
-                continue
-
-            if (
-                record_type == "response_item"
-                and payload.get("type") == "message"
-                and payload.get("role") == "user"
-            ):
-                authored = _authored_text_message(payload)
-                metadata = payload.get("internal_chat_message_metadata_passthrough")
-                if authored is None and isinstance(metadata, dict):
-                    native_turn_id = metadata.get("turn_id")
-                    kinds = metadata.get("content_item_kinds")
-                    authored_kind = isinstance(kinds, list) and any(
-                        isinstance(kind, str) and kind.startswith("user.") for kind in kinds
-                    )
-                    if authored_kind and isinstance(native_turn_id, str) and native_turn_id:
-                        # Do not pair a partial text-only prompt with an answer
-                        # that also depended on an unsupported authored input.
-                        unsupported_message_turns.add(native_turn_id)
-                if authored is not None:
-                    prompt, message_id, native_turn_id = authored
-                    if active_turn_id is not None and native_turn_id != active_turn_id:
-                        continue
-                    if native_turn_id != message_turn_id:
-                        pending_messages.clear()
-                        message_turn_id = native_turn_id
-                    if not any(item[1] == message_id for item in pending_messages):
-                        pending_messages.append((prompt, message_id, ()))
-                continue
-
-            if record_type == "event_msg" and payload.get("type") == "user_message":
-                raw_prompt = payload.get("message")
-                prompt = (
-                    raw_prompt
-                    if isinstance(raw_prompt, str) and raw_prompt.strip()
-                    else None
-                )
-                client_id = payload.get("client_id")
-                prompt_timestamp = str(record.get("timestamp") or "")
-                if isinstance(client_id, str) and client_id:
-                    event_key = client_id
-                elif prompt_timestamp:
-                    event_key = _fallback_turn_key(
-                        ref.native_task_id,
-                        prompt_timestamp,
-                    )
-                else:
-                    # Without either native identity signal, a later edit could
-                    # masquerade as a new turn and violate monotonic capture.
-                    continue
+        assembler = RolloutTurnAssembler(ref.native_task_id, legacy=True)
+        git_repository, git_branch, git_commit = (ref.native_git if ref.native_git is not None
+            else _sqlite_git_provenance(self._state_path, ref.native_task_id))
+        records, fingerprint = _read_rollout(ref.source_locator)
+        for record in records:
+            attachments = ()
+            payload = record.get("payload") if isinstance(record, dict) else None
+            if isinstance(payload, dict) and record.get("type") == "event_msg" and payload.get("type") == "user_message":
+                event_key = payload.get("client_id") or _fallback_turn_key(ref.native_task_id, str(record.get("timestamp") or ""))
                 attachments = _local_image_descriptors(payload, event_key)
-                if prompt is not None or attachments:
-                    pending_prompts.append(
-                        (
-                            prompt,
-                            event_key,
-                            attachments,
-                        )
-                    )
-                continue
-
-            if not (
-                record_type == "response_item"
-                and payload.get("type") == "message"
-                and payload.get("role") == "assistant"
-                and payload.get("phase") == "final_answer"
-                and (pending_prompts or pending_messages)
-            ):
-                continue
-
-            prompts = pending_prompts
-            if not prompts:
-                metadata = payload.get("internal_chat_message_metadata_passthrough")
-                if not isinstance(metadata, dict) or metadata.get("turn_id") != message_turn_id:
-                    continue
-                if message_turn_id in unsupported_message_turns:
-                    continue
-                prompts = pending_messages
-
-            content = payload.get("content")
-            if not isinstance(content, list):
-                continue
-            outcome_parts = [
-                item["text"]
-                for item in content
-                if isinstance(item, dict)
-                and item.get("type") == "output_text"
-                and isinstance(item.get("text"), str)
-            ]
-            outcome = "\n".join(outcome_parts)
-            if not outcome.strip():
-                continue
-
-            _, turn_key, _ = prompts[0]
-            turns.append(
-                AgentTurn(
-                    turn_id=turn_key,
-                    prompt_parts=tuple(
-                        item[0]
-                        for item in prompts
-                        if item[0] is not None
-                    ),
-                    visible_outcome=outcome,
-                    attachments=tuple(
-                        attachment
-                        for item in prompts
-                        for attachment in item[2]
-                    ),
-                )
-            )
-            pending_prompts.clear()
-            pending_messages.clear()
-            message_turn_id = None
-
-        observed_at = self._observed_at or datetime.now(tz=UTC)
+            assembler.feed(record, attachments=attachments)
+        workspaces = assembler.workspaces
+        git_repository = assembler.git.get("repository_url", git_repository)
+        git_branch = assembler.git.get("branch", git_branch)
+        git_commit = assembler.git.get("commit_hash", git_commit)
+        observed_at = ref.observed_at or datetime.now(tz=UTC)
         source_created_at = ref.source_created_at or ref.last_activity_at
         if ref.current_workspace and ref.current_workspace not in workspaces:
             workspaces.append(ref.current_workspace)
+        if self._project_state is None:
+            self._project_state = _project_state(self.codex_home)
         project_id, project_name, project_root = _explicit_codex_project(
-            self.codex_home,
-            ref.native_task_id,
+            self.codex_home, ref.native_task_id, state=self._project_state,
         )
         return AgentTaskSnapshot(
             source_type=self.source_type,
             native_task_id=ref.native_task_id,
             source_identity=ref.source_identity,
             title=ref.title,
-            turns=tuple(turns),
+            turns=tuple(assembler.turns),
             source_created_at=source_created_at,
             source_updated_at=max(
                 timestamp
-                for timestamp in (ref.last_activity_at, rollout_activity)
+                for timestamp in (ref.last_activity_at, assembler.last_ts)
                 if timestamp is not None
             ),
             observed_at=observed_at,
@@ -699,8 +512,10 @@ class CodexDesktopSource:
             provenance=(
                 ProvenanceField(
                     key="incomplete_turn_count",
-                    value="1" if pending_prompts or pending_messages else "0",
+                    value="1" if assembler.incomplete else "0",
                 ),
-                *self._title_provenance.get(ref.native_task_id, ()),
+                ProvenanceField("capture_drop_counts", json.dumps(assembler.drops, sort_keys=True)),
+                ProvenanceField("rollout_fingerprint", json.dumps(fingerprint)),
+                *ref.provenance,
             ),
         )

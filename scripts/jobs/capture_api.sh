@@ -7,7 +7,8 @@
 # incomplete .env fails loudly in ~/Library/Logs/second-brain/ instead of
 # silently serving an unauthenticated endpoint.
 set -euo pipefail
-cd /Users/kerrfir/second-brain
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$REPO_ROOT"
 
 if [ ! -f .env ]; then
   echo "capture_api.sh: .env not found in $(pwd) — create it with CAPTURE_API_TOKEN=<64 hex> (chmod 600)" >&2
@@ -19,4 +20,4 @@ if [ -z "${CAPTURE_API_TOKEN:-}" ]; then
   exit 78
 fi
 
-exec .venv/bin/python -m src.capture_api
+exec "${SECOND_BRAIN_PYTHON:-$REPO_ROOT/.venv/bin/python}" -m src.capture_api

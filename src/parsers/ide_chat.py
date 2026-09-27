@@ -7,7 +7,7 @@ Reads .chat JSON files from:
 Strips system prompts, tool messages, and boilerplate. Extracts project metadata.
 Applies size and content filters. Returns cleaned conversations as markdown strings.
 
-See docs/HYBRID-CHAT-EXTRACTION.md for stripping rules and filter thresholds.
+See docs/CAPTURE-COMPONENTS.md for stripping rules and filter thresholds.
 """
 
 import json
@@ -157,7 +157,7 @@ def format_as_markdown(filename, messages, meta, file_timestamp):
     return "\n".join(lines)
 
 
-def parse_chat_file(filepath):
+def parse_chat_file(filepath, *, strict=False):
     """Parse a single IDE .chat file. Returns (filename, markdown, meta) or None if filtered out."""
     filename = os.path.basename(filepath).replace(".chat", "")
 
@@ -165,6 +165,8 @@ def parse_chat_file(filepath):
         with open(filepath) as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
+        if strict:
+            raise
         return None
 
     chat_messages = data.get("chat", [])

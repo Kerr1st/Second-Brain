@@ -38,7 +38,6 @@ class TestPriceTable:
             # Skim-stage models (standard tier, us-east-1 geo/in-region rates).
             ("us.amazon.nova-2-lite-v1:0", 0.33, 2.75),
             ("amazon.nova-2-lite-v1:0", 0.33, 2.75),
-            ("google.gemma-3-12b-it", 0.09, 0.29),
         ],
     )
     def test_known_models(self, model, per_m_in, per_m_out):
@@ -50,14 +49,13 @@ class TestPriceTable:
         """Plan constraint 2: an unknown id is billed at the $10/$50 ceiling, which
         at skim volume (~1.4M input tokens/week) books ≈ $15/week and trips the
         sub-cap on the first document. Both skim models must be known."""
-        for model in ("us.amazon.nova-2-lite-v1:0", "google.gemma-3-12b-it"):
+        for model in ("us.amazon.nova-2-lite-v1:0",):
             assert price_for(model).known is True, model
 
     @pytest.mark.parametrize(
         "model, per_m_in, per_m_out",
         [
             ("us.amazon.nova-2-lite-v1:0", 0.165, 1.375),   # listed Flex row (geo/in-region)
-            ("google.gemma-3-12b-it", 0.045, 0.145),        # derived: Flex = 50% of standard
         ],
     )
     def test_flex_tier_prices(self, model, per_m_in, per_m_out):
@@ -96,7 +94,7 @@ class TestPriceTable:
         needles = [n for n, _, _ in _PRICE_TABLE]
         assert needles.index("claude-fable-5") < needles.index("claude-opus-4")
         assert needles.index("claude-haiku-4-5") < needles.index("claude-opus-4")
-        assert needles[-2:] == ["nova-2-lite", "gemma-3-12b"]
+        assert needles[-1:] == ["nova-2-lite"]
         assert len(needles) == len(set(needles))
         assert price_for("global.anthropic.claude-fable-5-1").input_per_m == 10.0
         assert price_for("global.anthropic.claude-sonnet-5").input_per_m == 2.0

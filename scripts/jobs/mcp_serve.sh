@@ -1,8 +1,8 @@
 #!/bin/bash
-# Second Brain MCP server launcher (stdio), for Kiro CLI / Claude Code clients.
-# Uses the project venv: system python3 does not have the pinned mcp/psycopg2.
-cd /Users/kerrfir/second-brain
-# Memory search embeds the query on Bedrock; use the jobs profile so search keeps
-# working when the interactive SSO session has lapsed.
+# Trusted interactive MCP launcher; discovery uses the separate read-only registry.
+set -uo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT" || exit 1
+export SECOND_BRAIN_PROFILE="${SECOND_BRAIN_PROFILE:-controlled}"
 export AWS_PROFILE="${AWS_PROFILE:-second-brain-jobs}"
-exec .venv/bin/python -m src.mcp_server
+exec "$ROOT/.venv/bin/python" -m src.mcp_server

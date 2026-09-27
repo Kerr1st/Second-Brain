@@ -1,361 +1,41 @@
-# Agent Memory Architecture — Disaster Recovery Runbook
+# Backup and recovery
 
-> Last updated: 2026-06-08
-> Backup schedule: Daily at 2:00 AM (launchd)
-> Verification schedule: Weekly, Sundays at 3:00 AM (launchd)
-> Encryption: AES-256 via GPG
-> RPO: 24 hours | RTO: ~15-30 minutes
+The repaired backup job creates one encrypted bundle containing a custom PostgreSQL dump, repository source/configuration/documentation, and explicitly configured knowledge sources. It does not depend on the dormant graph tables: the database dump includes whichever tables actually exist. `SECOND_BRAIN_KB_SOURCES` must point to the intended source directory; a configured missing or symlink directory fails instead of silently omitting it.
 
-> ## BACKUP POSTURE — single-cloud (Google Drive) + local · ACCEPTED 2026-06-12
-> **AWS S3 was de-scoped** (brittle overnight SSO). Backups now go to **Google Drive + local
-> only** (code/config also in git on `origin`/`mini`). This means:
-> - The old "**Either Google OR AWS alone is sufficient**" dual-cloud guarantee **no longer holds**
->   for data — offsite redundancy is now **single-cloud (Google Drive)**.
-> - **Scenario 2 (recovery from AWS S3) is UNAVAILABLE** — no S3 backups since 2026-06-01.
-> - The AWS sections below are retained for **historical reference only** (S3 is not planned to return).
->
-> **DECISION (2026-06-12): ACCEPTED.** Single-cloud (Google Drive) + local is the intended posture;
-> S3 will **not** be re-established. Google Drive is the sole offsite path — the weekly backup-verify
-> job and the 7-day local copy are the safety net. Verify the Google Drive leg diligently.
+## Backup contract
 
-### Known Failure Modes
+`scripts/maintenance/backup_bundle.py create` builds a private temporary payload, records every file's SHA-256, size and private permission mode (0600, or 0700 for owner-executable scripts), verifies the custom dump structure, encrypts with GPG AES256, decrypts and verifies the resulting payload, then publishes the local ciphertext. It never deletes original sources or starts a database service. A failed dump/encryption/verification is a failed job.
 
-| Issue | Impact | Mitigation |
-|---|---|---|
-| Google OAuth token expiry | Google Drive uploads fail → **no offsite backup** (S3 de-scoped, so Google is the only cloud) | Uses refresh token — hasn't expired in practice. Re-auth: `rclone config reconnect gdrive:`. Local copy still retained 7 days. |
-| PostgreSQL not running at 2 AM | Backup aborts | Pre-flight check; `brew services` auto-starts `postgresql@17` at login |
-| ~~AWS SSO token expiry~~ | ~~S3 uploads fail~~ | **N/A — S3 de-scoped 2026-06-01.** SSO now only affects Bedrock embedding/generation. |
+Only ciphertext is uploaded. The cloud copy is downloaded again and its checksum compared before remote success is reported. There is no plaintext `rclone sync`, implicit remote deletion or unconditional retention cleanup. A verified local bundle remains recoverable if cloud upload fails. Existing historical plaintext cloud/source backups require a separate inventory and reviewed retirement; new encryption does not retroactively protect them.
 
-### AWS SSO Recovery
+Manifest version 2 preserves owner execution while removing group/public access. Legacy version 1 can be checked for content but cannot establish executable permissions. The receipt distinguishes payload, file-mode, full restore and cloud verification. Merely listing an archive is not a restore test. PostgreSQL recommends custom-format dumps for flexible restores; a dump is a trusted-code input and should only be restored from the expected source. [PostgreSQL pg_dump](https://www.postgresql.org/docs/17/app-pgdump.html)
 
-```bash
-# Check token status
-aws sts get-caller-identity
+## Verify without touching the installed database
 
-# Refresh (opens browser)
-aws sso login --profile default
-
-# Profile: default → SSO session kiro-admin-session
-# Start URL: https://d-9066306d67.awsapps.com/start
-# Account: 048588987132, AdministratorAccess role
+```sh
+SECOND_BRAIN_PROFILE=controlled .venv/bin/python scripts/maintenance/backup_bundle.py verify /absolute/path/second-brain_TIMESTAMP.tar.gpg --key /absolute/path/backup-key --restore
 ```
 
----
+The verifier decrypts into a mode-0700 temporary directory, rejects unsafe archive paths/symlinks and unexpected or changed members, then restores into a newly initialized socket-only PostgreSQL cluster. It never accepts an existing database as the restore target. The cluster is stopped and temporary plaintext is removed. Interruptions unwind subprocess groups and stop the temporary database before cleanup. A failure must be resolved before corpus/schema maintenance.
 
-## Backup Strategy (Google Drive + local — S3 de-scoped 2026-06-01)
+The scheduled verification script downloads the newest encrypted bundle and runs this full restore check. PostgreSQL 17, pgvector and GPG must be available to the wrapper; rclone is required only for cloud operations.
 
-```
-                         Local Machine
-                              │
-                   daily encrypted backup (GPG AES-256)
-                         ┌────┴────┐
-                         ▼         ▼
-                  Google Drive    Local disk
-                  ┌──────────┐  ┌──────────┐
-                  │ pg_dump   │  │ pg_dump   │
-                  │ JSON      │  │ JSON      │
-                  │ KB sources│  │ (recent)  │
-                  │ Config    │  │           │
-                  └──────────┘  └──────────┘
-                  30-day cloud   7-day local
-                  retention      retention
+## Key custody
 
-                  Key: Google Secret Mgr + ~/second-brain/.backup-key
-```
+The installed key remains `/Users/kerrfir/second-brain/.backup-key`, mode 0600. At the user's request a matching recovery copy was placed at:
 
-Google Drive is the sole offsite copy; the 7-day local retention + git (code/config on `origin`/`mini`) are the other safety nets.
+`/Users/kerrfir/Library/CloudStorage/OneDrive-amazon.com/Second Brain Recovery/backup-key`
 
----
+The copy was compared byte-for-byte and restricted locally to 0600 inside a 0700 directory. Local OneDrive placement does not prove cloud synchronization or cloud sharing restrictions. Verify the file exists through OneDrive on another device/account session before treating loss-of-Mac recovery as established. Keep the folder private. Do not paste the key in a chat or commit it to Git.
 
-## What's Backed Up (and Where)
+A lost key makes encrypted bundles unusable. A key in the same physical machine as the only backup does not protect against loss of the machine. The key must be independent from the encrypted backup's failure domain.
 
-| Asset | Google Drive | Local |
-|---|---|---|
-| Layer 2: PostgreSQL dump (.dump.gpg) | ✅ | 7-day |
-| Layer 2: JSON — memories (.json.gpg) | ✅ | 7-day |
-| Layer 2: JSON — entities (.json.gpg) | ✅ | 7-day |
-| Layer 2: JSON — entity_edges (.json.gpg) | ✅ | 7-day |
-| Layer 2: JSON — memory_entities (.json.gpg) | ✅ | 7-day |
-| Layer 3: Knowledge base source docs | ✅ | Local copy |
-| Layer 1: Kiro skills / bootstrap | ✅ | `~/.kiro/skills/` |
-| Config: docker-compose.yml, schema.sql | ✅ | `~/second-brain/` (+ git) |
-| Config: backup & verify scripts | ✅ | `~/second-brain/` (+ git) |
-| Config: this runbook | ✅ | `~/second-brain/` (+ git) |
-| Encryption key | ✅ Google Secret Mgr | `~/second-brain/.backup-key` |
+## Restore a replacement installation
 
-### Data Sources (upstream of Second Brain)
+After an isolated verification passes, install the recorded code and locked dependencies on the replacement host; create owner/runtime roles explicitly; restore the dump into a chosen new database; recover required source/config files from the verified encrypted payload; set local secret permissions; and apply only qualified subsequent migrations. Validate retrieval, source identity/refresh, a synthetic embedding/model call, read-only discovery and job statuses before enabling schedules.
 
-These are NOT backed up by this script because they are independent sources of truth:
+Use the saved code/schema/config receipt to distinguish a restored old release from a new migration. Recovery success does not prove useful discoveries or that a previous static credential remains valid.
 
-| Source | Location | What it holds |
-|---|---|---|
-| Quick Desktop | `~/.quickwork/knowledge_v1.db` | 815+ memories, 2100+ entities, 4500+ edges |
-| Kiro CLI chat histories | `~/.kiro/` | All conversation sessions |
-| KB source files | `~/Work/Tools/Crawlee/knowledge/sources/` | Crawled articles, docs |
+## September 26 recovery evidence
 
-If the Second Brain is lost, it can be rebuilt from these sources via the migration scripts.
-
-## What's NOT Backed Up (by design)
-
-- Vector indexes (Layer 2 pgvector + Layer 3 Bedrock) — rebuilt automatically from source data
-- PostgreSQL service config — managed by Homebrew (`brew services`); reinstall via `brew install postgresql@17 pgvector`
-- rclone config — re-authorize in 2 minutes (interactive)
-
----
-
-## Encryption Key Storage
-
-The key is stored in three places. Any ONE is sufficient to decrypt backups.
-
-| Location | How to Access | When to Use |
-|---|---|---|
-| Local file | `cat ~/second-brain/.backup-key` | Normal daily operations |
-| Google Secret Manager | `gcloud secrets versions access latest --secret=memory-bank-key` | Local machine gone, no AWS |
-| AWS Secrets Manager | `aws secretsmanager get-secret-value --secret-id memory-bank-key --query SecretString --output text --region us-east-1` | Local machine gone, no Google |
-
-### Initial Key Setup (one-time, during system build)
-
-```bash
-# Generate the key
-mkdir -p ~/second-brain
-openssl rand -base64 32 > ~/second-brain/.backup-key
-chmod 600 ~/second-brain/.backup-key
-
-# Store in Google Secret Manager
-gcloud secrets create memory-bank-key --data-file=~/second-brain/.backup-key
-
-# Store in AWS Secrets Manager
-aws secretsmanager create-secret \
-  --name memory-bank-key \
-  --secret-string "$(cat ~/second-brain/.backup-key)" \
-  --region us-east-1
-```
-
----
-
-## Backup Script
-
-The backup script lives at `scripts/jobs/backup.sh`. It handles:
-- PostgreSQL dump (`pg_dump -Fc`)
-- JSON fallback exports (memories, entities, entity_edges, memory_entities)
-- GPG encryption (AES-256)
-- Upload to Google Drive (S3 de-scoped 2026-06-01)
-- Local retention (7 days), cloud retention (30 days)
-
-Do not duplicate the script here — see the source file for current implementation.
-
----
-
-## Recovery Scenarios
-
-### Scenario 1: Full recovery from Google Drive (no AWS, no local machine)
-
-```bash
-# On a new machine:
-brew install postgresql@17 pgvector rclone gpg
-
-# 1. Configure rclone for Google Drive
-rclone config  # n → gdrive → drive → authorize in browser
-
-# 2. Retrieve encryption key
-gcloud auth login
-mkdir -p ~/second-brain
-gcloud secrets versions access latest --secret=memory-bank-key > ~/second-brain/.backup-key
-chmod 600 ~/second-brain/.backup-key
-
-# 3. Download everything from Google Drive
-rclone copy gdrive:memory-bank-backups/config/ ~/second-brain/ 
-rclone copy gdrive:memory-bank-backups/kb-sources/ ~/second-brain/kb-sources/
-rclone copy gdrive:memory-bank-backups/ /tmp/restore/ --include "*.dump.gpg" --max-age 1d
-
-# 4. Restore Kiro skills
-cp -r ~/second-brain/kiro-skills/ ~/.kiro/skills/
-
-# 5. Restore Layer 2 (PostgreSQL memory bank — native PG 17 + pgvector)
-brew services start postgresql@17          # serves localhost:5432
-createuser -s memory_bank 2>/dev/null || true
-createdb -O memory_bank memory_bank 2>/dev/null || true
-psql -h localhost -U memory_bank -d memory_bank -c "CREATE EXTENSION IF NOT EXISTS vector;"
-for f in ~/second-brain/migrations/0*.sql; do
-  psql -h localhost -U memory_bank -d memory_bank -f "$f"
-done
-
-LATEST=$(ls -t /tmp/restore/*.dump.gpg | head -1)
-gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key "$LATEST" > /tmp/restore/memory_bank.dump
-pg_restore -h localhost -U memory_bank -d memory_bank /tmp/restore/memory_bank.dump
-
-# 6. Restore Layer 3 (re-index KB sources into local pgvector as temporary RAG)
-#    OR wait for AWS access and re-upload to S3 → Bedrock KB
-#    The source docs are at ~/second-brain/kb-sources/
-
-# 7. Re-import Quick Desktop knowledge graph (if not in pg_dump)
-cd ~/second-brain && .venv/bin/python scripts/migrate/migrate_quick_desktop.py --full
-
-# 8. Verify
-psql -h localhost -U memory_bank -d memory_bank -c "SELECT type, count(*) FROM memories GROUP BY type;"
-psql -h localhost -U memory_bank -d memory_bank -c "SELECT count(*) FROM entities;"
-ls ~/second-brain/kb-sources/
-ls ~/.kiro/skills/
-echo "✅ Full recovery from Google Drive complete"
-```
-
-**Recovery time: ~15 minutes. No AWS access required. All three layers restored.**
-
----
-
-### Scenario 2: Full recovery from AWS (no Google, no local machine)
-
-> **⚠️ UNAVAILABLE since 2026-06-01 — S3 was de-scoped, so no S3 backups exist to recover from.**
-> This scenario is retained for historical reference and applies only if S3 is re-enabled.
-> Use Scenario 1 (Google Drive) as the offsite recovery path.
-
-```bash
-# On a new machine:
-brew install postgresql gpg docker awscli
-
-# 1. Configure AWS CLI
-aws configure  # access key, secret, region us-east-1
-
-# 2. Retrieve encryption key
-mkdir -p ~/second-brain
-aws secretsmanager get-secret-value \
-  --secret-id memory-bank-key \
-  --query SecretString --output text \
-  --region us-east-1 > ~/second-brain/.backup-key
-chmod 600 ~/second-brain/.backup-key
-
-# 3. Download everything from S3
-aws s3 sync s3://memory-bank-backups/config/ ~/second-brain/
-aws s3 sync s3://memory-bank-backups/kb-sources/ ~/second-brain/kb-sources/
-aws s3 cp s3://memory-bank-backups/ /tmp/restore/ --recursive --exclude "*" --include "*.dump.gpg"
-
-# 4. Restore Kiro skills
-cp -r ~/second-brain/kiro-skills/ ~/.kiro/skills/
-
-# 5. Restore Layer 2 (PostgreSQL memory bank)
-docker compose -f ~/second-brain/docker-compose.yml up -d
-sleep 5
-for f in ~/second-brain/migrations/0*.sql; do
-  psql -h localhost -U memory_bank -d memory_bank -f "$f"
-done
-
-LATEST=$(ls -t /tmp/restore/*.dump.gpg | head -1)
-gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key "$LATEST" > /tmp/restore/memory_bank.dump
-pg_restore -h localhost -U memory_bank -d memory_bank /tmp/restore/memory_bank.dump
-
-# 6. Restore Layer 3 (re-upload to S3 and re-sync Bedrock KB)
-aws s3 sync ~/second-brain/kb-sources/ s3://your-kb-bucket/
-aws bedrock-agent start-ingestion-job \
-  --knowledge-base-id <your-kb-id> \
-  --data-source-id <your-ds-id> \
-  --region us-east-1
-
-# 7. Verify
-psql -h localhost -U memory_bank -d memory_bank -c "SELECT type, count(*) FROM memories GROUP BY type;"
-echo "✅ Full recovery from AWS complete"
-```
-
-**Recovery time: ~15 minutes. No Google access required. All three layers restored.**
-
----
-
-### Scenario 3: Database corrupted but machine is fine
-
-```bash
-LATEST=$(ls -t ~/second-brain/backups/*.dump.gpg 2>/dev/null | head -1)
-
-if [ -z "$LATEST" ]; then
-  rclone copy gdrive:memory-bank-backups/ /tmp/restore/ --include "*.dump.gpg" --max-age 1d
-  LATEST=$(ls -t /tmp/restore/*.dump.gpg | head -1)
-fi
-
-gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key "$LATEST" > /tmp/memory_bank.dump
-pg_restore -h localhost -U memory_bank -d memory_bank --clean --if-exists /tmp/memory_bank.dump
-```
-
----
-
-### Scenario 4: Can't restore .dump — fall back to JSON
-
-```bash
-# Download JSON backup (from whichever cloud is available)
-rclone copy gdrive:memory-bank-backups/ /tmp/restore/ --include "*.json.gpg" --max-age 1d
-# OR: aws s3 cp s3://memory-bank-backups/ /tmp/restore/ --recursive --exclude "*" --include "*.json.gpg"
-
-LATEST=$(ls -t /tmp/restore/*.json.gpg | head -1)
-gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key "$LATEST" > /tmp/memories.json
-
-# Start fresh native database, apply schema, import JSON
-brew services start postgresql@17
-createuser -s memory_bank 2>/dev/null || true; createdb -O memory_bank memory_bank 2>/dev/null || true
-psql -h localhost -U memory_bank -d memory_bank -c "CREATE EXTENSION IF NOT EXISTS vector;"
-psql -h localhost -U memory_bank -d memory_bank -f ~/second-brain/migrations/001_initial_schema.sql
-
-# Import (embeddings will need to be regenerated)
-# Use your import script or the MCP server's bulk import tool
-```
-
-**Note:** JSON restore requires re-generating vector embeddings (~10 extra minutes).
-
-**Note:** If entity/edge JSON backups are missing (pre-April 2026 backups), re-import from Quick Desktop:
-```bash
-cd ~/second-brain
-.venv/bin/python scripts/migrate/migrate_quick_desktop.py --full
-```
-
----
-
-### Scenario 5: Lost encryption key everywhere
-
-**Unrecoverable by design.** All encrypted backups are permanently unreadable.
-
-**If the database is still running locally:**
-```bash
-# Emergency: take an unencrypted backup immediately
-pg_dump -Fc -h localhost -U memory_bank memory_bank > ~/emergency_backup.dump
-
-# Generate new key and re-store in both clouds
-openssl rand -base64 32 > ~/second-brain/.backup-key
-chmod 600 ~/second-brain/.backup-key
-gcloud secrets versions add memory-bank-key --data-file=~/second-brain/.backup-key
-aws secretsmanager update-secret --secret-id memory-bank-key \
-  --secret-string "$(cat ~/second-brain/.backup-key)" --region us-east-1
-```
-
----
-
-## Backup Verification (Weekly)
-
-Runs every Sunday at 3 AM via `scripts/jobs/verify_backup.sh`. Checks BOTH destinations independently — downloads latest dump, decrypts, validates with `pg_restore -l`.
-
-See the script source for current implementation. Do not duplicate here.
-
-### Launchd schedule (weekly, Sundays 3 AM)
-
-File: `~/Library/LaunchAgents/com.second-brain.verify.plist` (symlinked from `scheduling/`)
-
-See `scheduling/com.second-brain.verify.plist` for current configuration.
-
-### Launchd schedule (daily backup, 2 AM)
-
-File: `~/Library/LaunchAgents/com.second-brain.backup.plist` (symlinked from `scheduling/`)
-
-See `scheduling/com.second-brain.backup.plist` for current configuration. All plists are documented in [OPERATIONS.md](OPERATIONS.md).
-
----
-
-## Quick Reference Card
-
-| Situation | Command |
-|---|---|
-| List backups (Google) | `rclone ls gdrive:memory-bank-backups/` |
-| Download latest (Google) | `rclone copy gdrive:memory-bank-backups/<file> ./` |
-| Get key (Google) | `gcloud secrets versions access latest --secret=memory-bank-key` |
-| Decrypt a file | `gpg --decrypt --batch --passphrase-file ~/second-brain/.backup-key <file.gpg> > <output>` |
-| Restore database | `pg_restore -h localhost -U memory_bank -d memory_bank --clean --if-exists <file.dump>` |
-| Restart PostgreSQL | `brew services restart postgresql@17` |
-| Re-sync Bedrock KB | `aws bedrock-agent start-ingestion-job --knowledge-base-id <id> --data-source-id <id> --region us-east-1` |
-| Verify backups | `bash ~/second-brain/scripts/jobs/verify_backup.sh` |
-| Manual backup now | `bash ~/second-brain/scripts/jobs/backup.sh` |
-| Check backup logs | `cat ~/second-brain/logs/backup-$(date +%Y%m%d).log` |
-| Check verify logs | `cat ~/second-brain/logs/verify.log` |
+The full v2 bundle restored successfully from the OneDrive key copy, including the database, repository files and configured knowledge sources. Migrations and unpaid repairs also passed in its disposable clone. The plaintext clone was stopped and removed. A separate encrypted preservation archive covers 1,512 ignored backup/log/fixture files and verifies every restored hash; the main backup deliberately excludes those directories. Neither archive causes original deletion. Exact hashes, cloud-copy state and qualification receipts are retained in the private workspace evidence and summarized in the [completion ledger](REFACTOR-COMPLETION-2026-09-26.md).

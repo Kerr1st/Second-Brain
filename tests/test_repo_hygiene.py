@@ -21,8 +21,8 @@ _LONG_HEX = re.compile(r"\b[0-9a-f]{40,}\b")
 
 
 def _tracked(patterns: list[str]) -> list[Path]:
-    out = subprocess.run(["git", "ls-files", "--", *patterns], cwd=REPO, capture_output=True, text=True, check=True)
-    return [REPO / p for p in out.stdout.split() if p]
+    out = subprocess.run(["git", "ls-files", "-z", "--", *patterns], cwd=REPO, capture_output=True, text=True, check=True)
+    return [REPO / p for p in out.stdout.split("\0") if p and (REPO / p).is_file()]
 
 
 class TestNoSecretsInTrackedConfig:
@@ -55,18 +55,18 @@ class TestCaptureApiLauncherFailsClosed:
     missing — never fall through to an unauthenticated service."""
 
     def _run_launcher_in(self, tmp_path: Path, env_body: str | None):
-        # Rewrite the launcher's hard-coded repo path to a sandbox and stub the python target.
-        script = (REPO / "scripts" / "jobs" / "capture_api.sh").read_text().replace(
-            "cd /Users/kerrfir/second-brain", f"cd {tmp_path}"
-        )
-        (tmp_path / "run.sh").write_text(script)
+        # Exercise the actual portable repository layout in a private fixture.
+        import shutil
+        target=tmp_path / "scripts" / "jobs" / "capture_api.sh"
+        target.parent.mkdir(parents=True)
+        shutil.copyfile(REPO / "scripts" / "jobs" / "capture_api.sh", target)
         (tmp_path / ".venv" / "bin").mkdir(parents=True)
         stub = tmp_path / ".venv" / "bin" / "python"
         stub.write_text('#!/bin/bash\necho "STARTED with token set: ${CAPTURE_API_TOKEN:+yes}"\n')
         stub.chmod(0o755)
         if env_body is not None:
             (tmp_path / ".env").write_text(env_body)
-        return subprocess.run(["bash", str(tmp_path / "run.sh")], capture_output=True, text=True,
+        return subprocess.run(["bash", str(target)], capture_output=True, text=True,
                               env={**os.environ, "CAPTURE_API_TOKEN": ""})
 
     def test_missing_env_file_exits_nonzero(self, tmp_path):
@@ -82,3 +82,37 @@ class TestCaptureApiLauncherFailsClosed:
         res = self._run_launcher_in(tmp_path, env_body="CAPTURE_API_TOKEN=abc123\n")
         assert res.returncode == 0
         assert "STARTED with token set: yes" in res.stdout
+
+
+class TestDocumentationContracts:
+    def test_generated_inventory_matches_source(self):
+        import json
+        from scripts.docs.inventory import snapshot,markdown
+        facts=snapshot(REPO)
+        assert json.loads((REPO/'docs/generated/runtime-inventory.json').read_text())==facts
+        assert (REPO/'docs/generated/runtime-inventory.md').read_text()==markdown(facts)
+
+    def test_hazards_have_owners_and_closure_evidence(self):
+        text=(REPO/'docs/VALIDATION.md').read_text()
+        rows=[line.split('|')[1:-1] for line in text.splitlines() if line.startswith('| H-')]
+        assert len(rows)>=9
+        for row in rows:
+            assert len(row)==4 and all(part.strip() for part in row)
+            assert row[1].strip() not in {'TBD','Unknown','Unassigned'}
+
+    def test_canonical_links_resolve(self):
+        documents=[REPO/'README.md',*(REPO/'docs').glob('*.md')]
+        # Audit records and dated execution histories intentionally retain original links.
+        for doc in documents:
+            if doc.name.startswith(('AUDIT-','REFACTOR-')):continue
+            for target in re.findall(r'\]\(([^)]+)\)',doc.read_text()):
+                target=target.split('#',1)[0]
+                if not target or '://' in target or target.startswith('mailto:'):continue
+                assert (doc.parent/target).exists(),f'{doc.name}: {target}'
+
+    def test_fixture_identifiers_and_local_secrets_stay_out(self):
+        for path in (REPO/'tests/fixtures/codex').glob('*'):
+            if path.suffix not in {'.json','.jsonl'}:continue
+            text=path.read_text()
+            assert '/Users/kerr' not in text and '@amazon.com' not in text
+        assert not _tracked(['.backup-key','*.tar.gpg','*.receipt.json','.maintenance/*','.dream/*'])

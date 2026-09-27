@@ -1,6 +1,6 @@
 """The skim record: JSON schema, dataclass and validation.
 
-One record per document (docs/PLAN-skim-stage.md §2):
+One record per document (docs/SKIM-STAGE.md §2):
 
 * ``summary`` — one neutral sentence, ≤ 200 characters
 * ``people[]``, ``entities[]`` — names exactly as written in the text

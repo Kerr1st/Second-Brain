@@ -40,26 +40,11 @@ KIRO_CLI = os.environ.get("KIRO_CLI", os.path.expanduser("~/.local/bin/kiro-cli"
 AGENTS_DIR = os.path.expanduser("~/.kiro/agents")
 DEFAULT_MODEL = "claude-opus-4.8"
 
-# --- Phase 0 LLM-call instrumentation (see docs/FABLE5-THINKER-PLAN.md) ---
-# METRICS_DIR stays defined here (not just re-exported) so the test-suite and
-# launchd env keep monkeypatching/overriding src.backends.kiro.METRICS_DIR, and
-# KiroInvoker's _metrics_dir() reads this module global at call time. Repo root
-# is dirname THREE times from src/backends/kiro.py (the file sits one level deeper
-# than the original src/agent_invoker.py, which used two).
 _REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
-METRICS_DIR = os.environ.get(
-    "KIRO_LLM_METRICS_DIR", os.path.join(_REPO_ROOT, "logs", "llm_metrics")
-)
 
 
-def _record_call_metrics(metrics: dict, run_id: str | None) -> None:
-    """Append one JSONL record of an LLM call's metrics to this module's
-    METRICS_DIR. Never raises. Kept here (reading the module-global METRICS_DIR
-    at call time) so monkeypatching ``src.backends.kiro.METRICS_DIR`` works and
-    the agent_invoker shim can re-export it unchanged."""
-    _write_metrics_line(metrics, run_id, METRICS_DIR)
 
 
 # Re-exported for back-compat: the agent_invoker shim and the test-suite import
@@ -69,9 +54,7 @@ __all__ = [
     "KIRO_CLI",
     "AGENTS_DIR",
     "DEFAULT_MODEL",
-    "METRICS_DIR",
     "_SECOND_BRAIN_MCP",
-    "_record_call_metrics",
 ]
 
 # MCP server config for the Second Brain — Explorer and Thinker need this
@@ -199,11 +182,6 @@ class KiroInvoker(AgenticCliInvoker):
     def _adapter_metrics_defaults(self) -> dict:
         return {"mcp_startup_retries": 0}
 
-    def _metrics_dir(self) -> str:
-        # Read this module's global at call time so monkeypatching
-        # src.backends.kiro.METRICS_DIR (tests) and the launchd env override both
-        # take effect — identical to the original inline behavior.
-        return METRICS_DIR
 
     def _extract_usage(self, *, parsed, raw, result, metrics):
         # usage=None / usage_source="estimate": kiro-cli exposes no real token

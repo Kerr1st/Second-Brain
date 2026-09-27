@@ -21,7 +21,10 @@ class DreamCycleResult:
     candidates_accepted: int
     candidates_rejected: int
     digest_path: str | None = None  # path to markdown digest file
-    aborted_early: bool = False  # True if circuit breaker fired (empty slices)
+    aborted_early: bool = False  # True if the run stopped before planned work completed
+    cost_usd: float = 0.0  # Known charged spend; a lower bound when spend_unknown
+    spend_unknown: bool = False
+    candidates_unjudged: int = 0
 
 
 @dataclass

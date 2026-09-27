@@ -177,7 +177,8 @@ def test_compose_gathers_all_sources(clean_tables, sample_memory_factory):
     assert insight["meta"]["cross_project"] is True
 
     contradiction = next(i for i in b["items"] if i["kind"] == "contradiction")
-    assert contradiction["title"] == "Old decision"
+    assert {contradiction["meta"]["a_title"], contradiction["meta"]["b_title"]} == {"Old decision", "New decision"}
+    assert contradiction["title"] in {"Old decision", "New decision"}
     assert "New overrides old" in contradiction["detail"]
 
 

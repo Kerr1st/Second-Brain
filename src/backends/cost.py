@@ -53,7 +53,7 @@ _PRICE_TABLE: tuple[tuple[str, float, float], ...] = (
     # OpenAI on Bedrock ({us,global}.openai.gpt-...)
     ("gpt-6-astra", 10.0, 50.0),
     ("gpt-5.6-sol", 4.0, 20.0),          # derived: Astra is 2.5x Sol's rate
-    # Skim-stage models (docs/PLAN-skim-stage.md). Standard tier, us-east-1,
+    # Skim-stage models (docs/SKIM-STAGE.md). Standard tier, us-east-1,
     # read from the Bedrock pricing page's data feed on 2026-09-20
     # (https://aws.amazon.com/bedrock/pricing/ , Amazon Nova tab "Geo
     # Cross-region inference and in-region" and the Google "On-Demand pricing"
@@ -61,16 +61,12 @@ _PRICE_TABLE: tuple[tuple[str, float, float], ...] = (
     # geo profile is what the skim calls, so the geo/in-region rate applies —
     # the `global.` profile is cheaper ($0.30 / $2.50) but leaves the US.
     ("nova-2-lite", 0.33, 2.75),         # us.amazon.nova-2-lite-v1:0
-    ("gemma-3-12b", 0.09, 0.29),         # google.gemma-3-12b-it
 )
 
 # Flex service tier (https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ServiceTier.html).
 # Nova 2 Lite: listed explicitly on the pricing page ("Flex Tier", geo/in-region).
-# Gemma 3 12B: the page prints no Flex row and states "Flex tier pricing is at
-# 50% discount to Standard tier pricing", so the figure is derived.
 _FLEX_PRICE_TABLE: tuple[tuple[str, float, float], ...] = (
     ("nova-2-lite", 0.165, 1.375),
-    ("gemma-3-12b", 0.045, 0.145),
 )
 
 # Conservative ceiling for unknown models (= the most expensive known tier).
@@ -289,7 +285,7 @@ def invoke_metered(invoker, spec, tracker: SpendTracker, system_prompt: str,
     on this tracker. This is a stop-after-call cap, not a guaranteed monetary
     ceiling: a single in-flight request can cross it. Accurate preflight
     reservation needs provider token counting and output/agent-turn bounds.
-    Legacy Dream Cycle callers retain their existing independent accounting.
+    Dream Cycle and standalone stages share this single charging boundary.
     """
     from src.backends.base import CORPUS_ROLES, CorpusRoutingError, assert_corpus_route, assert_backend_supports_role
     if spec.role not in CORPUS_ROLES:
@@ -304,13 +300,15 @@ def invoke_metered(invoker, spec, tracker: SpendTracker, system_prompt: str,
         raise ValueError("Invoker backend does not match resolved corpus role")
     tracker.ensure_available()
     kwargs.setdefault("tools", False)
+    if kwargs["tools"] and spec.backend != "claude_code":
+        raise CorpusRoutingError("Corpus tool calls require an enforced read-only tool surface")
     kwargs.setdefault("effort", spec.effort)
     kwargs.setdefault("stage", spec.role)
     try:
         result = invoker.invoke(system_prompt, user_message, **kwargs)
     except Exception as exc:
         if getattr(exc, "model_response_received", False):
-            tracker.record_metered(spec.model, getattr(exc, "usage", None),
+            tracker.record_metered(getattr(exc, "usage_model", spec.model), getattr(exc, "usage", None),
                                    usage_source=getattr(exc, "usage_source", None))
             if isinstance(exc, CorpusRoutingError):
                 tracker.blocked_reason = "Corpus model guarantee failed; no further calls permitted"

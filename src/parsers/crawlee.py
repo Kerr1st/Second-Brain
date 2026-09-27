@@ -34,7 +34,7 @@ An index entry is resolved to its file by an exact match of the header's
 ``last_parse_stats`` (module-level dict) holds the counters of the most
 recent :func:`parse_index` / :func:`parse_all` call — see the docstrings.
 
-See docs/AGENTS.md → Crawlee Integration for file format details.
+See docs/CAPTURE-COMPONENTS.md for file format details.
 """
 
 import itertools
@@ -69,7 +69,8 @@ _TABLE_RULE_RE = re.compile(r"^\|[-\s|:]+\|$")
 #   source_files      files scanned under knowledge/sources/
 #   source_files_no_url  files whose header has no usable http(s) `Source:`
 #   unresolved        index entries with no source file matching their URL
-#   unindexed_output  output/ files whose URL is not in the index
+#   unindexed_sources  source documents whose URL is absent from the index
+#   unindexed_output  output/ files whose URL is absent from index and sources
 last_parse_stats = {}
 
 
@@ -103,7 +104,7 @@ def _parse_index_row(line):
     return {"title": title, "url": url, "type": source_type, "date": date}
 
 
-def parse_index():
+def parse_index(index_path=None):
     """Parse knowledge/index.md and return the list of unique entries.
 
     Each entry is ``{"title", "url", "type", "date"}``. Rows without an
@@ -114,12 +115,13 @@ def parse_index():
     last_parse_stats.clear()
     last_parse_stats.update(stats)
 
-    if not os.path.exists(INDEX_PATH):
+    index_path = index_path or INDEX_PATH
+    if not os.path.exists(index_path):
         return []
 
     entries = []
     seen = set()
-    with open(INDEX_PATH) as f:
+    with open(index_path) as f:
         for line in f:
             line = line.strip()
             if not line.startswith("|") or line.startswith("| Title") or _TABLE_RULE_RE.match(line):
@@ -187,7 +189,7 @@ def _read_header(filepath, max_lines=HEADER_MAX_LINES):
     return meta
 
 
-def build_source_map():
+def build_source_map(sources_dir=None):
     """Map ``Source:`` URL → file path for every file in knowledge/sources/.
 
     Only non-empty http(s) values are mapped, so an empty header can never
@@ -195,7 +197,7 @@ def build_source_map():
     filename order wins. Counters ``source_files`` / ``source_files_no_url``
     are recorded in ``last_parse_stats``.
     """
-    sources_dir = _sources_dir()
+    sources_dir = sources_dir or _sources_dir()
     source_map = {}
     scanned = no_url = 0
     if os.path.isdir(sources_dir):
@@ -291,9 +293,23 @@ def parse_all(already_processed=None):
         yield url, source_type, content
     last_parse_stats["unresolved"] = unresolved
 
-    # 2. Unindexed output/ files (backward compat)
+    # Cookie capture writes source documents before an optional index entry.
+    # The exact Source header is the identity; never match body URL mentions.
     indexed_urls = {e["url"] for e in entries}
-    unindexed = find_unindexed_output_files(indexed_urls)
+    unindexed_sources = set(source_map) - indexed_urls
+    last_parse_stats["unindexed_sources"] = len(unindexed_sources)
+    for url in sorted(unindexed_sources):
+        if url in already_processed:
+            continue
+        filepath = source_map[url]
+        with open(filepath) as handle:
+            content = handle.read()
+        if content.strip():
+            source_type = "youtube" if _read_header(filepath).get("type") == "youtube-transcript" else "article"
+            yield url, source_type, content
+
+    # Legacy output documents cannot duplicate a knowledge source identity.
+    unindexed = find_unindexed_output_files(indexed_urls | set(source_map))
     last_parse_stats["unindexed_output"] = len(unindexed)
     for item in unindexed:
         if not is_http_url(item["url"]) or item["url"] in already_processed:

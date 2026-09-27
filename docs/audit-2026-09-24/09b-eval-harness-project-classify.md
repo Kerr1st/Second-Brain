@@ -204,7 +204,7 @@ Freeze the *inputs* to the ranking stage, not the model. `hybrid_search` needs a
 
 Embedding pinning is legitimate because the embedding model is not what the refactor changes; if it ever does, regenerate the fixture in one deliberate commit.
 
-### 6.3 Test (`tests/test_retrieval_regression.py`, DB-backed, marked `@pytest.mark.db`)
+### 6.3 Test (`tests/test_retrieval_quality_gate.py`, DB-backed, marked `@pytest.mark.db`)
 ```
 for q in fixture:
     rows = hybrid_search(q.query, q.embedding, limit=50)      # no model call

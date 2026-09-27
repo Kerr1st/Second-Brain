@@ -1,5 +1,5 @@
 # Skim-stage configuration: who "the user" is, and which capture channels carry
-# the user's own activity (docs/PLAN-skim-stage.md).
+# the user's own activity (docs/SKIM-STAGE.md).
 #
 # Read by src/skim/identity.py (load_identity) when src/prompts/skim.py builds
 # the skim system prompt, and rendered there as an "About the user" block plus

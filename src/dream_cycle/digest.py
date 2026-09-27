@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import logging
+import psycopg2
 import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,38 +15,14 @@ from src.models import CandidateInsight
 logger = logging.getLogger(__name__)
 
 
-def generate_digest(
-    run_id: str,
-    accepted: list[CandidateInsight],
-    rejected: list[CandidateInsight],
-) -> str:
-    """Generate a static markdown digest of the dream cycle run.
-
-    Writes a markdown file to ``logs/dream-cycle-digest-{date}.md`` with
-    accepted insights grouped by strategy type, run statistics, Explorer
-    strategies used, and a feedback loop summary.
-
-    Calls dream_cycle_db.get_evaluator_verdicts_for_run() and
-    dream_cycle_db.was_feedback_injected() instead of inline SQL.
-
-    Args:
-        run_id: The dream cycle run UUID.
-        accepted: Candidates that passed BFT consensus (≥3/4 ACCEPT).
-        rejected: Candidates that were rejected (≤2/4 ACCEPT).
-
-    Returns:
-        The file path of the written digest markdown file.
-    """
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    total = len(accepted) + len(rejected)
-
-    # Query evaluator verdicts for accepted candidates from the DB
-    verdicts_by_title: dict[str, dict] = {}
-    try:
-        verdicts_by_title = dream_cycle_db.get_evaluator_verdicts_for_run(run_id)
-    except Exception:
-        logger.warning("Could not query evaluator verdicts for digest, continuing without them")
-
+def render_digest(run_id: str, accepted: list[CandidateInsight], rejected: list[CandidateInsight], *,
+                  date: str, generated: int | None = None, feedback_injected: bool = False,
+                  verdicts_by_title: dict | None = None, slice_rows: list | None = None,
+                  cost_usd: float = 0.0, aborted: bool = False, storage_failed: int = 0) -> str:
+    """Pure rendering: callers supply completion facts; no database or filesystem I/O."""
+    today = date
+    total = generated if generated is not None else len(accepted) + len(rejected)
+    verdicts_by_title = verdicts_by_title or {}
     # Group accepted insights by strategy
     by_strategy: dict[str, list[CandidateInsight]] = {}
     for c in accepted:
@@ -53,13 +31,6 @@ def generate_digest(
 
     # Collect Explorer strategies used
     strategies_used = sorted({c.strategy_that_found_it for c in accepted if c.strategy_that_found_it})
-
-    # Check if feedback was injected
-    feedback_injected = False
-    try:
-        feedback_injected = dream_cycle_db.was_feedback_injected(run_id)
-    except Exception:
-        pass
 
     # Build markdown
     lines: list[str] = []
@@ -74,6 +45,10 @@ def generate_digest(
     lines.append(f"- Candidates generated: {total}")
     lines.append(f"- Accepted: {len(accepted)}")
     lines.append(f"- Rejected: {len(rejected)}")
+    lines.append(f"- Not persisted as accepted/rejected: {max(0, total - len(accepted) - len(rejected))}")
+    lines.append(f"- Storage blocked: {storage_failed}")
+    lines.append(f"- Known model cost: ${cost_usd:.4f}")
+    lines.append(f"- Aborted: {aborted}")
     lines.append("")
 
     # Explorer strategies
@@ -86,13 +61,8 @@ def generate_digest(
         lines.append("- (none)")
     lines.append("")
 
-    # Attention ledger: what the Explorer examined (migration 012)
-    try:
-        slice_rows = dream_cycle_db.get_slices_for_run(run_id)
-        if slice_rows:
-            lines += format_attention_section(run_metrics(slice_rows), slice_rows)
-    except Exception:
-        logger.warning("Could not build the attention section for the digest", exc_info=True)
+    if slice_rows:
+        lines += format_attention_section(run_metrics(slice_rows), slice_rows)
 
     # Feedback loop summary
     lines.append("## Feedback Loop Summary")
@@ -166,14 +136,54 @@ def generate_digest(
                 lines.append("---")
                 lines.append("")
 
-    # Write file. Resolve logs/ relative to the repo root (not cwd): scheduled
-    # launchd runs have cwd=/ (read-only), which broke the previous Path("logs").
-    # Built as a single Path() call over an os.path string so it stays both
-    # cwd-independent and simple to mock in tests.
-    logs_dir = Path(os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "logs")))
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    file_path = logs_dir / f"dream-cycle-digest-{today}.md"
-    file_path.write_text("\n".join(lines), encoding="utf-8")
+    return "\n".join(lines)
 
-    logger.info("Digest written to %s", file_path)
+
+def write_digest(run_id: str, text: str, *, date: str) -> str:
+    """Write a private run artifact, optionally inside an evaluation output directory.
+
+    A temporary file and atomic replacement keep partial output private and
+    prevent a pre-existing destination symlink from redirecting the write.
+    """
+    default_dir = Path(__file__).resolve().parents[2] / "logs"
+    logs_dir = Path(os.environ.get("SECOND_BRAIN_DIGEST_DIR", str(default_dir))).expanduser()
+    if not logs_dir.is_absolute() or logs_dir.is_symlink():
+        raise ValueError("Digest directory must be absolute and must not be a symlink")
+    logs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if logs_dir.stat().st_mode & 0o077:
+        raise ValueError("Digest directory must have private permissions (0700)")
+    safe_id = "".join(c for c in str(run_id) if c.isalnum() or c in "-_")[:80] or "unknown"
+    safe_date = datetime.strptime(date, "%Y-%m-%d").strftime("%Y-%m-%d")
+    file_path = logs_dir / f"dream-cycle-digest-{safe_date}-{safe_id}.md"
+    fd, temporary = tempfile.mkstemp(prefix=".digest-", dir=logs_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(temporary, file_path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     return str(file_path)
+
+
+def generate_digest(run_id: str, accepted: list[CandidateInsight], rejected: list[CandidateInsight], *,
+                    generated: int | None = None, feedback_injected: bool | None = None,
+                    cost_usd: float = 0.0, aborted: bool = False, storage_failed: int = 0) -> str:
+    """Load optional presentation detail and write the pure renderer's output.
+
+    The running pipeline supplies feedback explicitly because its completion row
+    has not been written yet. Historical callers may read the completed row.
+    """
+    verdicts, slices = {}, []
+    try:
+        verdicts = dream_cycle_db.get_evaluator_verdicts_for_run(run_id)
+        slices = dream_cycle_db.get_slices_for_run(run_id)
+    except (psycopg2.Error, OSError, ValueError, KeyError):
+        logger.warning("Digest detail unavailable", exc_info=True)
+    if feedback_injected is None:
+        feedback_injected = dream_cycle_db.was_feedback_injected(run_id)
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    text = render_digest(run_id, accepted, rejected, date=date, generated=generated,
+        feedback_injected=feedback_injected, verdicts_by_title=verdicts, slice_rows=slices,
+        cost_usd=cost_usd, aborted=aborted, storage_failed=storage_failed)
+    return write_digest(run_id, text, date=date)

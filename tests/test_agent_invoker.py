@@ -17,7 +17,7 @@ from src.backends.kiro import KiroInvoker as AgentInvoker
 def _isolate_llm_metrics(tmp_path, monkeypatch):
     """Phase 0: redirect per-call metrics writes to a temp dir so invoke tests
     don't pollute the real logs/llm_metrics/ directory."""
-    monkeypatch.setattr("src.backends.kiro.METRICS_DIR", str(tmp_path / "llm_metrics"))
+    monkeypatch.setattr("src.backends.base.METRICS_DIR", str(tmp_path / "llm_metrics"))
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +438,7 @@ class TestInvokeMetrics:
             run_id="run-123",
         )
 
-        path = os.path.join(ai.METRICS_DIR, "run-123.jsonl")
+        path = os.path.join(__import__("src.backends.base", fromlist=["METRICS_DIR"]).METRICS_DIR, "run-123.jsonl")
         assert os.path.exists(path)
         lines = [ln for ln in open(path, encoding="utf-8").read().splitlines() if ln.strip()]
         assert len(lines) == 1
@@ -462,7 +462,7 @@ class TestInvokeMetrics:
                 system_prompt="s", user_message="m", run_id="run-fail"
             )
 
-        path = os.path.join(ai.METRICS_DIR, "run-fail.jsonl")
+        path = os.path.join(__import__("src.backends.base", fromlist=["METRICS_DIR"]).METRICS_DIR, "run-fail.jsonl")
         assert os.path.exists(path)
         rec = json.loads(open(path, encoding="utf-8").read().splitlines()[0])
         assert rec["success"] is False
@@ -476,7 +476,7 @@ class TestInvokeMetrics:
 
         AgentInvoker().invoke(system_prompt="s", user_message="m", stage="synthetic_adapter")
 
-        assert os.path.exists(os.path.join(ai.METRICS_DIR, "adhoc.jsonl"))
+        assert os.path.exists(os.path.join(__import__("src.backends.base", fromlist=["METRICS_DIR"]).METRICS_DIR, "adhoc.jsonl"))
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +552,7 @@ class TestModelHonoredProvenance:
     @patch("src.backends.kiro.subprocess.run")
     def test_flag_false_and_warning_when_backend_ignores_model(self, mock_run, caplog, tmp_path, monkeypatch):
         import src.backends.kiro as kiro
-        monkeypatch.setattr(kiro, "METRICS_DIR", str(tmp_path))
+        monkeypatch.setattr("src.backends.base.METRICS_DIR", str(tmp_path))
         mock_run.return_value = MagicMock(
             returncode=0, stdout='{"ok": true}',
             stderr="[warn] failed to set model 'claude-opus-5': Method not found\n")
@@ -565,7 +565,7 @@ class TestModelHonoredProvenance:
     @patch("src.backends.kiro.subprocess.run")
     def test_flag_true_when_no_warning(self, mock_run, tmp_path, monkeypatch):
         import src.backends.kiro as kiro
-        monkeypatch.setattr(kiro, "METRICS_DIR", str(tmp_path))
+        monkeypatch.setattr("src.backends.base.METRICS_DIR", str(tmp_path))
         mock_run.return_value = MagicMock(returncode=0, stdout='{"ok": true}', stderr="")
         AgentInvoker(model="claude-sonnet-5").invoke("sys", "user", run_id="run-y")
         rec = json.loads((tmp_path / "run-y.jsonl").read_text().splitlines()[-1])

@@ -1,6 +1,6 @@
 """Cluster a window's arrivals by their existing embeddings — no model calls.
 
-Phase 3 of docs/PLAN-skim-stage.md (optional item): the inventory tags documents
+Phase 3 of docs/SKIM-STAGE.md (optional item): the inventory tags documents
 that are about the same matter with ``[c<k>]`` so the Explorer can see a Slack
 thread, an email and a calendar event as one story. The vectors already exist —
 the ingest embeds every parent memory or its chunks (pgvector ``vector(1024)``,

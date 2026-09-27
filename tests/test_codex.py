@@ -31,7 +31,7 @@ def _isolate_llm_metrics(tmp_path, monkeypatch):
     """Redirect per-call metrics writes to a temp dir so invoke tests don't
     pollute the real logs/llm_metrics/ directory."""
     monkeypatch.setattr(
-        "src.backends.agentic_cli.METRICS_DIR", str(tmp_path / "llm_metrics")
+        "src.backends.base.METRICS_DIR", str(tmp_path / "llm_metrics")
     )
 
 
@@ -215,20 +215,6 @@ class TestSystemPromptDelivery:
         assert "instructions=SYS" in cmd
         assert cmd[2] == "msg"
 
-    @patch("src.backends.codex.subprocess.run")
-    def test_prepend_fallback(self, mock_run):
-        """Req 12.3: fallback folds the system prompt into the user message."""
-        mock_run.side_effect = _writes_last_message('{"ok": 1}')
-        CodexInvoker(model="m", system_prompt_delivery="prepend").invoke(
-            "SYS ROLE", "USER MSG"
-        )
-        cmd = _last_cmd(mock_run)
-        assert cmd[2] == "SYS ROLE\n\nUSER MSG"
-        # no inline instruction config when prepending
-        joined = " ".join(cmd)
-        assert "developer_instructions=" not in joined
-        assert "instructions=" not in joined
-        assert "model_instructions_file=" not in joined
 
 
 class TestFinalTextExtraction:
@@ -586,7 +572,7 @@ class TestUsageCapture:
     def test_real_usage_recorded_in_metrics(self, mock_run, tmp_path, monkeypatch):
         # Real counts are folded into the per-call metrics line (Req 16.1).
         metrics_dir = tmp_path / "m"
-        monkeypatch.setattr("src.backends.agentic_cli.METRICS_DIR", str(metrics_dir))
+        monkeypatch.setattr("src.backends.base.METRICS_DIR", str(metrics_dir))
         inv = CodexInvoker(model="m", final_message_source="json")
         stream = _json_stream_with_usage(
             '{"ok": 1}',
