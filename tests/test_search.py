@@ -495,6 +495,38 @@ class TestFullTextWithoutEmbedding:
         )
         assert [str(row["id"]) for row in results] == [str(target)]
 
+    def test_fts_leg_skips_parents_represented_by_active_chunks(self, test_db, clean_tables, mock_embedding):
+        """Fix 6 (review B N2): a chunked parent is reachable through its chunks only;
+        a parent whose chunks are all superseded (childless again) and an unembedded
+        leaf stay reachable. Ranks are normalised to 0..1."""
+        from src.db.search_queries import fetch_candidates
+        term = "quokka"
+        parent = db.create_memory(type="source", title="Chunked doc", content=f"{term} appears here. " * 400,
+                                  source_type="article", source_url="a://1")
+        chunk = db.create_memory(type="source", title="Chunked doc (chunk 1/1)", content=f"{term} appears here.",
+                                 source_type="article", source_url="a://1", parent_id=parent,
+                                 embedding=str(mock_embedding("chunk")))
+        orphaned_parent = db.create_memory(type="source", title="Rechunked doc", content=f"{term} once more.",
+                                           source_type="article", source_url="a://2")
+        db.create_memory(type="source", title="old chunk", content=f"{term} once more.", source_type="article",
+                         source_url="a://2", parent_id=orphaned_parent, status="superseded")
+        leaf = db.create_memory(type="source", title="Leaf", content=f"A {term} leaf without embedding.",
+                                source_type="article", source_url="a://3")
+        _, fts, rows = fetch_candidates(term, mock_embedding(term), 20)
+        assert str(parent) not in fts
+        assert {str(chunk), str(orphaned_parent), str(leaf)} <= set(fts)
+        results = hybrid_search(term, mock_embedding(term), limit=10)
+        ids = [str(r["id"]) for r in results]
+        assert str(parent) not in ids and str(chunk) in ids and str(leaf) in ids
+        # Normalised rank: the lexical scores are in [0, 1) and a short document is
+        # not out-ranked by a long one merely for repeating the term.
+        with db.get_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id::text, ts_rank(search_vector, to_tsquery('english', %s), 33) FROM memories WHERE id IN (%s, %s)",
+                        (term, str(leaf), str(parent)))
+            ranks = dict(cur.fetchall())
+        assert all(0 <= v < 1 for v in ranks.values())
+        assert ranks[str(leaf)] >= ranks[str(parent)]
+
     def test_fts_and_vector_match_yields_one_result(
         self, test_db, clean_tables, mock_embedding,
     ):

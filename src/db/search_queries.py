@@ -18,8 +18,16 @@ def fetch_candidates(query_text,query_embedding,prefetch,**filters):
         vectors=sorted(cur.fetchall(),key=lambda r:(-r['similarity'],str(r['id'])))
         vec={str(r['id']):i+1 for i,r in enumerate(vectors)}
         fts={}
+        # Lexical leg (F-048 / fix 6): reaches rows without an embedding (unembedded
+        # leaves, childless parents) but NOT parents that have active chunks -- those
+        # are represented by their chunks, and whole documents of up to 1.3 M chars
+        # would otherwise flood the leg with rank ~1.0 (review B N2). ts_rank uses
+        # normalisation 1|32: divide by 1+log(document length), then scale to 0..1.
         for query in fts_passes(tokenize_query(query_text)):
-            cur.execute(sql.SQL("SELECT id, ts_rank(search_vector,to_tsquery('english',%s)) AS rank FROM memories {} AND search_vector @@ to_tsquery('english',%s) ORDER BY rank DESC,id LIMIT %s").format(where),[query,*params,query,prefetch])
+            cur.execute(sql.SQL("""SELECT id, ts_rank(search_vector,to_tsquery('english',%s),33) AS rank FROM memories m {}
+                AND search_vector @@ to_tsquery('english',%s)
+                AND NOT EXISTS (SELECT 1 FROM memories c WHERE c.parent_id = m.id AND c.status = 'active')
+                ORDER BY rank DESC,id LIMIT %s""").format(where),[query,*params,query,prefetch])
             for row in cur.fetchall():
                 mid=str(row['id'])
                 if mid not in fts:fts[mid]=len(fts)+1
