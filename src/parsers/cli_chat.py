@@ -177,7 +177,11 @@ def parse_conversation(conversation_id, messages, created_at):
     if not passes_content_filter(messages):
         return None
 
-    project = normalize_project_tag(conversation_id)
+    # F-028: the session filename is an opaque UUID, not a project. The CLI
+    # session store carries no project signal the parser can trust, so the
+    # project is left unset (identity does not depend on it; see
+    # src.db.capture_queries.find_captured_source).
+    project = None
     markdown = format_as_markdown(conversation_id, messages, created_at, project=project)
     return conversation_id, markdown, project
 

@@ -103,24 +103,29 @@ def find_temporal_neighbors(memory_id: str, created_at, limit: int = 3) -> list[
 
 
 def find_captured_source(source_type, source_url, project=None, *, conn=None):
-    """Identity is channel, URL and project, scoped to captured source parents.
+    """Identity of a captured source is its channel and URL, scoped to captured
+    source parents. ``project`` is accepted for call compatibility but is NOT
+    part of the identity: a project tag can be repaired (UUID -> NULL, F-028),
+    inferred differently by a newer parser, or absent, and none of that makes
+    the same document a new one. Before this rule the first capture run after
+    the UUID-project repair would have re-ingested every CLI session (B N1).
 
     Derived task memories may intentionally share a URL and never match here.
     """
     with connection_scope(conn) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""SELECT id, content, metadata FROM memories
-                WHERE source_type = %s AND source_url = %s AND project IS NOT DISTINCT FROM %s
+            cur.execute("""SELECT id, content, metadata, project FROM memories
+                WHERE source_type = %s AND source_url = %s
                 AND (type = 'source' OR metadata->>'capture_identity' = 'true' OR source_type LIKE 'quick_desktop%%')
                 AND parent_id IS NULL
                 AND COALESCE(metadata->>'record_kind', '') NOT IN ('task_memory', 'topic_segment')
-                ORDER BY created_at, id LIMIT 1""", (source_type, source_url, project))
+                ORDER BY created_at, id LIMIT 1""", (source_type, source_url))
             return cur.fetchone()
 
 
-def lock_source_identity(source_type, source_url, project, *, conn):
+def lock_source_identity(source_type, source_url, project=None, *, conn):
     """Serialize writers of one identity without a corpus-wide unique index."""
     import json
-    key = json.dumps([source_type, source_url, project], separators=(',', ':'))
+    key = json.dumps([source_type, source_url], separators=(',', ':'))
     with conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))

@@ -114,9 +114,12 @@ def _discover_relationships(parent_id, body=None):
 def ingest_content(content, source_type, source_url=None, project=None, *, refresh=False, source_metadata=None, memory_fields=None, parse_header=True):
     """Prepare every embedding first, then commit parent and chunks together.
 
-    Identity is channel + URL + project. Generated memories sharing a task URL
-    are outside this captured-source namespace. Refresh keeps cited old chunk IDs
-    as superseded history and atomically installs a fresh active chunk set.
+    Identity is channel + URL (``project`` is descriptive, never identity, so a
+    repaired or re-derived project tag cannot duplicate a source). Generated
+    memories sharing a task URL are outside this captured-source namespace.
+    Refresh keeps cited old chunk IDs as superseded history and atomically
+    installs a fresh active chunk set. A non-NULL resolved project is written
+    on refresh; a NULL one never erases an existing tag.
     """
     meta, body = parse_metadata_header(content) if parse_header else ({}, content)
     if source_metadata is not None:
@@ -159,6 +162,8 @@ def ingest_content(content, source_type, source_url=None, project=None, *, refre
             current = get_memory(existing["id"], conn=conn)
             updates = {"title": title, "type": memory_type,
                        "mem_class": explicit_class or classify_memory(memory_type, body), **fields}
+            if resolved_project is not None:
+                updates["project"] = resolved_project
             if current and current["content"] == body:
                 changed = any(current.get(k) != v for k, v in updates.items()) or any(
                     (current.get("metadata") or {}).get(k) != v for k, v in meta.items())
@@ -189,7 +194,8 @@ def ingest_content(content, source_type, source_url=None, project=None, *, refre
             with conn.cursor() as cur:
                 cur.execute("UPDATE memories SET status = 'superseded', updated_at = now() WHERE parent_id = %s AND status = 'active'", (parent_id,))
             update_fields(parent_id, {"title": title, "content": body,
-                          "mem_class": explicit_class or classify_memory(memory_type, body), "type": memory_type, **fields},
+                          "mem_class": explicit_class or classify_memory(memory_type, body), "type": memory_type,
+                          **({"project": resolved_project} if resolved_project is not None else {}), **fields},
                           metadata_patch=meta, conn=conn)
         else:
             parent_id = create_memory(type=memory_type, title=title, content=body,
@@ -210,8 +216,7 @@ def ingest_batch(items, source_type, *, refresh=False):
     stats = {"processed": 0, "skipped": 0, "failed": 0}
     already = set()
     for source_url, content in items:
-        meta, _ = parse_metadata_header(content)
-        identity = (source_type, source_url, normalize_project_tag(meta.get("project")))
+        identity = (source_type, source_url)
         if identity in already and not refresh:
             stats["skipped"] += 1
             continue

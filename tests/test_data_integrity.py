@@ -62,7 +62,9 @@ def test_batch_identity_and_refresh_preserve_citations(test_db,clean_tables,monk
     doc='# Example\nProject: alpha\n---\nOriginal content'
     assert ingest_batch([('test://one',doc),('test://one',doc),(None,doc)],'article')=={'processed':1,'skipped':1,'failed':1}
     parents=db.list_memories();parent=next(r for r in parents if not r['parent_id']);old=next(r for r in parents if r['parent_id'])
-    assert ingest_content(doc,'article','test://one',project='beta')
+    # Project is descriptive, not identity (F-028): the same channel+URL under another project is the same source.
+    assert ingest_content(doc,'article','test://one',project='beta') is None
+    assert len([r for r in db.list_memories() if not r['parent_id']])==1
     assert ingest_content(doc+' updated','article','test://one',refresh=True)==str(parent['id'])
     assert db.get_memory(old['id'])['status']=='superseded'
     assert db.get_memory(parent['id'])['content']=='Original content updated'
