@@ -30,9 +30,11 @@ import uuid
 
 from src.backends.agentic_cli import (
     AgenticCliInvoker,
-    _write_metrics_line,
 )
-from src.backends.base import parse_json_output as _parse_json_output
+from src.backends.base import (
+    _write_metrics_line,
+    parse_json_output as _parse_json_output,
+)
 
 logger = logging.getLogger(__name__)
 
