@@ -94,7 +94,8 @@ def memory_create(
     """Create a new memory and generate its embedding.
 
     type: idea, synthesis, research, insight, question, decision, priority, project, connection, source
-    source_type: youtube, article, pdf, course, kiro_cli_chat, kiro_ide_chat, notes, manual
+    source_type: manual, file, article, youtube, kiro_cli_chat, kiro_ide_chat, slack, outlook_email, browser_history
+      (optional; any other registered capture-channel label is accepted, unknown labels are rejected)
 
     DEPTH REQUIREMENT for ideas/insights/decisions: explain WHAT, WHAT HAPPENS when violated, and WHY.
     Include 'Questions this answers:' with 3-5 natural-language queries.
@@ -156,7 +157,7 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
 
     Filters (all optional, combine freely):
     - type: memory type, e.g. 'decision', 'insight', 'synthesis'.
-    - source_type: capture channel, e.g. 'distilled_chat', 'cli_chat', 'kiro_ide_chat', 'article'.
+    - source_type: capture channel, e.g. 'distilled_chat', 'kiro_cli_chat', 'kiro_ide_chat', 'article'.
     - since_days: only memories created in the last N days (e.g. 30 = last month).
     - status: e.g. 'active' to exclude superseded items.
     - project: scope to a project tag.
