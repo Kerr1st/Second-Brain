@@ -252,7 +252,7 @@ def memory_read(memory_id: str) -> dict:
         return {"error": "Not found"}
     out = {}
     for k, v in mem.items():
-        if k == "embedding":
+        if k in ("embedding", "search_vector"):  # vectors and the tsvector are storage detail (F-057)
             continue
         elif hasattr(v, "isoformat"):
             out[k] = v.isoformat()

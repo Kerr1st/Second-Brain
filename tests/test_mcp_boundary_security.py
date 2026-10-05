@@ -55,3 +55,12 @@ def test_programming_error_not_hidden():
     with patch.object(server, 'get_memory', side_effect=ZeroDivisionError):
         with pytest.raises(ZeroDivisionError):
             server.memory_read(str(uuid.uuid4()))
+
+
+def test_read_omits_vectors_and_tsvector(test_db, clean_tables):
+    """F-057: memory_read returns content and scalars, never the embedding or search_vector."""
+    from src import db
+    mid = db.create_memory("idea", "Vectors stay home", "Some content worth reading", embedding=[1.0] + [0.0] * 1023)
+    out = server.memory_read(mid)
+    assert out["content"] == "Some content worth reading" and out["id"] == mid
+    assert "embedding" not in out and "search_vector" not in out
