@@ -832,15 +832,30 @@ def get_strategy_usage(n_cycles: int = 10) -> dict[str, int]:
             return {row["strategy"]: row["cnt"] for row in cur.fetchall()}
 
 
-def expire_stale_relationships(days_threshold: int = 90) -> int:
-    """Set expired_at on relationships where neither endpoint was accessed recently.
+#: Provenance edges record *how* a memory came to exist (dream-cycle lineage and
+#: supersession). They are never decayed: losing them silently detaches a
+#: synthesis from its evidence. 2026-10-05 live audit: 97 such edges had been
+#: expired by the access-only rule below; migration 016 (R3) un-expires them.
+PERMANENT_RELATION_TYPES = ("derived_from", "superseded_by")
 
-    A relationship is considered stale if both source and target memories have
-    last_accessed_at older than days_threshold (or NULL) and the relationship
-    itself has no expired_at set yet.
+
+def expire_stale_relationships(days_threshold: int = 90) -> int:
+    """Set expired_at on association edges that are old AND whose endpoints are cold.
+
+    A relationship is stale only when ALL of the following hold:
+
+    * it is not already expired;
+    * its ``relation_type`` is not provenance (:data:`PERMANENT_RELATION_TYPES`);
+    * the edge itself is older than ``days_threshold`` (``created_at`` grace —
+      a new link between two never-read memories must survive its first night;
+      without this, 829 of the 872 edges created between 2026-09-26 and
+      2026-10-05 were expired by the very next dream cycle);
+    * neither endpoint memory has been accessed within ``days_threshold``.
 
     Returns the number of relationships expired.
     """
+    if isinstance(days_threshold, bool) or not isinstance(days_threshold, int) or days_threshold < 1:
+        raise ValueError("days_threshold must be a positive integer")
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -848,13 +863,15 @@ def expire_stale_relationships(days_threshold: int = 90) -> int:
                 UPDATE memory_relationships mr
                 SET expired_at = now()
                 WHERE mr.expired_at IS NULL
+                  AND mr.relation_type NOT IN %s
+                  AND mr.created_at < now() - make_interval(days => %s)
                   AND NOT EXISTS (
                       SELECT 1 FROM memories m
                       WHERE m.id IN (mr.source_id, mr.target_id)
-                        AND m.last_accessed_at > now() - make_interval(days => %s)
+                        AND m.last_accessed_at >= now() - make_interval(days => %s)
                   )
                 """,
-                (days_threshold,),
+                (PERMANENT_RELATION_TYPES, days_threshold, days_threshold),
             )
             count = cur.rowcount
         conn.commit()
