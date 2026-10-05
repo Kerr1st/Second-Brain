@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 import subprocess
 
+os.environ["SECOND_BRAIN_DIGEST_DIR"] = str(Path(os.environ["SECOND_BRAIN_TEST_MANIFEST"]).parent / "digests")
+
 import psycopg2
 from psycopg2 import sql
 import pytest
@@ -173,3 +175,36 @@ def sample_memory_factory(test_db, clean_tables, mock_embedding):
             **kwargs,
         )
     return _factory
+
+
+class FakeInvoker:
+    """Scripted provider seam with explicit synthetic usage and recorded prompts."""
+    def __init__(self, outputs=None, usage=(3000, 200), default_output=None):
+        self.outputs = list(outputs or [])
+        self.calls = []
+        self._usage = usage
+        self._default_output = default_output
+
+    def invoke(self, system_prompt, user_message, **kwargs):
+        import json
+        self.calls.append({"system": system_prompt, "user": user_message, **kwargs})
+        output = self.outputs.pop(0) if self.outputs else (
+            self._default_output() if callable(self._default_output) else self._default_output)
+        if isinstance(output, BaseException):
+            raise output
+        return {"output": output, "raw": json.dumps(output), "usage_source": "real",
+                "usage": {"inputTokens": self._usage[0], "outputTokens": self._usage[1], "serviceTier": "flex"}}
+
+
+def mock_conn(rows=(), first=None):
+    """One consistent cursor context for unit tests of provider-independent SQL wiring.
+
+    Data-integrity behavior uses the disposable database, not this mock.
+    """
+    from unittest.mock import MagicMock
+    connection = MagicMock()
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = list(rows)
+    cursor.fetchone.return_value = first
+    connection.__enter__.return_value = connection
+    return connection, cursor

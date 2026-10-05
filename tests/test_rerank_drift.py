@@ -84,8 +84,8 @@ SEED_SPECS = [
         "branch": "type_boost+none_class+project_penalty",
     },
     {
-        "key": "note_nonboosted_semantic",
-        "type": "note",                  # NOT in TYPE_BOOST_TYPES -> 0 type boost
+        "key": "question_nonboosted_semantic",
+        "type": "question",                  # NOT in TYPE_BOOST_TYPES -> 0 type boost
         "mem_class": "semantic",
         "project": None,
         "branch": "non_boosted_type+semantic",
@@ -100,7 +100,7 @@ SEED_SPECS = [
     },
     {
         "key": "stale_unretrieved",
-        "type": "note",
+        "type": "question",
         "mem_class": None,
         "project": None,
         "access_count": 0,               # never retrieved

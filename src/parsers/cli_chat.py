@@ -9,7 +9,7 @@ Each .jsonl line is {version, kind, data}:
   - kind=AssistantMessage -> assistant message (text parts; toolUse skipped)
   - kind=ToolResults      -> skipped
 
-See docs/HYBRID-CHAT-EXTRACTION.md for stripping rules and filter thresholds.
+See docs/CAPTURE-COMPONENTS.md for stripping rules and filter thresholds.
 """
 
 import glob
@@ -38,7 +38,7 @@ def _text_from_content(content):
     return "\n\n".join(parts)
 
 
-def extract_session_messages(path):
+def extract_session_messages(path, *, strict=False):
     """Read a Kiro CLI session .jsonl. Returns (messages, created_at_ms).
 
     messages: list of (role, text) with role in {human, bot}.
@@ -54,6 +54,8 @@ def extract_session_messages(path):
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
+                if strict:
+                    raise
                 continue
             data = entry.get("data") or {}
             if first_ts is None:

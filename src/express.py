@@ -9,7 +9,7 @@ the weekly digest) but never surfaces it. Express closes that loop:
   render_markdown()   — format a briefing for the terminal (P1 `brief`)
 
 P2 (proactive Gmail push) builds on the same compose/edit and adds should_push()
-+ render_email() + send_email(). See docs/EXPRESS-PLAN.md.
++ render_email() + send_email(). See docs/ARCHITECTURE.md.
 """
 
 from __future__ import annotations
@@ -23,9 +23,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from html import escape
 
-from psycopg2.extras import RealDictCursor
-
-from src.db import get_connection
+from src.db import express_queries as repository
+from src.db.express_queries import list_feedback
 
 logger = logging.getLogger(__name__)
 
@@ -63,58 +62,31 @@ def _classify_target(target: str) -> tuple[str, str]:
     return ("topic", t)
 
 
+
+
+
+
+
+
 def record_feedback(target: str, signal: str) -> dict:
-    """Upsert a delivery-preference signal (latest per target wins)."""
     if signal not in VALID_SIGNALS:
         raise ValueError(f"signal must be one of {sorted(VALID_SIGNALS)}")
-    ttype, tkey = _classify_target(target)
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO express_feedback (target_type, target_key, signal, weight)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (target_type, target_key)
-                DO UPDATE SET signal = EXCLUDED.signal, weight = EXCLUDED.weight, updated_at = now()
-                """,
-                (ttype, tkey, signal, _SIGNAL_WEIGHT[signal]),
-            )
-        conn.commit()
-    return {"target_type": ttype, "target_key": tkey, "signal": signal}
+    ttype,tkey=_classify_target(target)
+    repository.store_feedback(ttype,tkey,signal,_SIGNAL_WEIGHT[signal])
+    return {"target_type":ttype,"target_key":tkey,"signal":signal}
 
 
 def remove_feedback(target: str) -> int:
-    """Remove any stored signal for a target (the --unmute / reset path). Returns rows deleted."""
-    ttype, tkey = _classify_target(target)
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM express_feedback WHERE target_type = %s AND target_key = %s",
-                (ttype, tkey),
-            )
-            n = cur.rowcount
-        conn.commit()
-    return n
+    return repository.delete_feedback(*_classify_target(target))
 
 
-def list_feedback() -> list[dict]:
-    """All stored preferences, newest first (for `brief --prefs`)."""
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT target_type, target_key, signal, weight, updated_at "
-                "FROM express_feedback ORDER BY updated_at DESC"
-            )
-            return [dict(r) for r in cur.fetchall()]
-
-
-def load_prefs() -> dict:
+def load_prefs(rows=None) -> dict:
     """Compile stored feedback into muted sets + soft weights for fast application."""
     prefs = {
         "muted": {"item": set(), "kind": set(), "topic": set()},
         "weight": {"item": {}, "kind": {}, "topic": {}},
     }
-    for r in list_feedback():
+    for r in list_feedback() if rows is None else rows:
         tt, tk = r["target_type"], r["target_key"]
         if r["signal"] == "mute":
             prefs["muted"][tt].add(tk)
@@ -162,204 +134,14 @@ def _truncate(text: str | None, n: int = 600) -> str:
     return text if len(text) <= n else text[: n - 1].rstrip() + "…"
 
 
-def _gather_insights(cur, window_days: int) -> list[dict]:
-    """Recent accepted dream-cycle insights (identified by the `dream-cycle` tag)."""
-    cur.execute(
-        """
-        SELECT id, type, title, content, created_at, metadata, project
-        FROM memories
-        WHERE tags @> ARRAY['dream-cycle'] AND status = 'active'
-          AND created_at > now() - (%s || ' days')::interval
-        ORDER BY created_at DESC
-        LIMIT 8
-        """,
-        (window_days,),
-    )
-    rows = cur.fetchall()
-    if not rows:
-        return []
-
-    # Resolve source-memory projects/titles in one batched query → cross-project signal.
-    all_src: set[str] = set()
-    for r in rows:
-        for sid in (r["metadata"] or {}).get("source_memories", []) or []:
-            all_src.add(sid)
-    src_info: dict[str, dict] = {}
-    if all_src:
-        cur.execute(
-            "SELECT id, title, project FROM memories WHERE id = ANY(%s::uuid[])",
-            (list(all_src),),
-        )
-        for s in cur.fetchall():
-            src_info[str(s["id"])] = {"title": s["title"], "project": s["project"]}
-
-    items = []
-    for r in rows:
-        meta = r["metadata"] or {}
-        src_ids = meta.get("source_memories", []) or []
-        projects = {
-            src_info[s]["project"]
-            for s in src_ids
-            if s in src_info and src_info[s]["project"]
-        }
-        source_titles = [src_info[s]["title"] for s in src_ids if s in src_info]
-        cross_project = (
-            meta.get("strategy") == "cross_project_collision" or len(projects) >= 2
-        )
-        items.append(
-            {
-                "kind": "insight",
-                "id": str(r["id"]),
-                "title": r["title"],
-                "detail": _truncate(r["content"]),
-                "created_at": r["created_at"],
-                "meta": {
-                    "strategy": meta.get("strategy"),
-                    "confidence": meta.get("confidence"),
-                    "cross_project": cross_project,
-                    "projects": sorted(projects),
-                    "topics": sorted(projects),
-                    "source_titles": source_titles[:5],
-                },
-            }
-        )
-    return items
 
 
-def _gather_contradictions(cur, limit: int) -> list[dict]:
-    """Active `contradicts` edges — the 'you're reversing a past decision' signal.
-
-    Deduped to one entry per source memory (a memory may contradict several others;
-    showing it once, newest-first, keeps the briefing varied).
-    """
-    cur.execute(
-        """
-        SELECT r.source_id, r.target_id, r.note, r.created_at,
-               a.title AS a_title, b.title AS b_title
-        FROM memory_relationships r
-        JOIN memories a ON a.id = r.source_id
-        JOIN memories b ON b.id = r.target_id
-        WHERE r.relation_type = 'contradicts' AND r.expired_at IS NULL
-        ORDER BY r.created_at DESC
-        LIMIT %s
-        """,
-        (limit * 4,),
-    )
-    items = []
-    seen_sources: set = set()
-    for r in cur.fetchall():
-        if r["source_id"] in seen_sources:
-            continue
-        seen_sources.add(r["source_id"])
-        note = (r["note"] or "").strip()
-        detail = note or "These two memories make opposing claims."
-        detail += f"\n\n• «{r['a_title']}»\n• «{r['b_title']}»"
-        items.append(
-            {
-                "kind": "contradiction",
-                "id": f"{r['source_id']}:{r['target_id']}",
-                "title": r["a_title"],
-                "detail": detail,
-                "created_at": r["created_at"],
-                "meta": {"a_title": r["a_title"], "b_title": r["b_title"], "note": note},
-            }
-        )
-        if len(items) >= limit:
-            break
-    return items
 
 
-def _gather_resurfaced(cur, limit: int, suppress_days: int) -> list[dict]:
-    """High-value, long-unaccessed memories (desirable difficulty; Bjork 1992).
-
-    Value signal is `access_count` (proven prior retrieval = high storage strength)
-    on distilled types; depth_score is only populated on dream-cycle memories so it
-    is used only as a tiebreaker. "Forgotten" = old + not accessed recently.
-    """
-    cur.execute(
-        """
-        SELECT id, type, title, content, created_at, access_count, project,
-               COALESCE((metadata->>'depth_score')::float, 0) AS depth
-        FROM memories
-        WHERE status = 'active'
-          AND type IN ('insight', 'decision', 'synthesis')
-          AND NOT (tags @> ARRAY['dream-cycle'])
-          AND created_at < now() - (%s || ' days')::interval
-          AND (last_accessed_at IS NULL OR last_accessed_at < now() - (%s || ' days')::interval)
-          AND (
-                metadata->>'express_last_surfaced' IS NULL
-                OR (metadata->>'express_last_surfaced')::timestamptz < now() - (%s || ' days')::interval
-              )
-        ORDER BY access_count DESC, depth DESC, created_at ASC
-        LIMIT %s
-        """,
-        (RESURFACE_MIN_AGE_DAYS, RESURFACE_MIN_AGE_DAYS, suppress_days, limit),
-    )
-    items = []
-    for r in cur.fetchall():
-        items.append(
-            {
-                "kind": "resurface",
-                "id": str(r["id"]),
-                "title": r["title"],
-                "detail": _truncate(r["content"]),
-                "created_at": r["created_at"],
-                "meta": {"depth": round(r["depth"], 2), "access_count": r["access_count"],
-                         "topics": [r["project"]] if r["project"] else []},
-            }
-        )
-    return items
 
 
-def _gather_digest(cur) -> list[dict]:
-    """The latest weekly digest ('what you're working on / learning')."""
-    cur.execute(
-        """
-        SELECT id, title, content, created_at, project
-        FROM memories
-        WHERE source_type = 'weekly_digest'
-        ORDER BY created_at DESC
-        LIMIT 1
-        """
-    )
-    r = cur.fetchone()
-    if not r:
-        return []
-    return [
-        {
-            "kind": "digest",
-            "id": str(r["id"]),
-            "title": r["title"],
-            "detail": _truncate(r["content"]),
-            "created_at": r["created_at"],
-            "meta": {"topics": [r["project"]] if r["project"] else []},
-        }
-    ]
 
 
-def _gather_questions(cur, limit: int) -> list[dict]:
-    """Active open questions (currently none in the store; future-proofed)."""
-    cur.execute(
-        """
-        SELECT id, title, content, created_at, project
-        FROM memories
-        WHERE type = 'question' AND status = 'active'
-        ORDER BY created_at DESC
-        LIMIT %s
-        """,
-        (limit,),
-    )
-    return [
-        {
-            "kind": "question",
-            "id": str(r["id"]),
-            "title": r["title"],
-            "detail": _truncate(r["content"]),
-            "created_at": r["created_at"],
-            "meta": {"topics": [r["project"]] if r["project"] else []},
-        }
-        for r in cur.fetchall()
-    ]
 
 
 def compose_briefing(
@@ -372,17 +154,10 @@ def compose_briefing(
         {"generated_at": iso, "items": [item, ...], "counts": {kind: n}}
         where each item is {kind, id, title, detail, created_at, meta}.
     """
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            items: list[dict] = []
-            items += _gather_insights(cur, window_days)
-            items += _gather_contradictions(cur, CONTRADICTION_LIMIT)
-            items += _gather_resurfaced(cur, RESURFACE_LIMIT, suppress_days)
-            items += _gather_digest(cur)
-            items += _gather_questions(cur, QUESTION_LIMIT)
-
-    # Apply delivery preferences: drop hard-muted items, annotate soft weights.
-    prefs = load_prefs()
+    items, feedback = repository.read_briefing(window_days,suppress_days,
+        contradiction_limit=CONTRADICTION_LIMIT,resurface_limit=RESURFACE_LIMIT,
+        resurface_min_age=RESURFACE_MIN_AGE_DAYS,question_limit=QUESTION_LIMIT)
+    prefs = load_prefs(feedback)
     items = _apply_prefs(items, prefs)
 
     counts: dict[str, int] = {}
@@ -575,17 +350,6 @@ def email_configured() -> bool:
     return all(os.environ.get(v) for v in (ENV_TO, ENV_FROM, ENV_PASSWORD))
 
 
-def _distinct_projects(cur, source_ids) -> list[str]:
-    """Distinct non-empty projects among the given source memory UUIDs."""
-    ids = [s for s in (source_ids or []) if s]
-    if not ids:
-        return []
-    cur.execute(
-        "SELECT DISTINCT project FROM memories "
-        "WHERE id = ANY(%s::uuid[]) AND project IS NOT NULL AND project <> ''",
-        (ids,),
-    )
-    return [row["project"] for row in cur.fetchall()]
 
 
 def should_push(last_pushed_run_id: str | None = None) -> dict:
@@ -601,38 +365,20 @@ def should_push(last_pushed_run_id: str | None = None) -> dict:
     Returns:
         {"push": bool, "run_id": str|None, "reason": str, "triggers": [...]}
     """
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT id FROM dream_cycle_runs WHERE completed_at IS NOT NULL "
-                "ORDER BY completed_at DESC LIMIT 1"
-            )
-            run = cur.fetchone()
-            if not run:
-                return {"push": False, "run_id": None,
-                        "reason": "no completed dream-cycle run", "triggers": []}
-            run_id = str(run["id"])
-            if last_pushed_run_id and run_id == last_pushed_run_id:
-                return {"push": False, "run_id": run_id,
-                        "reason": "latest run already pushed", "triggers": []}
-
-            cur.execute(
-                "SELECT candidate_json FROM dream_cycle_candidates "
-                "WHERE run_id = %s AND final_verdict = 'ACCEPTED'",
-                (run_id,),
-            )
-            accepted = cur.fetchall()
-            triggers = []
-            for c in accepted:
-                cj = c["candidate_json"] or {}
-                title = cj.get("title") or "(insight)"
-                rels = cj.get("relationships") or []
-                if any((r or {}).get("relation_type") == "contradicts" for r in rels):
-                    triggers.append({"kind": "contradiction", "title": title})
-                    continue
-                projects = _distinct_projects(cur, cj.get("source_memories"))
-                if cj.get("strategy_that_found_it") == "cross_project_collision" or len(projects) >= 2:
-                    triggers.append({"kind": "cross_project", "title": title, "projects": projects})
+    run_id, accepted = repository.latest_accepted_candidates()
+    if run_id is None:
+        return {"push":False,"run_id":None,"reason":"no completed dream-cycle run","triggers":[]}
+    if last_pushed_run_id == run_id:
+        return {"push":False,"run_id":run_id,"reason":"latest run already pushed","triggers":[]}
+    triggers=[]
+    for candidate in accepted:
+        title=candidate.get("title") or "(insight)"
+        if any((relation or {}).get("relation_type")=="contradicts" for relation in candidate.get("relationships") or []):
+            triggers.append({"kind":"contradiction","title":title})
+            continue
+        projects=candidate["source_projects"]
+        if candidate.get("strategy_that_found_it")=="cross_project_collision" or len(projects)>=2:
+            triggers.append({"kind":"cross_project","title":title,"projects":projects})
 
     push = bool(triggers)
     if push:

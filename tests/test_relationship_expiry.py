@@ -42,12 +42,30 @@ def _touch(memory_id: str, days_ago: int) -> None:
         conn.commit()
 
 
+def _pair(a: str, b: str, relation_type: str) -> tuple[str, str, str]:
+    """Symmetric edges (``related_to``/``contradicts``) are stored canonically
+    (lower UUID first) since the R3 data layer; compare them order-insensitively."""
+    if relation_type in db.relationships.SYMMETRIC_RELATION_TYPES:
+        a, b = sorted((a, b))
+    return (a, b, relation_type)
+
+
 def _live_edges() -> set[tuple[str, str, str]]:
     with db.get_connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT source_id::text, target_id::text, relation_type FROM memory_relationships WHERE expired_at IS NULL"
         )
-        return set(cur.fetchall())
+        return {_pair(s, t, r) for s, t, r in cur.fetchall()}
+
+
+def _age_edge(a: str, b: str, days: int) -> None:
+    with db.get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE memory_relationships SET created_at = now() - make_interval(days => %s) "
+            "WHERE source_id IN (%s, %s) AND target_id IN (%s, %s)",
+            (days, a, b, a, b),
+        )
+        conn.commit()
 
 
 def _memories(n: int) -> list[str]:
@@ -61,7 +79,7 @@ def test_new_edge_between_never_accessed_memories_survives(test_db, clean_tables
     _edge(a, b)
 
     assert dream_cycle_db.expire_stale_relationships(days_threshold=90) == 0
-    assert _live_edges() == {(a, b, "related_to")}
+    assert _live_edges() == {_pair(a, b, "related_to")}
 
 
 def test_old_edge_between_cold_memories_is_expired(test_db, clean_tables):
@@ -78,13 +96,11 @@ def test_edge_exactly_at_threshold_is_not_yet_stale(test_db, clean_tables):
     a, b, c = _memories(3)
     _edge(a, b)
     _edge(b, c)
-    with db.get_connection() as conn, conn.cursor() as cur:
-        cur.execute("UPDATE memory_relationships SET created_at = now() - interval '89 days' WHERE source_id = %s", (a,))
-        cur.execute("UPDATE memory_relationships SET created_at = now() - interval '91 days' WHERE source_id = %s", (b,))
-        conn.commit()
+    _age_edge(a, b, 89)
+    _age_edge(b, c, 91)
 
     assert dream_cycle_db.expire_stale_relationships(days_threshold=90) == 1
-    assert _live_edges() == {(a, b, "related_to")}
+    assert _live_edges() == {_pair(a, b, "related_to")}
 
 
 @pytest.mark.parametrize("relation_type", ["derived_from", "superseded_by"])
@@ -96,7 +112,7 @@ def test_provenance_edges_never_expire(test_db, clean_tables, relation_type):
     _age_edges(1000)
 
     assert dream_cycle_db.expire_stale_relationships(days_threshold=90) == 1
-    assert _live_edges() == {(a, b, relation_type)}
+    assert _live_edges() == {_pair(a, b, relation_type)}
 
 
 def test_recently_accessed_endpoint_protects_an_old_edge(test_db, clean_tables):
@@ -116,7 +132,7 @@ def test_recently_accessed_endpoint_protects_an_old_edge(test_db, clean_tables):
     _touch(c, 95)
 
     assert dream_cycle_db.expire_stale_relationships(days_threshold=90) == 1
-    assert _live_edges() == {(a, b, "related_to")}
+    assert _live_edges() == {_pair(a, b, "related_to")}
 
 
 def test_access_on_the_source_endpoint_also_protects(test_db, clean_tables):
@@ -126,7 +142,7 @@ def test_access_on_the_source_endpoint_also_protects(test_db, clean_tables):
     _touch(a, 1)
 
     assert dream_cycle_db.expire_stale_relationships(days_threshold=90) == 0
-    assert _live_edges() == {(a, b, "related_to")}
+    assert _live_edges() == {_pair(a, b, "related_to")}
 
 
 def test_access_exactly_at_threshold_boundary_still_protects(test_db, clean_tables):
@@ -141,7 +157,7 @@ def test_access_exactly_at_threshold_boundary_still_protects(test_db, clean_tabl
     _touch(c, 91)
 
     assert dream_cycle_db.expire_stale_relationships(days_threshold=90) == 1
-    assert _live_edges() == {(a, b, "related_to")}
+    assert _live_edges() == {_pair(a, b, "related_to")}
 
 
 def test_already_expired_edges_are_not_counted_again(test_db, clean_tables):

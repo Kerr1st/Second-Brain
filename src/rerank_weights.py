@@ -31,7 +31,7 @@ REINFORCEMENT_COEFF = 0.03
 # Additive magnitudes — the raw value a signal contributes when its condition holds.
 TYPE_BOOST = 0.06
 TYPE_BOOST_TYPES = ("idea", "synthesis", "insight", "decision")
-MEM_CLASS_BOOST = {"semantic": 0.04, "procedural": 0.02}
+MEM_CLASS_BOOST = {"semantic": 0.04, "procedural": 0.02, "episodic": 0.0, "source": 0.0}
 PROJECT_PENALTY = -0.15
 SUPERSEDED_PENALTY = -0.20
 STALENESS_PENALTY_MAX = -0.05

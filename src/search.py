@@ -4,7 +4,7 @@ Extracted from db.py. Contains the multi-step hybrid retrieval algorithm
 (vector search + BM25 + RRF fusion), ranking business logic (utility reranking
 with scoring formulas), and retrieval reinforcement (access count bumping).
 
-Note: search_similar() stays in db.py — it's a data-access primitive (single SQL query),
+Note: search_similar() stays in the src.db repository — it's a data-access primitive (single SQL query),
 not a retrieval algorithm.
 """
 
@@ -12,8 +12,6 @@ import math
 import re
 from datetime import datetime, timezone
 
-from psycopg2 import sql
-from psycopg2.extras import RealDictCursor
 
 from src.db import get_connection
 from src.rerank_weights import (
@@ -29,140 +27,26 @@ from src.rerank_weights import (
 )
 
 
-# --- Hybrid Search (BM25 + Vector + RRF) ---
-
-# Columns materialised for search candidates: every scalar column of `memories`,
-# deliberately excluding `embedding` (1024-dim vector) and `search_vector` (tsvector).
-# Nothing downstream of hybrid_search reads either, and fetching them for the whole
-# candidate pool dominated the per-search payload. Keep in sync with migrations/.
-_CANDIDATE_COLUMNS = sql.SQL(", ").join(sql.Identifier(c) for c in (
-    "id", "type", "title", "content", "summary", "tags", "source_url", "source_type",
-    "metadata", "status", "confidence", "parent_id", "created_at", "updated_at",
-    "access_count", "mem_class", "project", "last_accessed_at", "encoding_context",
-))
+from src.retrieval import (build_filters, tokenize_query, fts_passes, rrf_fuse,
+                           normalise_rrf, dedup_candidates)
+from src.db.search_queries import fetch_candidates
 
 
 def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None, project=None,
                   source_type=None, created_after=None):
-    """Combine pgvector cosine search + PostgreSQL full-text search via RRF.
-
-    Returns list of dicts with 'rrf_score' field, sorted by fused rank.
-    """
-    k = 60  # RRF constant
-    prefetch = limit * 4  # fetch more candidates for fusion
-
-    conditions = [sql.SQL("TRUE")]
-    params_base = []
-    if type:
-        conditions.append(sql.SQL("type = %s"))
-        params_base.append(type)
-    if status:
-        conditions.append(sql.SQL("status = %s"))
-        params_base.append(status)
-    if project:
-        conditions.append(sql.SQL("(project = %s OR project IS NULL)"))
-        params_base.append(project)
-    if source_type:
-        conditions.append(sql.SQL("source_type = %s"))
-        params_base.append(source_type)
-    if created_after:
-        conditions.append(sql.SQL("created_at >= %s"))
-        params_base.append(created_after)
-    where = sql.SQL("WHERE ") + sql.SQL(" AND ").join(conditions)
-    # Any WHERE filter post-filters the HNSW result and can make it under-return;
-    # iterative scan keeps scanning until `limit` rows satisfy the filter (pgvector >=0.8).
-    filtered = bool(type or status or project or source_type or created_after)
-
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if filtered:
-                cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
-            # Vector search
-            emb_str = str(query_embedding)
-            vec_params = [emb_str] + params_base + [emb_str, prefetch]
-            vec_query = sql.SQL(
-                "SELECT id, 1 - (embedding <=> %s::vector) AS similarity"
-                " FROM memories {where}"
-                " ORDER BY embedding <=> %s::vector LIMIT %s"
-            ).format(where=where + sql.SQL(" AND embedding IS NOT NULL"))
-            cur.execute(vec_query, vec_params)
-            vec_results = {str(r["id"]): i + 1 for i, r in enumerate(cur.fetchall())}
-
-            # Full-text search includes unembedded sources and parent records.
-            # AND-first, OR as fallback. OR-ing every term lets a
-            # common word ("stage") fill the whole leg with documents that never
-            # mention the rare one ("skim"); the AND leg puts documents containing
-            # every term first, and OR only tops the leg up when AND is short.
-            terms = re.sub(r"[^\w\s]", " ", query_text).split()
-            fts_results: dict[str, int] = {}
-            if terms:
-                fts_sql = sql.SQL(
-                    "SELECT id, ts_rank(search_vector, to_tsquery('english', %s)) AS rank"
-                    " FROM memories {where}"
-                    " ORDER BY rank DESC LIMIT %s"
-                ).format(where=where + sql.SQL(" AND search_vector @@ to_tsquery('english', %s)"))
-                ordered: list[str] = []
-                for op in (" & ", " | ") if len(terms) > 1 else (" | ",):
-                    ts_query = op.join(terms)
-                    cur.execute(fts_sql, [ts_query] + params_base + [ts_query, prefetch])
-                    for r in cur.fetchall():
-                        mid = str(r["id"])
-                        if mid not in fts_results:
-                            fts_results[mid] = len(ordered) + 1
-                            ordered.append(mid)
-                    if len(ordered) >= prefetch:
-                        break
-
-            # RRF fusion
-            all_ids = set(vec_results) | set(fts_results)
-            scored = []
-            absent_rank = prefetch + 1
-            for mid in all_ids:
-                vec_rank = vec_results.get(mid, absent_rank)
-                fts_rank = fts_results.get(mid, absent_rank)
-                rrf = 1.0 / (k + vec_rank) + 1.0 / (k + fts_rank)
-                scored.append((mid, rrf))
-            scored.sort(key=lambda x: x[1], reverse=True)
-
-            # Fetch a candidate pool (larger than `limit`) so near-duplicate
-            # results can be dropped while still returning `limit` distinct rows.
-            cand_ids = [s[0] for s in scored[:prefetch]]
-            if not cand_ids:
-                return []
-            cur.execute(
-                sql.SQL("SELECT {cols} FROM memories WHERE id = ANY(%s::uuid[])").format(cols=_CANDIDATE_COLUMNS),
-                (cand_ids,),
-            )
-            row_by_id = {str(r["id"]): r for r in cur.fetchall()}
-
-        # Dedup (P2): collapse near-identical content and cap results per parent
-        # so raw chat/doc chunks and the dual-scheme imports stop flooding results.
-        # The RRF score handed to rerank() is min-max normalised over the fused
-        # candidate set: raw RRF lives in [0, 2/(k+1)] ≈ [0, 0.033], so unnormalised
-        # it contributed at most 0.30 × 0.033 ≈ 0.01 to the rerank score and the
-        # relevance-blind priors (length, depth, type) decided the order — the
-        # rerank weights and tests/test_rerank.py assume rrf_score in [0, 1].
-        lo, hi = scored[-1][1], scored[0][1]
-        span = hi - lo
-        out, seen_content, per_parent = [], set(), {}
-        for mid, score in scored[:prefetch]:
-            row = row_by_id.get(mid)
-            if row is None:
-                continue
-            ckey = re.sub(r"\s+", " ", (row.get("content") or "")).strip().lower()[:300]
-            if ckey and ckey in seen_content:
-                continue
-            pkey = str(row.get("parent_id") or mid)
-            if per_parent.get(pkey, 0) >= 2:
-                continue
-            seen_content.add(ckey)
-            per_parent[pkey] = per_parent.get(pkey, 0) + 1
-            row["rrf_raw"] = score
-            row["rrf_score"] = (score - lo) / span if span > 0 else 1.0
-            out.append(row)
-            if len(out) >= limit:
-                break
-        return out
+    """Fuse vector/full-text legs, increasing the bounded pool if duplicates crowd it."""
+    if limit <= 0:
+        return []
+    prefetch = max(limit * 4, 4)
+    ceiling = min(max(limit * 64, 512), 4096)
+    while True:
+        vec, fts, rows = fetch_candidates(query_text, query_embedding, prefetch,
+            type=type, status=status, project=project, source_type=source_type, created_after=created_after)
+        scored = rrf_fuse(vec, fts, absent_rank=prefetch + 1)
+        results = dedup_candidates(scored, rows, limit)
+        if len(results) >= limit or max(len(vec), len(fts)) < prefetch or prefetch >= ceiling:
+            return results
+        prefetch = min(prefetch * 2, ceiling)
 
 
 def compute_spacing_bonus(last_accessed_at, now=None):

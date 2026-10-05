@@ -575,7 +575,7 @@ class TestValidationHelpers:
 
     def test_vocabularies(self):
         assert V.MEMORY_TYPES == {"idea", "synthesis", "research", "insight", "question",
-                                  "decision", "priority", "project", "connection", "source"}
+                                  "decision", "priority", "project", "connection", "source", "correction_episode"}
         assert V.FILTERABLE_TYPES == V.MEMORY_TYPES | {"schema"}
         assert V.MEMORY_STATUSES == {"active", "superseded", "archived"}
         assert V.RELATION_TYPES == {"supports", "contradicts", "extends", "inspires",
@@ -842,7 +842,7 @@ class TestMemoryLearnValidation:
     @pytest.mark.parametrize("kwargs, fragment", [
         ({"content": "", "topics": "caching"}, "content must be a non-empty string"),
         ({"content": "article", "topics": ""}, "topics must be a non-empty string"),
-        ({"content": "article", "topics": " , ,, "}, "at least one non-empty"),
+        ({"content": "article", "topics": " , ,, "}, "between one and four"),
     ])
     def test_rejected_input(self, test_db, clean_tables, kwargs, fragment):
         from src.mcp_server import memory_learn
@@ -871,7 +871,7 @@ class TestRawDatabaseErrorsAreTranslated:
         with pytest.raises(V.ValidationError) as exc:
             guard(_db.get_memory, "not-a-uuid")  # bypasses the boundary check on purpose
         msg = str(exc.value)
-        assert msg.startswith("Invalid value: ")
+        assert msg == "Invalid value format"
         assert "LINE 1" not in msg and "SELECT" not in msg
         assert isinstance(exc.value.__cause__, psycopg2.errors.InvalidTextRepresentation)
 
