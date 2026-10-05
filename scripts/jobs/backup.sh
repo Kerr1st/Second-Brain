@@ -1,12 +1,16 @@
 #!/bin/bash
-# Daily backup — pg_dump + GPG encrypt + rclone to Google Drive.
+# Daily backup — pg_dump + GPG encrypt + rclone to Google Drive (ciphertext only).
 # S3 de-scoped 2026-06-01 (brittle overnight SSO); durable copies = local + GDrive + git.
 # See docs/DISASTER-RECOVERY.md for full recovery procedures.
 set -uo pipefail
-export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
+# SECOND_BRAIN_TOOL_PATH (tests only): a directory of stub tools that must win
+# over the Homebrew binaries, so the job can run without touching a database,
+# gpg or the network. Unset in production.
+export PATH="${SECOND_BRAIN_TOOL_PATH:+$SECOND_BRAIN_TOOL_PATH:}/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:$PATH"
 cd "$(dirname "$0")/../.."
 
-BACKUP_DIR="backups"
+# Env-overridable so the job can be exercised against a scratch directory.
+BACKUP_DIR="${BACKUP_DIR:-backups}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 KEY_FILE="$HOME/second-brain/.backup-key"
 CONTAINER="${DB_CONTAINER:-second-brain-db}"
@@ -89,8 +93,11 @@ cp -r ~/.kiro/skills/ "$BACKUP_DIR/config/kiro-skills/" 2>/dev/null || true
 log "Uploading to Google Drive..."
 GDRIVE_OK=true
 rclone copy "$BACKUP_DIR/" gdrive:memory-bank-backups/ --include "*.gpg" 2>&1 || { log "WARN: Google Drive upload failed"; GDRIVE_OK=false; }
-rclone sync "$BACKUP_DIR/kb-sources/" gdrive:memory-bank-backups/kb-sources/ 2>&1 || true
-rclone sync "$BACKUP_DIR/config/" gdrive:memory-bank-backups/config/ 2>&1 || true
+# Only ciphertext leaves this machine. Until 2026-10-05 the KB sources and the
+# config/ tree above were also `rclone sync`ed to Drive in PLAINTEXT (personal
+# knowledge corpus, docs, migrations, Kiro skills). Those two syncs are gone; the
+# local copies stay. Historical plaintext already on the remote is NOT touched by
+# this job — retiring it is a deliberate manual step (docs/DISASTER-RECOVERY.md).
 
 # rclone copy (above) verifies each transfer's size/hash and exits non-zero if the
 # upload didn't land — so GDRIVE_OK from the copy is the source of truth for upload

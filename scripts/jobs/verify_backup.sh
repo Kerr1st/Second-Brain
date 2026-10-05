@@ -58,9 +58,8 @@ verify_cloud() {
     ERRORS=$((ERRORS + 1))
   fi
 
-  KB_COUNT=$(rclone ls "$remote/kb-sources/" 2>/dev/null | wc -l | tr -d ' ')
-  CFG_COUNT=$(rclone ls "$remote/config/" 2>/dev/null | wc -l | tr -d ' ')
-  log "   KB sources: $KB_COUNT files, Config: $CFG_COUNT files"
+  # No plaintext trees are expected on the remote any more (backup.sh stopped
+  # syncing kb-sources/ and config/ on 2026-10-05); only *.gpg is verified.
 
   rm -f "$VERIFY_DIR"/*
 }

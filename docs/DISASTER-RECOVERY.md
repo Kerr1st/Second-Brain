@@ -164,6 +164,10 @@ gcloud secrets versions access latest --secret=memory-bank-key > ~/second-brain/
 chmod 600 ~/second-brain/.backup-key
 
 # 3. Download everything from Google Drive
+#    NOTE (2026-10-05): backup.sh no longer syncs config/ or kb-sources/ to Drive
+#    in plaintext. Whatever is under those two remote prefixes is a historical copy
+#    frozen at the last pre-change run; the authoritative config is the git repo
+#    and the local backups/kb-sources/ mirror. Only *.gpg is refreshed nightly.
 rclone copy gdrive:memory-bank-backups/config/ ~/second-brain/ 
 rclone copy gdrive:memory-bank-backups/kb-sources/ ~/second-brain/kb-sources/
 rclone copy gdrive:memory-bank-backups/ /tmp/restore/ --include "*.dump.gpg" --max-age 1d
