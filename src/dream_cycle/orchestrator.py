@@ -125,6 +125,17 @@ SKIM_DISABLED_ENV = "SECOND_BRAIN_SKIM_DISABLED"
 # cap in SpendTracker stays as the backstop.
 EST_THINKER_CALL_USD = 0.30
 EST_JUDGE_CANDIDATE_USD = 0.70
+# Floor for the conservative reservation charged when a call fails with no
+# response (throttle/timeout/transport): the larger of the worst-case token price
+# and the stage estimate above. Explorer and skim have no per-stage estimate
+# (their reservation is the computed worst case alone).
+_RESERVE_FLOOR_USD = {
+    "thinker": EST_THINKER_CALL_USD,
+    "skeptic": EST_JUDGE_CANDIDATE_USD,
+    "advocate": EST_JUDGE_CANDIDATE_USD,
+    "epistemologist": EST_JUDGE_CANDIDATE_USD,
+    "methodologist": EST_JUDGE_CANDIDATE_USD,
+}
 
 
 def _skim_cap_usd(run_cap_usd: float) -> float:
@@ -171,7 +182,16 @@ class DreamCycleOrchestrator:
         return caps.supports_mcp if caps is not None else True
 
     def _invoke_metered(self, role: str, **kwargs):
-        """All Dream Cycle requests share strict accounting, including failures."""
+        """All Dream Cycle requests share strict accounting, including failures.
+
+        A transport/throttle/timeout failure is charged a conservative reservation
+        by ``invoke_metered`` and re-raised as-is, so the stage keeps its own
+        resilience rule: Explorer crash -> arrivals-only slice, Thinker failure ->
+        skip the slice, evaluator failure -> bounded retry, skim failure ->
+        non-fatal. Only a blocked tracker (routing guarantee failed, unmeterable
+        response) is escalated to ``UsageUnavailable`` so nothing retries it.
+        """
+        kwargs.setdefault("reserve_floor_usd", _RESERVE_FLOOR_USD.get(role, 0.0))
         try:
             return invoke_metered(
                 self._invoker_for(role), self.resolver.spec_for(role), self._spend, **kwargs
@@ -311,6 +331,7 @@ class DreamCycleOrchestrator:
             try:
                 dream_cycle_db.complete_run(run_id, stats=self._run_stats | {
                     "aborted": True, "cost_usd": self._spend.total_usd,
+                    "spend_reserved_usd": self._spend.reserved_usd,
                     "spend_unknown": bool(self._spend.blocked_reason),
                 }, digest="")
             except Exception:
@@ -321,7 +342,7 @@ class DreamCycleOrchestrator:
             # run record so the abort is auditable, then report aborted_early.
             logger.error("Dream cycle aborted (run_id=%s): %s", run_id, exc)
             try:
-                dream_cycle_db.complete_run(run_id, stats=self._run_stats | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_unknown": bool(self._spend.blocked_reason)}, digest="")
+                dream_cycle_db.complete_run(run_id, stats=self._run_stats | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd, "spend_unknown": bool(self._spend.blocked_reason)}, digest="")
             except Exception:
                 logger.error("Failed to complete run record after spend-cap abort")
             return self._aborted_result(run_id, run_type, started_at)
@@ -333,7 +354,7 @@ class DreamCycleOrchestrator:
             try:
                 dream_cycle_db.complete_run(
                     run_id,
-                    stats=self._run_stats | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_unknown": bool(self._spend.blocked_reason)},
+                    stats=self._run_stats | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd, "spend_unknown": bool(self._spend.blocked_reason)},
                     digest="",
                 )
             except Exception:
@@ -580,6 +601,7 @@ class DreamCycleOrchestrator:
             run_id,
             stats={
                 "cost_usd": self._spend.total_usd,
+                "spend_reserved_usd": self._spend.reserved_usd,
                 "spend_unknown": bool(self._spend.blocked_reason),
                 "candidates_generated": len(all_candidates),
                 "candidates_accepted": len(accepted),

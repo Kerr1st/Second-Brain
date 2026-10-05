@@ -4,9 +4,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from src.backends.base import ModelRefusalError
+import math
+
+from src.backends.base import CorpusRoutingError, ModelRefusalError
 from src.backends.cost import (
-    SpendTracker, SpendCapExceeded, UsageUnavailable, cap_from_env, invoke_metered,
+    DEFAULT_RESERVED_OUTPUT_TOKENS, SpendTracker, SpendCapExceeded, UsageUnavailable, cap_from_env,
+    invoke_metered, reservation_usd,
 )
 from src.backends.direct_api import DirectApiInvoker
 from src.backends.resolver import EDITOR_ROLE, RoleBackend
@@ -105,15 +108,90 @@ def test_missing_usage_blocks_following_calls():
     assert tracker.blocked_reason
 
 
-def test_transport_failure_retains_original_error_but_blocks_further_spend():
+@pytest.mark.parametrize("error", [TimeoutError("synthetic timeout"), RuntimeError("Throttled: rate exceeded"),
+                                   RuntimeError("Service unavailable"), ConnectionError("DNS failed")])
+def test_transport_failure_reserves_worst_case_and_keeps_original_error(error):
+    """No response, no usage: charge the worst case for the attempt (input chars/3
+    + the adapter's max_tokens of output at list price), keep the error type so
+    callers' bounded retry/skip paths work, and do NOT block the tracker."""
+    invoker = FakeDirect(error=error)
+    invoker._max_tokens = 1000
+    tracker = SpendTracker(1)
+    with pytest.raises(type(error)) as raised:
+        invoke(invoker, tracker)
+    expected = reservation_usd(MODEL, len("synthetic system") + len("synthetic input"), 1000)
+    assert expected == pytest.approx((math.ceil(31 / 3) * 0.33 + 1000 * 2.75) / 1e6)
+    assert raised.value.spend_reserved_usd == pytest.approx(expected)
+    assert tracker.total_usd == pytest.approx(expected)
+    assert tracker.reserved_usd == pytest.approx(expected)
+    assert tracker.calls == tracker.reserved_calls == 1
+    assert tracker.blocked_reason is None
+    # A retry is allowed and is charged again: bounded by money, not blocked.
+    with pytest.raises(type(error)):
+        invoke(invoker, tracker)
+    assert invoker.calls == 2
+    assert tracker.total_usd == pytest.approx(2 * expected)
+
+
+def test_reservation_uses_the_stage_estimate_when_larger():
     invoker = FakeDirect(error=TimeoutError("synthetic timeout"))
+    invoker._max_tokens = 10
+    tracker = SpendTracker(1)
+    with pytest.raises(TimeoutError):
+        invoke_metered(invoker, SPEC, tracker, "s", "u", reserve_floor_usd=0.30)
+    assert tracker.total_usd == pytest.approx(0.30)
+    assert invoker.metrics  # the adapter still wrote its metrics line for the failed call
+
+
+def test_reservation_defaults_to_32k_output_when_adapter_has_no_max_tokens():
+    invoker = Mock()
+    invoker.model, invoker.BACKEND_NAME = MODEL, "bedrock"
+    invoker.invoke.side_effect = TimeoutError("cli hung")
+    del invoker.max_tokens, invoker._max_tokens
     tracker = SpendTracker(1)
     with pytest.raises(TimeoutError):
         invoke(invoker, tracker)
+    assert tracker.total_usd == pytest.approx(reservation_usd(MODEL, 31, DEFAULT_RESERVED_OUTPUT_TOKENS))
+    assert tracker.total_usd > 32768 * 2.75 / 1e6
+
+
+def test_reservation_that_crosses_the_cap_raises_spend_cap_exceeded():
+    invoker = FakeDirect(error=RuntimeError("Throttled"))
+    tracker = SpendTracker(0.0001)
+    with pytest.raises(SpendCapExceeded) as raised:
+        invoke(invoker, tracker)
+    assert isinstance(raised.value.transport_error, RuntimeError)
+    assert raised.value.__cause__ is raised.value.transport_error
+    assert tracker.total_usd > tracker.cap_usd
+    # Cap exhausted: ensure_available stops the next attempt before the provider.
+    with pytest.raises(SpendCapExceeded):
+        invoke(invoker, tracker)
+    assert invoker.calls == 1
+
+
+def test_routing_guarantee_failure_without_response_still_blocks():
+    invoker = FakeDirect(error=CorpusRoutingError("Requested corpus model was not honored"))
+    tracker = SpendTracker(1)
+    with pytest.raises(CorpusRoutingError):
+        invoke(invoker, tracker)
+    assert tracker.blocked_reason and "guarantee" in tracker.blocked_reason
+    assert tracker.reserved_calls == 0
     with pytest.raises(UsageUnavailable):
         invoke(invoker, tracker)
     assert invoker.calls == 1
-    assert tracker.total_usd == 0  # unknown is separately represented as blocked
+
+
+def test_routing_guarantee_failure_with_response_is_billed_and_blocks():
+    err = CorpusRoutingError("Requested corpus model was not honored")
+    err.model_response_received, err.usage, err.usage_source = True, USAGE, "real"
+    invoker = FakeDirect(error=err)
+    tracker = SpendTracker(1)
+    with pytest.raises(CorpusRoutingError):
+        invoke(invoker, tracker)
+    assert tracker.blocked_reason and tracker.calls == 1 and tracker.total_usd > 0
+    assert tracker.reserved_calls == 0
+    with pytest.raises(UsageUnavailable):
+        invoke(invoker, tracker)
 
 
 def test_one_call_can_cross_cap_but_no_next_call_runs():
@@ -228,8 +306,54 @@ def test_dream_unknown_usage_aborts_without_retry():
     assert invoker.calls == 1
 
 
-def test_dream_transport_failure_cannot_trigger_an_unmetered_retry():
+def test_dream_evaluator_throttle_is_retried_once_reserved_and_completes(monkeypatch):
+    """1071a81 semantics restored: one throttled evaluator call is retried (bounded
+    by EVALUATOR_MAX_ATTEMPTS) and the verdict lands; the failed attempt is not
+    free — it is reserved at the stage floor (EST_JUDGE_CANDIDATE_USD)."""
+    from src.dream_cycle.orchestrator import EST_JUDGE_CANDIDATE_USD
+
+    class ThrottledOnce(FakeDirect):
+        def _invoke_provider(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("Throttled: Too many requests")
+            return {"stopReason": "end_turn"}
+    invoker = ThrottledOnce(raw='{"verdict":"ACCEPT","reasoning":"synthetic"}')
+    orch = _dream(invoker, cap=5)
+    monkeypatch.setattr("src.dream_cycle.orchestrator.time.sleep", lambda *_: None)
+    verdict = orch._invoke_evaluator_safe(_candidate(), "skeptic")
+    assert verdict.verdict == "ACCEPT"
+    assert invoker.calls == 2
+    assert orch._spend.reserved_calls == 1
+    assert orch._spend.reserved_usd == pytest.approx(EST_JUDGE_CANDIDATE_USD)
+    assert orch._spend.total_usd == pytest.approx(EST_JUDGE_CANDIDATE_USD + 0.000605)
+    assert orch._spend.blocked_reason is None
+
+
+def test_dream_transport_retries_are_bounded_and_each_attempt_is_reserved(monkeypatch):
+    from src.dream_cycle.orchestrator import EVALUATOR_MAX_ATTEMPTS
     invoker = FakeDirect(error=TimeoutError("synthetic transport timeout"))
+    orch = _dream(invoker, cap=5)
+    monkeypatch.setattr("src.dream_cycle.orchestrator.time.sleep", lambda *_: None)
+    with pytest.raises(RuntimeError, match="unrecoverable"):
+        orch._invoke_evaluator_safe(_candidate(), "skeptic")
+    assert invoker.calls == EVALUATOR_MAX_ATTEMPTS
+    assert orch._spend.reserved_calls == EVALUATOR_MAX_ATTEMPTS
+    assert orch._spend.total_usd == pytest.approx(EVALUATOR_MAX_ATTEMPTS * 0.70)
+
+
+def test_dream_transport_reservation_crossing_the_cap_stops_retries(monkeypatch):
+    invoker = FakeDirect(error=TimeoutError("synthetic transport timeout"))
+    orch = _dream(invoker, cap=1)  # floor 0.70 per attempt: the 2nd reservation crosses
+    monkeypatch.setattr("src.dream_cycle.orchestrator.time.sleep", lambda *_: None)
+    with pytest.raises(SpendCapExceeded):
+        orch._invoke_evaluator_safe(_candidate(), "skeptic")
+    assert invoker.calls == 2
+    assert orch._spend.total_usd > orch._spend.cap_usd
+
+
+def test_dream_routing_failure_is_not_retried():
+    invoker = FakeDirect(error=CorpusRoutingError("Requested corpus model was not honored"))
     orch = _dream(invoker)
     with pytest.raises(UsageUnavailable):
         orch._invoke_evaluator_safe(_candidate(), "skeptic")

@@ -282,8 +282,22 @@ def test_probe_rejects_fable_before_invoker_constructor(monkeypatch):
     assert calls == []
 
 
-def test_probe_stops_unknown_transport_spend():
+def test_probe_reserves_transport_failure_and_continues():
+    """A timeout on one document is recorded against that document with its
+    conservative reservation; the probe goes on to the next document."""
     invoker = _FakeInvoker([TimeoutError("synthetic timeout"), _record()])
+    tracker = SpendTracker(1)
+    out = sp.run_probe([_doc(DOC_A), _doc(DOC_B)], invoker, MODEL, tracker)
+    assert len(invoker.calls) == 2
+    recs = out if isinstance(out, list) else out.get("records", out)
+    failed = [r for r in recs if isinstance(r, dict) and r.get("error") == "TimeoutError"]
+    assert len(failed) == 1 and failed[0]["cost_usd"] > 0
+    assert tracker.reserved_calls == 1 and tracker.blocked_reason is None
+
+
+def test_probe_still_stops_on_a_routing_guarantee_failure():
+    from src.backends.base import CorpusRoutingError
+    invoker = _FakeInvoker([CorpusRoutingError("Requested corpus model was not honored"), _record()])
     with pytest.raises(UsageUnavailable):
         sp.run_probe([_doc(DOC_A), _doc(DOC_B)], invoker, MODEL, SpendTracker(1))
     assert len(invoker.calls) == 1

@@ -198,16 +198,43 @@ class TestIdempotency:
 
 
 class TestFailureIsolation:
-    def test_unknown_model_spend_stops_before_further_documents(self):
+    def test_throttled_call_is_non_fatal_reserved_and_the_skim_continues(self):
+        """A skim transport failure never aborts the run (1071a81 semantics): the
+        document counts as failed, the attempt is charged a conservative
+        reservation that counts toward the skim sub-cap, and the rest are skimmed."""
         docs = [_doc(), _doc(DOC_B, "article"), _doc()]
-        inv = FakeInvoker([RuntimeError("throttled"), _record(), _record()])
+        inv = FakeInvoker([RuntimeError("Throttled: rate exceeded"), _record(), _record()])
+        tracker = SpendTracker(9.0)
+        res = skim_window(WINDOW, invoker=inv, model=MODEL, prompt_version=PROMPT_VERSION,
+                          tracker=tracker, cap_usd=1.0, run_id="r",
+                          fetch_docs=lambda ws: docs, store=FakeStore())
+        assert len(inv.calls) == 3
+        assert (res.skimmed, res.failed, res.invalid) == (2, 1, 0)
+        assert tracker.blocked_reason is None
+        assert tracker.reserved_calls == 1 and tracker.reserved_usd > 0
+        assert res.cost_usd == pytest.approx(tracker.total_usd)
+        assert res.cost_usd > tracker.reserved_usd  # reservation + two real calls
+
+    def test_repeated_throttles_hit_the_sub_cap_not_the_whole_run(self):
+        docs = [_doc() for _ in range(40)]
+        inv = FakeInvoker([RuntimeError("Throttled")] * 40)
+        tracker = SpendTracker(9.0)
+        res = skim_window(WINDOW, invoker=inv, model=MODEL, prompt_version=PROMPT_VERSION,
+                          tracker=tracker, cap_usd=0.5, run_id="r",
+                          fetch_docs=lambda ws: docs, store=FakeStore())
+        assert res.aborted_on_cap and res.failed == len(inv.calls) < 40
+        assert tracker.total_usd >= 0.5 and tracker.total_usd < 9.0
+
+    def test_routing_guarantee_failure_still_stops_the_skim(self):
+        from src.backends.base import CorpusRoutingError
+        docs = [_doc(), _doc()]
+        inv = FakeInvoker([CorpusRoutingError("Requested corpus model was not honored"), _record()])
         tracker = SpendTracker(9.0)
         with pytest.raises(UsageUnavailable):
             skim_window(WINDOW, invoker=inv, model=MODEL, prompt_version=PROMPT_VERSION,
                         tracker=tracker, cap_usd=1.0, run_id="r",
                         fetch_docs=lambda ws: docs, store=FakeStore())
-        assert len(inv.calls) == 1
-        assert tracker.blocked_reason
+        assert len(inv.calls) == 1 and tracker.blocked_reason
 
     def test_invalid_reply_counts_as_invalid_and_is_still_metered(self):
         res, _, store = _run([_doc(), _doc()], [_record(salience=4), _record()])

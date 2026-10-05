@@ -26,6 +26,19 @@ Flex prices in :data:`_FLEX_PRICE_TABLE`. A call is priced at the Flex rate only
 when its ``usage`` block says the request was actually served on Flex
 (``serviceTier: "flex"``, copied by the Bedrock adapter from the Converse
 response's ``serviceTier.type``) — never from what was merely requested.
+
+Transport failures (2026-10-05 policy): a call that fails before any response is
+received — throttle, timeout, DNS/connection error, 5xx — has no usage block,
+so its true cost is unknown (it may have been zero or it may have been billed).
+Rather than blocking the whole run on the first such blip, the tracker charges a
+*conservative reservation* for the failed attempt: the worst-case price of the
+request's input (``chars / RESERVE_CHARS_PER_TOKEN``) plus the adapter's
+``max_tokens`` of output, or the caller's per-stage estimate if larger. The
+reservation counts toward the cap exactly like real spend, so bounded retries
+stay bounded by money, and crossing the cap raises :class:`SpendCapExceeded`.
+Only routing-guarantee failures (:class:`~src.backends.base.CorpusRoutingError`,
+model-not-honoured) and unmeterable *successful* responses still block the
+tracker permanently.
 """
 
 from __future__ import annotations
@@ -38,6 +51,13 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 DEFAULT_RUN_COST_CAP_USD = 5.0
+
+#: Reservation for a failed call: assume ~3 chars per input token (real ratios
+#: for English prose and JSON are 3.5-4.5, so this over-counts) …
+RESERVE_CHARS_PER_TOKEN = 3
+#: … and the adapter's full output budget. Mirrors ``bedrock.DEFAULT_MAX_TOKENS``;
+#: used only when the invoker does not expose its own ``max_tokens``.
+DEFAULT_RESERVED_OUTPUT_TOKENS = 32768
 
 # Ordered (substring, input $/M, output $/M). First match wins, so more specific
 # substrings must precede more general ones (e.g. "fable-5-1" before "fable-5").
@@ -207,11 +227,41 @@ def _require_usage(usage) -> None:
         raise UsageUnavailable("Incomplete model token usage; stopping this run")
 
 
+def reservation_usd(model: str, input_chars: int, max_output_tokens: int | None = None,
+                    floor_usd: float = 0.0) -> float:
+    """Worst-case price of a request whose outcome is unknown (no usage returned).
+
+    ``input_chars / RESERVE_CHARS_PER_TOKEN`` input tokens plus ``max_output_tokens``
+    (default :data:`DEFAULT_RESERVED_OUTPUT_TOKENS`) of output at the model's
+    standard list price, never below ``floor_usd`` (a caller's per-stage estimate).
+    """
+    out = max_output_tokens if isinstance(max_output_tokens, int) and not isinstance(max_output_tokens, bool) \
+        and max_output_tokens > 0 else DEFAULT_RESERVED_OUTPUT_TOKENS
+    chars = max(int(input_chars or 0), 0)
+    inp = math.ceil(chars / RESERVE_CHARS_PER_TOKEN)
+    price = price_for(model)
+    cost = (inp * price.input_per_m + out * price.output_per_m) / 1_000_000
+    floor = float(floor_usd) if isinstance(floor_usd, (int, float)) and not isinstance(floor_usd, bool) \
+        and math.isfinite(floor_usd) and floor_usd > 0 else 0.0
+    return max(cost, floor)
+
+
+def _max_output_tokens_for(invoker, kwargs: dict) -> int | None:
+    """The output budget a failed request could have consumed, if knowable."""
+    for candidate in (kwargs.get("max_tokens"), getattr(invoker, "max_tokens", None),
+                      getattr(invoker, "_max_tokens", None)):
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate > 0:
+            return candidate
+    return None
+
+
 class SpendTracker:
     """Accumulate reported usage; stop after a response crosses the run cap.
 
     This cannot bound an already in-flight call. Standalone corpus stages use
     record_metered and ensure_available to stop after accounting gaps too.
+    ``reserved_usd``/``reserved_calls`` separate conservative reservations for
+    failed transport attempts from priced real usage (both are in ``total_usd``).
     """
 
     def __init__(self, cap_usd: float = DEFAULT_RUN_COST_CAP_USD):
@@ -221,6 +271,8 @@ class SpendTracker:
         self.blocked_reason = None
         self.total_usd = 0.0
         self.calls = 0
+        self.reserved_usd = 0.0
+        self.reserved_calls = 0
 
     @classmethod
     def from_env(cls) -> "SpendTracker":
@@ -274,6 +326,31 @@ class SpendTracker:
             )
         return cost
 
+    def reserve(self, model: str, usd: float, reason: str = "") -> float:
+        """Charge a conservative reservation for a call whose spend is unknown.
+
+        Used for transport/throttle/timeout failures that returned no usage. The
+        amount counts toward the cap like real spend (so retries are bounded by
+        money, not by hope) but does not block the tracker. Raises
+        :class:`SpendCapExceeded` when the reservation crosses the cap.
+        """
+        amount = float(usd)
+        if isinstance(usd, bool) or not math.isfinite(amount) or amount < 0:
+            raise ValueError("Reservation must be a finite non-negative amount")
+        self.calls += 1
+        self.reserved_calls += 1
+        self.reserved_usd += amount
+        self.total_usd += amount
+        logger.warning("Reserved $%.4f for a failed %s call with no usage (%s); run total $%.4f of $%.2f",
+                       amount, model, reason or "unknown error", self.total_usd, self.cap_usd)
+        if self.total_usd > self.cap_usd:
+            raise SpendCapExceeded(
+                f"Per-run spend cap exceeded: ${self.total_usd:.2f} > ${self.cap_usd:.2f} "
+                f"after {self.calls} metered call(s) including {self.reserved_calls} reservation(s) "
+                f"totalling ${self.reserved_usd:.2f}; last failed {model} call reserved ${amount:.2f}."
+            )
+        return amount
+
 
 def kill_switch_engaged() -> bool:
     """True when ``SECOND_BRAIN_KILL_SWITCH`` is set to a truthy value."""
@@ -281,15 +358,20 @@ def kill_switch_engaged() -> bool:
 
 
 def invoke_metered(invoker, spec, tracker: SpendTracker, system_prompt: str,
-                   user_message: str, **kwargs):
+                   user_message: str, *, reserve_floor_usd: float = 0.0, **kwargs):
     """Invoke one corpus stage, recording returned usage exactly once.
 
     A response with malformed output is still billed before its original error
-    propagates. A transport error has unknown spend and blocks further calls
-    on this tracker. This is a stop-after-call cap, not a guaranteed monetary
-    ceiling: a single in-flight request can cross it. Accurate preflight
-    reservation needs provider token counting and output/agent-turn bounds.
-    Legacy Dream Cycle callers retain their existing independent accounting.
+    propagates. A transport/throttle/timeout error (no response, no usage) is
+    charged a conservative reservation (:func:`reservation_usd`, never below
+    ``reserve_floor_usd``) and re-raised unchanged so the caller's existing,
+    bounded retry/skip logic applies; it does not block the tracker. Routing
+    guarantee failures (``CorpusRoutingError``) block the tracker permanently.
+    A successful response without finite, complete usage also blocks it.
+
+    This is a stop-after-call cap, not a guaranteed monetary ceiling: a single
+    in-flight request can cross it. Legacy Dream Cycle callers retain their
+    existing independent accounting.
     """
     from src.backends.base import CORPUS_ROLES, CorpusRoutingError, assert_corpus_route, assert_backend_supports_role
     if spec.role not in CORPUS_ROLES:
@@ -310,14 +392,32 @@ def invoke_metered(invoker, spec, tracker: SpendTracker, system_prompt: str,
         result = invoker.invoke(system_prompt, user_message, **kwargs)
     except Exception as exc:
         if getattr(exc, "model_response_received", False):
-            tracker.record_metered(spec.model, getattr(exc, "usage", None),
-                                   usage_source=getattr(exc, "usage_source", None))
-            if isinstance(exc, CorpusRoutingError):
-                tracker.blocked_reason = "Corpus model guarantee failed; no further calls permitted"
-        else:
-            # Do not claim zero dollars when the request may have reached the
-            # provider. Preserve the operational error but stop this run.
-            tracker.blocked_reason = "Model call failed without billable usage; spend is unknown"
+            # Response-bearing failure (refusal, bad JSON, truncation, model not
+            # honoured): bill the real usage, then let the original error propagate.
+            try:
+                tracker.record_metered(spec.model, getattr(exc, "usage", None),
+                                       usage_source=getattr(exc, "usage_source", None))
+            finally:
+                if isinstance(exc, CorpusRoutingError):
+                    tracker.blocked_reason = "Corpus model guarantee failed; no further calls permitted"
+            raise
+        if isinstance(exc, CorpusRoutingError):
+            tracker.blocked_reason = "Corpus model guarantee failed; no further calls permitted"
+            raise
+        # No response, no usage: the request may or may not have reached the
+        # provider. Charge the worst case for this attempt instead of claiming
+        # zero dollars, keep the original error type so bounded retry loops
+        # (evaluator) and skip paths (Explorer, Thinker, skim) behave as before.
+        reserved = reservation_usd(
+            spec.model, len(system_prompt) + len(user_message),
+            _max_output_tokens_for(invoker, kwargs), reserve_floor_usd,
+        )
+        exc.spend_reserved_usd = reserved
+        try:
+            tracker.reserve(spec.model, reserved, reason=f"{type(exc).__name__}: {exc}")
+        except SpendCapExceeded as cap:
+            cap.transport_error = exc
+            raise cap from exc
         raise
     if not isinstance(result, dict):
         tracker.blocked_reason = "Invalid metered response; spend is unknown"

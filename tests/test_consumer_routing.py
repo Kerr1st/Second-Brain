@@ -92,13 +92,32 @@ def test_malformed_output_is_failure_not_refusal_or_empty(distiller):
     ds.mark_refused.assert_not_called()
 
 
-def test_unknown_spend_stops_next_session(distiller, monkeypatch):
+def test_transport_failure_reserves_spend_and_the_next_session_still_runs(distiller, monkeypatch):
+    """A throttle/timeout on one session is not a reason to abandon the night:
+    the attempt is charged a conservative reservation and the loop continues."""
     monkeypatch.setattr(ds, "fetch_sessions", lambda *a, **k: [("s1", "chat", "one"), ("s2", "chat", "two")])
     distiller.invoke.side_effect = TimeoutError("transport")
-    stats = ds.distill()
-    assert stats["aborted"] and stats["spend_unknown"]
-    assert distiller.invoke.call_count == 1
+    tracker = SpendTracker(1.0)
+    stats = ds.distill(tracker=tracker)
+    assert distiller.invoke.call_count == 2
+    assert stats["failed"] == 2 and not stats["aborted"] and not stats["spend_unknown"]
+    assert tracker.reserved_calls == 2 and tracker.reserved_usd > 0
+    assert tracker.total_usd == pytest.approx(tracker.reserved_usd)
+    assert tracker.blocked_reason is None
     ds.mark_refused.assert_not_called()
+
+
+def test_transport_reservations_are_bounded_by_the_cap(distiller, monkeypatch):
+    """Repeated failures cannot retry forever: reservations accumulate against
+    the cap and the loop stops with SpendCapExceeded like any other overspend."""
+    monkeypatch.setattr(ds, "fetch_sessions",
+                        lambda *a, **k: [(f"s{i}", "chat", "x" * 1000) for i in range(50)])
+    distiller.invoke.side_effect = TimeoutError("transport")
+    tracker = SpendTracker(0.05)
+    stats = ds.distill(tracker=tracker)
+    assert stats["aborted"] and not stats["spend_unknown"]
+    assert 1 <= distiller.invoke.call_count < 50
+    assert tracker.total_usd > tracker.cap_usd
 
 
 def test_refusal_marker_is_input_and_provider_scoped():
