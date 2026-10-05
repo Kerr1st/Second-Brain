@@ -1,5 +1,8 @@
 # Requirements Document: Retrieval Quality
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Introduction
 
 Retrieval Quality is a set of Layer 1 (passive, at ingest/retrieval time) improvements to the Second Brain's search and ranking pipeline. These are complementary to the dream cycle pipeline (Layer 2 — active synthesis), which produces new semantic memories. Retrieval Quality improvements make search better across all 74K+ existing memories regardless of how they were created.

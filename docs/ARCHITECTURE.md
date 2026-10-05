@@ -1,327 +1,107 @@
-# Second Brain — Architecture
+# Architecture — original implementation
 
-> Last updated: 2026-06-16
+Source-reviewed 2026-09-10. This guide describes implemented paths and their limitations. [Start here](START-HERE.md) identifies the version; [Operations](OPERATIONS.md) separates configuration from operation.
 
-## Overview
+## Data flow
 
-A personal knowledge system that gives AI agents persistent memory across sessions. PostgreSQL + pgvector stores memories and their typed relationships. An MCP server exposes this to Kiro CLI, Claude Code, and other agents. A dream cycle pipeline autonomously surfaces connections and insights. (An entity knowledge graph was imported from Quick Desktop but is currently **dormant** — unused by retrieval/synthesis; see below.)
-
-## System Diagram
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Capture Channels                                           │
-│  Kiro CLI · Kiro IDE chats · Quick Desktop (docs, chats,    │
-│  feed events) · YouTube (yt-dlp, src/capture/youtube.py)    │
-│  · Web articles (Crawlee, ~/Work/Tools/Crawlee)             │
-└──────────────────────────┬──────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Ingestion Pipeline                                         │
-│  Parse → Classify → Chunk → Embed (Bedrock Titan 1024d)     │
-│  → Store → Discover relationships                           │
-└──────────────────────────┬──────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│  PostgreSQL 17 + pgvector (native)                          │
-│                                                             │
-│  ┌───────────┐ ┌────────────────┐ ┌──────────────────────┐  │
-│  │ memories   │ │ relationships  │ │ knowledge graph      │  │
-│  │ ~121K rows │ │ source→target  │ │ (imported from QD,   │  │
-│  │            │ │ typed edges    │ │ DORMANT — unused in  │  │
-│  │            │ │                │ │ retrieval/synthesis) │  │
-│  └───────────┘ └────────────────┘ └──────────────────────┘  │
-│                                                             │
-│  ┌───────────────────┐ ┌──────────────────────────────────┐ │
-│  │ dream_cycle_runs  │ │ dream_cycle_candidates           │ │
-│  │ run metadata      │ │ 4-evaluator BFT consensus        │ │
-│  └───────────────────┘ └──────────────────────────────────┘ │
-└──────────────────────────┬──────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│  MCP Server (src/mcp_server.py)                             │
-│  9 tools: create, search, read, update, relate,            │
-│           list, graph, learn, brief                         │
-└──────────────────────────┬──────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Agents: Kiro CLI · Claude Code · Dream Cycle Pipeline      │
-│  LLM: kiro-cli → Amazon Q (Opus 4.8), backend-selectable    │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Raw[Kiro chats / QD chats / Crawlee / YouTube] --> Ingest[ingest_content: raw parent + embedded chunks]
+    QD[Quick Desktop facts / docs / feed] --> Direct[Source-specific writers]
+    Manual[MCP create / optional HTTP capture] --> Direct
+    Ingest --> PG[(PostgreSQL + pgvector)]
+    Direct --> PG
+    PG --> Distill[Chat distiller: Kiro + Bedrock embeddings]
+    Distill --> PG
+    PG --> Search[Full-text + vector search / rerank]
+    Search --> Explorer[Explorer with memory tools]
+    Explorer --> Thinker[Thinker with memory tools]
+    Thinker --> Panel[Four reviewer calls]
+    Panel --> Vote[At least 3 ACCEPT]
+    Vote --> Persist[Dedup / CREATE UPDATE SUPERSEDE]
+    Persist --> PG
+    PG --> Express[Compose / edit / render briefing]
+    Express --> User[CLI / MCP / optional Gmail]
+    User --> Prefs[Delivery preferences]
+    Prefs --> Express
+    PG --> Rejections[Candidate and user rejection history]
+    Rejections --> Explorer
 ```
 
-## Data Flow
+Raw ingestion and later distillation are distinct scheduled/manual stages. The entity knowledge graph is stored separately from memory relationships and is not used by core retrieval or the dream cycle.
 
-1. **Capture** — Content arrives from multiple channels (Kiro CLI/IDE chats, Quick Desktop, YouTube transcripts, web scrapes)
-2. **Ingest** — Content is parsed, classified (semantic/episodic/procedural), chunked, embedded, and stored with auto-discovered relationships
-3. **Retrieve** — Hybrid search (BM25 + vector + RRF) with cognitive science-grounded reranking
-4. **Synthesize** — Dream cycle pipeline (Explorer → Thinker → 4-evaluator Consensus Panel) autonomously surfaces connections and insights
-5. **Deliver (Express)** — surfaces synthesized output to the user: on-demand `brief`, a gated Gmail push chained after the noon dream cycle, and the `memory_brief` MCP tool; shaped by delivery preferences (`express_feedback`, migration 010)
-6. **Backup** — Daily encrypted pg_dump + JSON exports to Google Drive (+ local + git). **S3 was de-scoped 2026-06-01** (brittle overnight SSO).
+## Component contracts
 
-## Database Schema
+| Component and entrypoint | Inputs → outputs; stored state | Dependencies and failure behavior | Verification surface |
+|---|---|---|---|
+| `src/ingest.py:ingest_content` | Markdown+header → unembedded full parent and embedded child memories, optional `related_to` edges | Bedrock and DB; each record commits separately. A failure may leave a partial source; relationship discovery failures are swallowed | `test_ingest_v2.py`, `test_ingest_interactions.py`, `test_cli_chat.py`, `test_ide_chat.py` |
+| `src/db.py` | CRUD, similarity SQL, relationships, temporal/schema lookups → row dictionaries/IDs | `SimpleConnectionPool`, DB env at module import; checkout probes reconnect, writes commit per helper | `test_db.py`, `test_pool_properties.py` |
+| `src/embeddings.py` | Text, truncated to 25,000 chars → 1024-dimensional vector | `boto3` Bedrock runtime; lazy client, error propagates; batch is sequential | Callers' mocked tests; real provider probe is separate |
+| `src/search.py` | Query text+embedding+filters → fused, deduplicated candidate rows; rerank adds score | PostgreSQL FTS and pgvector; requires embeddings even on the FTS branch. MCP search separately increments access counters | Search, question-search, rerank and property tests |
+| `scripts/distill_sessions.py` | Undistilled chat parent text → decisions/insights and possible contradiction edges | Kiro compatibility invoker, Bedrock embeddings, DB; partial failures logged; CLI does not translate failure totals to nonzero exit | `test_distill.py` |
+| `src/dream_cycle/orchestrator.py` | Run type/scope, DB stats/history → candidate records, accepted memory operations, digest | Six role-resolved invocations; Explorer/Thinker request tools; reviewers request `tools=False`, with adapter-dependent isolation. Empty Explorer aborts; failed Thinker slice skips; unrecoverable panel aborts | Dream-cycle run, orchestrator, prompt, consensus and storage tests |
+| `src/dream_cycle_db.py` | Run/candidate/feedback CRUD → persisted process history and aggregate metrics | DB; candidate rejection can mark associated memory `user_rejected` | `test_dream_cycle_db.py`, feedback/evaluation properties |
+| `src/express.py` | Existing memories/relationships+preferences → composed/edited Markdown/email | DB; editor uses Kiro alias by default; model failure or empty model selection falls back to deterministic items | `test_express.py` |
+| `src/mcp_server.py` | Nine stdio MCP tools → reads, writes, search, learning prompt, briefing | Python environment, DB; create/content-update/search/learn require embeddings | `test_mcp_server.py`, `test_integration.py` |
+| `src/capture_api.py` | Authenticated HTTP capture payloads → one embedded memory | FastAPI, token env, DB, Bedrock; localhost:8100 default, write error→HTTP500; health probes DB only | `test_capture_api.py` |
+| `scripts/weekly_digest.py` | Recent tag/project/source counts and decision titles → one weekly synthesis | Kiro alias, Bedrock, DB; source URL dedup by ISO week; optional macOS notification | `test_digest_properties.py` |
+| Jobs and backup | launchd templates → source-specific scripts/logs/state/dumps | Hardcoded paths and mixed exit fidelity; template presence is not runtime proof | [Operations](OPERATIONS.md), [Recovery](DISASTER-RECOVERY.md) |
 
-11 migrations applied in order (`migrations/000` through `010`).
+Helpers `classify.py`, `depth.py`, `project.py`, and `qd_profile.py` classify records, heuristically score depth, normalize project tags, and locate upstream profiles. They do not prove source accuracy, meaningful project identity, or semantic quality.
 
-### Core Tables
+## Storage and schema
 
-```sql
--- memories: The primary knowledge store
-CREATE TABLE memories (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    type TEXT NOT NULL,              -- idea, synthesis, research, insight, question, decision, priority, project, connection, source
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    summary TEXT,
-    embedding vector(1024),
-    tags TEXT[] DEFAULT '{}',
-    source_url TEXT,
-    source_type TEXT,                -- youtube, article, kiro_cli_chat, kiro_ide_chat, distilled_chat, quick_desktop_doc, quick_desktop_chat, quick_desktop_feed, ... (see DB for full set)
-    metadata JSONB DEFAULT '{}',
-    status TEXT DEFAULT 'active',    -- active, explored, archived, superseded, user_rejected
-    confidence FLOAT DEFAULT 1.0,
-    parent_id UUID REFERENCES memories(id),
-    created_at TIMESTAMPTZ DEFAULT now(),
-    updated_at TIMESTAMPTZ DEFAULT now(),
-    search_vector TSVECTOR,          -- auto-populated trigger: title+questions=A, content=B
-    access_count INTEGER DEFAULT 0,
-    mem_class TEXT,                   -- semantic, episodic, procedural
-    project TEXT,
-    last_accessed_at TIMESTAMPTZ,
-    encoding_context TEXT            -- cognitive context at creation time (migration 006)
-);
--- NOTE: migration 007 added partial INDEXES for schema-type memories
--- (type='schema' + derived_from edges) — NOT a column. There is no schema_type
--- column, and the schema feature is currently inert (0 type='schema' rows).
+The schema directory contains **12 SQL files numbered 000–011**: tracking plus 11 numbered changes. Installed migration state must be read from the target database; file presence is not evidence of application.
 
--- memory_relationships: Typed edges between memories
-CREATE TABLE memory_relationships (
-    source_id UUID REFERENCES memories(id) ON DELETE CASCADE,
-    target_id UUID REFERENCES memories(id) ON DELETE CASCADE,
-    relation_type TEXT NOT NULL,      -- supports, contradicts, extends, inspires, blocks, requires, derived_from, related_to, superseded_by
-    note TEXT,
-    created_at TIMESTAMPTZ DEFAULT now(),
-    expired_at TIMESTAMPTZ,
-    PRIMARY KEY (source_id, target_id, relation_type)
-);
-```
-
-### Knowledge Graph Tables (migration 008) — DORMANT
-
-**Status: imported from Quick Desktop but unused by retrieval, synthesis, or Express (0 `src/` references).** Retained for possible future use; see `AGENTIC-RETRIEVAL-PLAN.md` (the KG is ~99.5% disconnected from memories, so it is deferred). Entities represent real-world objects (people, tools, projects); edges represent factual relationships between them; the bridge table links entities to memories.
-
-```sql
-CREATE TABLE entities (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    category TEXT NOT NULL,          -- Person, Product, CreativeWork, DefinedTerm, Organization, etc.
-    name TEXT NOT NULL,
-    summary TEXT,
-    properties JSONB DEFAULT '{}',
-    source_type TEXT,
-    embedding vector(1536),
-    created_at TIMESTAMPTZ DEFAULT now(),
-    UNIQUE(category, name)
-);
-
-CREATE TABLE entity_edges (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    from_entity UUID REFERENCES entities(id) ON DELETE CASCADE,
-    to_entity UUID REFERENCES entities(id) ON DELETE CASCADE,
-    relation TEXT NOT NULL,          -- mentions, about, relatedTo, isPartOf, worksFor, etc.
-    weight REAL DEFAULT 1.0,
-    properties JSONB DEFAULT '{}',
-    created_at TIMESTAMPTZ DEFAULT now(),
-    UNIQUE(from_entity, to_entity, relation)
-);
-
-CREATE TABLE memory_entities (
-    memory_id UUID REFERENCES memories(id) ON DELETE CASCADE,
-    entity_id UUID REFERENCES entities(id) ON DELETE CASCADE,
-    relation TEXT DEFAULT 'mentions',
-    PRIMARY KEY (memory_id, entity_id, relation)
-);
-```
-
-### Dream Cycle Tables (migration 003-004)
-
-```sql
-CREATE TABLE dream_cycle_runs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_type TEXT NOT NULL,          -- scheduled, post_learn, session_start, user_triggered
-    started_at TIMESTAMPTZ DEFAULT now(),
-    completed_at TIMESTAMPTZ,
-    explorer_output JSONB,
-    explorer_feedback_injected TEXT,
-    candidates_generated INTEGER,
-    candidates_accepted INTEGER,
-    candidates_deferred INTEGER,
-    candidates_rejected INTEGER,
-    digest TEXT
-);
-
-CREATE TABLE dream_cycle_candidates (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    run_id UUID REFERENCES dream_cycle_runs(id),
-    candidate_json JSONB,
-    operation TEXT,                   -- CREATE, UPDATE, SUPERSEDE
-    target_memory_id UUID,
-    schema_operation TEXT,            -- assimilation, accommodation
-    evaluator_a_verdict TEXT,         -- Skeptic
-    evaluator_a_reasoning TEXT,
-    evaluator_b_verdict TEXT,         -- User Advocate
-    evaluator_b_reasoning TEXT,
-    evaluator_c_verdict TEXT,         -- Epistemologist
-    evaluator_c_reasoning TEXT,
-    evaluator_d_verdict TEXT,         -- Methodologist
-    evaluator_d_reasoning TEXT,
-    final_verdict TEXT,               -- ACCEPTED, REJECTED
-    created_memory_id UUID REFERENCES memories(id),
-    user_rejected_at TIMESTAMPTZ,
-    user_rejection_reason TEXT,
-    deferred_twice_rejected BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMPTZ DEFAULT now()
-);
-```
-
-### Indexes
-
-```sql
-CREATE INDEX ON memories USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX ON memories USING gin (search_vector);
-CREATE INDEX ON memories (type, status);
-CREATE INDEX ON memories USING gin (tags);
-CREATE INDEX ON memories USING gin (metadata);
-CREATE INDEX ON memories (created_at DESC);
-CREATE INDEX ON memories (source_type);
-CREATE INDEX ON memories (mem_class);
-CREATE INDEX ON memories (project);
-CREATE INDEX ON memories (last_accessed_at DESC);
-```
-
-## Search Architecture
-
-Hybrid retrieval with cognitive science-grounded reranking. Implementation: `src/search.py`.
-
-1. **BM25 full-text search** — PostgreSQL `tsvector/tsquery` with GIN index
-2. **Vector cosine search** — pgvector HNSW index (1024-dim Titan embeddings)
-3. **Reciprocal Rank Fusion** — `score = 1/(k+rank_vec) + 1/(k+rank_bm25)`, k=60
-4. **Utility reranking** — weighted scoring (see below)
-5. **Retrieval reinforcement** — `access_count` incremented on retrieval, `last_accessed_at` updated
-6. **Temporal context** — top result's temporal neighbors (±24h) appended
-
-### Reranking Formula
-
-```
-rerank_score = 0.30 * rrf_score
-             + 0.18 * token_overlap
-             + 0.18 * title_overlap
-             + 0.10 * context_overlap       (encoding context match)
-             + 0.12 * recency              (power-law decay with stability)
-             + 0.08 * length_score
-             + 0.05 * depth_score
-             + type_boost                   (0.06 for idea/synthesis/insight/decision)
-             + mem_class_boost              (0.04 semantic, 0.02 procedural, 0.00 episodic)
-             + reinforcement                (0.03 * log1p(access_count) * spacing_bonus)
-             + project_penalty              (-0.15 if cross-project)
-             + superseded_penalty           (-0.20 if status=superseded)
-             + staleness_penalty            (-0.05 if unretrieved >90 days)
-```
-
-> **Authoritative source:** `src/rerank_weights.py` is the single source of truth for these weight values; both the production scorer (`src/search.py`) and the evaluation scorer derive from it.
-
-See `docs/DESIGN-DECISIONS.md` for the cognitive science rationale.
-
-## Memory Types
-
-| Type | Purpose |
+| Migration | Responsibility |
 |---|---|
-| `research` | Raw information gathered |
-| `synthesis` | Your analysis of information |
-| `idea` | Hypotheses, project concepts |
-| `connection` | Links between concepts |
-| `priority` | What to work on and why |
-| `question` | Open threads to explore |
-| `insight` | Aha moments, realizations |
-| `decision` | Choices made and rationale |
-| `project` | Active project status |
-| `source` | Ingested external content |
+| 000 / 001 | Migration tracking; core memories, relationships, vector/full-text indexes and search trigger |
+| 002 | `mem_class`, `project`, `last_accessed_at` |
+| 003 / 004 | Dream-cycle run/candidate history, relationship `expired_at`, fourth reviewer fields |
+| 005 | Weighted title/question/body search vector trigger and backfill |
+| 006 | `encoding_context` field/index |
+| 007 | Partial indexes for `type='schema'` and `derived_from`; no `schema_type` column |
+| 008 | `entities`, `entity_edges`, `memory_entities` imported graph tables |
+| 009 | HNSW rebuild parameters; hardcoded `ALTER DATABASE memory_bank SET hnsw.ef_search=200` |
+| 010 | `express_feedback` delivery preferences |
+| 011 | Per-role `backend_provenance` on `dream_cycle_runs` |
 
-## Relationship Types
+`memories` stores UUID, type/title/content/summary, `vector(1024)`, tags, source URL/type, JSON metadata, status/confidence, parent pointer, timestamps, FTS vector, access counts, class/project/context. The schema accepts string types/statuses; application prompts are not database enums. `created_at` generally means insertion time; source dates may live only in metadata. Do not treat bulk-import insertion times as original event dates.
 
-| Type | Meaning |
-|---|---|
-| `supports` | Provides evidence for the target |
-| `contradicts` | Conflicts with the target |
-| `extends` | Builds on the target |
-| `inspires` | Sparked the target idea |
-| `blocks` | Blocker for the target |
-| `requires` | Depends on the target |
-| `derived_from` | Synthesized from the target source |
-| `related_to` | Auto-discovered semantic/temporal neighbor |
-| `superseded_by` | Replaced by the target (dream cycle) |
+`memory_relationships` is a directed `(source_id,target_id,relation_type)` key with note/timestamps. `derived_from` points from a synthesis to its evidence; `superseded_by` points old→new. `entities` has a separate 1536-dimensional embedding column; it is not compatible with the memory vector column. Graph imports and Slack channel/user imports do not imply graph-aware discovery or Slack message capture.
 
-## Technology Stack
+`dream_cycle_runs` stores execution metadata; `dream_cycle_candidates` stores proposal, individual verdicts, final vote, created memory ID, and rejection fields. Legacy DEFERRED columns remain, but current consensus only returns ACCEPTED/REJECTED. There are no immutable source revisions or exact-version delivery receipts in this original lineage.
 
-| Component | Technology |
-|---|---|
-| Knowledge store | PostgreSQL 17 + pgvector (native Homebrew, localhost:5432; Docker container retained as rollback pending Phase 5 decommission) |
-| Agent interface | MCP server (`src/mcp_server.py`) |
-| LLM (reasoning) | kiro-cli → Amazon Q (Claude Opus 4.8), $0 metered; pluggable per-machine via `config/backends.toml` (see MODEL-BACKENDS.md) |
-| Embeddings | Amazon Bedrock (Titan v2, 1024-dim) |
-| Scheduling | macOS launchd |
-| Backup transport | rclone (Google Drive) + local + git — S3 de-scoped 2026-06-01 |
-| Backup encryption | GPG (AES-256) |
-| YouTube capture | yt-dlp + curl_cffi (in-repo, `src/capture/youtube.py`) |
-| Web/article acquisition | Crawlee (Node.js, `~/Work/Tools/Crawlee/`) |
-| QD sync | Quick Desktop (`knowledge_v1.db`, `sessions.db`, `eventlog/`, `slack_cache/`) |
+## Retrieval
 
-## Dream Cycle Pipeline
+`hybrid_search` combines cosine HNSW ranks with PostgreSQL `ts_rank(to_tsquery(...))`, then Reciprocal Rank Fusion (`k=60`). **The lexical implementation is PostgreSQL full-text ranking, not BM25**, despite that shorthand in older comments. Candidate prefetch is4×limit; content-prefix dedup and a two-per-parent cap reduce repeated chunks. Filtering by project keeps matching or null-project rows, so a scoped search can hide relevant other-project records.
 
-Four-agent autonomous learning system (`src/dream_cycle/`):
+`rerank` uses centralized weights in `src/rerank_weights.py`: RRF, lexical/title/context overlap, recency, length, depth; plus class/type boosts, spaced access reinforcement, cross-project/superseded/staleness penalties. These are heuristics, not learned probabilities. The code prefers some kinds of recently accessed content, and measures of recall must account for that history.
 
-1. **Explorer** — Assembles "memory slices" using 11 strategies (temporal juxtaposition, cross-project collision, orphan archaeology, etc.)
-2. **Thinker** — Analyzes slices, proposes candidate insights (CREATE, UPDATE, or SUPERSEDE operations)
-3. **Consensus Panel** — 4 evaluators (Skeptic, User Advocate, Epistemologist, Methodologist) vote independently. Binary BFT: ≥3/4 = ACCEPTED
-4. **Storage** — Accepted candidates become memories with `tags: ["dream-cycle"]` and `metadata: {"dream_cycle": true}`
+`memory_search` embeds the query, calls hybrid search/rerank, **writes** access counters, and returns500-character previews plus temporal neighbors and schema context. Read full source records before judging evidence. `memory_read` does not increment access counts. Temporal neighbors use database `created_at`; no claim of original event chronology follows. The default search status is unfiltered, so `user_rejected` is not globally suppressed unless callers filter appropriately.
 
-Digests written to `logs/dream-cycle-digest-*.md`.
+## Discovery and learning
 
-## Express (Delivery Layer)
+1. `DreamCycleOrchestrator.run` chooses one of scheduled, post_learn, session_start, or user_triggered modes, creates run history, gathers stats and rejection feedback.
+2. Explorer gets the live memory tools, strategy guidance and current scope. Prompts suggest up to five slices; most shape/quantity limits are prompt instructions, not strict validated contracts.
+3. Thinker receives slice IDs/hypothesis and tools; proposes CREATE, UPDATE, or SUPERSEDE with source IDs and suggested relationships.
+4. Skeptic, Advocate, Epistemologist, and Methodologist run **sequentially**, each in a separate call. They receive candidate JSON and a list of source IDs, with no source content in the prompt. These calls request `tools=False`; actual tool isolation depends on the adapter. Source IDs alone do not permit independent evidence verification.
+5. `tally_consensus` accepts at least three ACCEPT votes out of four. Same-model role prompts can share errors. The “BFT” terminology in original code is an analogy, not a guarantee of truth or independent fault tolerance. There is no Bayesian posterior calculation here.
+6. Accepted candidates pass embedding similarity dedup before storage. That gate applies to UPDATE/SUPERSEDE too and can suppress the intended update by matching the target. Candidate ACCEPTED can be recorded with no created memory. Storage helpers commit separately, and UPDATE overwrites content without preserving its previous version.
+7. Digest/run history records results; stale relationship expiry is best effort. A later Explorer receives recent rejected-candidate reasoning, dissent on accepted candidates, and recorded user rejections.
 
-The Partnership rung — surfaces synthesized output to the user instead of waiting to be queried.
-Implementation: `src/express.py`, `scripts/brief.py`, `scripts/express_push.py`.
+Only the dream cycle's six roles are controlled by backend profiles. See [Model backends](MODEL-BACKENDS.md). Original source lineage is candidate/source IDs rather than quote-validated evidence packets.
 
-- **compose_briefing** gathers from existing synthesis: recent dream-cycle insights (cross-project detected), active `contradicts` edges, resurfaced high-value/forgotten memories, the weekly digest, open questions. **edit_briefing** ranks and writes headlines (LLM editor, deterministic fallback).
-- **Surfaces:** on-demand `brief` (CLI); a gated Gmail push (`should_push` sends only on a new cross-project synthesis or contradiction, chained after the noon dream cycle); the `memory_brief` MCP tool (in-session).
-- **Feedback (delivery preferences):** `brief --useful/--less/--mute/--unmute` targeting item/kind/topic, stored in `express_feedback` (migration 010); applied as hard filters + soft re-rank. Delivery-only (does not yet feed synthesis).
+## Delivery and feedback
 
-## Source Code Layout
+Express gathers recent dream-cycle insights, active contradictions, resurfaced records, a digest, and open questions. It truncates detail to 600 characters **before** the editor/render stage; caveats and provenance may be lost. A cross-project flag can arise from a strategy label alone or multiple non-null source project tags; neither proves a useful cross-project transfer.
 
-```
-src/
-  mcp_server.py          MCP server (9 tools)
-  express.py             Express delivery: briefing compose/edit/render, feedback, Gmail push
-  db.py                  PostgreSQL connection, memory CRUD, relationships
-  search.py              Hybrid search, reranking, retrieval reinforcement
-  embeddings.py          Bedrock Titan embedding generation
-  ingest.py              Ingestion pipeline
-  classify.py            Memory classifier (semantic/episodic/procedural)
-  depth.py               Depth scorer (0.0–1.0)
-  capture_api.py         HTTP capture endpoint (DEPRECATED — 0 captures, slated for removal)
-  capture/               Self-contained capture sources (youtube.py); see CAPTURE-COMPONENTS.md
-  models.py              Data models
-  agent_invoker.py       Backward-compat shim → re-exports backends.kiro.KiroInvoker
-  backends/              Pluggable model-backend layer (see MODEL-BACKENDS.md)
-    base.py              Invoker Protocol, BackendCapabilities, capability table
-    kiro.py              KiroInvoker — kiro-cli → Amazon Q (the default adapter)
-    resolver.py          Resolves an Invoker per role from config/backends.toml
-  parsers/               Chat and content parsers
-  prompts/               Agent prompt templates
-  dream_cycle/
-    orchestrator.py      Pipeline coordination
-    consensus.py         BFT consensus tally
-    storage.py           Memory persistence (CREATE/UPDATE/SUPERSEDE)
-    digest.py            Markdown digest generation
-    feedback.py          Feedback injection from rejections
-  dream_cycle_db.py      Dream cycle DB operations
-```
+The editor selects up to five items, adds headlines, and falls back deterministically on failure. An intentional empty editor selection also falls back, so “nothing worth showing” is not fully respected. CLI, in-session MCP, and optional Gmail use the same composition layer. The email gate checks the latest completed run's accepted candidate JSON, while composition separately gathers eligible memories. A triggering accepted duplicate or muted item need not appear in the sent briefing. The only resend guard is `logs/.express_last_push`, not an immutable delivery ledger.
+
+There are **three different feedback mechanisms**:
+
+- Search access counters influence retrieval ranking; they do not measure usefulness or citations.
+- `express_feedback` stores latest useful/less/mute preference per item/kind/topic and influences delivery only.
+- `mark_user_rejected` updates candidate/memory status and recent rejection text can enter Explorer. There is no exposed MCP or `brief` command for this function, and no complete version-aware correction/acceptance/outcome loop.
+
+Quick Desktop confidence is imported data, not evidence that these feedback mechanisms perform Bayesian learning. See [Capture](CAPTURE-COMPONENTS.md#quick-desktop-integration).

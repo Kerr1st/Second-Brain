@@ -1,5 +1,8 @@
 # Implementation Plan: Question-Aware Search
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Overview
 
 Implement weighted tsvector search by adding a PL/pgSQL questions parser, replacing the search_vector trigger with weighted setweight calls, backfilling existing rows, and adding a Python mirror of the parser for testing. All changes are contained in a single migration file and a Python utility function — no changes to search, ingest, or MCP server code.

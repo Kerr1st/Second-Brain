@@ -1,5 +1,9 @@
 # Requirements Document: Byzantine Consensus Panel
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+> The BFT analogy below does not establish factual correctness or independent failure modes for LLM reviewers; the repaired consensus also has a material-objection veto.
+
+
 ## Introduction
 
 The Dream Cycle's consensus panel currently uses 3 evaluators (Skeptic, User Advocate, Epistemologist) with a 3/3 unanimity threshold. The architecture is named "Four-Agent Byzantine Consensus Pipeline" and references Lamport's 1982 Byzantine Generals Problem, but the implementation does not satisfy Byzantine fault tolerance. Lamport, Shostak, and Pease (1982) proved that tolerating f faulty nodes requires 3f+1 total nodes. To tolerate 1 hallucinating evaluator (the "traitor general"), the panel needs 4 evaluators, not 3.

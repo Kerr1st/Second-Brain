@@ -1,5 +1,8 @@
 # Requirements Document
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Introduction
 
 This document specifies the requirements for decomposing `src/db.py` by extracting search and ranking logic into a new `src/search.py` module. The refactor is purely structural — no behavioral changes. Three functions (`hybrid_search`, `rerank`, `increment_access_count`) move from `src/db.py` to `src/search.py`. The data-access primitive `search_similar` stays in `src/db.py`. Only two consumer files update imports (`src/mcp_server.py` and `scripts/golden_queries.py`). All 157 existing tests must pass after each step.

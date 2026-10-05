@@ -1,5 +1,8 @@
 # Design Document: Data Layer Decomposition
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Overview
 
 This design describes the structural decomposition of `src/db.py` (342 lines, 7 distinct responsibilities) into a proper layered architecture by extracting search/ranking logic into a new `src/search.py` module and thinning `src/mcp_server.py` to a pure presentation layer. The refactor is purely structural — no behavioral changes. All 157 existing tests must pass after each extraction step.

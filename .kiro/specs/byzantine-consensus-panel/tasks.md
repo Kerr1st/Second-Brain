@@ -1,5 +1,9 @@
 # Implementation Plan: Byzantine Consensus Panel
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+> The BFT analogy below does not establish factual correctness or independent failure modes for LLM reviewers; the repaired consensus also has a material-objection veto.
+
+
 ## Overview
 
 Upgrade the Dream Cycle consensus panel from 3 evaluators to 4 (adding Methodologist), replace the three-state consensus model (ACCEPTED/DEFERRED/REJECTED) with binary BFT consensus (≥3/4 ACCEPTED, ≤2/4 REJECTED), remove all DEFERRED machinery, add accepted-dissent signal preservation via digest annotation and feedback injection, and extend the database schema with evaluator D columns.

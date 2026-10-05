@@ -1,5 +1,8 @@
 # Requirements Document
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Introduction
 
 The Second Brain project uses PostgreSQL + pgvector for personal knowledge management with 74K+ memories. Currently, every database function across `src/db.py`, `src/search.py`, and `src/dream_cycle_db.py` opens and closes its own connection via `get_connection() → psycopg2.connect()`. With 30+ functions following this pattern and no connection pooling, the long-lived MCP server process pays repeated connection setup costs. Additionally, `src/search.py` builds SQL WHERE clauses via f-string interpolation of hardcoded conditions — safe (parameterized values) but fragile.

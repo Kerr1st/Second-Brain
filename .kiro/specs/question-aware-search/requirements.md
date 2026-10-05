@@ -1,5 +1,8 @@
 # Requirements Document: Question-Aware Search
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Introduction
 
 Question-Aware Search gives the "Questions this answers:" section extra weight in BM25 full-text search so that memories are findable by the natural-language questions they answer, not just by their body content. The approach uses PostgreSQL tsvector weight labels (A/B/C/D) within the existing `search_vector` column — no new columns, no new search pass, no schema migration for new columns.

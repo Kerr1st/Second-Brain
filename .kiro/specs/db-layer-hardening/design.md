@@ -1,5 +1,8 @@
 # Design Document
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Overview
 
 This design replaces per-call `psycopg2.connect()` with a connection pool and context manager in `src/db.py`, migrates all 28 callers across three source files and six test files, and converts `hybrid_search()` WHERE clause construction from f-strings to `psycopg2.sql.SQL` composables.

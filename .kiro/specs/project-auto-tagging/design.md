@@ -1,5 +1,8 @@
 # Design Document: Project Auto-Tagging
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Overview
 
 This feature closes the loop on the Second Brain's project-scoping infrastructure. The `project` column, cross-project rerank penalty (-0.15), and project filter in `hybrid_search` are all implemented but inert because nothing populates the `project` field. This design covers four concerns:

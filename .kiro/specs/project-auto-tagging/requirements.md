@@ -1,5 +1,8 @@
 # Requirements Document
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Introduction
 
 The Second Brain's `project` column, cross-project rerank penalty (-0.15), and project filter in `hybrid_search` are all implemented but inert. Nothing populates the `project` field. The IDE chat parser extracts a `project_hint` from workspace context but the value is discarded before reaching `create_memory`. The CLI chat parser performs no project extraction at all. All 74K existing memories have `project = NULL`, which means they are treated as universal knowledge and the encoding-specificity scoping never activates.

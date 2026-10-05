@@ -1,5 +1,8 @@
 # Design Document: Capture API
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Overview
 
 This design implements the Capture API as a single FastAPI application in `src/capture_api.py` with Pydantic models for request validation, a shared storage pipeline function, bearer-token middleware, and channel-specific endpoints that normalize inputs before calling the shared pipeline. The server reuses the existing connection pool, embedding, classification, and depth-scoring modules.

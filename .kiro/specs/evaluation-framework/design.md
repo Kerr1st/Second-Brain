@@ -1,5 +1,8 @@
 # Design Document: Evaluation Framework
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Overview
 
 A multi-tier evaluation system for the Second Brain's retrieval pipeline. Measures retrieval accuracy, quantifies the value of V2 reranking signals, validates dream-cycle consolidation quality, and tracks trends over time.

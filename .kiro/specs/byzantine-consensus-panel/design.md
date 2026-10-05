@@ -1,5 +1,9 @@
 # Design Document: Byzantine Consensus Panel
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+> The BFT analogy below does not establish factual correctness or independent failure modes for LLM reviewers; the repaired consensus also has a material-objection veto.
+
+
 ## Overview
 
 This feature upgrades the Dream Cycle's consensus panel from 3 evaluators to 4, adding a Methodologist evaluator and replacing the three-state consensus model (ACCEPTED/DEFERRED/REJECTED) with a binary BFT-correct model. The theoretical foundation is Lamport, Shostak, and Pease (1982), "The Byzantine Generals Problem" (ACM TOPLAS), which proved that tolerating f faulty nodes requires 3f+1 total nodes. With f=1 (one potentially hallucinating evaluator), the panel needs 4 evaluators. The PBFT quorum (Castro & Liskov 1999) of 2f+1 = 3 out of 4 is the acceptance threshold.

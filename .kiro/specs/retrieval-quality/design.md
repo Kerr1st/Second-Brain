@@ -1,5 +1,8 @@
 # Design Document: Retrieval Quality
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Overview
 
 Retrieval Quality enhances the search and ranking pipeline of the Second Brain MCP server (PostgreSQL + pgvector). This is Layer 1 — passive improvements applied at ingest and retrieval time, complementary to the dream cycle pipeline (Layer 2 — active synthesis that produces new semantic memories).

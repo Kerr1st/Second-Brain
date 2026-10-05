@@ -1,5 +1,8 @@
 # Implementation Plan: Data Layer Decomposition
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Overview
 
 Extract `hybrid_search`, `rerank`, and `increment_access_count` from `src/db.py` into a new `src/search.py` module, then update 2 consumer files (`mcp_server.py`, `scripts/golden_queries.py`). Purely structural — no behavioral changes, zero test patch target changes, zero dream_cycle import changes. All 157 existing tests must pass after each step.

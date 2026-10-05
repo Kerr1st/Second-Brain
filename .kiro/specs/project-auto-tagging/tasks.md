@@ -1,5 +1,8 @@
 # Implementation Plan: Project Auto-Tagging
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Overview
 
 Wire the existing but inert `project` column through the full pipeline: shared normalization function → parser extraction → chat extract passthrough → ingestion storage → MCP normalization → backfill script. All project tags flow through `normalize_project_tag()` in `src/project.py`.

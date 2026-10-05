@@ -1,5 +1,8 @@
 # Implementation Plan: DB Layer Hardening
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Overview
 
 Replace per-call `psycopg2.connect()` with a `SimpleConnectionPool` + `@contextmanager` in `src/db.py`, migrate all 28 source callers and all test callers to `with get_connection() as conn:`, convert `hybrid_search()` WHERE clauses to `psycopg2.sql.SQL` composables, and update all mock-based and direct-caller tests.

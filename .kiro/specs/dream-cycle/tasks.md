@@ -1,5 +1,8 @@
 # Implementation Plan: Dream Cycle — Multi-Agent Autonomous Learning
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Overview
 
 Implement the Dream Cycle as a four-agent pipeline (Explorer → Thinker → Consensus Panel) that runs during downtime to discover hidden connections, surface contradictions, and store consensus-gated insights. This replaces/extends V2 Task 8 (Consolidation Pipeline) with a research-grounded multi-agent approach. Implementation follows the module structure from the design: orchestrator, DB layer, agent invoker, prompt templates, CLI entry point, and scheduling.

@@ -1,5 +1,8 @@
 # Tasks: Capture API
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 > **STATUS (2026-06-04): BUILT & DEPLOYED.** Fully implemented and running as a
 > live service — `src/capture_api.py`, `tests/test_capture_api.py`, LaunchAgent
 > `com.second-brain.capture-api` (port 8100). The unchecked boxes below predate

@@ -1,5 +1,8 @@
 # Requirements Document: Evaluation Framework
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 ## Introduction
 
 The Second Brain has 74K+ memories, a hybrid retrieval pipeline (BM25 + pgvector + RRF + utility reranking), and a weekly dream cycle that autonomously generates insights. The only retrieval quality measurement today is `scripts/golden_queries.py`, which checks whether dream-cycle insights appear in top search results for their declared "Questions this answers" queries. Current baseline: MRR 0.7833, Hit@1 60%, Hit@3 100%.

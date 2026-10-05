@@ -1,124 +1,57 @@
-# Capture — Component Architecture
+# Capture, ingestion, and distillation — original implementation
 
-**Status: reference for the component build-out.** Captures the target structure so each
-piece can be built, tested, scheduled, and replaced **independently**. Grounded in the
-2026-06-08 capture/ingest audit. YouTube (`src/capture/youtube.py`) is the first component
-and the reference implementation for the contract below.
+Source-reviewed 2026-09-10. [Architecture](ARCHITECTURE.md) describes the downstream contracts. This document lists actual capture paths; the aspirational common connector/runner design from June is [historical](archive/2026-09-10/docs/CAPTURE-COMPONENTS.md).
 
-## Why components
-Today capture is the most sprawled part of the system: ~15 scripts, an external Node tool,
-and **3 duplicate storage paths**. The goal is to make capture a set of small components with
-clear boundaries so we can work on one without touching the others, and so the shared spine
-(storage, distillation, retrieval) stays consistent across every source.
+## Source coverage
 
-## System components (top level)
-Second Brain is four components with clean boundaries (verified: the core does not import
-capture):
-
-```
-CAPTURE  →  RETRIEVAL substrate  →  SYNTHESIS (dream cycle)  →  DELIVERY (Express)
-```
-
-- **Retrieval** — `db`, `embeddings`, `search` (hybrid BM25+vector+RRF + cognitive rerank).
-- **Synthesis** — `dream_cycle/*` (Explorer → Thinker → 4 evaluators), consensus-gated.
-- **Delivery** — `express` (`brief` / push / `memory_brief`).
-- **Capture** — the subject of this doc; decomposed below.
-
-This doc decomposes **Capture**. The same component treatment can later apply to the others.
-
-## Capture = source connectors + a shared spine
-
-```
-                       ┌─────────── source connectors ───────────┐
-   youtube  kiro_chat  web  quick_desktop        (each: enumerate + fetch)
-                       └──────────────────┬──────────────────────┘
-                                          ▼
-                          SPINE:  store → ingest (chunk + parent/chunk + relationships)
-                                          ▼
-                                  distill  (raw → semantic decision/insight)   ← the value step
-                                          ▼
-                              memories (Postgres/pgvector)  → retrieval → synthesis
-```
-
-A **connector** owns only *"how do I reach this source and normalize it to markdown."*
-Everything after that (dedup, storage, chunking, distillation, retrieval) is **shared spine**.
-
-## The connector contract (what makes a source separately-workable)
-Every source connector implements three things — nothing more:
-
-```python
-SOURCE_TYPE = "youtube"                 # 1. its label
-
-def enumerate() -> Iterable[Item]:      # 2. list what's available (id/url, title, metadata)
-    ...
-
-def fetch(item) -> str | None:          # 3. produce markdown + metadata header, or None to skip
-    ...
-```
-
-A shared **runner** then does the cross-cutting work once, for every connector:
-dedup (`get_processed_source_urls(SOURCE_TYPE)`), `ingest_content(md, source_type=...)`,
-stats, `--limit`/`--dry-run`, and request backoff. (Today `youtube.py` inlines its own
-runner; the refactor lifts that into a shared `run(connector, ...)`.)
-
-Markdown each connector emits uses a metadata header the ingest pipeline parses:
-```
-# <title>
-Source: <url>
-Type: <source-specific>
-Engagement: <tier>        # e.g. liked | watch_later — interest signal for Phase 2
----
-<body>
-```
-
-## Source connectors (status)
-
-| Connector | Signal | Current home | State / work to bring into structure |
+| Surface | Actual entrypoint/input | Output/state | Dependency and boundary |
 |---|---|---|---|
-| **youtube** ✅ | Liked + Watch Later transcripts | `src/capture/youtube.py` | Done — reference impl. Refactor: split connector vs. shared runner. |
-| **kiro_chat** | Kiro IDE + CLI chat sessions | `chat_extract.py`, `batch_ingest_{parallel,staged}.py`, `ingest_chats.py`, `parsers/{ide,cli}_chat.py` | Consolidate 4 scripts → one connector. IDE source idle since 2026-02-18 (resumes when editor is used). |
-| **web** | Articles / bookmarks | `crawlee_ingest.py`, `scrape_bookmarks.py`, `parsers/crawlee.py` (+ external Node) | Bring in-repo (drop external Crawlee dependency), like youtube. |
-| **quick_desktop** | QD docs / feed / chat / 9 micro-cats | `migrate/{ingest_doc_chunks,ingest_eventlog,migrate_quick_desktop}.py`, `ingest_qd_chats.py`, `qd_sync.sh`, `qd_profile.py` | Consolidate. **Bug:** micro-cats (~1,140 recs) created with **no embeddings** → invisible to vector search. |
-| ~~capture_api~~ | Slack / browser / email (HTTP) | `src/capture_api.py` + `capture-api` launchd job + `test_capture_api.py` | **Retire** — 0 captures ever. |
-| ~~migrations~~ | Claude / ChatGPT / Notion (one-time) | `migrate/migrate_{claude,chatgpt,notion}.py` | **Archive** — 0 rows present. |
+| Kiro CLI | `src/parsers/cli_chat.py`: `~/.kiro/sessions/cli/*.jsonl`; `scripts/chat_extract.py` | Filtered user/assistant text → `staging/chats/cli_*.md` | Reads recorded sessions; tool results stripped, short/low-content sessions filtered |
+| Kiro IDE | `src/parsers/ide_chat.py`: current/legacy Kiro globalStorage `.chat` paths | Filtered text+project hints → staged Markdown | Does not inspect every UI surface; project hints can be incomplete |
+| Staged chats | `scripts/batch_ingest_staged.py`, scheduled by `jobs/ingest_staged.sh` | `chat://<id>` parent/chunks → moves staged file to `staging/ingested` | URL-existence skip; no source revision check; `ingest_chats.py` uses a different legacy URL scheme |
+| QD chats | `scripts/ingest_qd_chats.py`: active-profile `sessions/sessions.db` | `qd-chat://<id>` → raw parent/chunks | Minimum 2 messages; truncates large tool content to 2,000 characters; an existing session URL prevents recapture after append |
+| QD extracted facts/decisions | `scripts/migrate/migrate_quick_desktop.py` | `qd://memory/<id>` / `qd://entity/<id>`, graph rows; ID watermarks | Already-distilled input, direct memory writer; new embeddings now supplied by local wrapper |
+| QD documents | `scripts/migrate/ingest_doc_chunks.py`: `search_content` joined to `file_chunks` | One memory per `qd-doc://<node>`; `file_id`, chunk index, source file/folder metadata | Local docs only, Downloads excluded. Existing chunk IDs skipped; no full-file parent/revision completeness contract |
+| QD feed/engagement | `scripts/migrate/ingest_eventlog.py`: event/interactions JSONL | `qd-feed://<id>` memories plus interaction metadata | Engagement counts are source signals, not evidence of useful SB recommendations |
+| QD Slack cache | `scripts/migrate/import_slack_graph.py`: newest cache channel/user files | Entity graph rows | Imports channels/users, **not Slack message bodies**; graph not consumed by core search |
+| Browser bookmarks/web | `scripts/scrape_bookmarks.py` → external `~/Work/Tools/Crawlee`; `src/parsers/crawlee.py`, `scripts/crawlee_ingest.py` | Knowledge-store/output Markdown → article/YouTube parent/chunks | Chrome bookmark/cookie access and external Node tool; not general browser activity capture |
+| YouTube | `python -m src.capture.youtube` | Liked/Watch Later video transcripts → parent/chunks keyed by video URL | yt-dlp+curl_cffi+Chrome cookies; default minimum 300 seconds; missing transcript/network failures logged |
+| ChatGPT / Claude / Notion exports | `scripts/migrate/migrate_chatgpt.py`, `migrate_claude.py`, `migrate_notion.py` | Export normalization via `migration_utils.py` → ingestion | Manual export importers; **not automatic live Codex or Claude Code capture** |
+| Agent-created notes | MCP `memory_create` / two-step `memory_learn` | One embedded memory per create | Caller supplies evidence/context; depth guidance is a warning, not rejection |
+| HTTP messages | Optional `src/capture_api.py` `/capture`, `/capture/slack`, `/capture/browser`, `/capture/email` | One embedded memory | Caller must supply payload+bearer token. Endpoint implementation is not a working inbox/browser connector |
 
-## Shared spine
+The source tree has **no native automatic Codex conversation, Claude Code conversation, Gmail inbox, or Outlook inbox collector**. Quick Desktop may contain observations from external integrations; that upstream coverage must be audited separately. Broad “capture everything” is the purpose, not the present coverage guarantee.
 
-- **store** — the single primitive: `embed → classify → depth → create_memory`.
-  *Currently triplicated* (`ingest.ingest_content`, `capture_api._store_memory`,
-  `mcp_server.memory_create`) → collapse to one `store.py`; the other two call it.
-- **ingest / pipeline** — metadata-header parse + section chunking + parent (unembedded) +
-  embedded chunks + relationship discovery. Healthy today (`src/ingest.py`); keep
-  `ingest_content`'s signature stable (6 callers).
-- **distill** — raw chunks → semantic `decision`/`insight` memories. **The value-multiplier**
-  (synthesis cites distilled memories, not raw chunks). Today: chat-only, and only ~8% of IDE
-  sessions distilled (459/5,493). Target: generalize to any `source_type` + backfill.
+## Common ingestion path
 
-## Target layout
-```
-src/capture/
-  store.py            # the one storage primitive (all writers route here)
-  pipeline.py         # chunk + parent/chunk + relationships  (today's ingest.py)
-  distill.py          # raw → semantic, generalized to any source_type
-  runner.py           # shared capture loop: enumerate → dedup → fetch → ingest → stats
-  sources/
-    youtube.py  ✅
-    kiro_chat.py    web.py    quick_desktop.py
-```
+`ingest_content(content, source_type, source_url=None, project=None)` parses Markdown header fields, resolves/normalizes project, stores the full raw parent without an embedding, tries semantic/temporal auto-links, then chunks/embeds/stores children. A header `Date` is metadata, not automatically the `created_at` timestamp.
 
-## Migration path (incremental — never a big-bang rewrite)
-1. **Retire dead** — `capture_api` (+ job + test), one-off migrations, the `import_slack_graph`/entity-KG path. (Verify-before-cut; each its own commit.)
-2. **Lift one connector at a time** onto the shared spine, newest pattern first
-   (`youtube` ✅ → `kiro_chat` → `web` → `quick_desktop`), retiring its scattered scripts as it lands.
-3. **Collapse the 3 store paths → 1** (`store.py`); point `mcp_server`/any HTTP writer at it.
-4. **Generalize `distill`** to any source_type + backfill (the highest-leverage step for synthesis).
-5. Keep the test suite green and commit per step (origin + mini).
+Chunks split on section/paragraph boundaries and merge small sections. A single oversized section/paragraph is not forcibly subdivided. Embedding truncation can therefore omit tail meaning while full text remains stored. Auto-linking compares parent embeddings to existing records but keeps only parent neighbors; failed linking is swallowed. The wrapper is **not atomic across parent, children, and relationships**, and direct callers do not share a universal dedup contract.
 
-## Status snapshot
-- ✅ `youtube` connector shipped (`ac3054d`); reference contract established.
-- ▢ Extract shared `runner.py` from `youtube.py`.
-- ▢ Collapse the 3 store paths → `store.py`.
-- ▢ Lift `kiro_chat`, `web`, `quick_desktop` connectors.
-- ▢ Generalize `distill` + backfill (IDE remainder, youtube, articles).
-- ▢ Retire `capture_api` + one-off migrations.
-- ▢ Fix `quick_desktop` micro-category embeddings.
+`ingest_batch` snapshots already-processed URLs once. Staged and QD importers implement additional URL/ID skips. A partial parent write can cause future runs to treat an incomplete source as already captured. Existing URLs also skip changed/resumed material. Repairing source revisions is more important than advertising idempotence as a complete guarantee.
+
+There are several storage paths: ingestion, MCP create, HTTP capture, QD facts/docs, distillation, digest, and dream-cycle storage. Shared `store.py` / `runner.py` in the June component plan are **not implemented in this original tree**.
+
+## Distillation
+
+`python scripts/distill_sessions.py` selects undistilled parent records for `kiro_cli_chat` and `quick_desktop_chat` by default. Repeatable `--source-type` can select another type with suitable parent records. It makes one **Kiro** call per transcript (first 100,000 characters) to extract up to eight proposed decisions/insights. The prompt requests the cap; `valid_items` only checks type/content and does not enforce the number or source quotes.
+
+Outputs use `source_type='distilled_chat'`, `distill://<session>#<index>`, fixed confidence 0.8, semantic class, and `metadata.distilled_from`. Successful new decisions may trigger another Kiro comparison against the most similar prior active decision; a contradiction edge does not itself supersede the prior record.
+
+The script does not verify that a decision was the user's rather than the assistant's proposal, or validate exact quotation support. It does not store a successful empty-distillation receipt. Once any indexed item marks a session processed, later content and some partial-write failures can be skipped. `--dry-run` still makes real model calls; it prevents memory writes, not external transmission or inference cost.
+
+`redistill_capped.py` is a manual backfill tool for sessions that hit an older cap; it has its own lock/similarity filtering and writes additional distilled records. It is not part of the normal scheduled chain. `weekly_digest.py` summarizes aggregates and decision titles; it is neither raw capture nor evidence-grounded cross-project discovery.
+
+## Quick Desktop integration
+
+`src/qd_profile.py` selects `profiles.json:last_active` and its data path, falling back to legacy `~/.quickwork`. Slack cache resolution selects the newest cache directory. `warn_if_stale` only warns; a valid filename does not prove the external collector is current.
+
+`jobs/qd_sync.sh` runs **six** scripts, in order: facts/graph migration, tags/domains enrichment, feed/interactions ingestion, Slack channel/user graph, chats, document chunks. Its shell stops on nonzero subprocess status, but some Python scripts log failures and still exit zero. Facts migration advances maximum-ID watermarks across failures; older edits/reinforcements are not replayed by that new-ID filter. The state file is shared under the QD root, not namespaced by SB test installation, so never run it against a test DB with live state.
+
+Quick Desktop's historical design describes alpha/beta Bayesian confidence and retrieval reinforcement. The importer reads `confidence`/`effective_confidence`, copies values/metadata and retrieval count, and filters by effective confidence (default 0.5). **Second Brain does not import or execute an alpha/beta update algorithm here.** Importing scores does not establish that subsequent SB feedback updates QD beliefs. Bidirectional learning is not implemented.
+
+## Tests and capture acceptance checks
+
+Existing tests cover CLI/IDE parsing, ingest/chunk behavior, QD mappings/tags/docs/events/engagement, Slack graph import, YouTube helpers, distillation, and migration utilities. These test contracts and many mocked boundaries, not current upstream availability or every real source format.
+
+For each connector's end-to-end fixture, retain raw bytes/version/date, normalized text, source ID, exclusions and reasons, all expected chunks, DB IDs, and failures. Re-run the same source, append it, change its tail, and inject an embedding failure mid-ingest. Assert completeness and retry behavior, then trace the retained evidence into a delivered recommendation. See [Validation](VALIDATION.md).

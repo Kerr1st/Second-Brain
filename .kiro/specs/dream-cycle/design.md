@@ -1,5 +1,8 @@
 # Design Document: Dream Cycle — Multi-Agent Autonomous Learning
 
+> **Historical specification — documentation reconciliation 2026-09-10.** This records a design or implementation task at an earlier revision. Present-tense claims, examples, test counts and checkboxes below are not current deployment evidence. Read the [current specification index](../../../docs/SPEC-INDEX.md) and [version entry point](../../../docs/START-HERE.md) for implemented behavior and remaining limits.
+
+
 > **Note**: This spec has been partially superseded by the Byzantine Consensus Panel
 > spec (`.kiro/specs/byzantine-consensus-panel/`). The consensus panel was upgraded
 > from 3 to 4 evaluators with binary BFT consensus. The `generate_digest()` signature
