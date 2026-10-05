@@ -152,6 +152,19 @@ class DirectApiInvoker:
             if usage is not None:
                 metrics["real_input_tokens"] = usage.get("inputTokens")
                 metrics["real_output_tokens"] = usage.get("outputTokens")
+                # Audit fields (only when the provider / reconciliation set them):
+                # cache tokens, the provider total, and the raw input count plus
+                # flag when inputTokens was corrected or replaced as implausible.
+                for metric_key, usage_key in (
+                    ("real_cache_read_tokens", "cacheReadInputTokens"),
+                    ("real_cache_write_tokens", "cacheWriteInputTokens"),
+                    ("real_total_tokens", "totalTokens"),
+                    ("reported_input_tokens", "reportedInputTokens"),
+                    ("input_tokens_source", "inputTokensSource"),
+                    ("input_tokens_estimated", "inputTokensEstimated"),
+                ):
+                    if usage_key in usage:
+                        metrics[metric_key] = usage[usage_key]
             try:
                 stop_reason = response.get("stopReason") if isinstance(response, dict) else None
                 if stop_reason in {"content_filtered", "guardrail_intervened", "refusal"}:

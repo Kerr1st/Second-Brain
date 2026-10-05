@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 from typing import TYPE_CHECKING, Any, Optional
@@ -90,6 +91,72 @@ STRUCTURED_OUTPUT_TOOL = "structured_output"
 # extended thinking off — the skim stage's setting; ``max`` has no Nova
 # equivalent and maps to ``high``.
 _NOVA2_REASONING_EFFORTS = {"medium": "medium", "high": "high", "max": "high"}
+
+
+#: Plausibility floor for reported input: no tokenizer in use here produces fewer
+#: than one token per 12 characters of English/JSON prose (real ratios are 3-5).
+#: Below the floor the provider's input count is treated as implausible.
+MAX_PLAUSIBLE_CHARS_PER_INPUT_TOKEN = 12
+#: Conservative replacement when the count is implausible (over-counts ~1.3-1.7x).
+CONSERVATIVE_CHARS_PER_INPUT_TOKEN = 3
+
+
+def _nonneg_int(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def reconcile_input_usage(usage: dict, input_chars: int | None, *, model: str = "") -> dict:
+    """Make a Converse ``usage`` block safe to bill from. Mutates and returns it.
+
+    Live metrics (2026-10-05): 307 of 309 ``global.openai.gpt-6-astra`` calls
+    reported ``inputTokens: 2`` for 16-27k-character prompts — ~$1 of input per
+    scheduled run never reached the spend cap. Two corrections, both only ever
+    *raising* the billed input:
+
+    1. ``totalTokens - outputTokens`` is the provider's own statement of input
+       consumed. When it exceeds ``inputTokens + cacheRead + cacheWrite``, the
+       difference is added to ``inputTokens`` (``inputTokensSource="totalTokens"``).
+    2. If the effective input (``inputTokens + cacheRead + cacheWrite``) is still
+       below ``input_chars / MAX_PLAUSIBLE_CHARS_PER_INPUT_TOKEN`` the count is
+       implausible for a prompt of that length: ``inputTokens`` is replaced by
+       ``ceil(input_chars / CONSERVATIVE_CHARS_PER_INPUT_TOKEN)`` (cache fields are
+       kept and still priced) and the block is flagged ``inputTokensEstimated=True``.
+       ``usage_source`` stays ``"real"`` so the charge lands on the cap; the metrics
+       line carries ``reportedInputTokens`` and the flag for audit.
+
+    Nothing is changed when the reported figures are internally consistent and
+    plausible, so well-behaved models keep their exact usage.
+    """
+    inp = _nonneg_int(usage.get("inputTokens"))
+    out = _nonneg_int(usage.get("outputTokens"))
+    if inp is None or out is None:
+        return usage  # cost._require_usage rejects incomplete usage; leave it alone
+    cache_read = _nonneg_int(usage.get("cacheReadInputTokens")) or 0
+    cache_write = _nonneg_int(usage.get("cacheWriteInputTokens")) or 0
+    total = _nonneg_int(usage.get("totalTokens"))
+    reported = inp
+
+    accounted = inp + cache_read + cache_write
+    if total is not None and total > out and total - out > accounted:
+        inp += (total - out) - accounted
+        usage["inputTokens"] = inp
+        usage["inputTokensSource"] = "totalTokens"
+        usage["reportedInputTokens"] = reported
+        logger.warning("[bedrock] %s reported inputTokens=%d but totalTokens-outputTokens=%d; billing input as %d",
+                       model, reported, total - out, inp)
+        accounted = inp + cache_read + cache_write
+
+    chars = _nonneg_int(input_chars)
+    if chars and accounted < chars / MAX_PLAUSIBLE_CHARS_PER_INPUT_TOKEN:
+        conservative = math.ceil(chars / CONSERVATIVE_CHARS_PER_INPUT_TOKEN)
+        usage["inputTokens"] = conservative
+        usage["inputTokensEstimated"] = True
+        usage["inputTokensSource"] = "chars/3"
+        usage.setdefault("reportedInputTokens", reported)
+        logger.warning("[bedrock] %s reported %d input token(s) (+%d cached) for a %d-char prompt — implausible; "
+                       "billing a conservative %d input tokens against the cap",
+                       model, reported, cache_read + cache_write, chars, conservative)
+    return usage
 
 
 class BedrockInvoker(DirectApiInvoker):
@@ -584,14 +651,13 @@ class BedrockInvoker(DirectApiInvoker):
             body = response["_invoke_model_body"]
             usage_block = body.get("usage")
             if usage_block and isinstance(usage_block, dict):
-                return (
-                    {
-                        "inputTokens": usage_block.get("input_tokens"),
-                        "outputTokens": usage_block.get("output_tokens"),
-                        "totalTokens": usage_block.get("total_tokens"),
-                    },
-                    "real",
-                )
+                usage = {
+                    "inputTokens": usage_block.get("input_tokens"),
+                    "outputTokens": usage_block.get("output_tokens"),
+                    "totalTokens": usage_block.get("total_tokens"),
+                }
+                reconcile_input_usage(usage, metrics.get("input_chars"), model=self.model)
+                return (usage, "real")
             return self._warn_missing_usage("InvokeModel response missing usage")
 
         # Standard Converse response path.
@@ -607,6 +673,7 @@ class BedrockInvoker(DirectApiInvoker):
                 "cacheReadInputTokens": usage_block.get("cacheReadInputTokens", 0),
                 "cacheWriteInputTokens": usage_block.get("cacheWriteInputTokens", 0),
             }
+            reconcile_input_usage(usage, metrics.get("input_chars"), model=self.model)
             # The tier the request was actually served on (Converse echoes it);
             # cost.py prices Flex only from this, never from what was requested.
             served_tier = (response.get("serviceTier") or {}).get("type")
