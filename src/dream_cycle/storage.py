@@ -29,11 +29,24 @@ class CandidateAuthorizationError(ValueError):
     """A suggested mutation is outside the discovery writer's authority."""
 
 
-def _uuid(value) -> str:
+def canonical_uuid(value) -> str | None:
+    """Canonical (lower-case, hyphenated) UUID string, or None when malformed."""
     try:
         return str(UUID(str(value)))
     except (ValueError, TypeError, AttributeError):
-        raise CandidateAuthorizationError("Candidate references must be valid memory UUIDs") from None
+        return None
+
+
+def _uuid(value) -> str:
+    canonical = canonical_uuid(value)
+    if canonical is None:
+        raise CandidateAuthorizationError("Candidate references must be valid memory UUIDs")
+    return canonical
+
+
+# Semantic duplicate threshold, as in production before the refactor
+# (``check_duplicate(content, threshold=0.85)`` over active parent memories).
+SEMANTIC_DUPLICATE_THRESHOLD = 0.85
 
 
 def validate_candidate(candidate: CandidateInsight, authorized_memories: dict[str, dict]) -> set[str]:
@@ -93,6 +106,35 @@ def _assert_target_mutable(row: dict, snapshot: dict) -> None:
         raise CandidateAuthorizationError("Mutation target changed since evaluation; regenerate the candidate")
 
 
+def _has_accepted_provenance(cur, target_id: str) -> bool:
+    cur.execute("SELECT EXISTS(SELECT 1 FROM dream_cycle_candidates WHERE created_memory_id=%s AND final_verdict='ACCEPTED')", (target_id,))
+    row = cur.fetchone()
+    return bool(row["exists"] if isinstance(row, dict) else row[0])
+
+
+def authorize_candidate(candidate: CandidateInsight, authorized_memories: dict[str, dict], *, conn=None) -> set[str]:
+    """Everything that can be decided before spending on grounding and the panel.
+
+    Vocabulary, citation and relationship-target checks (:func:`validate_candidate`)
+    plus, for UPDATE/SUPERSEDE, the target authority rules from the supplied
+    snapshot (captured sources and guidance are immutable; only a discovery
+    type with ``dream_cycle`` metadata) and the accepted-discovery provenance
+    lookup (one cheap SELECT). ``store_accepted`` repeats all of it under row
+    locks after the panel as defence in depth. Raises CandidateAuthorizationError.
+    """
+    ids = validate_candidate(candidate, authorized_memories)
+    if candidate.operation in {"UPDATE", "SUPERSEDE"}:
+        target_id = _uuid(candidate.target_memory_id)
+        snapshot = authorized_memories[target_id]
+        _assert_target_mutable(snapshot, snapshot)
+        from src.db.pool import connection_scope
+        with connection_scope(conn) as scope:
+            with scope.cursor(cursor_factory=RealDictCursor) as cur:
+                if not _has_accepted_provenance(cur, target_id):
+                    raise CandidateAuthorizationError("Mutation target has no accepted discovery provenance")
+    return ids
+
+
 def store_accepted(candidate: CandidateInsight, *, run_id: str, verdicts: dict,
                    authorized_memories: dict[str, dict]) -> str:
     """Commit memory, provenance/relationship edges and accepted ledger together.
@@ -126,10 +168,17 @@ def store_accepted(candidate: CandidateInsight, *, run_id: str, verdicts: dict,
                 ORDER BY id LIMIT 1"""
             duplicate_params = (json.dumps(source_ids), json.dumps(source_ids), str(embedding))
             duplicate_id = None
+            semantic_duplicate = None
             if candidate.operation == "CREATE":
                 cur.execute(duplicate_sql, duplicate_params)
                 duplicate = cur.fetchone()
                 duplicate_id = str(duplicate["id"]) if duplicate else None
+                if duplicate_id is None:
+                    # Production (1071a81) semantics kept: a candidate that restates ANY
+                    # active parent memory above the threshold -- captured fact,
+                    # distilled insight or a discovery with a different source set --
+                    # is a duplicate and does not become a new memory (review C S3 2.4).
+                    semantic_duplicate = _semantic_duplicate(cur, embedding)
             lock_ids = ids | ({duplicate_id} if duplicate_id else set())
             cur.execute("SELECT * FROM memories WHERE id = ANY(%s::uuid[]) ORDER BY id FOR UPDATE", (sorted(lock_ids),))
             rows = {str(row["id"]): dict(row) for row in cur.fetchall()}
@@ -139,6 +188,15 @@ def store_accepted(candidate: CandidateInsight, *, run_id: str, verdicts: dict,
                 if rows[mid].get("content") != authorized_memories[mid].get("content"):
                     raise CandidateAuthorizationError("Source or target changed since evaluation")
             memory_id = None
+            if semantic_duplicate is not None:
+                # Record the acceptance against the existing memory without creating
+                # one. created_memory_id stays NULL: an arbitrary matched memory must
+                # not acquire accepted-discovery provenance (which would make it a
+                # legal UPDATE/SUPERSEDE target).
+                store_candidate(run_id, asdict(candidate) | {"duplicate_of": semantic_duplicate["id"],
+                                "duplicate_similarity": semantic_duplicate["similarity"]},
+                                verdicts, "ACCEPTED", None, conn=conn)
+                return str(semantic_duplicate["id"])
             if candidate.operation == "CREATE":
                 # Recheck the selected duplicate after locking it with all source
                 # and target rows. Never acquire a later row lock out of order.
@@ -157,8 +215,7 @@ def store_accepted(candidate: CandidateInsight, *, run_id: str, verdicts: dict,
             else:
                 target_id = _uuid(candidate.target_memory_id)
                 _assert_target_mutable(rows[target_id], authorized_memories[target_id])
-                cur.execute("SELECT EXISTS(SELECT 1 FROM dream_cycle_candidates WHERE created_memory_id=%s AND final_verdict='ACCEPTED')", (target_id,))
-                if not cur.fetchone()["exists"]:
+                if not _has_accepted_provenance(cur, target_id):
                     raise CandidateAuthorizationError("Mutation target has no accepted discovery provenance")
             if memory_id is None:
                 if candidate.operation == "UPDATE":
@@ -187,7 +244,18 @@ def store_accepted(candidate: CandidateInsight, *, run_id: str, verdicts: dict,
     return str(memory_id)
 
 
-def check_duplicate(content: str, threshold: float = 0.85) -> str | None:
+def _semantic_duplicate(cur, embedding, threshold: float = SEMANTIC_DUPLICATE_THRESHOLD) -> dict | None:
+    """Nearest active embedded parent memory above ``threshold`` (index-friendly ORDER BY)."""
+    cur.execute("""SELECT id, 1 - (embedding <=> %s::vector) AS similarity FROM memories
+        WHERE status = 'active' AND parent_id IS NULL AND embedding IS NOT NULL
+        ORDER BY embedding <=> %s::vector LIMIT 1""", (str(embedding), str(embedding)))
+    row = cur.fetchone()
+    if row and row["similarity"] is not None and float(row["similarity"]) > threshold:
+        return {"id": str(row["id"]), "similarity": float(row["similarity"])}
+    return None
+
+
+def check_duplicate(content: str, threshold: float = SEMANTIC_DUPLICATE_THRESHOLD) -> str | None:
     """Read-only similarity preview. Never use it to authorize a mutation."""
     results = search_similar(generate_embedding(content), limit=5, status="active")
     return next((str(row["id"]) for row in results if row.get("parent_id") is None and row.get("similarity", 0) > threshold), None)

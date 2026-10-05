@@ -25,5 +25,5 @@ def _aborted_result(
         aborted_early=True,
         cost_usd=self._spend.total_usd,
         spend_unknown=bool(self._spend.blocked_reason),
-        candidates_unjudged=max(0, self._run_stats["candidates_generated"] - self._run_stats["candidates_accepted"] - self._run_stats["candidates_rejected"] - self._run_stats.get("candidates_storage_failed", 0) - self._run_stats.get("candidates_withdrawn", 0)),
+        candidates_unjudged=max(0, self._run_stats["candidates_generated"] - self._run_stats["candidates_accepted"] - self._run_stats["candidates_rejected"] - self._run_stats.get("candidates_storage_failed", 0) - self._run_stats.get("candidates_withdrawn", 0) - self._run_stats.get("candidates_blocked_unjudged", 0)),
     )

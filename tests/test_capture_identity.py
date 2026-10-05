@@ -56,11 +56,17 @@ def test_real_project_names_still_normalize(raw):
     assert normalize_project_tag(raw) is not None
 
 
-def test_cli_parser_emits_no_project_from_the_session_id():
-    conv_id, markdown, project = parse_conversation(SESSION_ID, MESSAGES, 1_700_000_000_000)
-    assert conv_id == SESSION_ID
+@pytest.mark.parametrize("conv_id", [SESSION_ID, "0021dfcf-0435-4bd9-a525-c60ffdf4ee75", "not-a-uuid-but-a-bare-id"])
+def test_cli_parser_emits_no_project_from_a_bare_session_id(conv_id):
+    returned, markdown, project = parse_conversation(conv_id, MESSAGES, 1_700_000_000_000)
+    assert returned == conv_id
     assert project is None
     assert "Project:" not in markdown.split("---")[0]
+
+
+def test_cli_parser_keeps_the_legacy_workspace_path_project():
+    _, _, project = parse_conversation("/Users/x/Work/second-brain", MESSAGES, 1_700_000_000_000)
+    assert project == "second-brain"
 
 
 def test_same_session_is_one_parent_before_and_after_metadata_repair(test_db, clean_tables, offline_ingest):

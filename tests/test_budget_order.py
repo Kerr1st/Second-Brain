@@ -23,6 +23,15 @@ from src.dream_cycle.orchestrator import DreamCycleOrchestrator
 from src.models import CandidateInsight, EvaluatorVerdict, MemorySlice
 
 
+
+@pytest.fixture(autouse=True)
+def _coordination_only_authorization(monkeypatch):
+    """This suite isolates pipeline coordination with placeholder memory ids
+    ("m1", "uuid-1") and no slice snapshots. Pre-spend authorization (R3 fix 4)
+    is pinned with real UUIDs on the disposable database in
+    tests/test_discovery_integrity.py and tests/test_integration.py."""
+    monkeypatch.setattr("src.dream_cycle.orchestrator.authorize_candidate", lambda candidate, context: set())
+
 def _slice(name, strategy="stale_synthesis_check"):
     return MemorySlice(name=name, strategy=strategy, memory_ids=["m1", "m2"], memory_titles=["a", "b"])
 

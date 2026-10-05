@@ -177,11 +177,12 @@ def parse_conversation(conversation_id, messages, created_at):
     if not passes_content_filter(messages):
         return None
 
-    # F-028: the session filename is an opaque UUID, not a project. The CLI
-    # session store carries no project signal the parser can trust, so the
-    # project is left unset (identity does not depend on it; see
-    # src.db.capture_queries.find_captured_source).
-    project = None
+    # F-028: in the current session store the conversation id is the opaque
+    # UUID filename, never a project. Only a path-shaped id (the legacy store
+    # keyed conversations by workspace path) carries a project signal; a bare
+    # id of any shape yields None. Identity does not depend on the project
+    # (see src.db.capture_queries.find_captured_source).
+    project = normalize_project_tag(conversation_id) if "/" in str(conversation_id) else None
     markdown = format_as_markdown(conversation_id, messages, created_at, project=project)
     return conversation_id, markdown, project
 

@@ -201,7 +201,8 @@ class TestPipelineIntegration:
              patch.object(orch, "_skim_arrivals", return_value=None), \
              patch.object(orch, "invoke_explorer", return_value=[slice_]), \
              patch.object(orch, "_allocate_attention", side_effect=lambda r, t, s, sl: sl), \
-             patch.object(orch, "invoke_thinker", return_value=[candidate]), \
+             patch.object(orch, "invoke_thinker", side_effect=lambda s: (orch._slice_memory_cache.update(
+                 {SRC_A: {"id": SRC_A, "content": "a"}, SRC_B: {"id": SRC_B, "content": "b"}}), [candidate])[1]), \
              patch.object(orch, "_ground_candidate", return_value=ground_result), \
              patch.object(orch, "invoke_evaluator", side_effect=verdicts) as ev, \
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \

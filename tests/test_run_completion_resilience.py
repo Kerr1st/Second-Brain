@@ -67,12 +67,20 @@ def _candidate(title="c1"):
     return CandidateInsight(title=title, type="insight", operation="CREATE", target_memory_id=None,
                             content="Body of the candidate", schema_operation="assimilation", schema_note="n",
                             confidence="high", confidence_reasoning="r", supersedes_reason=None,
-                            source_memories=["11111111-1111-1111-1111-111111111111"], relationships=[],
+                            source_memories=[SOURCE_ID], relationships=[],
                             strategy_that_found_it="arrivals_synthesis")
 
 
 def _verdict(role, verdict="ACCEPT"):
     return EvaluatorVerdict(role=role, verdict=verdict, reasoning="ok", score=90, blocking_issues=[], advisory_issues=[])
+
+
+SOURCE_ID = "11111111-1111-1111-1111-111111111111"
+OTHER_ID = "22222222-2222-2222-2222-222222222222"
+
+
+SNAPSHOTS = {SOURCE_ID: {"id": SOURCE_ID, "content": "evidence one"},
+             OTHER_ID: {"id": OTHER_ID, "content": "evidence two"}}
 
 
 def _orchestrator():
@@ -81,12 +89,21 @@ def _orchestrator():
     return orch
 
 
+def _thinking(orch, produce):
+    """A Thinker double that, like the real one, caches the slice snapshots it read
+    (what authorizes a candidate's citations) before returning candidates."""
+    def think(slice_):
+        orch._slice_memory_cache.update(SNAPSHOTS)
+        return produce(slice_)
+    return think
+
+
 def _stats():
     return {"total_count": 5, "recent_activity": 1, "date_range": {"min": None, "max": None}, "type_distribution": {}}
 
 
-SLICES = [MemorySlice(name="s1", strategy="arrivals_synthesis", memory_ids=["11111111-1111-1111-1111-111111111111"]),
-          MemorySlice(name="s2", strategy="arrivals_synthesis", memory_ids=["22222222-2222-2222-2222-222222222222"])]
+SLICES = [MemorySlice(name="s1", strategy="arrivals_synthesis", memory_ids=[SOURCE_ID]),
+          MemorySlice(name="s2", strategy="arrivals_synthesis", memory_ids=[SOURCE_ID, OTHER_ID])]
 
 
 def _completion(mock_db):
@@ -101,7 +118,7 @@ def test_digest_failure_does_not_abort_a_judged_run():
          patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
          patch.object(orch, "_skim_arrivals", return_value=None), \
          patch.object(orch, "invoke_explorer", return_value=SLICES[:1]), \
-         patch.object(orch, "invoke_thinker", return_value=[_candidate()]), \
+         patch.object(orch, "invoke_thinker", side_effect=_thinking(orch, lambda s: [_candidate()])), \
          patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
          patch.object(orch, "_invoke_evaluator_safe", side_effect=lambda c, role: _verdict(role)), \
          patch("src.dream_cycle.orchestrator.store_accepted", return_value="mem-1"), \
@@ -125,7 +142,7 @@ def test_feedback_injected_flag_is_passed_to_the_digest(feedback, expected):
          patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=feedback), \
          patch.object(orch, "_skim_arrivals", return_value=None), \
          patch.object(orch, "invoke_explorer", return_value=SLICES[:1]), \
-         patch.object(orch, "invoke_thinker", return_value=[_candidate()]), \
+         patch.object(orch, "invoke_thinker", side_effect=_thinking(orch, lambda s: [_candidate()])), \
          patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
          patch.object(orch, "_invoke_evaluator_safe", side_effect=lambda c, role: _verdict(role, "REJECT")), \
          patch("src.dream_cycle.orchestrator.generate_digest", return_value="/tmp/d.md") as digest:
@@ -149,7 +166,7 @@ def test_unexpected_exception_after_a_judged_candidate_keeps_real_counts():
          patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
          patch.object(orch, "_skim_arrivals", return_value=None), \
          patch.object(orch, "invoke_explorer", return_value=SLICES), \
-         patch.object(orch, "invoke_thinker", side_effect=lambda s: [_candidate("c1")] if s.name == "s1" else [_candidate("c2")]), \
+         patch.object(orch, "invoke_thinker", side_effect=_thinking(orch, lambda s: [_candidate("c1")] if s.name == "s1" else [_candidate("c2")])), \
          patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
          patch.object(orch, "_invoke_evaluator_safe", side_effect=evaluator), \
          patch("src.dream_cycle.orchestrator.store_accepted", return_value="mem-1"):
@@ -168,11 +185,12 @@ def test_signal_mid_run_closes_the_run_as_aborted_with_real_counts(signum):
     """No completed_at NULL orphan when the job wrapper or launchd stops the process."""
     orch = _orchestrator()
 
-    def thinker(slice_):
+    def produce(slice_):
         if slice_.name == "s2":
             os.kill(os.getpid(), signum)  # delivered to this thread; handler raises RunInterrupted
             raise AssertionError("signal handler did not interrupt the Thinker")
         return [_candidate("c1")]
+    thinker = _thinking(orch, produce)
 
     with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
          patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \

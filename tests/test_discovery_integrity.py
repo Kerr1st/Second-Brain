@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 from src.db import create_memory, get_memory, get_connection, update_memory
 from src.dream_cycle_db import create_run, run_lock, store_candidate
-from src.dream_cycle.storage import CandidateAuthorizationError, store_accepted
+from src.dream_cycle.storage import CandidateAuthorizationError, authorize_candidate, store_accepted
 from src.models import CandidateInsight
 
 VOTES = {f"evaluator_{seat}_verdict": "ACCEPT" for seat in "abcd"}
@@ -113,11 +113,22 @@ def test_concurrent_same_source_duplicate_has_one_memory_and_two_ledgers(corpus)
     assert _counts() == (3, 1, 3)
 
 
-def test_same_content_different_evidence_keeps_separate_provenance(corpus):
+def test_same_content_different_evidence_is_a_semantic_duplicate(corpus):
+    """Production semantics restored in R3 (fix 5): the same discovery re-derived from
+    other evidence is accepted as a duplicate of the first, not stored twice. The
+    second ledger row points at the first memory (an accepted discovery) and keeps
+    its own source_memories, so provenance of the re-derivation is still auditable."""
     _, derived, context, run, c = corpus
     a = store_accepted(c, run_id=run, verdicts=VOTES, authorized_memories=context)
+    before = _counts()
     b = store_accepted(replace(c, source_memories=[derived]), run_id=run, verdicts=VOTES, authorized_memories=context)
-    assert a != b
+    assert a == b
+    after = _counts()
+    assert after[0] == before[0] and after[2] == before[2] + 1
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT created_memory_id, candidate_json->>'duplicate_of', candidate_json->'source_memories' FROM dream_cycle_candidates WHERE run_id=%s ORDER BY created_at DESC LIMIT 1", (run,))
+        created_memory_id, duplicate_of, sources = cur.fetchone()
+    assert created_memory_id is None and duplicate_of == a and sources == [derived]
 
 
 def test_run_lock_excludes_overlap_and_releases_after_exception(test_schema):
@@ -157,14 +168,130 @@ def test_prior_candidate_survives_next_candidate_authorization_failure(corpus, m
         assert [r[0] for r in rows] == ["ACCEPTED", "BLOCKED"]
         assert rows[0][1] and rows[1][1] is None
         cur.execute("SELECT stats FROM dream_cycle_runs WHERE id=%s", (result.run_id,))
-        assert cur.fetchone()[0]["candidates_storage_failed"] == 1
+        stats = cur.fetchone()[0]
+        # R3: the forbidden rewrite is blocked before any paid judging.
+        assert stats["candidates_blocked_unjudged"] == 1 and "candidates_storage_failed" not in stats
     assert get_memory(source)["content"] == context[source]["content"]
 
 
 def test_dedup_does_not_turn_metadata_marker_into_discovery_authority(corpus, mock_embedding):
+    """A forged marker that restates the candidate is a semantic duplicate (no new
+    memory, as in production), but it gains no accepted-discovery provenance and
+    stays immutable to the Thinker."""
     source, _, context, run, candidate = corpus
     forged = create_memory("insight", "Imported marker", candidate.content,
         embedding=mock_embedding(candidate.content), metadata={"dream_cycle": True, "source_memories": [source]})
-    created = store_accepted(candidate, run_id=run, verdicts=VOTES, authorized_memories=context)
-    assert created != forged
+    before = _counts()
+    returned = store_accepted(candidate, run_id=run, verdicts=VOTES, authorized_memories=context)
+    assert returned == forged
+    assert _counts() == (before[0], before[1], before[2] + 1)  # ledger row only
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT created_memory_id, candidate_json->>'duplicate_of' FROM dream_cycle_candidates WHERE run_id=%s ORDER BY created_at DESC LIMIT 1", (run,))
+        created_memory_id, duplicate_of = cur.fetchone()
+    assert created_memory_id is None and duplicate_of == forged
     assert get_memory(forged)["title"] == "Imported marker"
+    rewrite = replace(candidate, operation="UPDATE", target_memory_id=forged, title="Rewrite the marker")
+    with pytest.raises(CandidateAuthorizationError, match="provenance"):
+        store_accepted(rewrite, run_id=run, verdicts=VOTES, authorized_memories={**context, forged: dict(get_memory(forged))})
+
+
+def test_semantic_duplicate_of_any_active_parent_creates_no_new_memory(corpus, mock_embedding):
+    """Fix 5 (review C S3 2.4): production's check_duplicate semantics -- a candidate
+    restating ANY active embedded parent (here a captured QD fact, different source
+    set, not a discovery) is accepted as a duplicate, not stored twice."""
+    source, _, context, run, candidate = corpus
+    fact = create_memory("decision", "Captured fact", candidate.content, embedding=mock_embedding(candidate.content),
+                         source_type="quick_desktop_decision", source_url="qd://entity/1")
+    before = _counts()
+    assert store_accepted(candidate, run_id=run, verdicts=VOTES, authorized_memories=context) == fact
+    after = _counts()
+    assert after[0] == before[0] and after[1] == before[1] and after[2] == before[2] + 1
+    # A genuinely new candidate (different content) is still created.
+    novel = replace(candidate, content="Something entirely different and new", title="Novel")
+    created = store_accepted(novel, run_id=run, verdicts=VOTES, authorized_memories=context)
+    assert created not in (fact, source) and _counts()[0] == before[0] + 1
+
+
+def test_update_target_without_accepted_provenance_is_refused(corpus):
+    """Review C M4 survivor: the provenance EXISTS guard in store_accepted is pinned."""
+    source, _, context, run, candidate = corpus
+    orphan = create_memory("insight", "Unledgered discovery", "Looks like a discovery but no ACCEPTED row",
+                           metadata={"dream_cycle": True})
+    context = {**context, orphan: dict(get_memory(orphan))}
+    rewrite = replace(candidate, operation="UPDATE", target_memory_id=orphan, title="Rewrite")
+    before = _counts()
+    with pytest.raises(CandidateAuthorizationError, match="no accepted discovery provenance"):
+        store_accepted(rewrite, run_id=run, verdicts=VOTES, authorized_memories=context)
+    with pytest.raises(CandidateAuthorizationError, match="no accepted discovery provenance"):
+        authorize_candidate(rewrite, context)
+    assert _counts() == before
+    assert get_memory(orphan)["content"] == "Looks like a discovery but no ACCEPTED row"
+
+
+@pytest.mark.parametrize("change", [
+    {"relationships": [{"target_id": "11111111-1111-1111-1111-111111111111", "relation_type": "supports"}]},
+    {"relationships": [{"target_id": None, "relation_type": "derived_from"}]},
+    {"source_memories": ["33333333-3333-3333-3333-333333333333"]},
+    {"operation": "UPDATE", "target_memory_id": None},
+    {"operation": "SUPERSEDE", "supersedes_reason": ""},
+])
+def test_unauthorized_candidate_is_blocked_before_any_evaluator_call(corpus, monkeypatch, change):
+    """Fix 4 (review C S2 2.3): authorization runs before grounding and the panel, so an
+    invalid candidate costs zero evaluator calls instead of ~$0.70."""
+    from src.dream_cycle import DreamCycleOrchestrator
+    from src.models import MemorySlice, EvaluatorVerdict
+    source, derived, context, _, candidate = corpus
+    bad = replace(candidate, title="Invalid", **({**change, "target_memory_id": source} if change.get("operation") else change))
+    if change.get("operation") == "UPDATE":
+        bad = replace(bad, target_memory_id=source)  # captured source: immutable
+    orch = DreamCycleOrchestrator()
+    memory_slice = MemorySlice("Supplied evidence", "cross_project_collision", [source, derived])
+    calls = {"evaluator": 0, "grounding": 0}
+    def think(_):
+        orch._slice_memory_cache = context.copy()
+        return [bad, candidate]
+    def evaluate(c, role, stage=None):
+        calls["evaluator"] += 1
+        return EvaluatorVerdict(role, "ACCEPT")
+    def ground(c):
+        calls["grounding"] += 1
+        return c
+    monkeypatch.setattr(orch, "_skim_arrivals", lambda *args: None)
+    monkeypatch.setattr(orch, "invoke_explorer", lambda *args: [memory_slice])
+    monkeypatch.setattr(orch, "_allocate_attention", lambda run, kind, at, slices: slices)
+    monkeypatch.setattr(orch, "invoke_thinker", think)
+    monkeypatch.setattr(orch, "_ground_candidate", ground)
+    monkeypatch.setattr(orch, "invoke_evaluator", evaluate)
+    monkeypatch.setattr("src.dream_cycle.orchestrator.generate_digest", lambda *a, **kw: "fixture.md")
+    result = orch.run("user_triggered")
+    assert not result.aborted_early
+    assert result.candidates_generated == 2 and result.candidates_accepted == 1 and result.candidates_unjudged == 0
+    assert calls == {"evaluator": 4, "grounding": 1}  # only the valid candidate was judged
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT final_verdict, evaluator_a_verdict, candidate_json->>'block_reason' FROM dream_cycle_candidates WHERE run_id=%s ORDER BY created_at", (result.run_id,))
+        rows = cur.fetchall()
+    assert [r[0] for r in rows] == ["BLOCKED", "ACCEPTED"]
+    assert rows[0][1] is None and rows[0][2]
+
+
+def test_slice_ids_in_non_canonical_form_still_authorize_the_candidate(corpus, monkeypatch):
+    """Review C S3 2.5: the Explorer may spell ids upper-case/braced; the authorized
+    context is keyed canonically so the candidate is not BLOCKED for a spelling."""
+    from src.dream_cycle import DreamCycleOrchestrator
+    from src.models import MemorySlice, EvaluatorVerdict
+    source, derived, context, _, candidate = corpus
+    orch = DreamCycleOrchestrator()
+    odd_ids = ["{" + source.upper() + "}", derived.upper()]
+    memory_slice = MemorySlice("Odd spellings", "cross_project_collision", odd_ids)
+    def think(_):
+        orch._slice_memory_cache = context.copy()
+        return [candidate]
+    monkeypatch.setattr(orch, "_skim_arrivals", lambda *args: None)
+    monkeypatch.setattr(orch, "invoke_explorer", lambda *args: [memory_slice])
+    monkeypatch.setattr(orch, "_allocate_attention", lambda run, kind, at, slices: slices)
+    monkeypatch.setattr(orch, "invoke_thinker", think)
+    monkeypatch.setattr(orch, "_ground_candidate", lambda c: c)
+    monkeypatch.setattr(orch, "invoke_evaluator", lambda c, role, stage=None: EvaluatorVerdict(role, "ACCEPT"))
+    monkeypatch.setattr("src.dream_cycle.orchestrator.generate_digest", lambda *a, **kw: "fixture.md")
+    result = orch.run("user_triggered")
+    assert result.candidates_accepted == 1 and not result.aborted_early

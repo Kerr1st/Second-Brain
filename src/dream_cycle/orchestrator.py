@@ -34,7 +34,7 @@ from src.prompts.skim import PROMPT_VERSION as SKIM_PROMPT_VERSION
 import src.dream_cycle_db as dream_cycle_db
 from src.dream_cycle.repository.runs import verdict_columns
 from src.dream_cycle.consensus import tally_consensus
-from src.dream_cycle.storage import store_accepted, check_duplicate, CandidateAuthorizationError
+from src.dream_cycle.storage import store_accepted, check_duplicate, authorize_candidate, CandidateAuthorizationError, canonical_uuid
 from src.dream_cycle.digest import generate_digest
 from src.dream_cycle.feedback import build_feedback_injection
 from src.dream_cycle import allocation, ledger
@@ -358,9 +358,16 @@ class DreamCycleOrchestrator(AgentRunner):
                     "Truncating %d candidates to %d for slice '%s'", len(candidates), cap, s.name,
                 )
                 candidates = candidates[:cap]
+            # Authorized context = the slice snapshots the Thinker actually read.
+            # Slice ids come from the Explorer verbatim; the cache is keyed by the
+            # canonical DB id, so canonicalise before the lookup (review C S3 2.5).
+            authorized = {}
+            for mid in s.memory_ids:
+                key = canonical_uuid(mid)
+                if key is not None and key in self._slice_memory_cache:
+                    authorized[key] = self._slice_memory_cache[key]
             for candidate in candidates:
-                self._candidate_contexts[id(candidate)] = {mid: self._slice_memory_cache[mid]
-                    for mid in s.memory_ids if mid in self._slice_memory_cache}
+                self._candidate_contexts[id(candidate)] = authorized
             all_candidates.extend(candidates)
             self._run_stats["candidates_generated"] = len(all_candidates)
         logger.info("Total candidates from Thinker: %d%s", len(all_candidates),
@@ -391,8 +398,20 @@ class DreamCycleOrchestrator(AgentRunner):
                     "; ".join(c.title for c in all_candidates[idx:]),
                 )
                 break
-            # Grounding audit + one revision before the panel votes (never aborts).
+            # Authorization BEFORE any paid judging (review C S2 2.3): a candidate
+            # that cites outside its slice, proposes a provenance/unknown relation
+            # type, or targets a memory it may not mutate is BLOCKED here for $0.
+            # store_accepted re-validates after the panel as defence in depth.
             authorized_memories = self._candidate_contexts.get(id(candidate), {})
+            try:
+                authorize_candidate(candidate, authorized_memories)
+            except CandidateAuthorizationError as exc:
+                logger.warning("Candidate '%s' blocked before judging: %s", candidate.title, exc)
+                self._run_stats["candidates_blocked_unjudged"] = self._run_stats.get("candidates_blocked_unjudged", 0) + 1
+                dream_cycle_db.store_candidate(run_id, asdict(candidate) | {"storage_error": type(exc).__name__,
+                                               "block_reason": str(exc)}, {}, "BLOCKED")
+                continue
+            # Grounding audit + one revision before the panel votes (never aborts).
             candidate = self._ground_candidate(candidate)
             if not candidate.content.strip():
                 logger.info("Candidate '%s' had nothing supportable after revision; recording as rejected",
@@ -479,7 +498,7 @@ class DreamCycleOrchestrator(AgentRunner):
             stats={
                 **self._run_stats,
                 "aborted": panel_aborted,
-                "candidates_unjudged": max(0, len(all_candidates) - len(accepted) - len(rejected) - self._run_stats.get("candidates_storage_failed", 0) - self._run_stats.get("candidates_withdrawn", 0)),
+                "candidates_unjudged": max(0, len(all_candidates) - len(accepted) - len(rejected) - self._run_stats.get("candidates_storage_failed", 0) - self._run_stats.get("candidates_withdrawn", 0) - self._run_stats.get("candidates_blocked_unjudged", 0)),
                 "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd,
                 "spend_unknown": bool(self._spend.blocked_reason),
                 "candidates_generated": len(all_candidates),
@@ -506,7 +525,7 @@ class DreamCycleOrchestrator(AgentRunner):
             aborted_early=panel_aborted,
             cost_usd=self._spend.total_usd,
             spend_unknown=bool(self._spend.blocked_reason),
-            candidates_unjudged=max(0, len(all_candidates) - len(accepted) - len(rejected) - self._run_stats.get("candidates_storage_failed", 0) - self._run_stats.get("candidates_withdrawn", 0)),
+            candidates_unjudged=max(0, len(all_candidates) - len(accepted) - len(rejected) - self._run_stats.get("candidates_storage_failed", 0) - self._run_stats.get("candidates_withdrawn", 0) - self._run_stats.get("candidates_blocked_unjudged", 0)),
         )
 
 

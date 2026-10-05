@@ -43,6 +43,14 @@ class FakeAdapter:
         return {"output": out, "raw": "", "usage": {"inputTokens": 1000, "outputTokens": 100}, "usage_source": "real"}
 
 
+@pytest.fixture(autouse=True)
+def _coordination_only_authorization(monkeypatch):
+    """Placeholder memory ids ("m1") isolate the transport policy; pre-spend
+    authorization (R3 fix 4) is pinned on the disposable database in
+    tests/test_discovery_integrity.py."""
+    monkeypatch.setattr("src.dream_cycle.orchestrator.authorize_candidate", lambda candidate, context: set())
+
+
 def _slice(name):
     return MemorySlice(name=name, strategy="pattern_emergence", memory_ids=["m1"], memory_titles=["M1"],
                        hypothesis="h")
