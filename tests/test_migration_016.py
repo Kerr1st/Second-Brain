@@ -49,6 +49,16 @@ def _run(name, directory):
     return subprocess.run(["/bin/bash", str(MIGRATIONS / "migrate.sh")], env=env, capture_output=True, text=True, timeout=120)
 
 
+def _pg(name, tool, *args, check=True):
+    """Run a PostgreSQL client tool (pg_dump / pg_restore) against the test cluster."""
+    binary = shutil.which(tool, path=os.environ["PATH"])
+    assert binary, f"{tool} not on PATH"
+    command = [binary, "-h", os.environ["DB_HOST"], "-p", os.environ["DB_PORT"], "-U", os.environ["DB_USER"], "-d", name, *args]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    assert not check or result.returncode == 0, result.stdout + result.stderr
+    return result
+
+
 def _dir_through_014(tmp_path):
     """A migrations directory holding 000..014 only (the live ledger shape)."""
     for path in sorted(MIGRATIONS.glob("[0-9]*.sql")):
@@ -134,6 +144,9 @@ def upgraded(tmp_path_factory):
         seeded["candidate"] = cur.fetchone()[0]
         seeded["run"] = run_id
         conn.commit()
+    # The pre-window backup of the runbook: a custom-format dump of the 014 state.
+    seeded["pre_016_dump"] = str(tmp_path_factory.mktemp("dump") / "pre016.dump")
+    _pg(name, "pg_dump", "-Fc", "-f", seeded["pre_016_dump"])
     result = _run(name, MIGRATIONS)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.count("apply:") == 1 and "apply: 016_data_integrity.sql" in result.stdout
@@ -199,3 +212,84 @@ def test_016_checks_reject_new_out_of_vocabulary_writes_but_keep_legacy_rows(upg
         conn.rollback()
     finally:
         conn.close()
+
+
+def _post_016_state(cur):
+    cur.execute("SELECT count(*), max(version) FROM schema_migrations")
+    ledger = cur.fetchone()
+    cur.execute("SELECT conname FROM pg_constraint WHERE conrelid IN ('memories'::regclass, 'memory_relationships'::regclass, 'dream_cycle_runs'::regclass) AND contype = 'c'")
+    constraints = {r[0] for r in cur.fetchall()}
+    cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'dream_cycle_runs'")
+    run_columns = {r[0] for r in cur.fetchall()}
+    cur.execute("SELECT to_regclass('corpus_maintenance') IS NOT NULL, to_regclass('idx_memories_parent_id') IS NOT NULL, to_regclass('idx_memories_source_created') IS NOT NULL")
+    objects = cur.fetchone()
+    return ledger, constraints, run_columns, objects
+
+
+EXPECTED_CHECKS = {"dream_cycle_runs_cost_nonnegative", "relationship_provenance_permanent", "memories_type_vocabulary",
+                   "memories_status_vocabulary", "memories_class_vocabulary", "relationships_type_vocabulary",
+                   "memories_source_vocabulary"}
+
+
+def _assert_post_016(cur):
+    ledger, constraints, run_columns, objects = _post_016_state(cur)
+    assert ledger == (15, "016_data_integrity.sql")
+    assert EXPECTED_CHECKS <= constraints
+    assert "cost_usd" in run_columns and "candidates_deferred" not in run_columns
+    assert objects == (True, True, True)
+
+
+# These two tests leave the shared database in the post-016 state they found it in.
+def test_016_rerun_after_a_restore_based_rollback_succeeds(upgraded):
+    """Runbook §7.8: pg_restore --clean of the pre-window dump into the live DB.
+
+    The dump has no corpus_maintenance, so --clean leaves 016's table behind
+    while the ledger goes back to 014 and the tables to their 014 shape. The
+    next migrate.sh must apply 016 as a whole again, not fail at the leftover.
+    """
+    name, seeded = upgraded
+    # Restore like the runbook: object-level drops into the existing database. The
+    # test role does not own the vector extension, so leave that entry out of the list.
+    listing = _pg(name, "pg_restore", "-l", seeded["pre_016_dump"], check=True)
+    entries = [line for line in listing.stdout.splitlines() if " EXTENSION " not in line and " COMMENT - EXTENSION " not in line]
+    toc = Path(seeded["pre_016_dump"]).with_suffix(".list")
+    toc.write_text("\n".join(entries) + "\n")
+    restore = _pg(name, "pg_restore", "--clean", "--if-exists", "--no-owner", "--no-privileges", "-L", str(toc), seeded["pre_016_dump"], check=False)
+    assert restore.returncode == 0, restore.stdout + restore.stderr
+    with psycopg2.connect(**_config(name)) as conn, conn.cursor() as cur:
+        ledger, constraints, run_columns, objects = _post_016_state(cur)
+        assert ledger == (14, "014_memory_skim.sql")                       # ledger restored
+        assert not (EXPECTED_CHECKS & constraints)                         # 014-shaped tables
+        assert "candidates_deferred" in run_columns and "cost_usd" not in run_columns
+        assert objects[0] is True                                          # the leftover: corpus_maintenance survives --clean
+        cur.execute("SELECT stats->>'legacy_candidates_deferred', candidates_deferred FROM dream_cycle_runs WHERE id=%s", (seeded["run"],))
+        assert cur.fetchone() == (None, 3)
+    result = _run(name, MIGRATIONS)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("apply:") == 1 and "apply: 016_data_integrity.sql" in result.stdout
+    with psycopg2.connect(**_config(name)) as conn, conn.cursor() as cur:
+        _assert_post_016(cur)
+        cur.execute("SELECT stats->>'legacy_candidates_deferred' FROM dream_cycle_runs WHERE id=%s", (seeded["run"],))
+        assert cur.fetchone()[0] == "3"
+        assert _expired(cur, seeded["provenance_old_cold"], "derived_from") is None
+        assert _expired(cur, seeded["old_cold_quick_expiry"], "related_to") is not None
+
+
+def test_016_rerun_on_a_fully_migrated_schema_with_a_lost_ledger_row_succeeds(upgraded):
+    """Every statement must tolerate its own effect already being present: with
+    only the ledger row missing, 016 re-runs over existing constraints, the
+    existing table, dropped legacy columns and existing indexes."""
+    name, seeded = upgraded
+    with psycopg2.connect(**_config(name)) as conn, conn.cursor() as cur:
+        _assert_post_016(cur)
+        cur.execute("DELETE FROM schema_migrations WHERE version = '016_data_integrity.sql'")
+        conn.commit()
+    result = _run(name, MIGRATIONS)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "apply: 016_data_integrity.sql" in result.stdout
+    with psycopg2.connect(**_config(name)) as conn, conn.cursor() as cur:
+        _assert_post_016(cur)
+        cur.execute("SELECT count(*) FROM pg_constraint WHERE conname = ANY(%s)", (sorted(EXPECTED_CHECKS),))
+        assert cur.fetchone()[0] == len(EXPECTED_CHECKS)                   # no duplicates, none dropped
+        cur.execute("SELECT stats->>'legacy_candidates_deferred' FROM dream_cycle_runs WHERE id=%s", (seeded["run"],))
+        assert cur.fetchone()[0] == "3"                                    # audit value kept, not re-folded
