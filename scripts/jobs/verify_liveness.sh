@@ -25,7 +25,10 @@ set -uo pipefail
 export PATH="/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 cd "$(dirname "$0")/../.."
 
-CONTAINER="${DB_CONTAINER:-second-brain-db}"
+# Connection target. Defaults are the production database exactly as before;
+# tests point these at a disposable cluster so the monitor never reads memory_bank.
+DB_HOST="${DB_HOST:-127.0.0.1}"
+DB_PORT="${DB_PORT:-5432}"
 DB_USER="${DB_USER:-memory_bank}"
 DB_NAME="${DB_NAME:-memory_bank}"
 PSQL_BIN="${PSQL_BIN:-psql}"
@@ -88,7 +91,7 @@ CHANNELS=(
 #                             cause and there is nothing to repair in this repo.
 QD_MAX_AGE_DAYS="${QD_MAX_AGE_DAYS:-7}"
 
-if ! "$PG_ISREADY_BIN" -h 127.0.0.1 -p 5432 -U "$DB_USER" &>/dev/null; then
+if ! "$PG_ISREADY_BIN" -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" &>/dev/null; then
   log "ABORT: database not reachable"
   notify "Liveness check could not reach the database"
   exit 1
@@ -99,7 +102,7 @@ SILENT_MSG=""
 ADVISORY_MSG=""
 for entry in "${CHANNELS[@]}"; do
   IFS='|' read -r label pred max_age sev <<< "$entry"
-  age=$("$PSQL_BIN" -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -tAc \
+  age=$("$PSQL_BIN" -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -tAc \
     "SELECT COALESCE(now()::date - MAX(created_at)::date, 99999) FROM memories WHERE $pred;" 2>/dev/null)
   [[ "$age" =~ ^[0-9]+$ ]] || age=99999
   if [ "$sev" = retired ]; then

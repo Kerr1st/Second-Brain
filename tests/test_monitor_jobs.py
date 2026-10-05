@@ -22,6 +22,7 @@ database, no Quick corpus is touched.
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import time
@@ -100,17 +101,24 @@ def _fake_psql(tmp_path: Path) -> Path:
     $FAKE_PSQL_AGES is JSON: {"__default__": 0, "'slack'": 99}. Written in Python so
     the SQL predicates (quotes, %, spaces) need no shell escaping.
     """
+    # A /bin/sh wrapper rather than a `#!<interpreter>` shebang: shebangs cannot
+    # carry an interpreter path with spaces (the venv may live under one), and a
+    # failing stub would silently read as "99999d" for every channel.
     return _script(
         tmp_path / "psql",
-        f"#!{sys.executable}\n"
+        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} - \"$@\" <<'PYTHON'\n"
         "import json, os, sys\n"
         'rules = json.loads(os.environ.get("FAKE_PSQL_AGES", "{}"))\n'
         "sql = sys.argv[-1]\n"
+        'log = os.environ.get("FAKE_PSQL_ARGV_LOG")\n'
+        "if log:\n"
+        "    with open(log, 'a', encoding='utf-8') as fh:\n"
+        "        fh.write(json.dumps(sys.argv[1:]) + '\\n')\n"
         'age = rules.get("__default__", 0)\n'
         "for key, value in rules.items():\n"
         '    if key != "__default__" and key in sql:\n'
         "        age = value\n"
-        "print(age)\n",
+        "print(age)\nPYTHON\n",
     )
 
 
@@ -319,3 +327,34 @@ def test_the_upstream_check_never_reads_the_quick_corpus(tmp_path: Path):
 
     assert result.returncode == 0, result.stdout
     assert "✅ quick_upstream ok" in result.stdout
+
+
+def test_liveness_database_target_comes_from_env_not_hardcoded_production(tmp_path: Path):
+    """The monitor must read DB_HOST/DB_PORT/DB_NAME/DB_USER so a test (or a
+    staging host) can never make it query the production database by default
+    path. 1071a81 hard-coded ``-h 127.0.0.1 -p 5432 -d memory_bank``."""
+    argv_log = tmp_path / "psql-argv.jsonl"
+    result = _run_liveness(
+        tmp_path,
+        FAKE_PSQL_ARGV_LOG=str(argv_log),
+        DB_HOST=str(tmp_path / "socket"),
+        DB_PORT="5999",
+        DB_NAME="sb_liveness_test",
+        DB_USER="sb_test",
+    )
+
+    assert result.returncode == 0, result.stdout
+    calls = [json.loads(line) for line in argv_log.read_text(encoding="utf-8").splitlines()]
+    assert calls, "psql stub was never invoked"
+    for argv in calls:
+        assert argv[argv.index("-h") + 1] == str(tmp_path / "socket")
+        assert argv[argv.index("-p") + 1] == "5999"
+        assert argv[argv.index("-d") + 1] == "sb_liveness_test"
+        assert argv[argv.index("-U") + 1] == "sb_test"
+        assert "127.0.0.1" not in argv and "memory_bank" not in argv
+    # Defaults must stay the production target so the installed job is unchanged.
+    script = LIVENESS.read_text(encoding="utf-8")
+    assert 'DB_HOST="${DB_HOST:-127.0.0.1}"' in script
+    assert 'DB_PORT="${DB_PORT:-5432}"' in script
+    assert 'DB_NAME="${DB_NAME:-memory_bank}"' in script
+    assert "-h 127.0.0.1" not in script and "-p 5432" not in script
