@@ -37,38 +37,58 @@ def database_identity(conn):
         return list(cur.fetchone())
 
 
-def _rows(conn):
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT id, type, title, content, source_type, source_url, project, parent_id, metadata, status, embedding IS NOT NULL AS embedded FROM memories ORDER BY created_at, id")
-        return [dict(row) for row in cur.fetchall()]
+#: Rows per server-side cursor fetch. Planners never hold the corpus text in RAM:
+#: content hashes are computed in SQL and only one parent's text is fetched at a time.
+STREAM_BATCH = 2000
+
+# sha256 of the content exactly as Python's body_hash() computes it (UTF-8 bytes).
+_SQL_CONTENT_SHA256 = "encode(sha256(convert_to(content, 'UTF8')), 'hex')"
+
+
+def _stream_rows(conn, *, order="created_at, id", where="TRUE", params=()):
+    """Server-side cursor over memories metadata (no content column; hash + length only)."""
+    with conn.cursor(name=f"maint_{abs(hash((order, where))) % 10**8}", cursor_factory=RealDictCursor,
+                     withhold=False) as cur:
+        cur.itersize = STREAM_BATCH
+        cur.execute(f"""SELECT id, type, title, source_type, source_url, project, parent_id, metadata, status,
+                               embedding IS NOT NULL AS embedded, length(content) AS content_length,
+                               {_SQL_CONTENT_SHA256} AS content_sha256
+                        FROM memories WHERE {where} ORDER BY {order}""", params)
+        for row in cur:
+            yield dict(row)
 
 
 def plan_dedup():
-    """Only identical content under the same captured-source identity is mergeable."""
+    """Only identical content under the same captured-source identity is mergeable.
+
+    Streams the corpus in parent-first order through a server-side cursor; keeps
+    one small identity record per row (never the text), so RAM stays bounded on
+    the 125 k-row live corpus (review B N5).
+    """
     with get_connection() as conn:
-        rows = _rows(conn)
         plan = {'version': 1, 'kind': 'dedup', 'database': database_identity(conn), 'operations': []}
-    canonical = {}
-    rows_by_id = {str(row['id']): row for row in rows}
-    seen = {}
-    # Parents before children means duplicate imported trees can share an identity.
-    for row in sorted(rows, key=lambda r: r['parent_id'] is not None):
-        if (row['type'] != 'source' or not row['source_url'] or row['source_type'] in
-                ('codex_task', 'distilled_agent_task', 'distilled_chat', 'dream_cycle') or
-                (row['metadata'] or {}).get('record_kind')):
-            continue
-        parent = canonical.get(str(row['parent_id']), str(row['parent_id'] or ''))
-        # A repeated paragraph at a different chunk position remains distinct evidence.
-        key = json.dumps([identity(row, parent), body_hash(row), row['status']], sort_keys=True)
-        rid = str(row['id'])
-        if key not in seen:
-            seen[key] = rid
-            canonical[rid] = rid
-            continue
-        keeper = seen[key]
-        canonical[rid] = keeper
-        plan['operations'].append({'old_id': rid, 'new_id': keeper, 'content_sha256': body_hash(row),
-                                   'identity': identity(row), 'keeper_identity': identity(rows_by_id[keeper]),'status':row['status']})
+        canonical = {}
+        identities = {}
+        seen = {}
+        # Parents before children means duplicate imported trees can share an identity.
+        for row in _stream_rows(conn, order="(parent_id IS NOT NULL), created_at, id"):
+            rid = str(row['id'])
+            if (row['type'] != 'source' or not row['source_url'] or row['source_type'] in
+                    ('codex_task', 'distilled_agent_task', 'distilled_chat', 'dream_cycle') or
+                    (row['metadata'] or {}).get('record_kind')):
+                continue
+            parent = canonical.get(str(row['parent_id']), str(row['parent_id'] or ''))
+            # A repeated paragraph at a different chunk position remains distinct evidence.
+            key = json.dumps([identity(row, parent), row['content_sha256'], row['status']], sort_keys=True)
+            if key not in seen:
+                seen[key] = rid
+                canonical[rid] = rid
+                identities[rid] = identity(row)
+                continue
+            keeper = seen[key]
+            canonical[rid] = keeper
+            plan['operations'].append({'old_id': rid, 'new_id': keeper, 'content_sha256': row['content_sha256'],
+                                       'identity': identity(row), 'keeper_identity': identities[keeper], 'status': row['status']})
     # Chunk repairs precede parent repairs, keeping manifest child identities stable.
     plan['operations'].sort(key=lambda op: not bool(op['identity'][4]))
     return plan
@@ -172,7 +192,7 @@ def apply_dedup(plan, expected_sha256):
     completed = 0
     for op in plan['operations']:
         key = op['old_id']
-        with transaction() as conn:
+        with transaction(timeouts="maintenance") as conn:
             if database_identity(conn) != plan['database']:
                 raise ValueError('Manifest database incarnation differs; regenerate the dry run')
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -221,53 +241,86 @@ def _repair_text(row, strip_known_ide_context=False):
     return text
 
 
+def _active_children(cur, parent_id):
+    cur.execute(f"""SELECT id, metadata->>'chunk_index' AS chunk_index, {_SQL_CONTENT_SHA256} AS content_sha256,
+                           embedding IS NOT NULL AS embedded
+                    FROM memories WHERE parent_id = %s AND status = 'active' ORDER BY id""", (parent_id,))
+    return [dict(r) for r in cur.fetchall()]
+
+
 def plan_rechunk(max_chunk_chars=4000, *, strip_known_ide_context=False):
-    """Plan bounded replacements and missing leaf vectors without making model calls."""
+    """Plan bounded replacements and missing leaf vectors without making model calls.
+
+    Streams parents through a server-side cursor and fetches one parent's text at
+    a time, only when a decision needs it (review B N5). Rules (review B N3):
+
+    * a parent with active chunks is re-chunked only when its chunk sequence does
+      not reproduce the frozen text exactly (missing/duplicate/misordered index,
+      stale content, unembedded chunk);
+    * a childless row that is already embedded and within ``max_chunk_chars``
+      (and, with ``strip_known_ide_context``, has nothing to strip) is complete --
+      it is NOT given a redundant child copy of itself (74ba02d would have added
+      ~35,100 such children on the live corpus);
+    * a childless row that is unembedded, or longer than the bound, gets a single
+      leaf vector or a chunk set respectively.
+    """
     from src.ingest import chunk_by_section
     with get_connection() as conn:
-        rows=_rows(conn)
         plan={'version':1,'kind':'rechunk','database':database_identity(conn),
               'embedding_model':__import__('os').environ.get('EMBEDDING_MODEL','amazon.titan-embed-text-v2:0'),
               'embedding_dimensions':1024,'strip_known_ide_context':strip_known_ide_context,
-              'pricing_basis':'Current corpus; regenerate after dedup before paid application', 'max_chunk_chars':max_chunk_chars,'operations':[],'embedding_calls':0,'input_characters':0}
-    children=defaultdict(list)
-    for row in rows:
-        if row['parent_id'] and row['status']=='active':
-            children[str(row['parent_id'])].append(row)
-    for row in rows:
-        if row['parent_id'] or row['status']!='active' or row['source_type'] in ('codex_task','distilled_agent_task'):
-            continue
-        rid=str(row['id']); existing=children[rid]
-        repair_text=_repair_text(row, strip_known_ide_context)
-        replace=bool(existing) or row['type']=='source' or bool((row['metadata'] or {}).get('capture_identity'))
-        chunks=chunk_by_section(repair_text,max_chunk_chars) if replace or len(repair_text)>max_chunk_chars else [repair_text]
-        chunks=[chunk for chunk in chunks if chunk.strip()]
-        if replace:
-            # A valid embedded prefix does not prove the complete source was indexed.
-            # Verify the whole sequence and its indices against the frozen parent.
-            expected={i: text for i,text in enumerate(chunks)}
-            actual={}
-            complete=len(existing)==len(chunks)
-            for child in existing:
-                index=(child['metadata'] or {}).get('chunk_index')
-                if type(index) is not int:
-                    complete=False
+              'pricing_basis':'Current corpus; regenerate after dedup before paid application', 'max_chunk_chars':max_chunk_chars,'operations':[],'embedding_calls':0,'input_characters':0,
+              'skipped_complete_leaves':0}
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            for row in _stream_rows(conn, where="parent_id IS NULL AND status = 'active' AND (source_type IS NULL OR source_type <> ALL(%s))",
+                                    params=(['codex_task','distilled_agent_task'],)):
+                rid=str(row['id'])
+                existing=_active_children(cur, rid)
+                may_strip = strip_known_ide_context and row['source_type'] == 'kiro_ide_chat'
+                if not existing and row['embedded'] and row['content_length'] <= max_chunk_chars and not may_strip:
+                    plan['skipped_complete_leaves'] += 1
                     continue
-                if index in actual:
-                    complete=False
-                actual[index]=child['content']
-            needs=not complete or actual!=expected or any(not child['embedded'] for child in existing)
-        else:
-            needs=not row['embedded'] or len(row['content'])>50000
-        if not needs:
-            continue
-        if not chunks: continue
-        # Large standalone leaves receive child vectors but retain their original ID/content.
-        mode='chunks' if replace or len(chunks)>1 else 'leaf'
-        plan['operations'].append({'memory_id':rid,'content_sha256':body_hash(row),'identity':identity(row),
-            'status':row['status'],'mode':mode,'chunk_hashes':[hashlib.sha256(c.encode()).hexdigest() for c in chunks],
-            'active_children':[str(r['id']) for r in existing]})
-        plan['embedding_calls']+=len(chunks); plan['input_characters']+=sum(map(len,chunks))
+                cur.execute("SELECT content FROM memories WHERE id = %s", (rid,))
+                content = cur.fetchone()['content']
+                repair_text=_repair_text({'content': content, 'source_type': row['source_type']}, strip_known_ide_context)
+                replace=bool(existing) or row['type']=='source' or bool((row['metadata'] or {}).get('capture_identity'))
+                chunks=chunk_by_section(repair_text,max_chunk_chars) if replace or len(repair_text)>max_chunk_chars else [repair_text]
+                chunks=[chunk for chunk in chunks if chunk.strip()]
+                chunk_hashes=[hashlib.sha256(c.encode()).hexdigest() for c in chunks]
+                if existing:
+                    # A valid embedded prefix does not prove the complete source was indexed.
+                    # Verify the whole sequence and its indices against the frozen parent.
+                    expected={i: h for i,h in enumerate(chunk_hashes)}
+                    actual={}
+                    complete=len(existing)==len(chunks)
+                    for child in existing:
+                        index=child['chunk_index']
+                        try:
+                            index=int(index) if index is not None and str(index).strip()==str(int(index)) else None
+                        except (TypeError, ValueError):
+                            index=None
+                        if index is None:
+                            complete=False
+                            continue
+                        if index in actual:
+                            complete=False
+                        actual[index]=child['content_sha256']
+                    needs=not complete or actual!=expected or any(not child['embedded'] for child in existing)
+                elif not row['embedded'] or len(repair_text)>max_chunk_chars or len(chunks)>1:
+                    needs=True
+                else:
+                    # Embedded leaf whose stripped text is unchanged: nothing to do.
+                    needs=repair_text!=content
+                if not needs or not chunks:
+                    continue
+                # Rows with chunks get a fresh chunk set; a childless row is embedded in
+                # place when it fits one chunk, otherwise it receives child vectors and
+                # keeps its own ID/content.
+                mode='chunks' if existing or len(chunks)>1 else 'leaf'
+                plan['operations'].append({'memory_id':rid,'content_sha256':row['content_sha256'],'identity':identity(row),
+                    'status':row['status'],'mode':mode,'chunk_hashes':chunk_hashes,
+                    'active_children':[str(r['id']) for r in existing]})
+                plan['embedding_calls']+=len(chunks); plan['input_characters']+=sum(map(len,chunks))
     return plan
 
 
@@ -320,7 +373,7 @@ def apply_rechunk(plan, expected_sha256, *, embed, cache_dir):
                 finally:
                     if os.path.exists(tmp): os.unlink(tmp)
             vectors.append(vector)
-        with transaction() as conn:
+        with transaction(timeouts="maintenance") as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT pg_advisory_xact_lock(hashtextextended('corpus-maintenance',0))")
                 cur.execute('SELECT 1 FROM corpus_maintenance WHERE manifest_sha256=%s AND operation_key=%s',(expected_sha256,rid))
@@ -332,17 +385,65 @@ def apply_rechunk(plan, expected_sha256, *, embed, cache_dir):
                 if sorted(r['id'] for r in cur.fetchall())!=sorted(op['active_children']):
                     raise ValueError('Active chunk set changed since planning')
                 row=current  # Preserve current metadata/title after paid preparation.
+                purge={'deleted':0,'retained_referenced':0}
                 if op['mode']=='leaf': update_fields(rid,{'embedding':vectors[0], 'mem_class':row['mem_class'] or classify_memory(row['type'],row['content'])},conn=conn)
                 else:
+                    # Old chunks are replaced, not accumulated (review B N4): a chunk that
+                    # nothing references is deleted (its text lives on in the parent and
+                    # the new chunk set); a cited chunk is kept as superseded history.
                     cur.execute("UPDATE memories SET status='superseded',updated_at=now() WHERE parent_id=%s AND status='active'",(rid,))
                     for i,(text,vector) in enumerate(zip(chunks,vectors)):
                         create_memory(type=row['type'], title=f"{row['title']} (chunk {i+1}/{len(chunks)})", content=text,
                             embedding=vector,source_url=row['source_url'],source_type=row['source_type'],project=row['project'],
                             parent_id=rid,metadata={**(row['metadata'] or {}),'chunk_index':i,'total_chunks':len(chunks),'maintenance_manifest':expected_sha256},
                             mem_class=classify_memory(row['type'],text),conn=conn)
-                cur.execute('INSERT INTO corpus_maintenance(manifest_sha256,operation_key,details) VALUES(%s,%s,%s::jsonb)',(expected_sha256,rid,json.dumps({'mode':op['mode'],'chunks':len(chunks)})))
+                    purge=purge_superseded_chunks(conn, rid)
+                cur.execute('INSERT INTO corpus_maintenance(manifest_sha256,operation_key,details) VALUES(%s,%s,%s::jsonb)',(expected_sha256,rid,json.dumps({'mode':op['mode'],'chunks':len(chunks),**purge})))
         applied+=1
     return applied
+
+def _chunk_is_referenced(cur, chunk_id):
+    """True when any ledger, edge, skim, slice array or JSON document cites the chunk."""
+    _check_reference_layout(cur)
+    cur.execute("""SELECT EXISTS(SELECT 1 FROM memory_relationships WHERE source_id=%s OR target_id=%s)
+                       OR EXISTS(SELECT 1 FROM dream_cycle_candidates WHERE created_memory_id=%s OR target_memory_id=%s)
+                       OR EXISTS(SELECT 1 FROM memory_skim WHERE memory_id=%s)
+                       OR EXISTS(SELECT 1 FROM memory_entities WHERE memory_id=%s)
+                       OR EXISTS(SELECT 1 FROM memories WHERE parent_id=%s)""", (chunk_id,)*7)
+    if cur.fetchone()[0]:
+        return True
+    cur.execute("SELECT table_name,column_name,udt_name FROM information_schema.columns WHERE table_schema='public' AND (data_type='jsonb' OR udt_name IN ('_text','_uuid'))")
+    for table, column, typ in cur.fetchall():
+        if typ == 'jsonb':
+            query = sql.SQL('SELECT 1 FROM {} WHERE {}::text LIKE %s LIMIT 1').format(sql.Identifier(table), sql.Identifier(column))
+            cur.execute(query, ('%'+chunk_id+'%',))
+        else:
+            cast = sql.SQL('uuid') if typ == '_uuid' else sql.SQL('text')
+            query = sql.SQL('SELECT 1 FROM {} WHERE %s::{} = ANY({}) LIMIT 1').format(sql.Identifier(table), cast, sql.Identifier(column))
+            cur.execute(query, (chunk_id,))
+        if cur.fetchone():
+            return True
+    return False
+
+
+def purge_superseded_chunks(conn, parent_id):
+    """Delete the parent's superseded chunks that nothing references; keep cited ones.
+
+    Returns ``{'deleted': n, 'retained_referenced': m}``. Runs inside the caller's
+    transaction (apply_rechunk) so the new chunk set and the purge commit together.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT id::text FROM memories WHERE parent_id=%s AND status='superseded' ORDER BY id FOR UPDATE", (parent_id,))
+        superseded = [r[0] for r in cur.fetchall()]
+        deleted = retained = 0
+        for chunk_id in superseded:
+            if _chunk_is_referenced(cur, chunk_id):
+                retained += 1
+                continue
+            cur.execute("DELETE FROM memories WHERE id=%s AND status='superseded'", (chunk_id,))
+            deleted += cur.rowcount
+    return {'deleted': deleted, 'retained_referenced': retained}
+
 
 def plan_metadata_repairs():
     """Inventory UUID project tags and historical counter mismatches, read-only."""
@@ -372,7 +473,7 @@ def apply_metadata_repairs(plan,expected_sha256):
     count=0
     for op in plan['operations']:
         key=op['kind']+':'+op['id']
-        with transaction() as conn,conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with transaction(timeouts="maintenance") as conn,conn.cursor(cursor_factory=RealDictCursor) as cur:
             if database_identity(conn)!=plan['database']:raise ValueError('Database incarnation changed')
             cur.execute("SELECT pg_advisory_xact_lock(hashtextextended('corpus-maintenance',0))")
             cur.execute('SELECT 1 FROM corpus_maintenance WHERE manifest_sha256=%s AND operation_key=%s',(expected_sha256,key))

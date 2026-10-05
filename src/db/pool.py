@@ -75,14 +75,50 @@ def get_connection():
         slots.release()
 
 
+#: Per-transaction timeouts (milliseconds; 0 disables), all overridable by env.
+#:
+#: ``default`` -- every ordinary writer (capture ingest, dream-cycle storage,
+#: MCP memory_create/update/relate, express feedback): a statement that runs
+#: longer than ``DB_STATEMENT_TIMEOUT_MS`` (default 30 s) or waits for a lock
+#: longer than ``DB_LOCK_TIMEOUT_MS`` (default 5 s) fails and the whole
+#: transaction rolls back. Ingest prepares all embeddings *before* opening the
+#: transaction, so even a 1.3 M-char document is a few hundred fast inserts.
+#:
+#: ``maintenance`` -- corpus repairs (dedup / rechunk / metadata manifests,
+#: purge of superseded chunks), which legitimately scan JSONB columns for
+#: references and rewrite many rows: no statement timeout
+#: (``DB_MAINTENANCE_STATEMENT_TIMEOUT_MS`` default 0) and a longer lock wait
+#: (``DB_MAINTENANCE_LOCK_TIMEOUT_MS`` default 60 s). Schema migrations do not
+#: go through this pool at all (psql via migrations/migrate.sh; 016 sets its own
+#: ``lock_timeout``).
+TIMEOUT_PROFILES = {
+    "default": ("DB_STATEMENT_TIMEOUT_MS", 30000, "DB_LOCK_TIMEOUT_MS", 5000),
+    "maintenance": ("DB_MAINTENANCE_STATEMENT_TIMEOUT_MS", 0, "DB_MAINTENANCE_LOCK_TIMEOUT_MS", 60000),
+}
+
+
+def _timeout_ms(env_name: str, default: int) -> int:
+    value = int(os.environ.get(env_name, str(default)))
+    if value < 0:
+        raise ValueError(f"{env_name} must be >= 0 (0 disables the timeout)")
+    return value
+
+
 @contextmanager
-def transaction():
-    """One connection, one commit; all statements roll back on any failure."""
+def transaction(*, timeouts: str = "default"):
+    """One connection, one commit; all statements roll back on any failure.
+
+    ``timeouts`` names a :data:`TIMEOUT_PROFILES` entry (``"default"`` for
+    ordinary writers, ``"maintenance"`` for long legitimate repairs).
+    """
+    if timeouts not in TIMEOUT_PROFILES:
+        raise ValueError(f"Unknown transaction timeout profile {timeouts!r}")
+    statement_env, statement_default, lock_env, lock_default = TIMEOUT_PROFILES[timeouts]
     with get_connection() as conn:
         try:
             with conn.cursor() as cur:
-                cur.execute("SET LOCAL lock_timeout = %s", (int(os.environ.get("DB_LOCK_TIMEOUT_MS", "5000")),))
-                cur.execute("SET LOCAL statement_timeout = %s", (int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", "30000")),))
+                cur.execute("SET LOCAL lock_timeout = %s", (_timeout_ms(lock_env, lock_default),))
+                cur.execute("SET LOCAL statement_timeout = %s", (_timeout_ms(statement_env, statement_default),))
             yield conn
             conn.commit()
         except BaseException:

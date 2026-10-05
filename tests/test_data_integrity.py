@@ -127,13 +127,14 @@ def test_dedup_preserves_identity_and_untyped_references(test_db,clean_tables):
         target,created,body=cur.fetchone();assert target==created==a;assert body['source_memories']==[a]
 
 
-def test_rechunk_is_resumable_and_preserves_old_ids(test_db,clean_tables,tmp_path):
+def test_rechunk_is_resumable_and_purges_unreferenced_old_chunks(test_db,clean_tables,tmp_path):
     parent=db.create_memory('source','Long','x'*9000,source_type='article',source_url='test://long')
     old=db.create_memory('source','Old chunk','x'*9000,parent_id=parent,source_type='article',source_url='test://long',embedding=vector())
     plan=plan_rechunk();assert plan['embedding_calls']==3
     embed=Mock(side_effect=vector)
     assert apply_rechunk(plan,digest(plan),embed=embed,cache_dir=tmp_path)==1
-    assert db.get_memory(old)['status']=='superseded'
+    # Fix 7 / review B N4: the superseded chunk nothing cites is gone, not kept forever.
+    assert db.get_memory(old) is None and db.get_memory(parent)['status']=='active'
     assert apply_rechunk(plan,digest(plan),embed=embed,cache_dir=tmp_path)==0
     assert embed.call_count==2 # identical 4k chunks reuse prepared vectors
     with db.get_connection() as conn,conn.cursor() as cur:
@@ -249,7 +250,7 @@ def test_opt_in_context_repair_preserves_parent_verbatim(test_db,clean_tables,tm
     plan=plan_rechunk(strip_known_ide_context=True)
     apply_rechunk(plan,digest(plan),embed=vector,cache_dir=tmp_path)
     assert db.get_memory(parent)['content']==text
-    assert db.get_memory(child)['content']==text and db.get_memory(child)['status']=='superseded'
+    assert db.get_memory(child) is None  # unreferenced old chunk purged
     with db.get_connection() as conn,conn.cursor() as cur:
         cur.execute("SELECT content FROM memories WHERE parent_id=%s AND status='active'",(parent,))
         assert cur.fetchone()[0]=='My actual question\n\nAnswer and followup.'
@@ -271,7 +272,7 @@ def test_rechunk_detects_incomplete_or_changed_chunk_sequence(test_db,clean_tabl
     assert [op['memory_id'] for op in plan['operations']]==[parent]
     assert plan['embedding_calls']==2
     assert apply_rechunk(plan,digest(plan),embed=vector,cache_dir=tmp_path)==1
-    assert all(db.get_memory(mid)['status']=='superseded' for mid in original)
+    assert all(db.get_memory(mid) is None for mid in original)  # unreferenced old chunks purged
     with db.get_connection() as conn,conn.cursor() as cur:
         cur.execute("SELECT content FROM memories WHERE parent_id=%s AND status='active' ORDER BY (metadata->>'chunk_index')::int",(parent,))
         assert ''.join(row[0] for row in cur.fetchall())==content
@@ -323,3 +324,88 @@ def test_relationships_preserve_directed_reverse_edges_and_notes(test_db,clean_t
     assert {(str(edge['source_id']),str(edge['target_id']),edge['note']) for edge in directed}=={(a,b,'A supports B'),(b,a,'B supports A')}
     assert len([edge for edge in edges if edge['relation_type']=='related_to'])==1
     assert all(str(edge['neighbor_id'])==b for edge in edges)
+
+
+def test_rechunk_keeps_cited_old_chunks_as_superseded_history(test_db,clean_tables,tmp_path):
+    """Fix 7 / review B N4: a superseded chunk that a relationship, a candidate ledger
+    row or a slice array still cites is retained (status superseded); the rest are deleted."""
+    from src.dream_cycle_db import create_run, store_candidate
+    parent=db.create_memory('source','Doc','a'*4000+'b'*1000,source_type='article',source_url='test://cited')
+    cited=db.create_memory('source','Cited chunk','a'*4000,embedding=vector(),parent_id=parent,source_type='article',source_url='test://cited',metadata={'chunk_index':0})
+    ledgered=db.create_memory('source','Ledgered chunk','stale',embedding=vector(),parent_id=parent,source_type='article',source_url='test://cited',metadata={'chunk_index':1})
+    loose=db.create_memory('source','Loose chunk','also stale',embedding=vector(),parent_id=parent,source_type='article',source_url='test://cited',metadata={'chunk_index':2})
+    other=db.create_memory('idea','Other','x',embedding=vector())
+    db.create_relationship(other,cited,'supports')
+    run=create_run('user_triggered')
+    store_candidate(run,{'title':'c','source_memories':[ledgered]},{},'REJECTED')
+    plan=plan_rechunk()
+    assert [op['memory_id'] for op in plan['operations']]==[parent]
+    assert apply_rechunk(plan,digest(plan),embed=vector,cache_dir=tmp_path)==1
+    assert db.get_memory(cited)['status']=='superseded' and db.get_memory(ledgered)['status']=='superseded'
+    assert db.get_memory(loose) is None
+    with db.get_connection() as conn,conn.cursor() as cur:
+        cur.execute("SELECT string_agg(content,'' ORDER BY (metadata->>'chunk_index')::int) FROM memories WHERE parent_id=%s AND status='active'",(parent,))
+        assert cur.fetchone()[0]=='a'*4000+'b'*1000
+        cur.execute("SELECT details FROM corpus_maintenance WHERE operation_key=%s",(parent,))
+        details=cur.fetchone()[0]
+    assert details['deleted']==1 and details['retained_referenced']==2
+
+
+def test_plan_rechunk_leaves_complete_embedded_leaves_alone(test_db,clean_tables):
+    """Fix 7 / review B N3: 35,100 live small, embedded, childless ``type='source'`` rows
+    (quick_desktop_*) must not each receive a redundant child copy of themselves."""
+    complete=db.create_memory('source','QD fact','Short captured fact.',embedding=vector(),source_type='quick_desktop_decision',source_url='qd://entity/1',metadata={'capture_identity':True})
+    unembedded=db.create_memory('source','Half written','Unembedded leaf text.',source_type='article',source_url='test://half')
+    oversize=db.create_memory('source','Big leaf','z'*9000,embedding=vector(),source_type='article',source_url='test://big')
+    plan=plan_rechunk()
+    ops={op['memory_id']:op for op in plan['operations']}
+    assert complete not in ops and plan['skipped_complete_leaves']==1
+    assert ops[unembedded]['mode']=='leaf' and len(ops[unembedded]['chunk_hashes'])==1
+    assert ops[oversize]['mode']=='chunks' and len(ops[oversize]['chunk_hashes'])==3
+    assert plan['embedding_calls']==4
+
+
+def test_planners_stream_without_fetching_corpus_text(test_db,clean_tables,monkeypatch):
+    """Fix 7 / review B N5: plan_dedup never selects ``content``; plan_rechunk fetches
+    one parent's text at a time and only for rows that need a decision."""
+    from src.db import maintenance as m
+    for i in range(5):
+        db.create_memory('source',f'Leaf {i}',f'leaf text {i}',embedding=vector(),source_type='quick_desktop_people',source_url=f'qd://memory/{i}')
+    parent=db.create_memory('source','Doc','d'*5000,source_type='article',source_url='test://stream')
+    db.create_memory('source','chunk','d'*4000,embedding=vector(),parent_id=parent,source_type='article',source_url='test://stream',metadata={'chunk_index':0})
+    statements=[];named=[]
+    from psycopg2.extras import RealDictCursor
+    original_execute=RealDictCursor.execute;original_init=RealDictCursor.__init__
+    def spy_init(self,*args,**kwargs):
+        named.append(kwargs.get('name') or (args[1] if len(args)>1 else None));return original_init(self,*args,**kwargs)
+    def spy_execute(self,query,vars=None):
+        statements.append(query if isinstance(query,str) else query.as_string(self.connection));return original_execute(self,query,vars)
+    monkeypatch.setattr(RealDictCursor,'__init__',spy_init);monkeypatch.setattr(RealDictCursor,'execute',spy_execute)
+    assert plan_dedup()['operations']==[]
+    assert any(n for n in named)  # a server-side (named) cursor streamed the corpus
+    assert all('sha256' in q or 'content' not in q for q in statements)  # dedup never fetches text
+    statements.clear()
+    plan=plan_rechunk()
+    content_fetches=[q for q in statements if q.strip().startswith('SELECT content FROM memories WHERE id')]
+    assert len(content_fetches)==1 and [op['memory_id'] for op in plan['operations']]==[parent]
+
+
+def test_transaction_timeout_profiles(test_db,clean_tables,monkeypatch):
+    """Fix 11 / review B N8: ordinary writers get the bounded defaults; maintenance
+    repairs run without a statement timeout and a longer lock wait; both configurable."""
+    from src.db import pool
+    def gucs(**kw):
+        with pool.transaction(**kw) as conn,conn.cursor() as cur:
+            cur.execute("SELECT current_setting('statement_timeout'), current_setting('lock_timeout')")
+            return cur.fetchone()
+    assert gucs()==('30s','5s')
+    assert gucs(timeouts='maintenance')==('0','1min')
+    monkeypatch.setenv('DB_STATEMENT_TIMEOUT_MS','120000');monkeypatch.setenv('DB_LOCK_TIMEOUT_MS','250')
+    monkeypatch.setenv('DB_MAINTENANCE_STATEMENT_TIMEOUT_MS','3600000');monkeypatch.setenv('DB_MAINTENANCE_LOCK_TIMEOUT_MS','0')
+    assert gucs()==('2min','250ms') and gucs(timeouts='maintenance')==('1h','0')
+    with pytest.raises(ValueError):gucs(timeouts='nope')
+    monkeypatch.setenv('DB_STATEMENT_TIMEOUT_MS','-1')
+    with pytest.raises(ValueError):gucs()
+    # A pooled connection outside transaction() carries no leaked timeout.
+    with db.get_connection() as conn,conn.cursor() as cur:
+        cur.execute("SELECT current_setting('statement_timeout')");assert cur.fetchone()[0]=='0'
