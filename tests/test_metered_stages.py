@@ -233,6 +233,29 @@ def test_adapter_cannot_differ_from_safe_spec():
     assert invoker.calls == 0
 
 
+def test_invoker_model_must_equal_the_resolved_spec_even_when_both_are_allowed():
+    """Review S3-2: the mismatch check is independent of the fable denial. An
+    invoker on a perfectly allowed, metered Bedrock model that is simply not the
+    resolved seat's model is refused before any provider call and bills nothing."""
+    invoker = FakeDirect()
+    invoker.model = "global.anthropic.claude-sonnet-5"  # allowed, but SPEC is Nova
+    tracker = SpendTracker(1)
+    with pytest.raises(ValueError, match="model does not match resolved corpus role"):
+        invoke(invoker, tracker)
+    assert invoker.calls == 0
+    assert tracker.calls == 0 and tracker.total_usd == 0.0 and tracker.blocked_reason is None
+
+
+def test_invoker_backend_must_equal_the_resolved_spec():
+    invoker = FakeDirect()
+    invoker.BACKEND_NAME = "claude_code"  # SPEC says bedrock
+    tracker = SpendTracker(1)
+    with pytest.raises(ValueError, match="backend does not match resolved corpus role"):
+        invoke(invoker, tracker)
+    assert invoker.calls == 0
+    assert tracker.calls == 0 and tracker.total_usd == 0.0
+
+
 def test_legacy_direct_invocation_does_not_double_bill():
     # Original Dream Cycle still owns its tracker.record path.
     invoker = FakeDirect()
