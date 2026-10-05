@@ -6,8 +6,8 @@ Five pieces, all deterministic and unit-testable:
   block injected into the Explorer's user message: counts per channel and the
   newest documents in each, with ids the Explorer can pull directly.
 
-* :func:`build_arrivals_inventory` — replaces the manifest when skim records
-  exist for the window (docs/PLAN-skim-stage.md, Phase 3): the same header,
+* :func:`render_arrivals_inventory` — replaces the manifest when skim records
+  exist for the window (docs/SKIM-STAGE.md, Phase 3): the same header,
   then one line per document (``id | channel | S<salience> N<novelty> | flags |
   summary``) so the Explorer has read the whole day before choosing slices.
   Ordered by salience then novelty, channel-interleaved within a tier,
@@ -27,7 +27,7 @@ Five pieces, all deterministic and unit-testable:
   Nothing here judges topics. Work on the Second Brain itself is part of the
   user's day and competes on equal footing; it simply cannot be the only thing.
 
-* :func:`build_arrivals_slice` — the guaranteed slice: a stratified sample of
+* :func:`build_arrivals_selection` — the guaranteed slice: a stratified sample of
   parent-level memories created since the previous run, spread across channels
   (sqrt-proportional so small channels are represented, capped per channel),
   episodic first. Exists so every run examines new material even when the
@@ -282,14 +282,6 @@ def _inventory_footer(k: int) -> str:
     return f"… {k} more documents not listed (all ids are retrievable by tools)"
 
 
-def build_arrivals_inventory(window_start: datetime, records: list[dict], *,
-                             counts_by_channel: dict[str, int],
-                             max_chars: int = INVENTORY_MAX_CHARS) -> str:
-    """The Explorer's arrivals block when skim records exist — see
-    :func:`render_arrivals_inventory`; returns the text only."""
-    return render_arrivals_inventory(window_start, records, counts_by_channel=counts_by_channel,
-                                     max_chars=max_chars).text
-
 
 # --------------------------------------------------------------------------- #
 # Budget enforcement                                                           #
@@ -520,12 +512,6 @@ def build_arrivals_selection(window_start: datetime, size: int = ARRIVALS_SLICE_
     rows = dcdb.get_recent_parent_memories(window_start)
     selection = select_arrivals(rows if isinstance(rows, list) else [], size, skim_records)
     return slice_from_rows(window_start, selection.rows), selection
-
-
-def build_arrivals_slice(window_start: datetime, size: int = ARRIVALS_SLICE_SIZE, dcdb=None,
-                         skim_records: list[dict] | None = None) -> MemorySlice | None:
-    """DB-backed wrapper around :func:`compose_arrivals_slice` (reads via dream_cycle_db)."""
-    return build_arrivals_selection(window_start, size, dcdb, skim_records)[0]
 
 
 

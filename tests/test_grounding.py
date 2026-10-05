@@ -77,7 +77,7 @@ class TestGroundCandidate:
              patch.object(orch, "_revise_candidate") as revise:
             out = orch._ground_candidate(cand)
         assert out is cand
-        audit.assert_called_once_with(cand, "skeptic", stage="grounding_audit")
+        audit.assert_called_once_with(cand, o.GROUNDING_AUDIT_ROLE, stage="grounding_audit")
         revise.assert_not_called()
 
     def test_defects_trigger_one_revision(self):
@@ -207,7 +207,7 @@ class TestPipelineIntegration:
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
              patch("src.dream_cycle.orchestrator.check_duplicate", return_value=None), \
-             patch("src.dream_cycle.orchestrator.store_accepted", return_value="mem-1"):
+             patch("src.dream_cycle.orchestrator.store_accepted", side_effect=_stored):
             db.create_run.return_value = "run-p"
             db.get_memory_stats.return_value = {"total_count": 1, "recent_activity": 1, "date_range": {}}
             result = orch.run("scheduled")
@@ -228,8 +228,9 @@ class TestPipelineIntegration:
         orch = _orch(); original = _cand(); emptied = _cand(content="   ")
         result, db, ev = self._run(orch, original, emptied, [])
         ev.assert_not_called()
-        assert db.store_candidate.call_args.args[3] == "REJECTED"
-        assert result.candidates_rejected == 1 and result.candidates_accepted == 0
+        assert db.store_candidate.call_args.args[3] == "WITHDRAWN"
+        assert result.candidates_rejected == 0 and result.candidates_accepted == 0
+        assert db.store_candidate.call_args.args[2] == {}
 
 
 class TestPerSliceCap:
@@ -249,10 +250,17 @@ class TestPerSliceCap:
             db.create_run.return_value = "run-c"
             db.get_memory_stats.return_value = {"total_count": 1, "recent_activity": 1, "date_range": {}}
             result = orch.run("scheduled")
-        assert result.candidates_generated == o.MAX_CANDIDATES_PER_SLICE == 3
+        assert result.candidates_generated == o.MAX_CANDIDATES_PER_SLICE == 2
 
 
 class TestRevisionRequest:
     def test_request_is_json_with_candidate_sources_and_issues(self):
         req = json.loads(build_revision_request('{"title": "t"}', "SRC TEXT", ["b1"], ["a1"]))
         assert req == {"candidate": {"title": "t"}, "cited_sources": "SRC TEXT", "blocking_issues": ["b1"], "advisory_issues": ["a1"]}
+
+
+def _stored(candidate, *, run_id, verdicts, authorized_memories):
+    from dataclasses import asdict
+    from src.dream_cycle import orchestrator
+    orchestrator.dream_cycle_db.store_candidate(run_id, asdict(candidate), verdicts, "ACCEPTED", "mem-1")
+    return "mem-1"

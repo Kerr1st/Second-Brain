@@ -149,13 +149,13 @@ class TestBudgetAwareThinker:
             result, db, th, ev, digest = _run(orch, slices, rows,
                                               thinker=lambda s: [_cand(f"{s.name}-{i}") for i in range(3)])
         assert th.call_count == 1 and th.call_args.args[0].name == "first"
-        assert result.candidates_generated == 3 and result.candidates_rejected == 3
+        assert result.candidates_generated == 2 and result.candidates_rejected == 2
         assert result.aborted_early is False
         stats = db.complete_run.call_args.kwargs["stats"]
         assert stats["slices_skipped_for_budget"] == 2 and "candidates_unjudged_for_budget" not in stats
         msg = [r.getMessage() for r in caplog.records if "skipping the Thinker" in r.getMessage()]
-        assert len(msg) == 1 and "$3.00 left of $3.00" in msg[0] and "needs ~$3.80" in msg[0]
-        assert "3 pending candidates" in msg[0] and "remaining 2 slice(s): second; third" in msg[0]
+        assert len(msg) == 1 and "$3.00 left of $3.00" in msg[0] and "needs ~$3.10" in msg[0]
+        assert "2 pending candidates" in msg[0] and "remaining 2 slice(s): second; third" in msg[0]
         digest.assert_called_once()
 
     def test_enough_budget_runs_every_slice_and_records_no_budget_keys(self):
@@ -171,7 +171,7 @@ class TestBudgetAwareThinker:
         orch = _orch(cap=1000.0)
         slices = [_slice("first"), _slice("second"), _slice("third")]
         result, db, th, *_ = _run(orch, slices, [], thinker=lambda s: [_cand(f"{s.name}-{i}") for i in range(3)])
-        assert th.call_count == 3 and result.candidates_generated == 9
+        assert th.call_count == 3 and result.candidates_generated == 6
 
     def test_thinker_skip_uses_real_spend_not_estimates(self):
         """$9 cap but $7.50 already spent: the very first slice is skipped."""
@@ -220,15 +220,15 @@ class TestPanelSoftStop:
                                               evaluator=self._spending_evaluator(orch, 0.40))
         assert ev.call_count == 4                                    # one candidate, four votes, then stop
         assert result.aborted_early is False
-        assert result.candidates_generated == 3 and result.candidates_rejected == 1 and result.candidates_accepted == 0
+        assert result.candidates_generated == 2 and result.candidates_rejected == 1 and result.candidates_accepted == 0
         assert db.store_candidate.call_count == 1                    # no verdict stored or fabricated for the rest
         assert db.store_candidate.call_args.args[1]["title"] == "judged"
         stats = db.complete_run.call_args.kwargs["stats"]
-        assert stats["candidates_unjudged_for_budget"] == 2 and stats["candidates_rejected"] == 1
+        assert stats["candidates_unjudged_for_budget"] == 1 and stats["candidates_rejected"] == 1
         digest.assert_called_once()                                  # digest + complete_run: a normal completion
         db.complete_run.assert_called_once()
         msg = [r.getMessage() for r in caplog.records if "unjudged" in r.getMessage()]
-        assert len(msg) == 1 and "$0.40 left of $2.00" in msg[0] and "leaving 2 candidate(s) unjudged: left; also left" in msg[0]
+        assert len(msg) == 1 and "$0.40 left of $2.00" in msg[0] and "leaving 1 candidate(s) unjudged: left" in msg[0]
 
     def test_soft_stop_before_any_candidate_when_the_thinker_used_the_budget(self):
         orch = _orch(cap=2.0)

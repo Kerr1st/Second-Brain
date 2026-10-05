@@ -1,0 +1,117 @@
+"""Agents Thinker responsibilities."""
+from __future__ import annotations
+import json
+import logging
+from src.models import CandidateInsight, MemorySlice
+from src.prompts import get_thinker_prompt
+from src.dream_cycle.packet import TOOLED_NOTE, TOOLLESS_NOTE, build_packet, load_memories_by_ids
+from src.dream_cycle.budget import *
+logger = logging.getLogger(__name__)
+
+def invoke_thinker(
+    self, slice: MemorySlice,
+) -> list[CandidateInsight]:
+    """Invoke Thinker agent with a memory slice.
+
+    Builds a JSON user message containing the memory slice data,
+    then invokes the Thinker via AgentInvoker with MCP config.
+
+    Args:
+        slice: A MemorySlice assembled by the Explorer.
+
+    Returns:
+        List of CandidateInsight objects (may be empty).
+    """
+    # Build the user message payload
+    payload: dict = {
+        "memory_slice": {
+            "name": slice.name,
+            "strategy": slice.strategy,
+            "memory_ids": slice.memory_ids,
+            "memory_titles": slice.memory_titles,
+            "hypothesis": slice.hypothesis,
+        },
+    }
+
+    # The evaluators are always tool-less, so cache the slice contents for
+    # their grounding checks regardless of how the Thinker reads memories.
+    # Every Thinker gets the slice contents inline (the "B2 context packet"):
+    # a tool-capable one (agentic CLI) used to re-read 10-20 memories over MCP
+    # at ~20s per turn and timed out on episodic slices (2026-09-17); it now
+    # keeps its tools for CLS-interleaving searches only. A tool-less one
+    # (Direct-API / Bedrock) reasons from the packet alone.
+    thinker_has_tools = self._role_has_tools("thinker")
+    memories = load_memories_by_ids(slice.memory_ids)
+    for memory in memories:
+        self._slice_memory_cache[str(memory.get("id"))] = memory
+    payload["memory_slice"]["memories"] = build_packet(memories)
+    payload["note"] = TOOLED_NOTE if thinker_has_tools else TOOLLESS_NOTE
+    if len(memories) < len(slice.memory_ids):
+        logger.warning(
+            "Thinker packet: loaded %d of %d slice memories for %s",
+            len(memories), len(slice.memory_ids), slice.name,
+        )
+
+    user_message = json.dumps(payload, default=str)
+
+    # Get the static Thinker prompt
+    prompt = get_thinker_prompt()
+
+    logger.info(
+        "Invoking Thinker agent (slice=%s, tools=%s)",
+        slice.name, thinker_has_tools,
+    )
+    result = self._invoke_metered("thinker",
+        system_prompt=prompt,
+        user_message=user_message,
+        tools=thinker_has_tools,
+        timeout=THINKER_TIMEOUT_S,
+        effort=self.resolver.spec_for("thinker").effort,
+        stage="thinker",
+        run_id=self._current_run_id,
+    )
+
+    safe_name = slice.name.replace(" ", "_").replace("/", "_")[:50]
+    self._capture(f"thinker_{safe_name}", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
+
+    # Parse output into CandidateInsight objects
+    raw_candidates = result["output"]
+    if not isinstance(raw_candidates, list):
+        logger.warning(
+            "Thinker output is not a list, wrapping: %s", type(raw_candidates)
+        )
+        raw_candidates = [raw_candidates] if raw_candidates else []
+
+    candidates = []
+    for raw in raw_candidates:
+        try:
+            candidate = CandidateInsight(
+                title=raw.get("title", ""),
+                type=raw.get("type", "insight"),
+                operation=raw.get("operation", "CREATE"),
+                target_memory_id=raw.get("target_memory_id"),
+                supersedes_reason=raw.get("supersedes_reason"),
+                schema_operation=raw.get("schema_operation", "assimilation"),
+                schema_note=raw.get("schema_note", ""),
+                confidence=raw.get("confidence", "medium"),
+                confidence_reasoning=raw.get("confidence_reasoning", ""),
+                content=raw.get("content", ""),
+                source_memories=raw.get("source_memories", []),
+                relationships=raw.get("relationships", []),
+                strategy_that_found_it=raw.get(
+                    "strategy_that_found_it", slice.strategy
+                ),
+            )
+            candidates.append(candidate)
+            logger.debug(
+                "Parsed candidate: title=%s, operation=%s, confidence=%s",
+                candidate.title,
+                candidate.operation,
+                candidate.confidence,
+            )
+        except (KeyError, TypeError) as exc:
+            logger.warning(
+                "Failed to parse Thinker candidate: %s — %s", raw, exc
+            )
+
+    return candidates

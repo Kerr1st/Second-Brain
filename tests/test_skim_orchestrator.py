@@ -107,8 +107,8 @@ STARTED = datetime(2026, 9, 20, 2, 0, tzinfo=timezone.utc)
 class TestSkimArrivalsFallbacks:
     def test_unconfigured_role_returns_none_with_one_warning(self, caplog):
         orch = _orch(_profile(skim=False))
-        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.orchestrator"), \
-             patch("src.dream_cycle.orchestrator.skim_window") as sw, \
+        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.stages.skim_stage"), \
+             patch("src.dream_cycle.stages.skim_stage.skim_window") as sw, \
              patch("src.dream_cycle.orchestrator.dream_cycle_db"):
             assert orch._skim_arrivals("run-s", "scheduled", STARTED) is None
         sw.assert_not_called()
@@ -119,8 +119,8 @@ class TestSkimArrivalsFallbacks:
     def test_env_off_switch_skips_the_stage_with_one_warning(self, value, caplog, monkeypatch):
         monkeypatch.setenv("SECOND_BRAIN_SKIM_DISABLED", value)
         orch = _orch(_profile())
-        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.orchestrator"), \
-             patch("src.dream_cycle.orchestrator.skim_window") as sw, \
+        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.stages.skim_stage"), \
+             patch("src.dream_cycle.stages.skim_stage.skim_window") as sw, \
              patch.object(orch, "_invoker_for") as inv, \
              patch("src.dream_cycle.orchestrator.dream_cycle_db"):
             assert orch._skim_arrivals("run-s", "scheduled", STARTED) is None
@@ -131,15 +131,15 @@ class TestSkimArrivalsFallbacks:
     def test_env_off_switch_ignores_other_values(self, monkeypatch):
         monkeypatch.setenv("SECOND_BRAIN_SKIM_DISABLED", "0")
         orch = _orch(_profile(skim=False))  # falls through to the normal path
-        with patch("src.dream_cycle.orchestrator.skim_window"), \
+        with patch("src.dream_cycle.stages.skim_stage.skim_window"), \
              patch("src.dream_cycle.orchestrator.dream_cycle_db"):
             assert orch._skim_arrivals("run-s", "scheduled", STARTED) is None  # unconfigured, not disabled
 
     @pytest.mark.parametrize("backend", ["kiro", "claude_code", "codex"])
     def test_agentic_backend_returns_none_and_never_invokes(self, backend, caplog):
         orch = _orch(_profile(skim_backend=backend))
-        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.orchestrator"), \
-             patch("src.dream_cycle.orchestrator.skim_window") as sw, \
+        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.stages.skim_stage"), \
+             patch("src.dream_cycle.stages.skim_stage.skim_window") as sw, \
              patch.object(orch, "_invoker_for") as inv, \
              patch("src.dream_cycle.orchestrator.dream_cycle_db"):
             assert orch._skim_arrivals("run-s", "scheduled", STARTED) is None
@@ -149,14 +149,14 @@ class TestSkimArrivalsFallbacks:
     def test_mocked_resolver_returns_none(self):
         """A MagicMock resolver (most orchestrator tests) yields an unknown backend → None."""
         orch = _orch()
-        with patch("src.dream_cycle.orchestrator.skim_window") as sw:
+        with patch("src.dream_cycle.stages.skim_stage.skim_window") as sw:
             assert orch._skim_arrivals("run-s", "scheduled", STARTED) is None
         sw.assert_not_called()
 
     def test_exception_inside_returns_none_with_warning(self, caplog):
         orch = _orch(_profile())
-        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.orchestrator"), \
-             patch("src.dream_cycle.orchestrator.skim_window", side_effect=RuntimeError("db unreachable")), \
+        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.stages.skim_stage"), \
+             patch("src.dream_cycle.stages.skim_stage.skim_window", side_effect=RuntimeError("db unreachable")), \
              patch("src.dream_cycle.orchestrator.dream_cycle_db"):
             assert orch._skim_arrivals("run-s", "scheduled", STARTED) is None
         assert any("Skim failed (non-fatal)" in r.getMessage() for r in caplog.records)
@@ -170,7 +170,7 @@ class TestSkimArrivalsFallbacks:
 
     def test_spend_cap_exceeded_propagates(self):
         orch = _orch(_profile())
-        with patch("src.dream_cycle.orchestrator.skim_window", side_effect=SpendCapExceeded("cap")), \
+        with patch("src.dream_cycle.stages.skim_stage.skim_window", side_effect=SpendCapExceeded("cap")), \
              patch("src.dream_cycle.orchestrator.dream_cycle_db"):
             with pytest.raises(SpendCapExceeded):
                 orch._skim_arrivals("run-s", "scheduled", STARTED)
@@ -182,7 +182,7 @@ class TestSkimArrivalsHappyPath:
         result = SkimResult(docs_total=3, skimmed=2, reused=1, cost_usd=0.002)
         db = MagicMock()
         db.get_previous_run_started_at.return_value = STARTED - timedelta(days=2)
-        with patch("src.dream_cycle.orchestrator.skim_window", return_value=result) as sw, \
+        with patch("src.dream_cycle.stages.skim_stage.skim_window", return_value=result) as sw, \
              patch.object(orch, "_invoker_for", return_value="INVOKER") as inv, \
              patch("src.dream_cycle.orchestrator.dream_cycle_db", db):
             out = orch._skim_arrivals("run-s", "scheduled", STARTED)
@@ -311,7 +311,7 @@ class TestSkimCap:
     @pytest.mark.parametrize("bad", ["abc", "0", "-1"])
     def test_bad_env_falls_back_to_default(self, monkeypatch, bad, caplog):
         monkeypatch.setenv("SECOND_BRAIN_SKIM_CAP_USD", bad)
-        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.orchestrator"):
+        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.stages.skim_stage"):
             assert o._skim_cap_usd(9.0) == pytest.approx(1.00)
         assert any("SECOND_BRAIN_SKIM_CAP_USD" in r.getMessage() for r in caplog.records)
 
@@ -343,7 +343,7 @@ def _skim_record(rid, channel="slack", salience=2, novelty=1, summary="A synthet
 class TestLoadSkimRecords:
     def test_none_or_nothing_stored_fetches_nothing(self):
         orch = _orch()
-        with patch("src.dream_cycle.orchestrator.skim_store") as st, \
+        with patch("src.dream_cycle.stages.skim_stage.skim_store") as st, \
              patch("src.dream_cycle.orchestrator.dream_cycle_db"):
             assert orch._load_skim_records(None, "run-s", "scheduled", STARTED) == []
             assert orch._load_skim_records(SkimResult(docs_total=3, skimmed=0, reused=0), "run-s", "scheduled",
@@ -356,8 +356,8 @@ class TestLoadSkimRecords:
         skim = SkimResult(docs_total=2, skimmed=1, reused=1, model=SKIM_MODEL, prompt_version=PROMPT_VERSION)
         db = MagicMock()
         db.get_previous_run_started_at.return_value = STARTED - timedelta(days=2)
-        with patch("src.dream_cycle.orchestrator.skim_store") as st, \
-             patch("src.dream_cycle.orchestrator.cluster_window") as cw, \
+        with patch("src.dream_cycle.stages.skim_stage.skim_store") as st, \
+             patch("src.dream_cycle.stages.skim_stage.cluster_window") as cw, \
              patch("src.dream_cycle.orchestrator.dream_cycle_db", db):
             st.fetch_window_records.return_value = recs
             out = orch._load_skim_records(skim, "run-s", "scheduled", STARTED)
@@ -368,14 +368,14 @@ class TestLoadSkimRecords:
     def test_store_failure_and_clustering_failure_are_non_fatal(self, caplog):
         orch = _orch()
         skim = SkimResult(docs_total=2, skimmed=2, model=SKIM_MODEL, prompt_version=PROMPT_VERSION)
-        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.orchestrator"), \
+        with caplog.at_level(logging.WARNING, logger="src.dream_cycle.stages.skim_stage"), \
              patch("src.dream_cycle.orchestrator.dream_cycle_db"):
             # Store offline (conftest): the real module raises.
             assert orch._load_skim_records(skim, "run-s", "scheduled", STARTED) == []
         assert any("Skim records unavailable" in r.getMessage() for r in caplog.records)
         recs = [_skim_record("a"), _skim_record("b")]
-        with patch("src.dream_cycle.orchestrator.skim_store") as st, \
-             patch("src.dream_cycle.orchestrator.cluster_window", side_effect=RuntimeError("no vectors")), \
+        with patch("src.dream_cycle.stages.skim_stage.skim_store") as st, \
+             patch("src.dream_cycle.stages.skim_stage.cluster_window", side_effect=RuntimeError("no vectors")), \
              patch("src.dream_cycle.orchestrator.dream_cycle_db"):
             st.fetch_window_records.return_value = recs
             assert orch._load_skim_records(skim, "run-s", "scheduled", STARTED) is recs
@@ -383,7 +383,7 @@ class TestLoadSkimRecords:
     def test_empty_result_set_falls_back(self):
         orch = _orch()
         skim = SkimResult(docs_total=2, skimmed=2, model=SKIM_MODEL, prompt_version=PROMPT_VERSION)
-        with patch("src.dream_cycle.orchestrator.skim_store") as st, \
+        with patch("src.dream_cycle.stages.skim_stage.skim_store") as st, \
              patch("src.dream_cycle.orchestrator.dream_cycle_db"):
             st.fetch_window_records.return_value = []
             assert orch._load_skim_records(skim, "run-s", "scheduled", STARTED) == []
@@ -397,7 +397,7 @@ class TestExplorerInventory:
     def _explore(self, orch, caplog):
         invoker = MagicMock()
         invoker.invoke.return_value = {"output": [], "raw": "[]", "usage": None, "usage_source": "estimate"}
-        with caplog.at_level(logging.INFO, logger="src.dream_cycle.orchestrator"), \
+        with caplog.at_level(logging.INFO, logger="src.dream_cycle.agents.explorer"), \
              patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
              patch.object(orch, "_invoker_for", return_value=invoker), \
              patch.object(orch, "_invoke_metered", side_effect=lambda role, **kw: invoker.invoke(**kw)), patch.object(orch, "_capture"):
@@ -472,7 +472,7 @@ class TestWeightedArrivalsSliceWiring:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db:
             db.get_previous_run_started_at.return_value = STARTED - timedelta(days=1)
             db.get_recent_slice_memory_ids.return_value = set()
-            db.get_memory_provenance.side_effect = lambda ids: [r for r in prov if r["id"] in set(ids)]
+            _provenance.side_effect = lambda ids: [r for r in prov if r["id"] in set(ids)]
             db.get_recent_parent_memories.return_value = new_rows
             out = orch._allocate_attention("run-1", "scheduled", STARTED, [])
         assert [s.strategy for s in out] == ["arrivals_synthesis"]
@@ -491,7 +491,7 @@ class TestWeightedArrivalsSliceWiring:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db:
             db.get_previous_run_started_at.return_value = STARTED - timedelta(days=1)
             db.get_recent_slice_memory_ids.return_value = set()
-            db.get_memory_provenance.side_effect = lambda ids: [self._prov(i) for i in ids]
+            _provenance.side_effect = lambda ids: [self._prov(i) for i in ids]
             db.get_recent_parent_memories.return_value = new_rows
             orch._allocate_attention("run-1", "scheduled", STARTED, [])
         rows = db.record_slices.call_args[0][1]
@@ -503,3 +503,13 @@ class TestWeightedArrivalsSliceWiring:
         with patch("src.dream_cycle.orchestrator.dream_cycle_db"):
             out = orch._allocate_attention("run-1", "scheduled", STARTED, [MemorySlice(name="s", strategy="x", memory_ids=["m"])])
         assert len(out) == 1 and orch._slice_rows == []
+
+
+_provenance = MagicMock()
+
+
+@pytest.fixture(autouse=True)
+def provenance_repository(monkeypatch):
+    """``get_memory_provenance`` lives in ``src.db`` since R3; the ledger imports it directly."""
+    _provenance.reset_mock(return_value=True, side_effect=True)
+    monkeypatch.setattr("src.dream_cycle.ledger.get_memory_provenance", _provenance)

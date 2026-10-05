@@ -239,7 +239,7 @@ def get_evaluator_prompt(
 
     sections = [
         f"You are evaluating a candidate insight. Your role is {_ROLE_DESCRIPTIONS[role]} "
-        "You are one of four evaluators from two model families; your verdict, score and "
+        "You are one of four independent evaluator roles; your verdict, score and "
         "issue lists are combined with theirs.",
         f"## The candidate insight:\n{candidate_json}",
         f"## The source memories it references:\n{source_memories_content}",
@@ -248,16 +248,3 @@ def get_evaluator_prompt(
         sections.append(_ADVOCATE_CONTEXT)
     sections += [_STANDARD, _ROLE_CRITERIA[role], _VERDICT_V2]
     return "\n\n".join(sections)
-
-
-def get_evaluator_prompt_standard(
-    role: str,
-    candidate_json: str,
-    source_memories_content: str,
-) -> str:
-    """Alias of :func:`get_evaluator_prompt` returning the identical text.
-
-    Kept because the replay harness (``scripts/panel_replay.py``) resolves
-    ``--prompt-variant standard`` to ``get_evaluator_prompt_standard``.
-    """
-    return get_evaluator_prompt(role, candidate_json, source_memories_content)

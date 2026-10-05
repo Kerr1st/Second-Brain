@@ -25,6 +25,10 @@ def _prov(mid, source_type="slack", type="source", created=NOW, parent=None):
 # --------------------------------------------------------------------------- #
 # Feedback injection is bounded and reframed                                   #
 # --------------------------------------------------------------------------- #
+def _inventory_text(*args, **kwargs):
+    return allocation.render_arrivals_inventory(*args, **kwargs).text
+
+
 class TestFeedbackBounds:
     def _rows(self, n_cycles, per_cycle, reasoning_chars=1600):
         rows = []
@@ -134,7 +138,7 @@ class TestInventory:
     def test_header_legend_and_line_format(self):
         r = _rec("slack", 3, 2, summary="Priya moved the beta launch to the 14th.", decisions=1, questions=1,
                  people=2, hint="reverses the earlier date", rid="id-1")
-        text = allocation.build_arrivals_inventory(WINDOW, [r], counts_by_channel=self.COUNTS)
+        text = _inventory_text(WINDOW, [r], counts_by_channel=self.COUNTS)
         assert text.startswith("## What arrived since the previous run (2026-09-17 09:00 UTC)")
         assert "172 documents across 3 channels; 1 of them were read by the skim stage" in text
         assert "- article: 120 articles / web pages" in text and "- slack: 40 conversation-days" in text
@@ -144,7 +148,7 @@ class TestInventory:
     def test_flags_unverified_marker_cluster_tag_and_empty_flags(self):
         bang = _rec(decisions=2, unverified=1, rid="id-b")
         plain = _rec(salience=0, novelty=0, summary="", rid="id-p", cluster="c2")
-        text = allocation.build_arrivals_inventory(WINDOW, [bang, plain], counts_by_channel=self.COUNTS)
+        text = _inventory_text(WINDOW, [bang, plain], counts_by_channel=self.COUNTS)
         assert "id-b | slack | S2 N1 | D2 ! | A synthetic summary." in text
         assert "id-p | slack | S0 N0 | - | - [c2]" in text
 
@@ -152,7 +156,7 @@ class TestInventory:
         r = _rec(decisions=1, rid="id-n")
         r["skim"]["decisions"][0]["quote"] = None
         del r["skim"]["quotes_unverified"]
-        assert "id-n | slack | S2 N1 | D1 ! |" in allocation.build_arrivals_inventory(
+        assert "id-n | slack | S2 N1 | D1 ! |" in _inventory_text(
             WINDOW, [r], counts_by_channel=self.COUNTS)
 
     def test_order_salience_then_novelty_then_round_robin_across_channels(self):
@@ -180,7 +184,7 @@ class TestInventory:
 
     def test_summary_is_trimmed_for_the_line(self):
         r = _rec(summary="word " * 60, rid="id-l")
-        line = [l for l in allocation.build_arrivals_inventory(WINDOW, [r], counts_by_channel=self.COUNTS).split("\n")
+        line = [l for l in _inventory_text(WINDOW, [r], counts_by_channel=self.COUNTS).split("\n")
                 if l.startswith("id-l")][0]
         summary = line.split(" | ")[-1]
         assert summary.endswith("…") and len(summary) <= allocation.INVENTORY_SUMMARY_CHARS + 1
@@ -192,10 +196,10 @@ class TestInventory:
             WINDOW, [{"source_type": "article", "documents": 120, "samples": []},
                      {"source_type": "slack", "documents": 40, "samples": []},
                      {"source_type": "outlook_email", "documents": 12, "samples": []}])
-        assert "Nothing new was captured" in allocation.build_arrivals_inventory(WINDOW, [], counts_by_channel={})
+        assert "Nothing new was captured" in _inventory_text(WINDOW, [], counts_by_channel={})
 
     def test_counts_fall_back_to_the_records_when_the_summary_is_missing(self):
-        text = allocation.build_arrivals_inventory(WINDOW, [_rec("slack"), _rec("article")], counts_by_channel={})
+        text = _inventory_text(WINDOW, [_rec("slack"), _rec("article")], counts_by_channel={})
         assert "2 documents across 2 channels" in text
 
 
@@ -349,7 +353,7 @@ class TestSkimWeightedArrivalsSlice:
         slice_, sel = allocation.build_arrivals_selection(WINDOW, dcdb=db, skim_records=[_rec("slack", 3, 3, rid="slack-9")])
         assert slice_.strategy == allocation.ARRIVALS_STRATEGY and "slack-9" in slice_.memory_ids
         assert sel.skim_weighted is True and sel.skim_picked >= 1
-        assert allocation.build_arrivals_slice(WINDOW, dcdb=db).memory_ids == \
+        assert allocation.build_arrivals_selection(WINDOW, dcdb=db)[0].memory_ids == \
                allocation.compose_arrivals_slice(WINDOW, self._rows()).memory_ids
 
 
@@ -370,7 +374,7 @@ class TestPromptContracts:
         assert p.index("## Where memories come from") < p.index("1. TEMPORAL JUXTAPOSITION")
 
     def test_explorer_prompt_explains_the_inventory(self):
-        """Phase 3 (docs/PLAN-skim-stage.md): the Explorer knows the inventory semantics and
+        """Phase 3 (docs/SKIM-STAGE.md): the Explorer knows the inventory semantics and
         is told to build arrival-anchored slices from it across channels and salience levels."""
         p = get_explorer_prompt(memory_count=1, date_range="x", feedback_injection="", run_type="scheduled")
         assert "## The arrivals inventory (in the user message)" in p
@@ -414,10 +418,11 @@ class TestAllocateAttention:
                     [_prov(r["id"], r["source_type"]) for r in new_rows]
         explorer_slices = [MemorySlice(name="stale", strategy="stale_synthesis_check", memory_ids=old_ids)]
 
-        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db:
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch("src.dream_cycle.ledger.get_memory_provenance") as provenance:
             db.get_previous_run_started_at.return_value = WINDOW
             db.get_recent_slice_memory_ids.return_value = set(old_ids[:6])
-            db.get_memory_provenance.side_effect = lambda ids: [r for r in prov_rows if r["id"] in set(ids)]
+            provenance.side_effect = lambda ids: [r for r in prov_rows if r["id"] in set(ids)]
             db.get_recent_parent_memories.return_value = new_rows
             out = self._orch()._allocate_attention("run-1", "scheduled", NOW, explorer_slices)
 
@@ -431,10 +436,11 @@ class TestAllocateAttention:
 
     def test_scoped_runs_are_recorded_but_not_budgeted(self):
         ids = [_uid() for _ in range(3)]
-        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db:
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch("src.dream_cycle.ledger.get_memory_provenance") as provenance:
             db.get_previous_run_started_at.return_value = None
             db.get_recent_slice_memory_ids.return_value = set()
-            db.get_memory_provenance.return_value = [_prov(i, "distilled_chat", "insight", NOW - timedelta(days=40)) for i in ids]
+            provenance.return_value = [_prov(i, "distilled_chat", "insight", NOW - timedelta(days=40)) for i in ids]
             out = self._orch()._allocate_attention("run-2", "user_triggered", NOW,
                                                    [MemorySlice(name="topic", strategy="x", memory_ids=ids)])
         assert [s.name for s in out] == ["topic"]
@@ -444,15 +450,17 @@ class TestAllocateAttention:
     def test_unavailable_provenance_leaves_slices_untouched(self):
         """Fully mocked DB (as in the older orchestrator tests): no judgement, no ledger."""
         slices = [MemorySlice(name="s", strategy="x", memory_ids=["mem-1", "mem-2"])]
-        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db:   # every call returns MagicMock
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch("src.dream_cycle.ledger.get_memory_provenance"):
             out = self._orch()._allocate_attention("run-3", "scheduled", NOW, slices)
         assert out == slices
         db.record_slices.assert_not_called()
 
     def test_failure_is_non_fatal(self):
         slices = [MemorySlice(name="s", strategy="x", memory_ids=[_uid()])]
-        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db:
-            db.get_previous_run_started_at.side_effect = RuntimeError("db down")
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch("src.dream_cycle.ledger.get_memory_provenance") as provenance:
+            db.get_previous_run_started_at.side_effect = OSError("db down")
             out = self._orch()._allocate_attention("run-4", "scheduled", NOW, slices)
         assert out == slices
 

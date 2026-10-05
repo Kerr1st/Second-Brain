@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from unittest.mock import patch
+import pytest
 
 from src.dream_cycle import packet
 from src.dream_cycle.packet import (
@@ -36,8 +37,13 @@ class TestLoader:
         db_call.assert_not_called()
 
     def test_database_failure_degrades_to_empty(self):
-        with patch.object(packet, "get_memories_by_ids", side_effect=RuntimeError("db down")):
+        with patch.object(packet, "get_memories_by_ids", side_effect=OSError("db down")):
             assert load_memories_by_ids([UUID_A]) == []
+
+    def test_programming_failure_propagates(self):
+        with patch.object(packet, "get_memories_by_ids", side_effect=AttributeError("bug")):
+            with pytest.raises(AttributeError):
+                load_memories_by_ids([UUID_A])
 
 
 class TestBuildPacket:

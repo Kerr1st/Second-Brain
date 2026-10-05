@@ -23,11 +23,13 @@ testable without a database; :func:`record_run_slices` does the I/O.
 
 Baseline (2026-09-14..17, three scheduled runs, backfilled from candidate
 citations): arrival_share 0.00, source_types 1, concentration 1.00,
-episodic_share 0.00. See docs/DREAM-CYCLE.md.
+episodic_share 0.00. See docs/ARCHITECTURE.md.
 """
 from __future__ import annotations
+from src.db import get_memory_provenance
 
 import logging
+import psycopg2
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
@@ -191,7 +193,7 @@ def fetch_provenance(slices, dcdb=None) -> dict[str, dict] | None:
     all_ids = []
     for s in slices:
         all_ids += [str(m) for m in (_get(s, "memory_ids") or [])]
-    prov = dcdb.get_memory_provenance(all_ids)
+    prov = get_memory_provenance(all_ids)
     if not isinstance(prov, list):
         return None
     return {str(r["id"]): r for r in prov}
@@ -239,8 +241,8 @@ def record_run_slices(run_id: str, run_type: str, slices, started_at: datetime |
                       origins: dict[int, str] | None = None, dcdb=None) -> dict:
     """Compute metrics for the run's slices, persist them, and return run metrics.
 
-    ``slices`` are MemorySlice objects (or dicts with the same fields). Never
-    raises: the ledger is observability and must not abort a run.
+    ``slices`` are MemorySlice objects (or dicts with the same fields). Expected
+    storage/data errors return no metrics; programming errors remain visible.
     """
     dcdb = _dcdb(dcdb)
     try:
@@ -249,7 +251,7 @@ def record_run_slices(run_id: str, run_type: str, slices, started_at: datetime |
         run = run_metrics(rows)
         log_run_metrics(run)
         return run
-    except Exception:
+    except (psycopg2.Error, OSError, ValueError, KeyError):
         logger.warning("Attention ledger failed (non-fatal)", exc_info=True)
         return {}
 

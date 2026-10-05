@@ -373,19 +373,14 @@ class TestEvaluatorPromptStandard:
         prompt = _prompt_for(role)
 
         assert prompt.startswith("You are evaluating a candidate insight. Your role is THE ")
-        assert "one of four evaluators from two model families" in prompt
+        assert "one of four independent evaluator roles" in prompt
+        assert "verdict, score and issue lists are combined" in prompt
 
     def test_only_the_advocate_gets_user_context(self):
         for role in EVALUATOR_ROLES:
             has_context = "## Context about the user:" in _prompt_for(role)
             assert has_context is (role == "advocate"), role
 
-    def test_standard_alias_returns_identical_text(self):
-        """scripts/panel_replay.py resolves --prompt-variant standard to this name."""
-        from src.prompts.panel import get_evaluator_prompt_standard
-
-        for role in EVALUATOR_ROLES:
-            assert get_evaluator_prompt_standard(role, _CANDIDATE_JSON, _SOURCES) == _prompt_for(role)
 
 
 class TestEvaluatorCriteriaWording:
