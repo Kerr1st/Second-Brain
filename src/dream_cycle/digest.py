@@ -139,19 +139,33 @@ def render_digest(run_id: str, accepted: list[CandidateInsight], rejected: list[
     return "\n".join(lines)
 
 
-def write_digest(run_id: str, text: str, *, date: str) -> str:
-    """Write a private run artifact, optionally inside an evaluation output directory.
+DEFAULT_DIGEST_SUBDIR = "digests"
 
-    A temporary file and atomic replacement keep partial output private and
-    prevent a pre-existing destination symlink from redirecting the write.
+
+def write_digest(run_id: str, text: str, *, date: str) -> str:
+    """Write a private run artifact.
+
+    Default location is ``<repo>/logs/digests/`` -- a subdirectory this writer
+    owns and creates with mode 0700 -- so the installed ``logs/`` directory
+    (0755, shared with job logs) is never required to change mode. An explicit
+    ``SECOND_BRAIN_DIGEST_DIR`` is honoured as given; if it is not private the
+    file is still written (0600, via mkstemp) and a WARNING is logged rather than
+    failing the run (review C S2: a digest refusal must never mark a fully judged
+    run as aborted). A temporary file and atomic replacement keep partial output
+    private and prevent a pre-existing destination symlink from redirecting the
+    write.
     """
-    default_dir = Path(__file__).resolve().parents[2] / "logs"
+    default_dir = Path(__file__).resolve().parents[2] / "logs" / DEFAULT_DIGEST_SUBDIR
     logs_dir = Path(os.environ.get("SECOND_BRAIN_DIGEST_DIR", str(default_dir))).expanduser()
     if not logs_dir.is_absolute() or logs_dir.is_symlink():
         raise ValueError("Digest directory must be absolute and must not be a symlink")
     logs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if logs_dir.stat().st_mode & 0o077:
-        raise ValueError("Digest directory must have private permissions (0700)")
+    mode = logs_dir.stat().st_mode & 0o777
+    if mode & 0o077:
+        if logs_dir == default_dir:
+            os.chmod(logs_dir, 0o700)  # our own directory: make it private
+        else:
+            logger.warning("Digest directory %s is not private (mode %o); digest file will be 0600", logs_dir, mode)
     safe_id = "".join(c for c in str(run_id) if c.isalnum() or c in "-_")[:80] or "unknown"
     safe_date = datetime.strptime(date, "%Y-%m-%d").strftime("%Y-%m-%d")
     file_path = logs_dir / f"dream-cycle-digest-{safe_date}-{safe_id}.md"
@@ -159,6 +173,7 @@ def write_digest(run_id: str, text: str, *, date: str) -> str:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
+        os.chmod(temporary, 0o600)
         os.replace(temporary, file_path)
     finally:
         if os.path.exists(temporary):

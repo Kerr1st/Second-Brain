@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
+import threading
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -54,6 +56,26 @@ _ZERO_STATS = {
     "candidates_accepted": 0,
     "candidates_rejected": 0,
 }
+
+
+class RunInterrupted(BaseException):
+    """SIGTERM/SIGINT arrived mid-run: stop paid work, close the run row as aborted.
+
+    Derives from BaseException (like KeyboardInterrupt) so the per-stage
+    ``except Exception`` fallbacks (Thinker skip, grounding, skim) cannot swallow
+    it; only the dedicated arm in ``_run_locked`` handles it.
+    """
+
+    def __init__(self, signum: int):
+        self.signum = signum
+        try:
+            self.signal_name = signal.Signals(signum).name
+        except ValueError:
+            self.signal_name = str(signum)
+        super().__init__(f"run interrupted by {self.signal_name}")
+
+
+_INTERRUPT_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
 from src.dream_cycle.budget import *
 from src.dream_cycle.budget import _skim_cap_usd
@@ -151,9 +173,23 @@ class DreamCycleOrchestrator(AgentRunner):
 
         # Top-level try/except around the entire pipeline to catch unexpected
         # errors (including DB failures mid-run). The run record should always
-        # be completed, even on error paths.
+        # be completed, even on error paths -- including a SIGTERM from the job
+        # wrapper / launchd or a Ctrl-C, which must not leave completed_at NULL.
+        previous_handlers = self._install_interrupt_handlers()
         try:
             return self._run_pipeline(run_id, run_type, scope, started_at)
+        except RunInterrupted as exc:
+            logger.error("Dream cycle interrupted by %s (run_id=%s); closing the run as aborted with real counts",
+                         exc.signal_name, run_id)
+            try:
+                dream_cycle_db.complete_run(run_id, stats=self._run_stats | {
+                    "aborted": True, "interrupted_by": exc.signal_name,
+                    "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd,
+                    "spend_unknown": bool(self._spend.blocked_reason),
+                }, digest="")
+            except Exception:
+                logger.error("Failed to complete run record after %s", exc.signal_name)
+            return self._aborted_result(run_id, run_type, started_at)
         except psycopg2.OperationalError:
             logger.error("Database unreachable during pipeline execution (run_id=%s)", run_id)
             try:
@@ -187,6 +223,31 @@ class DreamCycleOrchestrator(AgentRunner):
             except Exception:
                 logger.error("Failed to complete run record after unexpected error")
             return self._aborted_result(run_id, run_type, started_at)
+        finally:
+            self._restore_interrupt_handlers(previous_handlers)
+
+    def _install_interrupt_handlers(self) -> dict:
+        """Turn SIGTERM/SIGINT into RunInterrupted (main thread only; no-op elsewhere)."""
+        if threading.current_thread() is not threading.main_thread():
+            return {}
+        previous = {}
+
+        def _raise(signum, frame):
+            raise RunInterrupted(signum)
+        for sig in _INTERRUPT_SIGNALS:
+            try:
+                previous[sig] = signal.signal(sig, _raise)
+            except (ValueError, OSError):
+                continue
+        return previous
+
+    @staticmethod
+    def _restore_interrupt_handlers(previous: dict) -> None:
+        for sig, handler in previous.items():
+            try:
+                signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+            except (ValueError, OSError):
+                continue
 
     def _run_pipeline(
         self,
@@ -386,12 +447,19 @@ class DreamCycleOrchestrator(AgentRunner):
                 "Candidate '%s': %s", candidate.title, final
             )
 
-        # Step 8: Generate digest and complete run
+        # Step 8: Generate digest and complete run. The digest is a convenience
+        # artifact: if writing it fails (permissions, disk, rendering) the run
+        # still completes with its real counts and digest="" (review C S2).
         completed_at = datetime.now(timezone.utc)
-        digest = generate_digest(run_id, accepted, rejected,
-            generated=len(all_candidates), feedback_injected=bool(feedback),
-            cost_usd=self._spend.total_usd, aborted=panel_aborted,
-            storage_failed=self._run_stats.get("candidates_storage_failed", 0))
+        try:
+            digest = generate_digest(run_id, accepted, rejected,
+                generated=len(all_candidates), feedback_injected=bool(feedback),
+                cost_usd=self._spend.total_usd, aborted=panel_aborted,
+                storage_failed=self._run_stats.get("candidates_storage_failed", 0))
+        except Exception:
+            logger.error("Digest could not be written for run %s; completing the run without it", run_id,
+                         exc_info=True)
+            digest = ""
 
         # Step 9: Post-run maintenance — expire stale relationships
         try:

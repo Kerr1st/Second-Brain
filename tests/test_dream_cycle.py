@@ -759,15 +759,18 @@ class TestDigestCompletenessExplicit:
         assert result.stat().st_mode & 0o777 == 0o600
         assert list(output.iterdir()) == [result]
 
-    def test_digest_rejects_non_private_directory(self, tmp_path, monkeypatch):
+    def test_digest_in_non_private_directory_is_written_privately(self, tmp_path, monkeypatch):
+        """R3: a shared directory (the installed logs/ is 0755) is not refused; the
+        file itself is private. Refusing here used to mark a judged run aborted."""
+        from pathlib import Path
         from src.dream_cycle.digest import write_digest
         output = tmp_path / "digests"
         output.mkdir(mode=0o755)
         output.chmod(0o755)
         monkeypatch.setenv("SECOND_BRAIN_DIGEST_DIR", str(output))
-        with pytest.raises(ValueError, match="private permissions"):
-            write_digest("run-path", "Synthetic content", date="2026-09-26")
-        assert list(output.iterdir()) == []
+        result = Path(write_digest("run-path", "Synthetic content", date="2026-09-26"))
+        assert result.stat().st_mode & 0o777 == 0o600
+        assert list(output.iterdir()) == [result]
 
 
 # ---------------------------------------------------------------------------
