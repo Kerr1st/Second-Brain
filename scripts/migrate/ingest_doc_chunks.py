@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 os.environ.setdefault("DB_POOL_MAX", "20")
 
 from src.db import create_memory, get_processed_source_urls
-from src.embeddings import generate_embedding
+from src.embeddings import generate_embedding, embed_leaf
 from src.qd_profile import qd_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
@@ -128,7 +128,9 @@ def ingest_doc_chunks(db_path=None, dry_run=False, workers=20):
             return "skipped"
 
         try:
-            embedding = generate_embedding(text)
+            # QD pre-chunks documents, but a chunk is not guaranteed to fit the
+            # provider limit: bound the input and record any truncation.
+            embedding, embed_meta = embed_leaf(text, embed=generate_embedding)
             create_memory(
                 type="source",
                 title=title_from_source(chunk["source"], chunk["chunk_index"]),
@@ -137,14 +139,17 @@ def ingest_doc_chunks(db_path=None, dry_run=False, workers=20):
                 tags=tags_for_chunk(chunk["extension"], chunk["folder_path"]),
                 source_url=url,
                 source_type=SOURCE_TYPE,
-                metadata=metadata_for_chunk(
-                    node_id=chunk["node"],
-                    chunk_index=chunk["chunk_index"],
-                    file_id=chunk["file_id"],
-                    folder_path=chunk["folder_path"],
-                    extension=chunk["extension"],
-                    source=chunk["source"],
-                ),
+                metadata={
+                    **metadata_for_chunk(
+                        node_id=chunk["node"],
+                        chunk_index=chunk["chunk_index"],
+                        file_id=chunk["file_id"],
+                        folder_path=chunk["folder_path"],
+                        extension=chunk["extension"],
+                        source=chunk["source"],
+                    ),
+                    **embed_meta,
+                },
             )
             return "processed"
         except Exception as e:

@@ -32,7 +32,7 @@ from src.db import (
     find_schemas_for_memories,
 )
 from src.search import hybrid_search, rerank, increment_access_count
-from src.embeddings import generate_embedding
+from src.embeddings import generate_embedding, embed_leaf
 from src.classify import classify_memory
 from src.depth import compute_depth_score
 from src.project import normalize_project_tag
@@ -116,12 +116,15 @@ def memory_create(
     except ValidationError as e:
         return f"Error: {e}"
 
-    embedding = generate_embedding(content)
+    # Leaf write: embed a bounded prefix of long content and record the fact,
+    # rather than sending an over-limit string to the provider.
+    embedding, embed_meta = embed_leaf(content, embed=generate_embedding)
     mem_class = classify_memory(type, content)
     depth_score = compute_depth_score(content)
     project = normalize_project_tag(project)
     metadata = dict(metadata or {})  # copy: never mutate the caller's dict
     metadata["depth_score"] = depth_score
+    metadata.update(embed_meta)
     mid = create_memory(
         type=type, title=title, content=content, embedding=embedding,
         tags=tags, source_type=source_type, source_url=source_url, metadata=metadata,
@@ -306,7 +309,7 @@ def memory_update(
         return "Error: Not found"
 
     if "content" in fields:
-        fields["embedding"] = generate_embedding(fields["content"])
+        fields["embedding"], embed_meta = embed_leaf(fields["content"], embed=generate_embedding)
         existing_metadata = existing.get("metadata") or {}
         if isinstance(existing_metadata, str):
             import json as _json
@@ -314,6 +317,10 @@ def memory_update(
         mem_type = fields.get("type") or existing.get("type") or "idea"
         fields["mem_class"] = classify_memory(mem_type, fields["content"])
         existing_metadata["depth_score"] = compute_depth_score(fields["content"])
+        # The truncation record describes the current embedding only.
+        for key in ("embedding_truncated", "original_chars", "embedded_chars"):
+            existing_metadata.pop(key, None)
+        existing_metadata.update(embed_meta)
         fields["metadata"] = existing_metadata
     try:
         _guarded(update_memory, memory_id, **fields)

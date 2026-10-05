@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.db import create_memory, get_processed_source_urls, get_connection
-from src.embeddings import generate_embedding
+from src.embeddings import generate_embedding, embed_leaf
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -122,7 +122,9 @@ def ingest_eventlog(dry_run=False):
         try:
             md = format_event_as_markdown(event)
             tags = tags_for_event(event)
-            embedding = generate_embedding(md)
+            # One row, one vector: bound the provider input, keep the full text,
+            # and record any truncation in metadata instead of failing the event.
+            embedding, embed_meta = embed_leaf(md, embed=generate_embedding)
 
             create_memory(
                 type="source",
@@ -137,6 +139,7 @@ def ingest_eventlog(dry_run=False):
                     "agent_source": event.get("source"),
                     "importance": event.get("details", {}).get("importance"),
                     "timestamp": event.get("timestamp"),
+                    **embed_meta,
                 },
             )
             stats["processed"] += 1
