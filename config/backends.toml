@@ -81,10 +81,10 @@ editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", ef
 # Estimated ≈ $1.60/run from the June token counts, before thinking tokens.
 explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-5",    effort = "high" }
 thinker        = { backend = "bedrock",     model = "global.anthropic.claude-opus-5", effort = "high" }
-skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
-advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
-epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
-methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
+skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
+epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
 codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
@@ -106,12 +106,23 @@ editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", ef
 # slice contents inline (B2 packet), so it no longer needs memory_read. Cost
 # estimate ≈ $3-4/run (Explorer ~$0.5-1, Thinker ~$1, Claude evaluators ~$0.4,
 # Astra ~$1.6) — under the $6/run cap; ~$100/month nightly.
+#
+# Evaluator-seat output budgets (2026-10-05, review S3-3). A failed call with no
+# usage is reserved at input + max_tokens of output (src/backends/cost.py), so
+# the inherited 32,768 default made one throttled Astra seat cost ≈ $1.70 of
+# the $9 run cap and three attempts ≈ $5. Production llm_metrics to date
+# (real_output_tokens, thinking included): Astra skeptic/epistemologist and
+# grounding audit max 2,293; Sonnet-5 advocate/methodologist max 9,581. Budgets
+# are set ≥ 2x the observed maximum, never below 8192: Astra 8192 (≈ $0.48 raw
+# for a 20k-char prompt), Sonnet-5 20480 (≈ $0.22) — both now sit at the $0.70
+# per-seat floor (EST_JUDGE_CANDIDATE_USD), i.e. ≤ $2.10 for three attempts.
+# A max_tokens stop is still a loud error, never a silent truncation.
 explorer       = { backend = "claude_code", model = "global.anthropic.claude-sonnet-5",  effort = "high" }
 thinker        = { backend = "bedrock",     model = "global.anthropic.claude-opus-5",    effort = "high" }
-skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
-advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
-epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high" }
-methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high" }
+skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
+epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
 codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
