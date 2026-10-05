@@ -18,7 +18,8 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASES = ("sb_suite_test", "sb_migration_fresh_test", "sb_migration_failure_test", "sb_migration_concurrent_test")
+DATABASES = ("sb_suite_test", "sb_migration_fresh_test", "sb_migration_failure_test", "sb_migration_concurrent_test",
+             "sb_migration_016_upgrade_test")
 
 
 def main() -> int:
