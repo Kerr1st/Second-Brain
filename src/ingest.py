@@ -9,7 +9,6 @@ Pipeline: parse metadata header → chunk by section → embed → store.
 import logging
 import re
 import psycopg2
-from botocore.exceptions import BotoCoreError, ClientError
 from datetime import datetime, timezone
 from src.db import (
     create_memory,
@@ -212,7 +211,14 @@ def ingest_content(content, source_type, source_url=None, project=None, *, refre
 
 
 def ingest_batch(items, source_type, *, refresh=False):
-    """Ingest each captured identity once per batch; reject missing identities."""
+    """Ingest each captured identity once per batch; reject missing identities.
+
+    One bad item never aborts the channel: any ``Exception`` (provider, database,
+    validation, or a programming error such as TypeError/KeyError on a malformed
+    item) is logged with its traceback and counted in ``failed`` so it surfaces in
+    the job log and stats, and the batch continues. ``BaseException`` subclasses
+    (KeyboardInterrupt, SystemExit, the dream cycle's RunInterrupted) propagate.
+    """
     stats = {"processed": 0, "skipped": 0, "failed": 0}
     already = set()
     for source_url, content in items:
@@ -229,7 +235,7 @@ def ingest_batch(items, source_type, *, refresh=False):
                 stats["processed"] += 1
             else:
                 stats["skipped"] += 1
-        except (ValueError, OSError, psycopg2.Error, BotoCoreError, ClientError) as exc:
+        except Exception as exc:
             logger.error("Failed to ingest source: %s", type(exc).__name__, exc_info=True)
             stats["failed"] += 1
     return stats
