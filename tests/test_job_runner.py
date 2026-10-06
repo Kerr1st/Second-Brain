@@ -46,6 +46,23 @@ def status(repo, name="test"):
     return json.loads((repo / f"status/{name}.json").read_text())
 
 
+def deadline_starts_when_ready(monkeypatch, marker: Path, limit: float = 10.0):
+    """Short job deadlines (0.5 s) must not race interpreter start-up: under full-suite
+    load bash + Python can take longer than that to install a SIGTERM handler, and the
+    child then dies on the default action before the behaviour under test is reached.
+    The runner's Popen returns only once the child has written ``marker`` (or exited),
+    so ``child.wait(timeout=...)`` — the deadline — starts at readiness."""
+    real_popen = jobs.subprocess.Popen
+
+    def popen(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        waited_until = time.monotonic() + limit
+        while not marker.exists() and child.poll() is None and time.monotonic() < waited_until:
+            time.sleep(0.01)
+        return child
+    monkeypatch.setattr(jobs.subprocess, "Popen", popen)
+
+
 # --------------------------------------------------------------------- basics
 
 def test_environment_cwd_args_and_exit_reach_durable_status(job_env):
@@ -119,6 +136,7 @@ def test_timeout_sends_sigterm_and_waits_the_grace_period_before_sigkill(job_env
                            "signal.signal(signal.SIGTERM, term)\n"
                            "Path('started.marker').write_text('x')\n"
                            "time.sleep(60)\n")
+    deadline_starts_when_ready(monkeypatch, job_env / "started.marker")
     started = time.monotonic()
     assert run_job(str(path), "test", repo=job_env, timeout=0.5) == 124
     assert (job_env / "completed.marker").read_text() == "run row closed"
@@ -135,8 +153,10 @@ def test_grace_waits_for_the_whole_process_group_not_just_the_leader(job_env, mo
     monkeypatch.setenv("SECOND_BRAIN_JOB_GRACE_S", "8")
     child = script(job_env, "import signal,sys,time\nfrom pathlib import Path\n"
                             "def term(*_):\n    time.sleep(2); Path('grandchild.marker').write_text('closed'); sys.exit(0)\n"
-                            "signal.signal(signal.SIGTERM, term)\ntime.sleep(60)\n", name="child.py")
+                            "signal.signal(signal.SIGTERM, term)\nPath('started.marker').write_text('x')\ntime.sleep(60)\n",
+                   name="child.py")
     leader = script(job_env, f"#!/bin/bash\n'{sys.executable}' '{child}'\n", name="leader.sh")  # no exec: bash stays the leader
+    deadline_starts_when_ready(monkeypatch, job_env / "started.marker")
     assert run_job(str(leader), "test", repo=job_env, timeout=0.5) == 124
     assert (job_env / "grandchild.marker").read_text() == "closed"
     assert status(job_env)["stopped_gracefully"] is True
@@ -146,6 +166,7 @@ def test_term_ignoring_child_is_killed_after_the_grace(job_env, monkeypatch):
     monkeypatch.setenv("SECOND_BRAIN_JOB_GRACE_S", "1")
     path = script(job_env, "import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
                            "Path('child.pid').write_text(str(os.getpid())); time.sleep(60)")
+    deadline_starts_when_ready(monkeypatch, job_env / "child.pid")
     started = time.monotonic()
     assert run_job(str(path), "test", repo=job_env, timeout=0.5) == 124
     assert 1.0 <= time.monotonic() - started < 8
