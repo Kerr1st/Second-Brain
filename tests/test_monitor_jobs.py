@@ -13,6 +13,13 @@ broken for days. The failures were not the ones being reported:
   thresholds (3 d / 5 d) were unreachable: the upstream Quick export had stopped, so
   no threshold over our own table could ever be satisfied or diagnose the cause.
 
+R5 moved the channel policy into ``config/liveness.toml`` evaluated by
+``src.operations.liveness`` (tested in ``tests/test_liveness_policy.py``); the shell
+adapter is tested here with that module stubbed: it must fail when the policy
+module fails (the 74ba02d integration was stubbed to ``exit 0`` and untested),
+pass its DB target through from the environment, keep the upstream Quick stat
+check, and notify only on ❌.
+
 So these tests pin the distinctions that make the monitors readable again: OK vs
 EXPIRED vs TOOL-MISSING, REQUIRED vs ADVISORY, and ❌ vs ⚠ with an exit code that
 follows only the ❌ column. Everything is stubbed — no AWS call, no MCP server, no
@@ -95,30 +102,21 @@ def _run_credentials(tmp_path: Path, *args: str, **env_overrides) -> subprocess.
     )
 
 
-def _fake_psql(tmp_path: Path) -> Path:
-    """Stub psql returning an age in days, chosen by substring match on the SQL.
 
-    $FAKE_PSQL_AGES is JSON: {"__default__": 0, "'slack'": 99}. Written in Python so
-    the SQL predicates (quotes, %, spaces) need no shell escaping.
-    """
-    # A /bin/sh wrapper rather than a `#!<interpreter>` shebang: shebangs cannot
-    # carry an interpreter path with spaces (the venv may live under one), and a
-    # failing stub would silently read as "99999d" for every channel.
+
+def _policy_stub(tmp_path: Path) -> Path:
+    """Stub for `python -m src.operations.liveness` (and the qd_profile one-liner).
+
+    $FAKE_POLICY_LINES: text printed verbatim; $FAKE_POLICY_RC: exit code. Records
+    its argv and the DB_* environment it saw in $FAKE_POLICY_LOG so the adapter's
+    env passthrough can be asserted. Never imports src."""
     return _script(
-        tmp_path / "psql",
-        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} - \"$@\" <<'PYTHON'\n"
-        "import json, os, sys\n"
-        'rules = json.loads(os.environ.get("FAKE_PSQL_AGES", "{}"))\n'
-        "sql = sys.argv[-1]\n"
-        'log = os.environ.get("FAKE_PSQL_ARGV_LOG")\n'
-        "if log:\n"
-        "    with open(log, 'a', encoding='utf-8') as fh:\n"
-        "        fh.write(json.dumps(sys.argv[1:]) + '\\n')\n"
-        'age = rules.get("__default__", 0)\n'
-        "for key, value in rules.items():\n"
-        '    if key != "__default__" and key in sql:\n'
-        "        age = value\n"
-        "print(age)\nPYTHON\n",
+        tmp_path / "python",
+        "#!/bin/bash\n"
+        'if [ "${1:-}" = "-c" ]; then exit 0; fi\n'
+        'printf \'%s\\n\' "ARGS $*" "DB_HOST=${DB_HOST:-}" "DB_PORT=${DB_PORT:-}" "DB_NAME=${DB_NAME:-}" "DB_USER=${DB_USER:-}" >> "$FAKE_POLICY_LOG"\n'
+        'printf \'%s\' "${FAKE_POLICY_LINES:-}"\n'
+        'exit "${FAKE_POLICY_RC:-0}"\n',
     )
 
 
@@ -131,30 +129,28 @@ def _quick_db(tmp_path: Path, age_days: float, name: str = "knowledge_v1.db") ->
     return db
 
 
-def _run_liveness(tmp_path: Path, ages=None, **env_overrides) -> subprocess.CompletedProcess:
+def _run_liveness(tmp_path: Path, lines: str = "", rc: int = 0, pg_ready: bool = True, **env_overrides) -> subprocess.CompletedProcess:
     _fake_notifier(tmp_path)
     env = {
         **os.environ,
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
-        "PSQL_BIN": str(_fake_psql(tmp_path)),
-        "PG_ISREADY_BIN": str(_script(tmp_path / "pg_isready", "#!/bin/bash\nexit 0\n")),
-        "FAKE_PSQL_AGES": json.dumps({"__default__": 0, **(ages or {})}),
-        # A stub interpreter, so a missing QD_DB_PATH can never reach src/qd_profile.
-        "SECOND_BRAIN_PYTHON": str(_fake_python(tmp_path)),
+        "PG_ISREADY_BIN": str(_script(tmp_path / "pg_isready", f"#!/bin/bash\nexit {0 if pg_ready else 2}\n")),
+        "SECOND_BRAIN_PYTHON": str(_policy_stub(tmp_path)),
+        "SECOND_BRAIN_STATUS_DIR": str(tmp_path / "status"),
+        "FAKE_POLICY_LOG": str(tmp_path / "policy.log"),
+        "FAKE_POLICY_LINES": lines,
+        "FAKE_POLICY_RC": str(rc),
         # A fresh upstream stub unless the test supplies its own (minting it here
         # would otherwise reset a deliberately-aged file's mtime).
-        "QD_DB_PATH": env_overrides.pop(
-            "QD_DB_PATH", str(_quick_db(tmp_path, 0, "upstream-fresh.db"))
-        ),
+        "QD_DB_PATH": env_overrides.pop("QD_DB_PATH", str(_quick_db(tmp_path, 0, "upstream-fresh.db"))),
         **env_overrides,
     }
-    return subprocess.run(
-        ["bash", str(LIVENESS)],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    return subprocess.run(["bash", str(LIVENESS)], env=env, capture_output=True, text=True, check=False)
+
+
+def _policy_log(tmp_path: Path) -> list[str]:
+    log = tmp_path / "policy.log"
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
 
 
 # --------------------------------------------------------------------------- #
@@ -234,69 +230,74 @@ def test_usr_local_bin_is_on_the_path_under_a_launchd_environment(tmp_path: Path
     assert "timeout" in tools
 
 
+
+
 # --------------------------------------------------------------------------- #
-# verify_liveness.sh
+# verify_liveness.sh (adapter around src.operations.liveness)
 # --------------------------------------------------------------------------- #
 
 
-def test_all_channels_fresh_exits_zero(tmp_path: Path):
-    result = _run_liveness(tmp_path)
+def test_all_green_exits_zero_and_echoes_the_policy_lines(tmp_path: Path):
+    result = _run_liveness(tmp_path, lines="✅ [channel:slack] ok (0d / max 4d)\n✅ [job:backup] job backup succeeded (exit 0)\n")
 
     assert result.returncode == 0, result.stdout
     assert "=== All monitored channels live ===" in result.stdout
-    assert "❌" not in result.stdout
-    assert "✅ codex_task ok" in result.stdout
+    assert "✅ [channel:slack] ok" in result.stdout
     assert "✅ quick_upstream ok" in result.stdout
+    assert "❌" not in result.stdout
     assert _notifications(tmp_path) == []
+    assert any(a.startswith("ARGS -m src.operations.liveness --status-dir") for a in _policy_log(tmp_path))
 
 
-@pytest.mark.parametrize(
-    "predicate,label",
-    [
-        ("'slack'", "slack"),
-        ("'kiro_cli_chat'", "cli_chat"),
-        ("'outlook_email'", "outlook_email"),
-        # Codex capture went live 2026-09-22 and was unmonitored until now.
-        ("'codex_task'", "codex_task"),
-    ],
-)
-def test_a_silent_required_channel_fails_the_job_and_notifies(
-    tmp_path: Path, predicate: str, label: str
-):
-    result = _run_liveness(tmp_path, ages={predicate: 99})
+def test_a_required_policy_failure_fails_the_job_and_notifies(tmp_path: Path):
+    """The 74ba02d adapter stubbed this call to exit 0 in tests (E mutation: 14/14 still
+    passed with the integration removed). A ❌ from the policy module must reach the
+    exit code, the summary line and the notification."""
+    result = _run_liveness(
+        tmp_path, rc=1,
+        lines="❌ [channel:slack] SILENT — last capture 99d ago (max 4d)\n⚠ [channel:distilled_chat] silent 14d — advisory\n"
+              "❌ [job:backup] job backup last exit 69 (1 consecutive, first failure 0.3d ago)\n",
+    )
 
     assert result.returncode != 0, result.stdout
-    assert f"❌ {label} SILENT — last capture 99d ago" in result.stdout
-    assert f"=== SILENT CHANNELS: {label}(99d) ===" in result.stdout
+    assert "❌ [channel:slack] SILENT — last capture 99d ago" in result.stdout
+    assert "=== SILENT CHANNELS: channel:slack job:backup ===" in result.stdout
+    assert "durable report:" in result.stdout and "liveness-report.json" in result.stdout
+    assert "advisory, NOT failing the job: distilled_chat" in result.stdout
     assert len(_notifications(tmp_path)) == 1
 
 
-def test_the_retired_quick_doc_channel_stays_visible_without_failing(tmp_path: Path):
-    """Dormant since 2026-06-04 — the loudest source of the old nightly false alarm."""
-    result = _run_liveness(tmp_path, ages={"= 'quick_desktop_doc'": 400})
+def test_advisory_only_output_keeps_the_job_green(tmp_path: Path):
+    """E-N6: known-disabled producers (distill, weekly digest) are ⚠, never ❌."""
+    result = _run_liveness(
+        tmp_path, rc=0,
+        lines="⚠ [channel:distilled_chat] silent 14d (max 7d) — advisory: launchctl-disabled\n"
+              "⚠ [channel:weekly_digest] silent 99999d (max 14d) — advisory\n⚠ [zero_output:slack] produced zero rows for 3d\n",
+    )
 
     assert result.returncode == 0, result.stdout
-    assert "⚠ quick_desktop_doc retired" in result.stdout
-    assert "400d ago" in result.stdout  # still reported, not silently deleted
-    assert "❌" not in result.stdout
+    assert "=== advisory, NOT failing the job: distilled_chat weekly_digest slack ===" in result.stdout
     assert _notifications(tmp_path) == []
 
 
-def test_quick_synthesis_threshold_tolerates_the_observed_upstream_gaps(tmp_path: Path):
-    """Observed inter-capture gaps are 11 d and 14 d; the old 5 d could never pass."""
-    fresh = _run_liveness(tmp_path, ages={"LIKE 'quick_desktop_%'": 14})
-    stalled = _run_liveness(tmp_path, ages={"LIKE 'quick_desktop_%'": 60})
+def test_policy_module_crash_is_a_failure_not_a_silent_pass(tmp_path: Path):
+    result = _run_liveness(tmp_path, rc=3, lines="Traceback: synthetic crash\n")
 
-    assert fresh.returncode == 0, fresh.stdout
-    assert "✅ quick_desktop_synth ok (14d" in fresh.stdout
-    # ...but a genuine multi-week ingest stall is still caught.
-    assert stalled.returncode != 0
-    assert "❌ quick_desktop_synth SILENT" in stalled.stdout
+    assert result.returncode != 0
+    assert "=== SILENT CHANNELS: policy-exit-3 ===" in result.stdout
+    assert len(_notifications(tmp_path)) == 1
 
 
-def test_a_stale_upstream_quick_export_is_reported_as_such_not_as_our_breakage(
-    tmp_path: Path,
-):
+def test_unreachable_database_fails_but_still_sweeps_job_statuses(tmp_path: Path):
+    result = _run_liveness(tmp_path, pg_ready=False, lines="⚠ [job:backup] job backup: no status file yet\n")
+
+    assert result.returncode != 0
+    assert "❌ database not reachable" in result.stdout
+    assert "database(unreachable)" in result.stdout
+    assert any("--skip-db" in a for a in _policy_log(tmp_path)), "the status sweep must still run without the DB"
+
+
+def test_a_stale_upstream_quick_export_is_reported_as_such_not_as_our_breakage(tmp_path: Path):
     """"Quick stopped exporting" is visible, and advisory: not ours to repair."""
     result = _run_liveness(tmp_path, QD_DB_PATH=str(_quick_db(tmp_path, 40)))
 
@@ -330,31 +331,19 @@ def test_the_upstream_check_never_reads_the_quick_corpus(tmp_path: Path):
 
 
 def test_liveness_database_target_comes_from_env_not_hardcoded_production(tmp_path: Path):
-    """The monitor must read DB_HOST/DB_PORT/DB_NAME/DB_USER so a test (or a
+    """The monitor must pass DB_HOST/DB_PORT/DB_NAME/DB_USER through so a test (or a
     staging host) can never make it query the production database by default
     path. 1071a81 hard-coded ``-h 127.0.0.1 -p 5432 -d memory_bank``."""
-    argv_log = tmp_path / "psql-argv.jsonl"
-    result = _run_liveness(
-        tmp_path,
-        FAKE_PSQL_ARGV_LOG=str(argv_log),
-        DB_HOST=str(tmp_path / "socket"),
-        DB_PORT="5999",
-        DB_NAME="sb_liveness_test",
-        DB_USER="sb_test",
-    )
+    result = _run_liveness(tmp_path, DB_HOST=str(tmp_path / "socket"), DB_PORT="5999",
+                           DB_NAME="sb_liveness_test", DB_USER="sb_test")
 
     assert result.returncode == 0, result.stdout
-    calls = [json.loads(line) for line in argv_log.read_text(encoding="utf-8").splitlines()]
-    assert calls, "psql stub was never invoked"
-    for argv in calls:
-        assert argv[argv.index("-h") + 1] == str(tmp_path / "socket")
-        assert argv[argv.index("-p") + 1] == "5999"
-        assert argv[argv.index("-d") + 1] == "sb_liveness_test"
-        assert argv[argv.index("-U") + 1] == "sb_test"
-        assert "127.0.0.1" not in argv and "memory_bank" not in argv
+    seen = dict(line.split("=", 1) for line in _policy_log(tmp_path) if "=" in line)
+    assert seen == {"DB_HOST": str(tmp_path / "socket"), "DB_PORT": "5999", "DB_NAME": "sb_liveness_test", "DB_USER": "sb_test"}
     # Defaults must stay the production target so the installed job is unchanged.
     script = LIVENESS.read_text(encoding="utf-8")
     assert 'DB_HOST="${DB_HOST:-127.0.0.1}"' in script
     assert 'DB_PORT="${DB_PORT:-5432}"' in script
     assert 'DB_NAME="${DB_NAME:-memory_bank}"' in script
     assert "-h 127.0.0.1" not in script and "-p 5432" not in script
+    assert "psql" not in "\n".join(l for l in script.splitlines() if not l.lstrip().startswith("#"))
