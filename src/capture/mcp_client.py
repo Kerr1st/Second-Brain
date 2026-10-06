@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import subprocess
 from typing import Any
 
@@ -40,6 +41,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_CALL_TIMEOUT = 120  # seconds per tool call
 DEFAULT_MAX_RECONNECTS = 1  # reconnect budget for the whole session, not per call
 DEFAULT_RECONNECT_BACKOFF = 2.0  # seconds before the single retry
+# Rate limits (slack-mcp: 120 get_messages per 60 s window, "Retry after N s").
+# Off by default: an adapter that knows its server's limit opts in (see slack.py).
+DEFAULT_RATE_LIMIT_RETRIES = 0        # retries per call after a throttled reply
+DEFAULT_RATE_LIMIT_MAX_WAIT = 90.0    # cap on one Retry-After sleep (seconds)
+DEFAULT_RATE_LIMIT_WAIT_BUDGET = 600.0  # total Retry-After sleep per session (seconds)
+DEFAULT_RATE_LIMIT_FALLBACK_WAIT = 5.0  # when the server gives no Retry-After
 
 # --------------------------------------------------------------------------- #
 # Exit-code taxonomy for scheduled capture jobs                                #
@@ -61,6 +68,23 @@ class McpToolError(RuntimeError):
     not sink the run). Auth and transport failures therefore do *not* use it —
     swallowing those is exactly how two days of Slack went missing.
     """
+
+
+class McpRateLimited(McpToolError):
+    """The server refused the call with a rate limit and (usually) a Retry-After.
+
+    slack-mcp answers ``RATE_LIMIT_EXCEEDED`` as a tool error whose text ends in
+    ``"Retry after N s."`` (and carries ``details.timeout`` in ms). On 2026-10-05
+    72 such errors were logged in one run while the job still reported
+    ``failed=0``: the collector swallowed them as ordinary tool errors and 36
+    conversation-days were silently dropped. :meth:`McpClient.call_json` now
+    honours the Retry-After with a bounded budget; what is still refused after
+    the budget propagates as this error and is counted as a failure.
+    """
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class McpAuthError(RuntimeError):
@@ -116,6 +140,29 @@ _CLOSED_TYPES = (
 )
 # Transport-ish but not worth reconnecting inside the same call (a hung server).
 _HUNG_MARKERS = ("timed out after", "timeout", "exit status")
+# A server-side throttle: wait what it asks for (bounded), then try again.
+_RATE_LIMIT_MARKERS = ("rate_limit_exceeded", "rate limit exceeded", "ratelimiterror", "too many requests")
+_RETRY_AFTER_RE = re.compile(r"retry\s+after\s+(\d+(?:\.\d+)?)\s*(ms|s)?", re.I)
+
+
+def rate_limit_retry_after(text: str) -> float | None:
+    """Seconds the server asked us to wait, or None when it did not say.
+
+    Understands ``"Retry after 38s."`` and a ``details.timeout`` in milliseconds
+    (slack-mcp emits both for the same error).
+    """
+    m = _RETRY_AFTER_RE.search(text or "")
+    if m:
+        value = float(m.group(1))
+        return value / 1000.0 if (m.group(2) or "s").lower() == "ms" else value
+    m = re.search(r'"timeout"\s*:\s*(\d+)', text or "")
+    if m:
+        return int(m.group(1)) / 1000.0
+    return None
+
+
+def is_rate_limited(text: str) -> bool:
+    return any(marker in (text or "").lower() for marker in _RATE_LIMIT_MARKERS)
 
 
 def _one_line(text: str, limit: int = 300) -> str:
@@ -262,12 +309,20 @@ class McpClient:
     def __init__(self, command: str, args: list[str] | None = None,
                  call_timeout: float = DEFAULT_CALL_TIMEOUT,
                  max_reconnects: int = DEFAULT_MAX_RECONNECTS,
-                 reconnect_backoff: float = DEFAULT_RECONNECT_BACKOFF):
+                 reconnect_backoff: float = DEFAULT_RECONNECT_BACKOFF,
+                 rate_limit_retries: int = DEFAULT_RATE_LIMIT_RETRIES,
+                 rate_limit_max_wait: float = DEFAULT_RATE_LIMIT_MAX_WAIT,
+                 rate_limit_wait_budget: float = DEFAULT_RATE_LIMIT_WAIT_BUDGET):
         self._params = StdioServerParameters(command=command, args=list(args or []))
         self._timeout = call_timeout
         self._max_reconnects = max(0, int(max_reconnects))
         self._reconnect_backoff = reconnect_backoff
+        self._rate_limit_retries = max(0, int(rate_limit_retries))
+        self._rate_limit_max_wait = max(0.0, float(rate_limit_max_wait))
+        self._rate_limit_wait_budget = max(0.0, float(rate_limit_wait_budget))
         self.reconnects_used = 0
+        self.rate_limit_waited = 0.0   # seconds slept on Retry-After this session
+        self.rate_limit_hits = 0       # throttled replies seen (retried or not)
         self._stack: list = []
         self._session: ClientSession | None = None
 
@@ -311,6 +366,8 @@ class McpClient:
             # former must abort the run, the latter is skippable per item.
             if _matches(RuntimeError(text), _AUTH_MARKERS):
                 raise McpAuthError(f"{tool}: {_one_line(text)}")
+            if is_rate_limited(text):
+                raise McpRateLimited(f"{tool}: {_one_line(text)}", rate_limit_retry_after(text))
             raise McpToolError(f"{tool}: {text[:300]}")
         payload = parse_payload(text)
         auth = auth_error_in_payload(payload)
@@ -318,15 +375,45 @@ class McpClient:
             raise McpAuthError(f"{tool}: {auth}")
         return payload
 
+    async def _call_rate_limited(self, tool: str, params: dict | None = None) -> Any:
+        """``_call_once`` plus a bounded Retry-After loop for throttled replies.
+
+        Every throttled reply is counted in ``rate_limit_hits``. A retry waits
+        ``min(Retry-After, rate_limit_max_wait)`` (or a small fallback when the
+        server gave none) and only while the session's total sleep stays inside
+        ``rate_limit_wait_budget``; otherwise the :class:`McpRateLimited` is
+        re-raised so the caller counts the item as failed instead of dropping it.
+        """
+        attempt = 0
+        while True:
+            try:
+                return await self._call_once(tool, params)
+            except McpRateLimited as e:
+                self.rate_limit_hits += 1
+                wait = e.retry_after if e.retry_after is not None else DEFAULT_RATE_LIMIT_FALLBACK_WAIT
+                wait = min(max(wait, 0.0), self._rate_limit_max_wait)
+                if attempt >= self._rate_limit_retries \
+                        or self.rate_limit_waited + wait > self._rate_limit_wait_budget:
+                    logger.warning("%s: rate limited and out of retry budget (attempt %d, waited %.0fs of %.0fs)",
+                                   tool, attempt, self.rate_limit_waited, self._rate_limit_wait_budget)
+                    raise
+                attempt += 1
+                self.rate_limit_waited += wait
+                logger.info("%s: rate limited — honouring Retry-After, sleeping %.1fs (retry %d/%d)",
+                            tool, wait, attempt, self._rate_limit_retries)
+                await asyncio.sleep(wait)
+
     async def call_json(self, tool: str, params: dict | None = None) -> Any:
         """Call ``tool`` and return its parsed JSON payload.
 
         Reconnects and retries **once per session** when the connection is gone
         (``McpError: Connection closed``, a broken pipe, or a server that
-        exited). Anything else — including auth errors — propagates untouched.
+        exited). Throttled replies are retried within the rate-limit budget (see
+        :meth:`_call_rate_limited`). Anything else — including auth errors —
+        propagates untouched.
         """
         try:
-            return await self._call_once(tool, params)
+            return await self._call_rate_limited(tool, params)
         except Exception as e:
             if not is_connection_closed(e):
                 raise
@@ -341,7 +428,7 @@ class McpClient:
             await asyncio.sleep(self._reconnect_backoff)
             try:
                 await self._connect()
-                return await self._call_once(tool, params)
+                return await self._call_rate_limited(tool, params)
             except Exception as retry_exc:
                 if is_auth_error(retry_exc):
                     raise  # the server came back and told us the token is stale

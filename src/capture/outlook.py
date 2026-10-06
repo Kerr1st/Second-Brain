@@ -30,7 +30,6 @@ import logging
 import os
 import re
 import sys
-from mcp.shared.exceptions import McpError
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
@@ -287,7 +286,10 @@ async def _run_async(days_back: int, calendar: bool, dry_run: bool) -> dict:
             if client.reconnects_used:
                 logger.warning("grasp-mcp connection was re-established %d time(s) during this run",
                                client.reconnects_used)
-    except (OSError, ValueError, RuntimeError, asyncio.TimeoutError, McpError) as e:
+    except Exception as e:  # noqa: BLE001 - classify everything: transport death vs stale token vs bug.
+        # A KeyError/TypeError from a malformed payload or an anyio ExceptionGroup
+        # must still produce the one-line classified failure and its exit code,
+        # not a bare traceback (D N-7).
         kind = classify_error(e)
         raise CaptureFailure(kind, str(e), AUTH_FIX if kind == "auth" else None) from e
 

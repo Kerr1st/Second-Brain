@@ -29,12 +29,12 @@ import logging
 import os
 import re
 import sys
-from mcp.shared.exceptions import McpError
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from src.capture.mcp_client import (
-    CaptureFailure, McpClient, McpToolError, auth_error_in_payload, classify_error, report_failure,
+    CaptureFailure, McpClient, McpRateLimited, McpToolError, auth_error_in_payload, classify_error,
+    report_failure,
 )
 
 from src.capture.common import CaptureBatch, exit_code
@@ -50,6 +50,15 @@ SLACK_CMD = os.environ.get("SLACK_MCP", os.path.expanduser("~/.aim/mcp-servers/s
 # Per-tool-call ceiling. A channel-day page (200 messages + up to 50 threads) is
 # the heaviest call; 120s is generous for it and still bounded.
 SLACK_CALL_TIMEOUT = float(os.environ.get("SLACK_CALL_TIMEOUT", "120"))
+# slack-mcp throttles get_messages at 120 calls per 60 s and answers
+# RATE_LIMIT_EXCEEDED with "Retry after N s". A 200-conversation, 2-day run makes
+# up to ~400 such calls, so throttling is normal, not a fault: honour the
+# Retry-After (bounded per call and per run) and count whatever is still refused
+# as a failed conversation-day instead of silently dropping it (2026-10-05: 72
+# throttled replies, 36 days dropped, job reported failed=0).
+SLACK_RATE_LIMIT_RETRIES = int(os.environ.get("SLACK_RATE_LIMIT_RETRIES", "3"))
+SLACK_RATE_LIMIT_MAX_WAIT = float(os.environ.get("SLACK_RATE_LIMIT_MAX_WAIT", "90"))
+SLACK_RATE_LIMIT_WAIT_BUDGET = float(os.environ.get("SLACK_RATE_LIMIT_WAIT_BUDGET", "900"))
 # The probe must be quick — it exists to fail fast, not to wait out a sick server.
 PROBE_TOOL = "list_my_channels"
 PROBE_TIMEOUT = float(os.environ.get("SLACK_PROBE_TIMEOUT", "60"))
@@ -266,9 +275,14 @@ def _dm_inactive_for(conv: dict, days: list[date]) -> bool:
     return la < since
 
 
+def _one_line_err(exc: BaseException, limit: int = 160) -> str:
+    return " ".join(str(exc).split())[:limit]
+
+
 async def collect(call: Call, days: list[date], already: set[str],
                   max_conversations: int = MAX_CONVERSATIONS) -> list[tuple[str, str]]:
     items = CaptureBatch()
+    items.rate_limited = 0
     convs = await list_conversations(call, max_conversations)
     logger.info("Slack: %d conversations, days %s", len(convs), [d.isoformat() for d in days])
     for conv in convs:
@@ -280,6 +294,14 @@ async def collect(call: Call, days: list[date], already: set[str],
                 continue
             try:
                 meta, messages = await fetch_day(call, conv, day)
+            except McpRateLimited as e:
+                # The client already slept through its Retry-After budget; what
+                # is still refused is a lost conversation-day, i.e. a failure.
+                logger.warning("Slack conversation-day still rate limited after backoff (%s); counted as failed",
+                               _one_line_err(e))
+                items.failed += 1
+                items.rate_limited += 1
+                continue
             except McpToolError as e:
                 logger.warning("Slack conversation-day fetch failed: %s", type(e).__name__)
                 items.failed += 1
@@ -305,18 +327,29 @@ async def _run_async(days_back: int, max_conversations: int, dry_run: bool) -> d
     days = completed_days(days_back)
     already = set(get_processed_source_urls(SOURCE_TYPE))
     try:
-        async with McpClient(SLACK_CMD, [], call_timeout=SLACK_CALL_TIMEOUT) as client:
+        async with McpClient(SLACK_CMD, [], call_timeout=SLACK_CALL_TIMEOUT,
+                             rate_limit_retries=SLACK_RATE_LIMIT_RETRIES,
+                             rate_limit_max_wait=SLACK_RATE_LIMIT_MAX_WAIT,
+                             rate_limit_wait_budget=SLACK_RATE_LIMIT_WAIT_BUDGET) as client:
             kind, detail = await preflight(client.call_json)
             if kind != "ok":
                 # Do not attempt the capture: with a stale cookie every call fails.
                 raise CaptureFailure(kind, detail, AUTH_FIX if kind == "auth" else None)
             items = await collect(client.call_json, days, already, max_conversations)
+            throttle = {"hits": getattr(client, "rate_limit_hits", 0),
+                        "waited_s": round(getattr(client, "rate_limit_waited", 0.0), 1)}
     except CaptureFailure:
         raise
-    except (OSError, ValueError, RuntimeError, asyncio.TimeoutError, McpError) as e:
-        raise CaptureFailure(classify_error(e), str(e),
-                             AUTH_FIX if classify_error(e) == "auth" else None) from e
+    except Exception as e:  # noqa: BLE001 - classify everything (KeyError, ExceptionGroup, ...) then exit with the right code
+        kind = classify_error(e)
+        raise CaptureFailure(kind, str(e), AUTH_FIX if kind == "auth" else None) from e
     stats = run_channel(SOURCE_TYPE, items, dry_run=dry_run, ingest=ingest_batch)
+    stats["rate_limited"] = getattr(items, "rate_limited", 0)
+    stats["throttle"] = throttle
+    if stats["rate_limited"]:
+        logger.error("Slack: %d conversation-day(s) lost to rate limiting after %.0fs of Retry-After backoff "
+                     "(%d throttled replies); run is partial", stats["rate_limited"], throttle["waited_s"],
+                     throttle["hits"])
     logger.info("%s: %s", SOURCE_TYPE, stats)
     return stats
 
