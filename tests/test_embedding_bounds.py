@@ -7,8 +7,10 @@ instead of being stored. These tests pin the repaired contract:
 
 * every string handed to the provider is at most ``EMBEDDING_SAFE_CHARS`` long;
 * chunked ingestion stores the complete parent and embeds bounded chunks;
-* leaf writers (one row, one vector) embed a bounded prefix, keep the full
-  content and record ``embedding_truncated`` / ``original_chars`` in metadata;
+* leaf writers (one row, one vector: ``memory_create``/``memory_update``) embed
+  a bounded prefix, keep the full content and record ``embedding_truncated`` /
+  ``original_chars`` in metadata; the hourly QD writers moved onto
+  ``ingest_content`` in R4 and store oversized items as bounded chunks;
 * the truncation is logged.
 """
 import json
@@ -106,8 +108,19 @@ def test_ingest_content_stores_the_whole_oversized_parent_with_bounded_embedded_
     assert all(len(text) <= EMBEDDING_SAFE_CHARS for text in embed.inputs)
 
 
-def test_eventlog_oversized_event_is_stored_with_a_recorded_truncation(test_conn, caplog):
-    from scripts.migrate import ingest_eventlog as mod
+def _bounded_ingest(monkeypatch):
+    import src.ingest as ingest
+    embed = _BoundedEmbedder()
+    monkeypatch.setattr(ingest, "generate_embedding", embed)
+    monkeypatch.setattr(ingest, "_discover_relationships", lambda *a: None)
+    return embed
+
+
+def test_eventlog_oversized_event_is_stored_whole_with_bounded_embedded_chunks(test_conn, monkeypatch):
+    """R4: the hourly feed writer goes through ``ingest_content`` (R3 embeds a
+    bounded prefix per leaf; R4 stores the complete event and embeds bounded
+    chunks). Either way an oversized event is stored, never ``Failed`` hourly."""
+    from src.capture import qd_eventlog as mod
     event = {"id": "test-evt_oversize", "timestamp": "2026-10-05T12:00:00", "source": "agent:session-recorder",
              "event_type": "session_event", "summary": "Very long session",
              "details": {"full_message": OVERSIZED}}
@@ -115,43 +128,44 @@ def test_eventlog_oversized_event_is_stored_with_a_recorded_truncation(test_conn
         f.write(json.dumps(event) + "\n")
         path = f.name
     try:
-        embed = _BoundedEmbedder()
-        with patch.object(mod, "EVENTLOG_PATH", path), patch.object(mod, "generate_embedding", embed), \
-                caplog.at_level(logging.WARNING, logger="src.embeddings"):
+        embed = _bounded_ingest(monkeypatch)
+        with patch.object(mod, "EVENTLOG_PATH", path):
             stats = mod.ingest_eventlog(dry_run=False)
     finally:
         os.unlink(path)
     assert stats == {"processed": 1, "skipped": 0, "failed": 0}
-    assert len(embed.inputs) == 1 and len(embed.inputs[0]) == EMBEDDING_SAFE_CHARS
+    assert len(embed.inputs) >= 2 and all(len(text) <= 4000 for text in embed.inputs)
     with test_conn.cursor() as cur:
-        cur.execute("SELECT length(content), embedding IS NOT NULL, metadata FROM memories WHERE source_url = 'qd-feed://test-evt_oversize'")
-        length, embedded, metadata = cur.fetchone()
-    assert length > EMBEDDING_MAX_CHARS and embedded
-    assert metadata["embedding_truncated"] is True
-    assert metadata["original_chars"] == length and metadata["embedded_chars"] == EMBEDDING_SAFE_CHARS
+        cur.execute("SELECT id, length(content), metadata FROM memories WHERE source_url = 'qd-feed://test-evt_oversize' AND parent_id IS NULL")
+        parent_id, length, metadata = cur.fetchone()
+        cur.execute("SELECT count(*), count(*) FILTER (WHERE embedding IS NULL) FROM memories WHERE parent_id = %s", (parent_id,))
+        children, unembedded = cur.fetchone()
+    assert length > EMBEDDING_MAX_CHARS
+    assert children == len(embed.inputs) and unembedded == 0
     assert metadata["event_type"] == "session_event"
-    assert any("embedding_input_truncated" in r.getMessage() for r in caplog.records)
 
 
-def test_eventlog_normal_event_carries_no_truncation_metadata(test_conn):
-    from scripts.migrate import ingest_eventlog as mod
+def test_eventlog_normal_event_is_stored_once(test_conn, monkeypatch):
+    from src.capture import qd_eventlog as mod
     event = {"id": "test-evt_small", "timestamp": "2026-10-05T12:00:00", "source": "agent:x",
              "event_type": "notification", "summary": "Small", "details": {"full_message": "hello"}}
     with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
         f.write(json.dumps(event) + "\n")
         path = f.name
     try:
-        with patch.object(mod, "EVENTLOG_PATH", path), patch.object(mod, "generate_embedding", _BoundedEmbedder()):
+        embed = _bounded_ingest(monkeypatch)
+        with patch.object(mod, "EVENTLOG_PATH", path):
             assert mod.ingest_eventlog(dry_run=False)["processed"] == 1
     finally:
         os.unlink(path)
+    assert len(embed.inputs) == 1
     with test_conn.cursor() as cur:
-        cur.execute("SELECT metadata FROM memories WHERE source_url = 'qd-feed://test-evt_small'")
+        cur.execute("SELECT metadata FROM memories WHERE source_url = 'qd-feed://test-evt_small' AND parent_id IS NULL")
         assert "embedding_truncated" not in cur.fetchone()[0]
 
 
-def test_doc_chunk_oversized_text_is_stored_with_a_recorded_truncation(test_conn):
-    from scripts.migrate import ingest_doc_chunks as mod
+def test_doc_chunk_oversized_text_is_stored_whole_with_bounded_embedded_chunks(test_conn, monkeypatch):
+    from src.capture import qd_docs as mod
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         path = f.name
     conn = sqlite3.connect(path)
@@ -161,18 +175,16 @@ def test_doc_chunk_oversized_text_is_stored_with_a_recorded_truncation(test_conn
     conn.execute("INSERT INTO file_chunks VALUES (1, -901, 7, 0)")
     conn.commit(); conn.close()
     try:
-        embed = _BoundedEmbedder()
-        with patch.object(mod, "generate_embedding", embed):
-            stats = mod.ingest_doc_chunks(path, dry_run=False, workers=1)
+        embed = _bounded_ingest(monkeypatch)
+        stats = mod.ingest_doc_chunks(path, dry_run=False, workers=1)
     finally:
         os.unlink(path)
     assert stats == {"processed": 1, "skipped": 0, "failed": 0}
-    assert len(embed.inputs) == 1 and len(embed.inputs[0]) == EMBEDDING_SAFE_CHARS
+    assert len(embed.inputs) >= 2 and all(len(text) <= EMBEDDING_SAFE_CHARS for text in embed.inputs)
     with test_conn.cursor() as cur:
-        cur.execute("SELECT length(content), embedding IS NOT NULL, metadata FROM memories WHERE source_url = 'qd-doc://-901'")
-        length, embedded, metadata = cur.fetchone()
-    assert length == len(OVERSIZED) and embedded
-    assert metadata["embedding_truncated"] is True and metadata["original_chars"] == length
+        cur.execute("SELECT length(content), metadata FROM memories WHERE source_url = 'qd-doc://-901' AND parent_id IS NULL")
+        length, metadata = cur.fetchone()
+    assert length == len(OVERSIZED)
     assert metadata["node_id"] == -901
 
 

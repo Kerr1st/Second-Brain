@@ -143,7 +143,7 @@ class TestCapture:
                             {"processed": len(items), "skipped": 0, "failed": 0})
         sent = []
         fake_sb = type("SB", (), {"load_indexed_urls": staticmethod(lambda: {"https://example.org/background-tab"}),
-                                  "scrape_with_crawlee": staticmethod(lambda urls: sent.extend(urls))})
+                                  "scrape_with_crawlee": staticmethod(lambda urls: sent.extend(urls) or {"processed": len(urls), "failed": 0})})
         monkeypatch.setitem(__import__("sys").modules, "scripts.scrape_bookmarks", fake_sb)
         monkeypatch.setattr(b, "completed_days", lambda n: [date(2026, 9, 14), date(2026, 9, 15)])
         stats = b.capture(days_back=2, history_path=history_db)
@@ -159,7 +159,7 @@ class TestCapture:
         monkeypatch.setattr(src.ingest, "ingest_batch", lambda items, st: {"processed": 0, "skipped": 0, "failed": 0})
         sent = []
         fake_sb = type("SB", (), {"load_indexed_urls": staticmethod(lambda: set()),
-                                  "scrape_with_crawlee": staticmethod(lambda urls: sent.extend(urls))})
+                                  "scrape_with_crawlee": staticmethod(lambda urls: sent.extend(urls) or {"processed": len(urls), "failed": 0})})
         monkeypatch.setitem(__import__("sys").modules, "scripts.scrape_bookmarks", fake_sb)
         monkeypatch.setattr(b, "completed_days", lambda n: [date(2026, 9, 15)])
         stats = b.capture(days_back=1, history_path=history_db)

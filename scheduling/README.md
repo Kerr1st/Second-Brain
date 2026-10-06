@@ -9,9 +9,9 @@ All plists live in this directory. Install by symlinking to `~/Library/LaunchAge
 | `com.second-brain.bookmarks` | Sat 1:00 AM | `scrape_bookmarks.py` | Chrome bookmarks scrape |
 | `com.second-brain.youtube` | Daily 1:30 AM | `youtube_scrape.sh` | YouTube playlist/history scrape |
 | `com.second-brain.backup` | Daily 2:00 AM | `backup.sh` | Encrypted backup to Google Drive |
-| `com.second-brain.chat-extract` | Daily 2:30 AM | `chat_extract.py` | Phase 1 chat extraction |
-| `com.second-brain.ingest` | Daily 3:00 AM | `ingest_staged.sh` | Phase 2 staged ingestion |
-| `com.second-brain.qd-sync` | Every 3600s | `qd_sync.sh` | Quick Desktop sync (5 scripts: memories, tags, events, Slack graph, chats) |
+| `com.second-brain.chat-extract` | Daily 2:30 AM | `capture_chats.sh` → `src.capture.chats` (job name `chat-capture`) | Kiro IDE (native sessions + legacy `.chat`) and CLI capture, bounded per run (`--max-sessions`, default 50, newest first) |
+| `com.second-brain.ingest` | Daily 3:00 AM | `crawlee_ingest.py` → `src.capture.crawlee` (job name `crawlee-ingest`) | Crawlee knowledge-store ingest (articles/transcripts); never-indexed sources bounded per run (`--max-unindexed`, default 25) |
+| `com.second-brain.qd-sync` | Every 3600s | `job_wrapper.sh` → `qd_sync.sh` → `src.capture.qd` | Quick Desktop sync (stages: facts, tags, feed, chats; doc export retired, replay via `src.capture.qd_docs`) |
 | `com.second-brain.verify` | Sun 3:00 AM | `verify_backup.sh` | Backup verification (Google Drive) |
 | `com.second-brain.dream-cycle` | Mon/Wed/Fri 2:00 AM | `dream_cycle_scheduled.sh` | Dream cycle pipeline (`StartCalendarInterval` array in the plist; not nightly) |
 | `com.second-brain.liveness` | Daily 9:00 AM | `verify_liveness.sh` | Per-source capture liveness check (alerts if a channel goes silent) |

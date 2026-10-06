@@ -36,7 +36,7 @@ def test_build_markdown_has_metadata_header():
     assert md.startswith("# My Vid")
     assert "Source: https://www.youtube.com/watch?v=abc123" in md
     assert "Engagement: liked" in md
-    assert "Video ID: abc123" in md
+    assert "Video_ID: abc123" in md
     assert md.strip().endswith("transcript body")
 
 

@@ -26,17 +26,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
-import html
 import logging
 import os
 import re
 import sys
+from mcp.shared.exceptions import McpError
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 from src.capture.mcp_client import (
     CaptureFailure, McpClient, McpToolError, classify_error, report_failure,
 )
+
+from src.capture.common import CaptureBatch, exit_code
+from src.capture.framework import run_channel
+from src.capture.render import render_header_lines, html_to_text as _html_to_text
 
 logger = logging.getLogger(__name__)
 
@@ -82,18 +86,7 @@ Call = Callable[[str, dict], Awaitable[Any]]
 # Rendering (pure)                                                             #
 # --------------------------------------------------------------------------- #
 def html_to_text(body: str | None) -> str:
-    """Convert an HTML (or plain) body to readable text."""
-    if not body:
-        return ""
-    text = re.sub(r"<(style|script|head)\b.*?</\1>", " ", body, flags=re.S | re.I)
-    text = re.sub(r"<br\s*/?>|</(p|div|tr|li|h[1-6]|blockquote)>", "\n", text, flags=re.I)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = html.unescape(text)
-    text = _BANNER_RE.sub("", text)
-    text = re.sub(r"[ \t\xa0]+", " ", text)
-    text = re.sub(r" *\n *", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    return _BANNER_RE.sub("", _html_to_text(body)).strip()
 
 
 def _addr(entry: Any) -> str:
@@ -111,6 +104,8 @@ def _hash(*parts: str) -> str:
 
 def mail_source_url(msg: dict) -> str:
     received = (msg.get("receivedDateTime") or msg.get("sentDateTime") or "")[:19]
+    if not received:
+        raise ValueError("Outlook mail requires received or sent time for stable identity")
     sender = msg.get("from")
     sender_mail = sender.get("emailAddress", "") if isinstance(sender, dict) else str(sender or "")
     return f"outlook://mail/{received}/{_hash(msg.get('subject') or '', sender_mail)}"
@@ -143,11 +138,13 @@ def render_email(details: dict) -> tuple[str, str] | None:
         header.append(f"Conversation: {details['conversationId']}")
     if details.get("hasAttachments"):
         header.append("Attachments: yes")
-    return mail_source_url(details), "\n".join(header) + "\n\n---\n\n" + body
+    return mail_source_url(details), render_header_lines(header, body)
 
 
 def event_source_url(ev: dict) -> str:
     start = (ev.get("start") or "")[:19]
+    if not start:
+        raise ValueError("Outlook event requires start time for stable identity")
     return f"outlook://event/{start}/{_hash(ev.get('subject') or '', str(ev.get('organizer') or ''))}"
 
 
@@ -182,7 +179,7 @@ def render_event(ev: dict) -> tuple[str, str]:
     body = html_to_text(body_raw) if (ev.get("bodyContentType") or "html").lower() == "html" else body_raw.strip()
     if body:
         lines += ["", body[:MAX_BODY_CHARS]]
-    return event_source_url(ev), "\n".join(header) + "\n\n---\n\n" + "\n".join(lines)
+    return event_source_url(ev), render_header_lines(header, "\n".join(lines))
 
 
 # --------------------------------------------------------------------------- #
@@ -195,7 +192,7 @@ def _iso_z(dt: datetime) -> str:
 async def collect_mail(call: Call, start: datetime, end: datetime, already: set[str],
                        folders=MAIL_FOLDERS, max_per_folder: int = MAX_MAIL_PER_FOLDER) -> list[tuple[str, str]]:
     """List messages in [start, end] per folder, fetch bodies for unseen ones, render."""
-    items: list[tuple[str, str]] = []
+    items = CaptureBatch()
     flt = f"receivedDateTime ge {_iso_z(start)} and receivedDateTime le {_iso_z(end)}"
     for folder in folders:
         seen_in_folder = 0
@@ -217,7 +214,8 @@ async def collect_mail(call: Call, start: datetime, end: datetime, already: set[
                 try:
                     details = await call("get_email_details", {"emailId": msg["id"]})
                 except McpToolError as e:
-                    logger.warning("get_email_details failed for %s: %s", msg.get("subject"), e)
+                    logger.warning("Outlook detail fetch failed: %s", type(e).__name__)
+                    items.failed += 1
                     continue
                 details = {**msg, **(details or {})}
                 details.setdefault("folder", folder)
@@ -233,7 +231,7 @@ async def collect_mail(call: Call, start: datetime, end: datetime, already: set[
 
 async def collect_calendar(call: Call, start: datetime, end: datetime, already: set[str],
                            max_events: int = MAX_EVENTS) -> list[tuple[str, str]]:
-    items: list[tuple[str, str]] = []
+    items = CaptureBatch()
     token = None
     seen = 0
     while seen < max_events:
@@ -289,18 +287,13 @@ async def _run_async(days_back: int, calendar: bool, dry_run: bool) -> dict:
             if client.reconnects_used:
                 logger.warning("grasp-mcp connection was re-established %d time(s) during this run",
                                client.reconnects_used)
-    except Exception as e:  # noqa: BLE001 - classify: transport death vs stale token vs bug
+    except (OSError, ValueError, RuntimeError, asyncio.TimeoutError, McpError) as e:
         kind = classify_error(e)
         raise CaptureFailure(kind, str(e), AUTH_FIX if kind == "auth" else None) from e
 
     summary = {}
     for source_type, items in ((SOURCE_TYPE_MAIL, mail), (SOURCE_TYPE_CALENDAR, events)):
-        if dry_run:
-            for url, _ in items:
-                logger.info("[DRY] %s %s", source_type, url)
-            summary[source_type] = {"new": len(items)}
-            continue
-        stats = ingest_batch(items, source_type) if items else {"processed": 0, "skipped": 0, "failed": 0}
+        stats = run_channel(source_type, items, dry_run=dry_run, ingest=ingest_batch)
         summary[source_type] = stats
         logger.info("%s: %s", source_type, stats)
     return summary
@@ -322,9 +315,9 @@ def main() -> int:
         summary = capture(days_back=args.days_back, calendar=not args.no_calendar, dry_run=args.dry_run)
     except CaptureFailure as failure:
         return report_failure(failure, "outlook")
-    total_new = sum(v.get("processed", v.get("new", 0)) for v in summary.values())
+    total_new = sum(v.get("processed", 0) for v in summary.values())
     logger.info("captures_this_cycle: outlook=%d", total_new)
-    return 0
+    return exit_code(summary)
 
 
 if __name__ == "__main__":

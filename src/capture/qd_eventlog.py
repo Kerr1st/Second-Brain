@@ -4,7 +4,7 @@
 Reads ~/.quickwork/eventlog/events.jsonl and creates memories for each
 curated feed event (Slack notifications, email FYIs, day plans, etc.).
 
-Usage: .venv/bin/python scripts/migrate/ingest_eventlog.py [--dry-run]
+Usage: .venv/bin/python -m src.capture.qd_eventlog [--dry-run]
 
 Idempotent — uses source_url 'qd-feed://{event_id}' for deduplication.
 """
@@ -17,8 +17,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from src.db import create_memory, get_processed_source_urls, get_connection
-from src.embeddings import generate_embedding, embed_leaf
+from src.db import get_connection
+from src.capture.render import render_header_lines
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -78,7 +78,8 @@ def format_event_as_markdown(event):
             if isinstance(v, str) and v:
                 lines.append(f"{k}: {v}")
 
-    lines.extend(["", "---", "", full_message])
+    header = lines
+    lines = [full_message]
 
     importance = details.get("importance")
     if importance:
@@ -92,63 +93,22 @@ def format_event_as_markdown(event):
             if label:
                 lines.append(f"- {label}")
 
-    return "\n".join(lines)
+    return render_header_lines(header, "\n".join(lines))
 
 
 def ingest_eventlog(dry_run=False):
-    """Ingest all events from the eventlog. Returns stats dict."""
-    if not os.path.exists(EVENTLOG_PATH):
-        log.error(f"Eventlog not found: {EVENTLOG_PATH}")
-        return {"processed": 0, "skipped": 0, "failed": 0}
-
-    events = parse_events(EVENTLOG_PATH)
-    log.info(f"Found {len(events)} events in eventlog")
-
-    already = get_processed_source_urls(SOURCE_TYPE) if not dry_run else set()
-
-    stats = {"processed": 0, "skipped": 0, "failed": 0}
-
-    for event in events:
-        url = source_url_for_event(event)
-
-        if url in already:
-            stats["skipped"] += 1
-            continue
-
-        if dry_run:
-            stats["processed"] += 1
-            continue
-
-        try:
-            md = format_event_as_markdown(event)
-            tags = tags_for_event(event)
-            # One row, one vector: bound the provider input, keep the full text,
-            # and record any truncation in metadata instead of failing the event.
-            embedding, embed_meta = embed_leaf(md, embed=generate_embedding)
-
-            create_memory(
-                type="source",
-                title=event.get("summary", "QD Feed Event"),
-                content=md,
-                embedding=embedding,
-                tags=tags,
-                source_url=url,
-                source_type=SOURCE_TYPE,
-                metadata={
-                    "event_type": event.get("event_type"),
-                    "agent_source": event.get("source"),
-                    "importance": event.get("details", {}).get("importance"),
-                    "timestamp": event.get("timestamp"),
-                    **embed_meta,
-                },
-            )
-            stats["processed"] += 1
-        except Exception as e:
-            stats["failed"] += 1
-            log.error(f"Failed {event.get('id')}: {e}")
-
-    log.info(f"Done: processed={stats['processed']} skipped={stats['skipped']} failed={stats['failed']}")
-    return stats
+    from src.capture.framework import run_records
+    if not os.path.isfile(EVENTLOG_PATH):
+        return {"processed": 0, "skipped": 0, "failed": 1}
+    records = []
+    for event in parse_events(EVENTLOG_PATH):
+        records.append({"type": "source", "title": event.get("summary", "QD Feed Event"),
+            "content": format_event_as_markdown(event), "tags": tags_for_event(event),
+            "source_url": source_url_for_event(event), "source_type": SOURCE_TYPE,
+            "metadata": {"event_type": event.get("event_type"), "agent_source": event.get("source"),
+                         "importance": event.get("details", {}).get("importance"), "timestamp": event.get("timestamp")}})
+    return run_records(records, dry_run=dry_run, refresh=True).get(SOURCE_TYPE,
+        {"processed": 0, "skipped": 0, "failed": 0})
 
 
 def parse_interactions(path):
@@ -243,11 +203,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    ingest_eventlog(dry_run=args.dry_run)
-    enrich_with_interactions(dry_run=args.dry_run)
+    from src.capture.common import exit_code
+    result = ingest_eventlog(dry_run=args.dry_run)
+    if not args.dry_run and os.path.exists(INTERACTIONS_PATH):
+        enrich_with_interactions(dry_run=False)
     if args.dry_run:
-        log.info("DRY RUN — no changes written")
+        log.info("DRY RUN: no changes written")
+    return exit_code(result)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

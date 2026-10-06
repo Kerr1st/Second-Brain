@@ -30,6 +30,10 @@ import tempfile
 from src.db import get_processed_source_urls, is_reachable
 from src.ingest import ingest_content
 
+from src.capture.common import exit_code
+from src.capture.framework import run_channel
+from src.capture.render import render_document
+
 logger = logging.getLogger(__name__)
 
 # Intentional-interest playlists -> engagement-tier label stored on each memory.
@@ -87,8 +91,8 @@ def list_playlist(playlist_id: str) -> list[dict]:
             "duration": e.get("duration"),
             "channel": e.get("channel") or e.get("uploader") or "",
         })
-    if not entries and proc.returncode != 0:
-        logger.warning("Enumeration failed for %s: %s", playlist_id, (proc.stderr or "").strip()[:300])
+    if proc.returncode != 0:
+        raise RuntimeError(f"YouTube enumeration failed (exit {proc.returncode})")
     return entries
 
 
@@ -120,7 +124,7 @@ def fetch_transcript(video_url: str) -> str | None:
         # cookies makes yt-dlp use the authenticated web_creator/tv player client,
         # which (without the deno JS-challenge solver) returns "Requested format is
         # not available". The anonymous android_vr client still serves subtitles.
-        _ytdlp([
+        proc = _ytdlp([
             "--impersonate", IMPERSONATE,
             "--skip-download",
             "--write-subs", "--write-auto-subs",
@@ -131,6 +135,8 @@ def fetch_transcript(video_url: str) -> str | None:
             "-o", os.path.join(tmp, "%(id)s.%(ext)s"),
             video_url,
         ], timeout=120)
+        if proc.returncode != 0:
+            raise RuntimeError(f"YouTube transcript fetch failed (exit {proc.returncode})")
         vtts = [f for f in os.listdir(tmp) if f.endswith(".vtt")]
         if not vtts:
             return None
@@ -142,40 +148,38 @@ def fetch_transcript(video_url: str) -> str | None:
 
 def build_markdown(entry: dict, engagement: str, transcript: str) -> str:
     """Build a metadata-headed markdown doc for ingest_content."""
-    return "\n".join([
-        f"# {entry['title']}",
-        "",
-        f"Source: {entry['url']}",
-        "Type: youtube-transcript",
-        f"Video ID: {entry['id']}",
-        f"Channel: {entry['channel']}",
-        f"Duration: {entry.get('duration') or ''}",
-        f"Engagement: {engagement}",
-        "",
-        "---",
-        "",
-        transcript,
-    ])
+    return render_document(entry["title"], {
+        "Source": entry["url"], "Type": "youtube-transcript",
+        "Video_ID": entry["id"], "Channel": entry["channel"],
+        "Duration": entry.get("duration") or "", "Engagement": engagement,
+    }, transcript)
 
 
 def capture(playlists=None, min_duration: int = MIN_DURATION_DEFAULT,
             limit: int | None = None, dry_run: bool = False) -> dict:
     """Enumerate playlists, fetch transcripts for NEW videos, ingest them."""
     playlists = playlists or list(PLAYLISTS)
-    stats = {"processed": 0, "skipped": 0, "failed": 0, "no_transcript": 0}
+    stats = {"processed": 0, "skipped": 0, "failed": 0, "no_transcript": 0, "planned": 0}
 
     if not is_reachable():
         logger.error("Database unreachable; aborting.")
+        stats["failed"] = 1
         return stats
 
     already = get_processed_source_urls("youtube")
 
+    attempted = 0
     for pid in playlists:
         engagement = PLAYLISTS.get(pid, pid)
-        entries = list_playlist(pid)
+        try:
+            entries = list_playlist(pid)
+        except (OSError, RuntimeError, ValueError):
+            logger.exception("YouTube enumeration failed")
+            stats["failed"] += 1
+            continue
         logger.info("Playlist %s (%s): %d videos enumerated", pid, engagement, len(entries))
         for e in entries:
-            if limit is not None and stats["processed"] >= limit:
+            if limit is not None and attempted >= limit:
                 break
             if e["url"] in already:
                 stats["skipped"] += 1
@@ -184,28 +188,37 @@ def capture(playlists=None, min_duration: int = MIN_DURATION_DEFAULT,
             if dur is not None and dur < min_duration:
                 stats["skipped"] += 1
                 continue
+            attempted += 1
             if dry_run:
-                logger.info("[dry-run] would capture: %s (%s)", e["title"][:70], engagement)
-                stats["processed"] += 1
+                stats["planned"] += 1
                 continue
             try:
                 transcript = fetch_transcript(e["url"])
-            except Exception:
+            except (OSError, RuntimeError, ValueError):
                 logger.exception("Fetch failed: %s", e["url"])
                 stats["failed"] += 1
                 continue
             if not transcript:
                 stats["no_transcript"] += 1
                 continue
-            try:
-                ingest_content(build_markdown(e, engagement, transcript),
-                               source_type="youtube", source_url=e["url"])
+            # The shared pipeline accounts for falsy ingest results and failures.
+            def store(items, source_type):
+                from psycopg2 import Error as DatabaseError
+                result = {"processed": 0, "skipped": 0, "failed": 0}
+                for url, md in items:
+                    try:
+                        saved = ingest_content(md, source_type=source_type, source_url=url)
+                    except (DatabaseError, OSError, RuntimeError, ValueError):
+                        logger.exception("YouTube ingest failed")
+                        result["failed"] += 1
+                    else:
+                        result["processed" if saved else "skipped"] += 1
+                return result
+            outcome = run_channel("youtube", [(e["url"], build_markdown(e, engagement, transcript))], ingest=store)
+            for key in ("processed", "skipped", "failed"):
+                stats[key] += outcome[key]
+            if not outcome["failed"]:
                 already.add(e["url"])
-                stats["processed"] += 1
-                logger.info("Captured: %s (%s)", e["title"][:70], engagement)
-            except Exception:
-                logger.exception("Ingest failed: %s", e["url"])
-                stats["failed"] += 1
 
     logger.info("Done: %s", stats)
     return stats
@@ -219,9 +232,10 @@ def main():
     ap.add_argument("--playlists", nargs="*", default=None, help="playlist IDs (default: LL WL)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    capture(playlists=args.playlists, min_duration=args.min_duration,
+    stats = capture(playlists=args.playlists, min_duration=args.min_duration,
             limit=args.limit, dry_run=args.dry_run)
+    return exit_code(stats)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

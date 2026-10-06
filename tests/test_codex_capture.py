@@ -28,20 +28,20 @@ from src.dream_cycle.storage import check_duplicate
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "codex"
-MANIFEST = json.loads((FIXTURE_DIR / "real_task.json").read_text())
+MANIFEST = json.loads((FIXTURE_DIR / "sanitized_task.json").read_text())
 RECORDS = tuple(
     json.loads(line)
-    for line in (FIXTURE_DIR / "real_task.jsonl").read_text().splitlines()
+    for line in (FIXTURE_DIR / "sanitized_task.jsonl").read_text().splitlines()
 )
 CORRECTION_MANIFEST = json.loads(
-    (FIXTURE_DIR / "real_correction_task.json").read_text()
+    (FIXTURE_DIR / "sanitized_correction_task.json").read_text()
 )
 CORRECTION_RECORDS = tuple(
     json.loads(line)
-    for line in (FIXTURE_DIR / "real_correction_task.jsonl").read_text().splitlines()
+    for line in (FIXTURE_DIR / "sanitized_correction_task.jsonl").read_text().splitlines()
 )
 LEGACY_DELEGATED_MANIFEST = json.loads(
-    (FIXTURE_DIR / "real_legacy_delegated_task.json").read_text()
+    (FIXTURE_DIR / "sanitized_legacy_delegated_task.json").read_text()
 )
 TASK_ID = MANIFEST["id"]
 CORRECTION_TASK_ID = CORRECTION_MANIFEST["id"]
@@ -556,7 +556,7 @@ def test_source_provenance_refreshes_without_new_turns(
             """,
             (
                 "Renamed Codex task",
-                "/Users/kerrclaw/repositories/Github Repos/Second-Brain-renamed",
+                "/Users/example/projects/Second-Brain-renamed",
                 "codex/codex-task-capture",
                 MANIFEST["updated_at"] + 60,
                 MANIFEST["updated_at_ms"] + 60_000,
@@ -844,8 +844,8 @@ def test_real_user_correction_persists_neutral_episode_with_exact_provenance(
     )
     assert episode[3] == "episodic"
     assert episode[4]["supporting_turn_ids"] == [
-        "ee442a21-8919-4145-b3df-b454fd987cd7",
-        "b0a21672-118f-433e-a1e7-3b206baed324",
+        "41da4414-e236-5e2d-9b6c-d2631108039f",
+        "35b9b72c-2685-56fa-b408-6ecaf55e0e3f",
     ]
     assert episode[6] is None
     assert str(episode[0]) in {str(item["id"]) for item in retrieved}
@@ -947,8 +947,8 @@ def test_resumed_task_extends_adjacent_segment_to_capture_correction(
     assert (resumed.refreshed, resumed.semantic_processed) == (1, 1)
     assert segment_id == original_segment_id
     assert segment_turn_ids == [
-        "ee442a21-8919-4145-b3df-b454fd987cd7",
-        "b0a21672-118f-433e-a1e7-3b206baed324",
+        "41da4414-e236-5e2d-9b6c-d2631108039f",
+        "35b9b72c-2685-56fa-b408-6ecaf55e0e3f",
     ]
     assert episode_count == 1
     assert target_id == str(original_segment_id)
@@ -983,10 +983,10 @@ def test_zero_memory_segment_is_searchable_but_dream_cycle_ignores_child_source(
         assert check_duplicate("Codex task capture project attribution") is None
 
 
-CURRENT_MANIFEST = json.loads((FIXTURE_DIR / "real_current_task.json").read_text())
+CURRENT_MANIFEST = json.loads((FIXTURE_DIR / "sanitized_current_task.json").read_text())
 CURRENT_RECORDS = tuple(
     json.loads(line)
-    for line in (FIXTURE_DIR / "real_current_task.jsonl").read_text().splitlines()
+    for line in (FIXTURE_DIR / "sanitized_current_task.jsonl").read_text().splitlines()
 )
 CURRENT_NOW = datetime(2026, 9, 10, tzinfo=UTC)
 

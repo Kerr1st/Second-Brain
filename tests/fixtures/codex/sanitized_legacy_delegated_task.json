@@ -1,0 +1,8 @@
+{
+  "fixture_kind": "capture_relevant_excerpt_from_real_codex_state",
+  "id": "221121e1-1257-5948-a1ec-66e137740aaf",
+  "source": "vscode",
+  "thread_source": "subagent",
+  "agent_path": null,
+  "spawned_child": false
+}

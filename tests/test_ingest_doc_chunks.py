@@ -82,29 +82,29 @@ class TestQueryAndMetadata:
     """Unit tests for query building, metadata extraction, source_url generation."""
 
     def test_source_url_generation(self):
-        from scripts.migrate.ingest_doc_chunks import source_url_for_chunk
+        from src.capture.qd_docs import source_url_for_chunk
         assert source_url_for_chunk(-101) == "qd-doc://-101"
         assert source_url_for_chunk(-103) == "qd-doc://-103"
 
     def test_title_from_source_path(self):
-        from scripts.migrate.ingest_doc_chunks import title_from_source
+        from src.capture.qd_docs import title_from_source
         assert title_from_source("/path/to/Team Offsite.docx") == "Team Offsite.docx"
         assert title_from_source("/path/to/amazonq-developer-ug.pdf") == "amazonq-developer-ug.pdf"
 
     def test_title_from_source_with_chunk_index(self):
-        from scripts.migrate.ingest_doc_chunks import title_from_source
+        from src.capture.qd_docs import title_from_source
         title = title_from_source("/path/to/doc.pdf", chunk_index=5)
         assert "doc.pdf" in title
         assert "chunk 5" in title
 
     def test_tags_from_chunk(self):
-        from scripts.migrate.ingest_doc_chunks import tags_for_chunk
+        from src.capture.qd_docs import tags_for_chunk
         tags = tags_for_chunk(".pdf", "/synthetic-fixtures/documents/Q-Nav")
         assert "qd-doc" in tags
         assert "pdf" in tags
 
     def test_metadata_from_chunk(self):
-        from scripts.migrate.ingest_doc_chunks import metadata_for_chunk
+        from src.capture.qd_docs import metadata_for_chunk
         meta = metadata_for_chunk(
             node_id=-101, chunk_index=0, file_id=3,
             folder_path="/synthetic-fixtures/documents/Docs",
@@ -117,7 +117,7 @@ class TestQueryAndMetadata:
         assert meta["extension"] == ".docx"
 
     def test_query_chunks_from_sqlite(self, sqlite_db):
-        from scripts.migrate.ingest_doc_chunks import query_chunks
+        from src.capture.qd_docs import query_chunks
         chunks = query_chunks(sqlite_db)
         assert len(chunks) == 3
         assert chunks[0]["node"] == -101
@@ -132,7 +132,7 @@ class TestDocChunkProperties:
 
     @given(node_id=st.integers(min_value=1, max_value=999999))
     def test_source_url_always_has_prefix(self, node_id):
-        from scripts.migrate.ingest_doc_chunks import source_url_for_chunk
+        from src.capture.qd_docs import source_url_for_chunk
         url = source_url_for_chunk(node_id)
         assert url.startswith("qd-doc://")
         assert str(node_id) in url
@@ -160,28 +160,28 @@ class TestDocChunksE2E:
     """End-to-end tests for document chunk ingestion."""
 
     def test_ingest_creates_memories(self, test_conn, sqlite_db):
-        from scripts.migrate.ingest_doc_chunks import ingest_doc_chunks
+        from src.capture.qd_docs import ingest_doc_chunks
 
         with test_conn.cursor() as cur:
             cur.execute("DELETE FROM memories WHERE source_url IN ('qd-doc://-101', 'qd-doc://-102', 'qd-doc://-103')")
 
-        with patch("scripts.migrate.ingest_doc_chunks.generate_embedding", return_value=[0.1] * 1024):
+        with patch("src.ingest.generate_embedding", return_value=[0.1] * 1024):
             stats = ingest_doc_chunks(sqlite_db, dry_run=False, workers=2)
 
         assert stats["processed"] == 3
         assert stats["failed"] == 0
 
         with test_conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM memories WHERE source_type = 'quick_desktop_doc'")
+            cur.execute("SELECT count(*) FROM memories WHERE parent_id IS NULL AND source_type = 'quick_desktop_doc'")
             assert cur.fetchone()[0] == 3
 
     def test_ingest_is_idempotent(self, test_conn, sqlite_db):
-        from scripts.migrate.ingest_doc_chunks import ingest_doc_chunks
+        from src.capture.qd_docs import ingest_doc_chunks
 
         with test_conn.cursor() as cur:
             cur.execute("DELETE FROM memories WHERE source_url IN ('qd-doc://-101', 'qd-doc://-102', 'qd-doc://-103')")
 
-        with patch("scripts.migrate.ingest_doc_chunks.generate_embedding", return_value=[0.1] * 1024):
+        with patch("src.ingest.generate_embedding", return_value=[0.1] * 1024):
             stats1 = ingest_doc_chunks(sqlite_db, dry_run=False, workers=2)
             stats2 = ingest_doc_chunks(sqlite_db, dry_run=False, workers=2)
 
@@ -190,16 +190,16 @@ class TestDocChunksE2E:
         assert stats2["skipped"] == 3
 
     def test_dry_run_creates_nothing(self, test_conn, sqlite_db):
-        from scripts.migrate.ingest_doc_chunks import ingest_doc_chunks
+        from src.capture.qd_docs import ingest_doc_chunks
 
         with test_conn.cursor() as cur:
             cur.execute("DELETE FROM memories WHERE source_url IN ('qd-doc://-101', 'qd-doc://-102', 'qd-doc://-103')")
 
-        with patch("scripts.migrate.ingest_doc_chunks.generate_embedding", return_value=[0.1] * 1024):
+        with patch("src.ingest.generate_embedding", return_value=[0.1] * 1024):
             stats = ingest_doc_chunks(sqlite_db, dry_run=True, workers=2)
 
-        assert stats["processed"] == 3
+        assert stats["processed"] == 0 and stats["planned"] == 3
 
         with test_conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM memories WHERE source_type = 'quick_desktop_doc'")
+            cur.execute("SELECT count(*) FROM memories WHERE parent_id IS NULL AND source_type = 'quick_desktop_doc'")
             assert cur.fetchone()[0] == 0

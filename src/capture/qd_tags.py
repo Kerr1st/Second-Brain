@@ -5,7 +5,7 @@ Reads memory_tags and memory_domains from QD's knowledge_v1.db and merges
 them into the corresponding Second Brain memories' tags[] array and metadata.
 
 Usage:
-  .venv/bin/python scripts/migrate/enrich_qd_tags.py [--dry-run]
+  .venv/bin/python -m src.capture.qd_tags [--dry-run]
 
 Designed to be idempotent — safe to run repeatedly. Already-present tags
 are not duplicated.
@@ -90,7 +90,7 @@ def get_qd_memory_id_mapping():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id, source_url FROM memories
-                WHERE source_url LIKE 'qd://memory/%'
+                WHERE source_url LIKE 'qd://memory/%' AND parent_id IS NULL
             """)
             for row in cur.fetchall():
                 sb_id = str(row[0])
@@ -111,7 +111,7 @@ def enrich_memories(dry_run=False):
     """
     if not os.path.exists(QD_DB_PATH):
         log.error(f"QD database not found: {QD_DB_PATH}")
-        return {"tags_enriched": 0, "domains_enriched": 0, "skipped": 0}
+        return {"tags_enriched": 0, "domains_enriched": 0, "skipped": 0, "failed": 1}
 
     qd_conn = sqlite3.connect(f"file:{QD_DB_PATH}?mode=ro", uri=True)
     qd_conn.row_factory = sqlite3.Row
@@ -198,8 +198,10 @@ def main():
 
     stats = enrich_memories(dry_run=args.dry_run)
     if args.dry_run:
-        log.info("DRY RUN — no changes written")
+        log.info("DRY RUN: no changes written")
+    from src.capture.common import exit_code
+    return exit_code(stats)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

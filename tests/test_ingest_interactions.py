@@ -53,19 +53,19 @@ def interactions_file():
 class TestParseInteractions:
 
     def test_parse_interactions(self, interactions_file):
-        from scripts.migrate.ingest_eventlog import parse_interactions
+        from src.capture.qd_eventlog import parse_interactions
         result = parse_interactions(interactions_file)
         assert len(result) == 3
 
     def test_group_by_event(self):
-        from scripts.migrate.ingest_eventlog import group_interactions_by_event
+        from src.capture.qd_eventlog import group_interactions_by_event
         grouped = group_interactions_by_event(SAMPLE_INTERACTIONS)
         assert "test-evt_00001" in grouped
         assert len(grouped["test-evt_00001"]) == 1
         assert grouped["test-evt_00001"][0]["interaction_type"] == "link_click"
 
     def test_classify_engagement(self):
-        from scripts.migrate.ingest_eventlog import classify_engagement
+        from src.capture.qd_eventlog import classify_engagement
         # Active engagement: link_click, recommendation_click, card_resolve
         assert classify_engagement("link_click") == "active"
         assert classify_engagement("recommendation_click") == "active"
@@ -75,7 +75,7 @@ class TestParseInteractions:
         assert classify_engagement("card_agent_resolve") == "passive"
 
     def test_build_interaction_metadata(self):
-        from scripts.migrate.ingest_eventlog import build_interaction_metadata
+        from src.capture.qd_eventlog import build_interaction_metadata
         interactions = [SAMPLE_INTERACTIONS[0]]  # link_click
         meta = build_interaction_metadata(interactions)
         assert meta["interaction_count"] == 1
@@ -96,7 +96,7 @@ class TestInteractionProperties:
         ])
     )
     def test_classify_always_returns_valid_level(self, interaction_type):
-        from scripts.migrate.ingest_eventlog import classify_engagement
+        from src.capture.qd_eventlog import classify_engagement
         result = classify_engagement(interaction_type)
         assert result in ("active", "passive")
 
@@ -108,7 +108,7 @@ class TestInteractionProperties:
         ),
     )
     def test_metadata_count_matches_input(self, n, types):
-        from scripts.migrate.ingest_eventlog import build_interaction_metadata
+        from src.capture.qd_eventlog import build_interaction_metadata
         interactions = [{"interaction_type": t, "timestamp": "2026-01-01", "details": {}} for t in types]
         meta = build_interaction_metadata(interactions)
         assert meta["interaction_count"] == len(types)
@@ -140,9 +140,9 @@ def seeded_feed_events(test_conn):
 class TestInteractionsE2E:
 
     def test_enrich_adds_interaction_metadata(self, test_conn, seeded_feed_events, interactions_file):
-        from scripts.migrate.ingest_eventlog import enrich_with_interactions
+        from src.capture.qd_eventlog import enrich_with_interactions
 
-        with patch("scripts.migrate.ingest_eventlog.INTERACTIONS_PATH", interactions_file):
+        with patch("src.capture.qd_eventlog.INTERACTIONS_PATH", interactions_file):
             stats = enrich_with_interactions(dry_run=False)
 
         assert stats["enriched"] >= 2  # test-evt_00001 and test-evt_00002 have active interactions
@@ -155,9 +155,9 @@ class TestInteractionsE2E:
             assert "interactions" in meta
 
     def test_enrich_is_idempotent(self, test_conn, seeded_feed_events, interactions_file):
-        from scripts.migrate.ingest_eventlog import enrich_with_interactions
+        from src.capture.qd_eventlog import enrich_with_interactions
 
-        with patch("scripts.migrate.ingest_eventlog.INTERACTIONS_PATH", interactions_file):
+        with patch("src.capture.qd_eventlog.INTERACTIONS_PATH", interactions_file):
             enrich_with_interactions(dry_run=False)
             stats2 = enrich_with_interactions(dry_run=False)
 
@@ -165,13 +165,13 @@ class TestInteractionsE2E:
         assert stats2["skipped"] > 0
 
     def test_dry_run_changes_nothing(self, test_conn, seeded_feed_events, interactions_file):
-        from scripts.migrate.ingest_eventlog import enrich_with_interactions
+        from src.capture.qd_eventlog import enrich_with_interactions
 
         # Clear any previous enrichment
         with test_conn.cursor() as cur:
             cur.execute("UPDATE memories SET metadata = '{}' WHERE source_url LIKE 'qd-feed://test-evt_0000%'")
 
-        with patch("scripts.migrate.ingest_eventlog.INTERACTIONS_PATH", interactions_file):
+        with patch("src.capture.qd_eventlog.INTERACTIONS_PATH", interactions_file):
             stats = enrich_with_interactions(dry_run=True)
 
         assert stats["enriched"] > 0

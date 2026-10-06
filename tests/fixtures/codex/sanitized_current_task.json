@@ -1,0 +1,33 @@
+{
+  "id": "e816d771-8c9f-59a3-9805-437426003d6f",
+  "created_at": 1788615315,
+  "updated_at": 1788706700,
+  "source": "vscode",
+  "cwd": "/Users/example/projects/Second-Brain-work",
+  "title": "Explore",
+  "archived": 0,
+  "agent_path": null,
+  "created_at_ms": 1788615315733,
+  "updated_at_ms": 1788706700386,
+  "thread_source": "user",
+  "git_origin_url": "git@github.com:example/Second-Brain.git",
+  "git_branch": "codex/codex-task-capture",
+  "git_sha": "5335d808dba21821e79e283111058f19f0e3c25c",
+  "fixture_kind": "sanitized_capture_excerpt",
+  "excerpt_ordinals": [
+    212,
+    214,
+    217,
+    220
+  ],
+  "injected_context_metadata": {
+    "turn_id": "cde0ba5a-e68e-5bbd-b60c-36e03c162f36",
+    "create_time": 1788615321.810071,
+    "content_item_kinds": [
+      "plugins.recommendations",
+      "agents_md.instructions",
+      "environments.environment_context"
+    ]
+  },
+  "injected_context_metadata_ordinal": 5
+}

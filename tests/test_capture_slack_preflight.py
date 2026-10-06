@@ -192,7 +192,7 @@ class TestProbeGatesTheCapture:
         monkeypatch.setattr(slack, "McpClient", lambda *a, **k: Working(HEALTHY))
         monkeypatch.setattr("src.db.get_processed_source_urls", lambda *a, **k: [])
         stats = slack.capture(days_back=1, dry_run=True)
-        assert stats == {"new": 0}
+        assert stats == {"processed": 0, "skipped": 0, "failed": 0, "planned": 0, "dry_run": True}
         assert calls[0] == slack.PROBE_TOOL and "list_dms" in calls
 
 

@@ -5,7 +5,7 @@ Much faster than the Kiro CLI one-at-a-time approach. Processes files
 sequentially through ingest_content() which handles chunking, embedding,
 and relationship discovery.
 
-Usage: .venv/bin/python scripts/batch_ingest_staged.py [--dry-run] [--limit N]
+Usage: .venv/bin/python scripts/maintenance/drain_staged_chats.py [--dry-run] [--limit N]
 """
 
 import argparse
@@ -15,7 +15,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.ingest import ingest_content
 from src.db import get_processed_source_urls
@@ -27,8 +27,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-STAGING_DIR = Path(__file__).resolve().parent.parent / "staging" / "chats"
-INGESTED_DIR = Path(__file__).resolve().parent.parent / "staging" / "ingested"
+STAGING_DIR = Path(__file__).resolve().parents[2] / "staging" / "chats"
+INGESTED_DIR = Path(__file__).resolve().parents[2] / "staging" / "ingested"
 
 
 def main():
@@ -37,7 +37,8 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="Max files to process (0=all)")
     args = parser.parse_args()
 
-    INGESTED_DIR.mkdir(parents=True, exist_ok=True)
+    if not args.dry_run:
+        INGESTED_DIR.mkdir(parents=True, exist_ok=True)
 
     files = sorted(STAGING_DIR.glob("*.md"))
     if not files:
@@ -55,6 +56,7 @@ def main():
     log.info(f"Processing {len(files)} staged files (dry_run={args.dry_run})")
 
     processed = 0
+    planned = 0
     skipped = 0
     failed = 0
     start = time.time()
@@ -71,7 +73,7 @@ def main():
             continue
 
         if args.dry_run:
-            processed += 1
+            planned += 1
             continue
 
         try:
@@ -83,7 +85,7 @@ def main():
             else:
                 skipped += 1
                 f.rename(INGESTED_DIR / f.name)
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError, __import__("psycopg2").Error) as e:
             failed += 1
             log.error(f"Failed {f.name}: {e}")
 
@@ -103,6 +105,8 @@ def main():
         f"Done in {elapsed:.0f}s: processed={processed} skipped={skipped} failed={failed}"
     )
 
+    return int(bool(failed))
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

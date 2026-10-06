@@ -82,7 +82,7 @@ class TestFetchTagsAndDomains:
     """Unit tests for fetching tags and domains from QD database."""
 
     def test_fetch_tags_for_memory(self, qd_db_with_tags):
-        from scripts.migrate.enrich_qd_tags import fetch_tags_for_memories
+        from src.capture.qd_tags import fetch_tags_for_memories
         conn = sqlite3.connect(qd_db_with_tags)
         conn.row_factory = sqlite3.Row
         result = fetch_tags_for_memories(conn)
@@ -93,7 +93,7 @@ class TestFetchTagsAndDomains:
         conn.close()
 
     def test_fetch_domains_for_memory(self, qd_db_with_tags):
-        from scripts.migrate.enrich_qd_tags import fetch_domains_for_memories
+        from src.capture.qd_tags import fetch_domains_for_memories
         conn = sqlite3.connect(qd_db_with_tags)
         conn.row_factory = sqlite3.Row
         result = fetch_domains_for_memories(conn)
@@ -104,7 +104,7 @@ class TestFetchTagsAndDomains:
         conn.close()
 
     def test_tags_are_stripped(self, qd_db_with_tags):
-        from scripts.migrate.enrich_qd_tags import fetch_tags_for_memories
+        from src.capture.qd_tags import fetch_tags_for_memories
         conn = sqlite3.connect(qd_db_with_tags)
         conn.row_factory = sqlite3.Row
         result = fetch_tags_for_memories(conn)
@@ -122,7 +122,7 @@ class TestFetchTagsAndDomains:
         conn.execute("CREATE TABLE memory_domains (id INTEGER PRIMARY KEY, memory_id INTEGER, domain TEXT)")
         conn.commit()
 
-        from scripts.migrate.enrich_qd_tags import fetch_tags_for_memories, fetch_domains_for_memories
+        from src.capture.qd_tags import fetch_tags_for_memories, fetch_domains_for_memories
         assert fetch_tags_for_memories(conn) == {}
         assert fetch_domains_for_memories(conn) == {}
         conn.close()
@@ -133,7 +133,7 @@ class TestMergeTags:
     """Unit tests for the tag merging logic."""
 
     def test_merge_new_tags_with_existing(self):
-        from scripts.migrate.enrich_qd_tags import merge_tags
+        from src.capture.qd_tags import merge_tags
         existing = ["qd:people", "qd_type:fact"]
         new_tags = ["people", "css-team", "q-dev"]
         result = merge_tags(existing, new_tags)
@@ -144,14 +144,14 @@ class TestMergeTags:
         assert "q-dev" in result
 
     def test_merge_deduplicates(self):
-        from scripts.migrate.enrich_qd_tags import merge_tags
+        from src.capture.qd_tags import merge_tags
         existing = ["qd:people", "people"]
         new_tags = ["people", "css-team"]
         result = merge_tags(existing, new_tags)
         assert result.count("people") == 1
 
     def test_merge_preserves_order_existing_first(self):
-        from scripts.migrate.enrich_qd_tags import merge_tags
+        from src.capture.qd_tags import merge_tags
         existing = ["qd:people", "qd_type:fact"]
         new_tags = ["z-tag", "a-tag"]
         result = merge_tags(existing, new_tags)
@@ -160,13 +160,13 @@ class TestMergeTags:
         assert result[1] == "qd_type:fact"
 
     def test_merge_empty_new_tags(self):
-        from scripts.migrate.enrich_qd_tags import merge_tags
+        from src.capture.qd_tags import merge_tags
         existing = ["qd:people"]
         result = merge_tags(existing, [])
         assert result == ["qd:people"]
 
     def test_merge_empty_existing(self):
-        from scripts.migrate.enrich_qd_tags import merge_tags
+        from src.capture.qd_tags import merge_tags
         result = merge_tags([], ["new-tag"])
         assert result == ["new-tag"]
 
@@ -183,7 +183,7 @@ class TestMergeTagsProperties:
         new_tags=st.lists(st.text(min_size=1, max_size=30, alphabet=st.characters(whitelist_categories=("L", "N", "P"))), max_size=20),
     )
     def test_merge_never_loses_existing_tags(self, existing, new_tags):
-        from scripts.migrate.enrich_qd_tags import merge_tags
+        from src.capture.qd_tags import merge_tags
         result = merge_tags(existing, new_tags)
         for tag in existing:
             assert tag in result
@@ -193,7 +193,7 @@ class TestMergeTagsProperties:
         new_tags=st.lists(st.text(min_size=1, max_size=30, alphabet=st.characters(whitelist_categories=("L", "N", "P"))), max_size=20),
     )
     def test_merge_result_has_no_duplicates(self, existing, new_tags):
-        from scripts.migrate.enrich_qd_tags import merge_tags
+        from src.capture.qd_tags import merge_tags
         result = merge_tags(existing, new_tags)
         assert len(result) == len(set(result))
 
@@ -202,7 +202,7 @@ class TestMergeTagsProperties:
         new_tags=st.lists(st.text(min_size=1, max_size=30, alphabet=st.characters(whitelist_categories=("L", "N", "P"))), max_size=20),
     )
     def test_merge_result_size_bounded(self, existing, new_tags):
-        from scripts.migrate.enrich_qd_tags import merge_tags
+        from src.capture.qd_tags import merge_tags
         result = merge_tags(existing, new_tags)
         # Result can't be larger than union of both
         assert len(result) <= len(set(existing) | set(new_tags))
@@ -212,7 +212,7 @@ class TestMergeTagsProperties:
         new_tags=st.lists(st.text(min_size=1, max_size=30, alphabet=st.characters(whitelist_categories=("L", "N", "P"))), max_size=20),
     )
     def test_merge_is_superset_of_existing(self, existing, new_tags):
-        from scripts.migrate.enrich_qd_tags import merge_tags
+        from src.capture.qd_tags import merge_tags
         result = merge_tags(existing, new_tags)
         assert set(existing).issubset(set(result))
 
@@ -249,13 +249,13 @@ class TestEnrichmentE2E:
     """End-to-end tests that verify enrichment against real PostgreSQL."""
 
     def test_enrichment_adds_tags_to_existing_memories(self, test_conn, seeded_memories, qd_db_with_tags):
-        from scripts.migrate.enrich_qd_tags import enrich_memories
+        from src.capture.qd_tags import enrich_memories
 
         # Map test QD IDs to our seeded memory source_urls
         qd_to_sb = {i: sb_id for sb_id, i in seeded_memories}
 
-        with patch("scripts.migrate.enrich_qd_tags.QD_DB_PATH", qd_db_with_tags):
-            with patch("scripts.migrate.enrich_qd_tags.get_qd_memory_id_mapping") as mock_mapping:
+        with patch("src.capture.qd_tags.QD_DB_PATH", qd_db_with_tags):
+            with patch("src.capture.qd_tags.get_qd_memory_id_mapping") as mock_mapping:
                 mock_mapping.return_value = qd_to_sb
                 stats = enrich_memories(dry_run=False)
 
@@ -269,7 +269,7 @@ class TestEnrichmentE2E:
             assert "people" in tags or "css-team" in tags
 
     def test_enrichment_dry_run_changes_nothing(self, test_conn, seeded_memories, qd_db_with_tags):
-        from scripts.migrate.enrich_qd_tags import enrich_memories
+        from src.capture.qd_tags import enrich_memories
 
         qd_to_sb = {i: sb_id for sb_id, i in seeded_memories}
 
@@ -279,8 +279,8 @@ class TestEnrichmentE2E:
             cur.execute("SELECT tags FROM memories WHERE id = %s", (sb_id,))
             tags_before = cur.fetchone()[0]
 
-        with patch("scripts.migrate.enrich_qd_tags.QD_DB_PATH", qd_db_with_tags):
-            with patch("scripts.migrate.enrich_qd_tags.get_qd_memory_id_mapping") as mock_mapping:
+        with patch("src.capture.qd_tags.QD_DB_PATH", qd_db_with_tags):
+            with patch("src.capture.qd_tags.get_qd_memory_id_mapping") as mock_mapping:
                 mock_mapping.return_value = qd_to_sb
                 stats = enrich_memories(dry_run=True)
 
@@ -291,12 +291,12 @@ class TestEnrichmentE2E:
         assert tags_before == tags_after
 
     def test_enrichment_is_idempotent(self, test_conn, seeded_memories, qd_db_with_tags):
-        from scripts.migrate.enrich_qd_tags import enrich_memories
+        from src.capture.qd_tags import enrich_memories
 
         qd_to_sb = {i: sb_id for sb_id, i in seeded_memories}
 
-        with patch("scripts.migrate.enrich_qd_tags.QD_DB_PATH", qd_db_with_tags):
-            with patch("scripts.migrate.enrich_qd_tags.get_qd_memory_id_mapping") as mock_mapping:
+        with patch("src.capture.qd_tags.QD_DB_PATH", qd_db_with_tags):
+            with patch("src.capture.qd_tags.get_qd_memory_id_mapping") as mock_mapping:
                 mock_mapping.return_value = qd_to_sb
                 stats1 = enrich_memories(dry_run=False)
                 stats2 = enrich_memories(dry_run=False)
