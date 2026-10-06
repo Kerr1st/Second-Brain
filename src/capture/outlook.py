@@ -207,7 +207,14 @@ async def collect_mail(call: Call, start: datetime, end: datetime, already: set[
                 break
             for msg in emails:
                 seen_in_folder += 1
-                url = mail_source_url(msg)
+                try:
+                    url = mail_source_url(msg)
+                except ValueError as e:
+                    # One message without a received/sent time must not abort the
+                    # whole run (R4 review S3-7): count it, log it, move on.
+                    logger.warning("Outlook mail skipped (id=%s): %s", msg.get("id"), e)
+                    items.failed += 1
+                    continue
                 if url in already:
                     continue
                 try:
@@ -218,7 +225,12 @@ async def collect_mail(call: Call, start: datetime, end: datetime, already: set[
                     continue
                 details = {**msg, **(details or {})}
                 details.setdefault("folder", folder)
-                rendered = render_email(details)
+                try:
+                    rendered = render_email(details)
+                except ValueError as e:
+                    logger.warning("Outlook mail render failed (id=%s): %s", msg.get("id"), e)
+                    items.failed += 1
+                    continue
                 if rendered:
                     items.append(rendered)
                     already.add(url)
@@ -243,7 +255,12 @@ async def collect_calendar(call: Call, start: datetime, end: datetime, already: 
             break
         for ev in events:
             seen += 1
-            url = event_source_url(ev)
+            try:
+                url = event_source_url(ev)
+            except ValueError as e:
+                logger.warning("Outlook event skipped (id=%s): %s", ev.get("id"), e)
+                items.failed += 1
+                continue
             if url in already:
                 continue
             if ev.get("sensitivity", "normal") not in ("normal", "personal"):

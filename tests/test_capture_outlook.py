@@ -173,3 +173,53 @@ class TestOutlookCollect:
         already = {outlook.event_source_url(ev_known)}
         items = asyncio.run(outlook.collect_calendar(_fake_call({}, {}, events_pages=pages), self.start, self.end, already))
         assert [u for u, _ in items] == [outlook.event_source_url(ev_ok)]
+
+    def test_mail_without_a_timestamp_is_a_counted_failure_not_an_aborted_run(self, caplog):
+        """R4 review S3-7: the identity guard in ``mail_source_url`` raises; one
+        malformed message must be counted (and logged), the rest still captured."""
+        ok1, bad, ok2 = _msg(1), {**_msg(2), "receivedDateTime": None}, _msg(3)
+        pages = {"inbox": [{"emails": [ok1, bad, ok2], "hasMore": False}], "sent": []}
+        details = {mid: {"bodyType": "text", "bodyContent": f"body of {mid}"} for mid in ("m1", "m2", "m3")}
+        log = []
+        with caplog.at_level("WARNING", logger="src.capture.outlook"):
+            items = asyncio.run(outlook.collect_mail(_fake_call(pages, details, log=log), self.start, self.end, set()))
+        assert [u for u, _ in items] == [outlook.mail_source_url(ok1), outlook.mail_source_url(ok2)]
+        assert items.failed == 1
+        assert [p["emailId"] for t, p in log if t == "get_email_details"] == ["m1", "m3"]  # bad one never fetched
+        assert any("m2" in rec.getMessage() and "stable identity" in rec.getMessage() for rec in caplog.records)
+
+    def test_mail_whose_details_drop_the_timestamp_is_a_counted_failure(self):
+        """The detail payload is merged over the listing; a detail reply that
+        nulls the timestamp fails rendering for that item only."""
+        ok, bad = _msg(1), _msg(2)
+        pages = {"inbox": [{"emails": [bad, ok], "hasMore": False}], "sent": []}
+        details = {"m1": {"bodyType": "text", "bodyContent": "fine"},
+                   "m2": {"bodyType": "text", "bodyContent": "body", "receivedDateTime": None, "sentDateTime": None}}
+        items = asyncio.run(outlook.collect_mail(_fake_call(pages, details), self.start, self.end, set()))
+        assert [u for u, _ in items] == [outlook.mail_source_url(ok)]
+        assert items.failed == 1
+
+    def test_event_without_a_start_is_a_counted_failure_not_an_aborted_run(self, caplog):
+        ev_ok = {"id": "1", "subject": "Sync", "start": "2026-09-15T17:00:00Z", "end": "2026-09-15T17:30:00Z",
+                 "organizer": "X", "attendees": [], "sensitivity": "normal"}
+        ev_bad = {**ev_ok, "id": "2", "subject": "No start", "start": ""}
+        ev_ok2 = {**ev_ok, "id": "3", "subject": "Later"}
+        pages = [{"events": [ev_bad, ev_ok, ev_ok2], "nextPageToken": None}]
+        with caplog.at_level("WARNING", logger="src.capture.outlook"):
+            items = asyncio.run(outlook.collect_calendar(_fake_call({}, {}, events_pages=pages), self.start, self.end, set()))
+        assert [u for u, _ in items] == [outlook.event_source_url(ev_ok), outlook.event_source_url(ev_ok2)]
+        assert items.failed == 1
+        assert any("id=2" in rec.getMessage() for rec in caplog.records)
+
+    def test_per_item_guard_failures_reach_the_channel_stats_and_exit_code(self):
+        """``CaptureBatch.failed`` from the collectors is what ``run_channel`` reports
+        and what ``exit_code`` turns into a non-zero exit (fix 7 contract)."""
+        from src.capture.common import exit_code
+        from src.capture.framework import run_channel
+        bad = {**_msg(2), "receivedDateTime": None}
+        pages = {"inbox": [{"emails": [_msg(1), bad], "hasMore": False}], "sent": []}
+        details = {"m1": {"bodyType": "text", "bodyContent": "fine"}}
+        items = asyncio.run(outlook.collect_mail(_fake_call(pages, details), self.start, self.end, set()))
+        stats = run_channel(outlook.SOURCE_TYPE_MAIL, items, dry_run=True)
+        assert stats["failed"] == 1 and stats["planned"] == 1
+        assert exit_code({outlook.SOURCE_TYPE_MAIL: stats}) == 1
