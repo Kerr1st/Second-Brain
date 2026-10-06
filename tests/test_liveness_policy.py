@@ -32,20 +32,22 @@ def test_production_channel_thresholds_are_unchanged_from_r1(policy):
     """verify_liveness.sh at 1071a81/R1 (2026-09-23 thresholds). Moving them into
     TOML must not move the numbers."""
     expected = {
-        "quick_desktop_doc": (3, "retired"), "quick_desktop_synth": (21, "required"), "web_articles": (9, "required"),
+        "quick_desktop_doc": (3, "retired"), "quick_desktop_synth": (21, "advisory"), "web_articles": (9, "required"),
         "cli_chat": (4, "required"), "youtube": (9, "required"), "outlook_email": (3, "required"),
         "outlook_calendar": (5, "required"), "slack": (4, "required"), "browser_history": (4, "required"),
         "codex_task": (7, "required"),
     }
     for label, (days, severity) in expected.items():
         assert (policy["channels"][label]["max_age_days"], policy["channels"][label]["severity"]) == (days, severity), label
+    # quick_desktop_synth keeps its R1 threshold; only its severity moved (upstream Quick export stale, R5 heads-up)
     assert policy["channels"]["quick_desktop_synth"]["predicate"] == \
         "source_type LIKE 'quick_desktop_%' AND source_type NOT IN ('quick_desktop_doc','quick_desktop_session_event')"
 
 
 def test_known_disabled_producers_are_advisory_by_explicit_config_with_a_reason(policy):
     advisory = {label for label, c in policy["channels"].items() if c["severity"] == "advisory"}
-    assert advisory == {"distilled_chat", "weekly_digest"}
+    assert advisory == {"distilled_chat", "weekly_digest", "quick_desktop_synth"}
+    assert "upstream Quick export stale" in policy["channels"]["quick_desktop_synth"]["reason"]
     for label in advisory:
         assert policy["channels"][label]["reason"].strip()
     assert policy["channels"]["ide_chat"] == {"predicate": "source_type = 'kiro_ide_chat'", "max_age_days": 7, "severity": "required"}
@@ -331,6 +333,22 @@ def test_deliberately_broken_channels_fail_the_sweep_end_to_end(test_conn, tmp_p
     assert by[("dream_cycle", "completed_at")]["state"] == "stalled"
     assert by[("channel", "ide_chat")]["healthy"] is True                                # R4 revived it
     assert by[("channel", "distilled_chat")]["severity"] == "advisory"
+
+
+def test_quick_desktop_silence_is_judged_on_created_at_not_on_a_refresh_touching_updated_at(test_conn, tmp_path, policy):
+    """Heads-up (R5 review): quick_desktop_feed is 20 d silent against a 21 d threshold.
+    R4's hourly qd-sync refresh does not touch unchanged rows, and the one metadata
+    patch it applies on its first run bumps updated_at without any new upstream
+    capture — so updated_at is not evidence of liveness. The predicate must keep
+    reading created_at, and the stale upstream is advisory, not ❌."""
+    _seed(test_conn, "quick_desktop_feed", 25)
+    with test_conn.cursor() as cur:
+        cur.execute("UPDATE memories SET updated_at = now() WHERE source_type = 'quick_desktop_feed'")   # a refresh happened
+    ages = liveness.fetch_channel_ages(test_conn, policy)
+    assert ages["quick_desktop_synth"] == 25                                   # created_at, not updated_at
+    finding = {f["subject"]: f for f in evaluate_channels(ages, policy)}["quick_desktop_synth"]
+    assert finding["healthy"] is False and finding["severity"] == "advisory" and not required_failure(finding)
+    assert "upstream Quick export stale" in finding["message"]
 
 
 def test_enumerated_detection_uses_the_real_predicates_against_the_database(test_conn, tmp_path, policy):

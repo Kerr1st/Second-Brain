@@ -21,7 +21,17 @@ reason = "upstream Quick doc export dormant since 2026-06-04; re-arm (severity =
 [channels.quick_desktop_synth]
 predicate = "source_type LIKE 'quick_desktop_%' AND source_type NOT IN ('quick_desktop_doc','quick_desktop_session_event')"
 max_age_days = 21
-severity = "required"
+# Advisory since R5 (2026-10-06): the upstream Quick export is stale — knowledge_v1.db
+# last written 2026-09-16, eventlog 2026-07-21; every quick_desktop_* type has
+# max(created_at) == max(updated_at) (feed: 20 d). The channel would go ❌ on 10-08
+# for an upstream condition no job of ours can fix. `created_at` stays the column:
+# the hourly qd-sync refresh (R4) leaves unchanged rows untouched (src/ingest.py
+# returns before any UPDATE when content/fields/metadata are equal), and the one
+# metadata patch it does apply on its first run (capture_identity) would make
+# `updated_at` look fresh for a day without any new upstream capture.
+# Re-arm (severity = "required") when the export resumes.
+severity = "advisory"
+reason = "upstream Quick export stale (knowledge_v1.db unchanged since 2026-09-16); qd-sync runs hourly but has nothing new to capture — re-arm when the export resumes"
 
 [channels.web_articles]
 predicate = "source_type = 'article'"
