@@ -176,3 +176,10 @@ def test_schedules_match_the_readme_table():
             if key.startswith("SECOND_BRAIN_JOB_TIMEOUT_"):
                 assert plist["EnvironmentVariables"][key] in readme, f"{label}: timeout value not documented"
     assert "SECOND_BRAIN_JOB_TIMEOUT_<NAME>" in readme and "SECOND_BRAIN_JOB_GRACE_S" in readme
+    # the plist table says which jobs wait for the network, and the runbook names the verification
+    for line in readme.splitlines():
+        for label in EXPECTED_LABELS:
+            if line.startswith(f"| `com.second-brain.{label}` |"):
+                flagged = PLISTS[label].get("EnvironmentVariables", {}).get("SECOND_BRAIN_JOB_NEEDS_NETWORK") == "1"
+                assert ("SECOND_BRAIN_JOB_NEEDS_NETWORK=1" in line) == flagged, label
+    assert "first Monday 06:00 weekly-digest run" in readme and "SECOND_BRAIN_JOB_NETWORK_WAIT_S" in readme
