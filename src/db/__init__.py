@@ -5,7 +5,7 @@ from .memories import (ALLOWED_UPDATE_FIELDS, create_memory, get_memory, get_mem
     update_memory, update_fields, deepen_schema, list_memories, search_similar,
     find_schemas_for_memories, get_memory_provenance)
 from .relationships import create_relationship, get_relationships, expire_stale_relationships
-from .capture_queries import get_arrivals_summary, get_processed_source_urls, find_temporal_neighbors, find_captured_source, lock_source_identity
+from .capture_queries import get_arrivals_summary, get_processed_source_urls, get_capture_fingerprints, find_temporal_neighbors, find_captured_source, lock_source_identity
 
 
 def __getattr__(name):

@@ -54,22 +54,33 @@ def get_arrivals_summary(since, samples_per_source=5):
 
 
 def get_processed_source_urls(source_type=None):
-    """URL inventory, channel-scoped when ``source_type`` is given.
+    """Channel-scoped URL inventory. Cross-channel identity is never inferred.
 
-    R3 keeps the R1 behaviour for ``source_type=None`` (every URL) because the
-    unchanged R1 crawlee ingest (``scripts/crawlee_ingest.py``, nightly ``ingest``
-    job) still calls it that way; the capture rewrite (R4) makes the argument
-    mandatory. A non-empty string is required otherwise.
+    R3 allowed ``source_type=None`` (every URL) for the R1 crawlee ingest; R4
+    replaced that caller with ``src.capture.crawlee``, so the channel label is
+    now required.
     """
-    if source_type is None:
-        with get_connection() as conn, conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT source_url FROM memories WHERE source_url IS NOT NULL")
-            return {row[0] for row in cur.fetchall()}
     if not isinstance(source_type, str) or not source_type.strip():
-        raise ValueError("source_type must be a non-empty channel label (or None for every URL)")
+        raise ValueError("source_type is required for a source URL inventory")
     with get_connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT DISTINCT source_url FROM memories WHERE source_type = %s AND source_url IS NOT NULL", (source_type,))
         return {row[0] for row in cur.fetchall()}
+
+
+def get_capture_fingerprints(source_type):
+    """``{source_url: metadata.source_fingerprint}`` for a channel's captured parents.
+
+    Lets a bounded capture run skip sessions whose source files are byte-for-byte
+    the ones already captured (no re-read, no re-render, no DB write). Parents
+    captured before fingerprints existed map to ``None`` and are therefore
+    re-examined once.
+    """
+    if not isinstance(source_type, str) or not source_type.strip():
+        raise ValueError("source_type is required for a fingerprint inventory")
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT source_url, metadata->>'source_fingerprint' FROM memories
+                       WHERE source_type = %s AND source_url IS NOT NULL AND parent_id IS NULL""", (source_type,))
+        return {url: fp for url, fp in cur.fetchall()}
 
 
 def find_temporal_neighbors(memory_id: str, created_at, limit: int = 3) -> list[dict]:

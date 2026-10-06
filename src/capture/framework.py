@@ -4,7 +4,10 @@ Adapters own preflight and source windows; asynchronous adapters hand over their
 collected batch. All writes use the ingestion service, not source-specific SQL.
 """
 from __future__ import annotations
+import logging
 from src.capture.common import CaptureBatch, exit_code
+
+logger = logging.getLogger(__name__)
 
 
 def run_channel(source_type: str, items=None, *, collect=None, preflight=None,
@@ -23,8 +26,15 @@ def run_channel(source_type: str, items=None, *, collect=None, preflight=None,
         elif url in seen:
             stats["skipped"] += 1
         else:
+            # One odd header line fails that item, never the whole channel (D N-9).
+            try:
+                rendered = normalize_document_headers(markdown) if normalize_headers else markdown
+            except ValueError:
+                logger.warning("Capture item header could not be normalized; counted as failed", exc_info=True)
+                stats["failed"] += 1
+                continue
             seen.add(url)
-            clean.append((url, normalize_document_headers(markdown) if normalize_headers else markdown))
+            clean.append((url, rendered))
     if dry_run:
         return {**stats, "planned": len(clean), "dry_run": True}
     if clean:
@@ -37,13 +47,37 @@ def run_channel(source_type: str, items=None, *, collect=None, preflight=None,
     return stats
 
 
+def ingest_with_metadata(metadata_by_url: dict, *, refresh=False, ingest=None):
+    """An ``ingest`` callable for :func:`run_channel` that attaches per-item
+    source metadata (for example a source fingerprint) without widening the
+    document header. Mirrors ``ingest_batch``: one bad item is counted, never
+    fatal; ``BaseException`` propagates.
+    """
+    if ingest is None:
+        from src.ingest import ingest_content
+        ingest = ingest_content
+
+    def store(items, source_type, **_kwargs):
+        result = {"processed": 0, "skipped": 0, "failed": 0}
+        for url, content in items:
+            try:
+                saved = ingest(content, source_type, url, refresh=refresh,
+                               source_metadata=metadata_by_url.get(url) or None)
+            except Exception:  # noqa: BLE001 - per-item resilience (R3 S3-8)
+                logger.error("Failed to ingest source: %s", url[:120], exc_info=True)
+                result["failed"] += 1
+            else:
+                result["processed" if saved else "skipped"] += 1
+        return result
+    return store
+
+
 def run_records(records, *, dry_run=False, refresh=False, ingest=None) -> dict:
     """Capture trusted source mappings while retaining their typed provenance.
 
     These are parser-owned fields, never unconstrained model arguments.
     """
     from collections import defaultdict
-    from psycopg2 import Error as DatabaseError
     if ingest is None:
         from src.ingest import ingest_content
         ingest = ingest_content
@@ -66,9 +100,8 @@ def run_records(records, *, dry_run=False, refresh=False, ingest=None) -> dict:
                 try:
                     saved = ingest(content, source_type, url, refresh=refresh,
                                    source_metadata=record.get("metadata") or {}, memory_fields=fields, parse_header=False)
-                except (DatabaseError, OSError, ValueError, RuntimeError):
-                    import logging
-                    logging.getLogger(__name__).exception("Capture record storage failed")
+                except Exception:  # noqa: BLE001 - one bad record never aborts the channel (R3 S3-8)
+                    logger.exception("Capture record storage failed")
                     result["failed"] += 1
                 else:
                     result["processed" if saved else "skipped"] += 1

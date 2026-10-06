@@ -108,22 +108,30 @@ def test_youtube_dry_run_counts_planned_and_honors_limit():
     assert result["processed"] == 0 and result["planned"] == 2
 
 
+def patch_inventory(monkeypatch, known=(), fingerprints=None):
+    """Stand in for the channel's DB inventory (URLs + stored fingerprints)."""
+    import src.db
+    monkeypatch.setattr(src.db, 'get_processed_source_urls', lambda _: set(known))
+    monkeypatch.setattr(src.db, 'get_capture_fingerprints', lambda _: dict(fingerprints or {}))
+
+
 def test_native_pipeline_routes_refresh_and_dry_run_is_read_only(tmp_path, monkeypatch):
     from src.capture import chats
-    import src.db, src.ingest
+    import src.ingest
     path, _ = native_session(tmp_path)
     monkeypatch.setattr(chats.ide_chat, 'find_chat_files', lambda: [])
     monkeypatch.setattr(chats.kiro_sessions, 'find_sessions', lambda: [path])
-    monkeypatch.setattr(src.db,'get_processed_source_urls',lambda _: set())
-    writer = Mock(return_value={'processed':1,'skipped':0,'failed':0})
-    monkeypatch.setattr(src.ingest,'ingest_batch',writer)
-    planned = chats.capture(dry_run=True,cli=False)
+    patch_inventory(monkeypatch)
+    writer = Mock(return_value='new-id')
+    monkeypatch.setattr(src.ingest, 'ingest_content', writer)
+    planned = chats.capture(dry_run=True, cli=False)
     assert planned['kiro_ide_chat']['planned'] == 1
     writer.assert_not_called()
     actual = chats.capture(cli=False)
     assert actual['kiro_ide_chat']['processed'] == 1
-    assert writer.call_args.kwargs == {'refresh':True}
-    assert writer.call_args.args[0][0][0] == 'kiro-ide://session/stable-id'
+    assert writer.call_args.kwargs['refresh'] is True
+    assert writer.call_args.kwargs['source_metadata'] == {'source_fingerprint': kiro_sessions.fingerprint(path)}
+    assert writer.call_args.args[2] == 'kiro-ide://session/stable-id'
 
 
 def test_native_parse_failure_produces_failed_capture(tmp_path, monkeypatch):
@@ -132,6 +140,7 @@ def test_native_parse_failure_produces_failed_capture(tmp_path, monkeypatch):
     path.write_text('not json')
     monkeypatch.setattr(chats.ide_chat,'find_chat_files',lambda: [])
     monkeypatch.setattr(chats.kiro_sessions,'find_sessions',lambda: [path])
+    patch_inventory(monkeypatch)
     result = chats.capture(dry_run=True,cli=False)
     assert result['kiro_ide_chat']['failed'] == 1 and exit_code(result) == 1
 
@@ -152,14 +161,13 @@ def test_one_crawlee_index_reader_handles_shifted_title_columns(tmp_path):
 
 def test_native_ide_reuses_legacy_identity_when_session_migrated(tmp_path, monkeypatch):
     from src.capture import chats
-    import src.db, src.ingest
+    import src.ingest
     path,_=native_session(tmp_path)
     monkeypatch.setattr(chats.ide_chat,'find_chat_files',lambda: [])
     monkeypatch.setattr(chats.kiro_sessions,'find_sessions',lambda: [path,path])
-    monkeypatch.setattr(src.db,'get_processed_source_urls',lambda _: {'chat://stable-id'})
-    writer=Mock(return_value={'processed':1,'failed':0,'skipped':0})
-    monkeypatch.setattr(src.ingest,'ingest_batch',writer)
-    chats.capture(cli=False)
-    items,channel=writer.call_args.args
-    assert channel == 'kiro_ide_chat' and len(items) == 1
-    assert items[0][0] == 'chat://stable-id'
+    patch_inventory(monkeypatch, known={'chat://stable-id'})
+    writer=Mock(return_value='id')
+    monkeypatch.setattr(src.ingest,'ingest_content',writer)
+    result = chats.capture(cli=False)
+    assert writer.call_count == 1 and result['kiro_ide_chat']['processed'] == 1
+    assert writer.call_args.args[1:3] == ('kiro_ide_chat', 'chat://stable-id')
