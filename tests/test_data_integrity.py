@@ -164,7 +164,8 @@ def test_metadata_only_refresh_does_not_embed(test_db,clean_tables,monkeypatch):
     assert ingest_content('Unchanged text','quick_desktop_decision','qd-decision://test',refresh=True,memory_fields={**fields,'confidence':0.9,'tags':['new']},source_metadata={'origin':'updated'})==parent
     assert embed.call_count==1
     row=db.get_memory(parent)
-    assert row['confidence']==0.9 and row['tags']==['new'] and row['metadata']['origin']=='updated'
+    # R4 (D N-4): captured tags are merged into the row's tags, never substituted for them.
+    assert row['confidence']==0.9 and row['tags']==['old','new'] and row['metadata']['origin']=='updated'
 
 
 def test_pool_exhaustion_times_out(test_db,monkeypatch):

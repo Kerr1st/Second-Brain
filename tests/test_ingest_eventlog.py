@@ -83,7 +83,7 @@ class TestParseEvents:
         from src.capture.qd_eventlog import format_event_as_markdown
         md = format_event_as_markdown(SAMPLE_EVENTS[0])
         assert "# Ryan answered your FedRAMP questions" in md
-        assert "Source_Type: quick_desktop_feed" in md
+        assert "Source-Type: quick_desktop_feed" in md  # legacy-stable header (R4 fix 4)
         assert "test-evt_00001" in md
         assert "FedRAMP" in md
 
@@ -136,7 +136,7 @@ class TestEventProperties:
         md = format_event_as_markdown(event)
         assert md.startswith("# ")
         assert "---" in md
-        assert "Source_Type: quick_desktop_feed" in md
+        assert "Source-Type: quick_desktop_feed" in md  # legacy-stable header (R4 fix 4)
 
     @given(
         event_id=st.text(min_size=1, max_size=20, alphabet="abcdefghijklmnopqrstuvwxyz0123456789_"),

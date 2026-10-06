@@ -18,7 +18,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.db import get_connection
-from src.capture.render import render_header_lines
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -57,7 +56,19 @@ def tags_for_event(event):
 
 
 def format_event_as_markdown(event):
-    """Format an event as markdown with metadata header for ingestion."""
+    """Format an event as markdown with metadata header for ingestion.
+
+    BYTE-STABLE WITH THE LEGACY WRITER (``scripts/migrate/ingest_eventlog.py``,
+    retired in R4). The 1,803 live ``quick_desktop_feed`` rows store exactly this
+    rendering as their ``content`` (header included: the legacy writer did not
+    split the header off). ``run_records`` compares the rendered text with the
+    stored content to decide whether a row changed, so any cosmetic change here
+    (for example normalising ``Source-Type`` to ``Source_Type`` through
+    ``render_header_lines``) would re-embed every feed row and add a duplicate
+    chunk child under each on the first hourly run (D N-3). Keep the hyphenated
+    keys, the raw summary line and the exact separators; the test
+    ``test_qd_eventlog_rendering_is_byte_stable_with_legacy_rows`` pins them.
+    """
     summary = event.get("summary", "Untitled Event")
     details = event.get("details", {})
     full_message = details.get("full_message", "")
@@ -78,8 +89,7 @@ def format_event_as_markdown(event):
             if isinstance(v, str) and v:
                 lines.append(f"{k}: {v}")
 
-    header = lines
-    lines = [full_message]
+    lines.extend(["", "---", "", full_message])
 
     importance = details.get("importance")
     if importance:
@@ -93,7 +103,7 @@ def format_event_as_markdown(event):
             if label:
                 lines.append(f"- {label}")
 
-    return render_header_lines(header, "\n".join(lines))
+    return "\n".join(lines)
 
 
 def ingest_eventlog(dry_run=False):

@@ -110,6 +110,22 @@ def _discover_relationships(parent_id, body=None):
         logger.warning("temporal_relationship_discovery_failed parent=%s", parent_id, exc_info=True)
 
 
+def merge_tags(existing, new_tags):
+    """Existing tags first (order kept), then new ones; no duplicates.
+
+    Capture stages must commute: the QD facts stage supplies the record's own
+    tags while the QD tags stage enriches the same rows with upstream tags. A
+    refresh therefore merges rather than overwrites, so neither stage undoes the
+    other (D N-4: 280 rows flipped every hour).
+    """
+    seen, merged = set(), []
+    for tag in list(existing or []) + list(new_tags or []):
+        if tag not in seen:
+            seen.add(tag)
+            merged.append(tag)
+    return merged
+
+
 def ingest_content(content, source_type, source_url=None, project=None, *, refresh=False, source_metadata=None, memory_fields=None, parse_header=True):
     """Prepare every embedding first, then commit parent and chunks together.
 
@@ -118,7 +134,8 @@ def ingest_content(content, source_type, source_url=None, project=None, *, refre
     memories sharing a task URL are outside this captured-source namespace.
     Refresh keeps cited old chunk IDs as superseded history and atomically
     installs a fresh active chunk set. A non-NULL resolved project is written
-    on refresh; a NULL one never erases an existing tag.
+    on refresh; a NULL one never erases an existing tag. Captured ``tags`` are
+    merged into the existing row's tags, never substituted for them.
     """
     meta, body = parse_metadata_header(content) if parse_header else ({}, content)
     if source_metadata is not None:
@@ -159,6 +176,8 @@ def ingest_content(content, source_type, source_url=None, project=None, *, refre
         with transaction() as conn:
             lock_source_identity(source_type, source_url, resolved_project, conn=conn)
             current = get_memory(existing["id"], conn=conn)
+            if current is not None and "tags" in fields:
+                fields["tags"] = merge_tags(current.get("tags"), fields["tags"])
             updates = {"title": title, "type": memory_type,
                        "mem_class": explicit_class or classify_memory(memory_type, body), **fields}
             if resolved_project is not None:
@@ -188,11 +207,17 @@ def ingest_content(content, source_type, source_url=None, project=None, *, refre
         meta["capture_updated_at"] = datetime.now(timezone.utc).isoformat()
         if existing:
             parent_id = str(existing["id"])
+            if "tags" in fields:
+                current = get_memory(parent_id, conn=conn)
+                fields["tags"] = merge_tags(current.get("tags") if current else None, fields["tags"])
             # Retaining prior chunk rows preserves downstream references and exact
             # evidence. Retrieval defaults and caller filters can exclude history.
             with conn.cursor() as cur:
                 cur.execute("UPDATE memories SET status = 'superseded', updated_at = now() WHERE parent_id = %s AND status = 'active'", (parent_id,))
-            update_fields(parent_id, {"title": title, "content": body,
+            # The fresh chunk set carries the vectors; a parent embedded as a
+            # single leaf by an older writer must not keep a vector of the old
+            # text next to them (duplicate, stale retrieval hit — D N-3).
+            update_fields(parent_id, {"title": title, "content": body, "embedding": None,
                           "mem_class": explicit_class or classify_memory(memory_type, body), "type": memory_type,
                           **({"project": resolved_project} if resolved_project is not None else {}), **fields},
                           metadata_patch=meta, conn=conn)

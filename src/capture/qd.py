@@ -4,8 +4,6 @@ import argparse
 import json
 import logging
 import os
-import sqlite3
-from psycopg2 import Error as DatabaseError
 from src.capture.common import exit_code
 
 
@@ -19,14 +17,14 @@ def capture(*, dry_run=False):
     for name, run in stages.items():
         try:
             results[name] = run(dry_run=dry_run)
-        except (OSError, ValueError, KeyError, sqlite3.Error, DatabaseError, RuntimeError):
+        except Exception:  # noqa: BLE001 - one stage never hides the others' outcome (R3 S3-8)
             logging.getLogger(__name__).exception("QD %s capture failed", name)
             results[name] = {"failed": 1}
     if not dry_run and not exit_code(results.get("feed", {})):
         try:
             if os.path.isfile(qd_eventlog.INTERACTIONS_PATH):
                 results["interactions"] = qd_eventlog.enrich_with_interactions()
-        except (OSError, ValueError, KeyError, sqlite3.Error, DatabaseError):
+        except Exception:  # noqa: BLE001
             logging.getLogger(__name__).exception("QD interaction enrichment failed")
             results["interactions"] = {"failed": 1}
     return results
