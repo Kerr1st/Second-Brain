@@ -345,6 +345,33 @@ class TestMainExitCodes:
         from src.capture import crawlee
         assert module.main is crawlee.main
 
+    @pytest.mark.parametrize("rc", [1, 0])
+    def test_crawlee_compat_script_main_guard_propagates_the_exit_code(self, rc, monkeypatch):
+        """R4 review S3-4 (mutant M7c): the ``if __name__ == "__main__"`` line is the
+        nightly ``ingest`` job's exit code. Run the script *as* ``__main__`` with the
+        channel ``main`` patched and assert ``SystemExit`` carries its return value."""
+        import runpy
+        from src.capture import crawlee
+        monkeypatch.setattr(crawlee, "main", lambda: rc)
+        with pytest.raises(SystemExit) as excinfo:
+            runpy.run_path("scripts/crawlee_ingest.py", run_name="__main__")
+        assert excinfo.value.code == rc
+
+    def test_crawlee_compat_script_exits_non_zero_as_a_subprocess(self, tmp_path):
+        """Same contract end to end in a real interpreter: a failing channel ``main``
+        must surface as a non-zero process exit for the job wrapper."""
+        import pathlib, sys
+        shim = tmp_path / "sitecustomize.py"
+        shim.write_text(
+            "import sys, pathlib\n"
+            f"sys.path.insert(0, {str(pathlib.Path.cwd())!r})\n"
+            "import src.capture.crawlee as crawlee\n"
+            "crawlee.main = lambda: 7\n")
+        env = {"PYTHONPATH": str(tmp_path), "PATH": "/usr/bin:/bin"}
+        proc = subprocess.run([sys.executable, "scripts/crawlee_ingest.py"], env=env,
+                              capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 7, proc.stderr
+
     def test_scrape_bookmarks_main_maps_failures_to_non_zero(self, tmp_path, monkeypatch):
         import importlib.util, pathlib
         spec = importlib.util.spec_from_file_location("scrape_bookmarks", pathlib.Path("scripts/scrape_bookmarks.py"))
