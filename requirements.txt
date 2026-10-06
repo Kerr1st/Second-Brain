@@ -1,18 +1,20 @@
-psycopg2-binary==2.9.11
-boto3==1.42.69
-mcp==1.26.0
+psycopg2-binary==2.9.13
+boto3==1.43.103
+mcp>=1.30.0,<2
 browser-cookie3==0.20.1
-requests==2.32.5
-hypothesis==6.151.9
-pytest==9.0.2
-fastapi>=0.115.0
-uvicorn[standard]>=0.34.0
-numpy>=2.0.0
-scipy>=1.14.0
+requests==2.34.2
+hypothesis==6.168.1
+pytest==9.1.1
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+numpy==2.5.3
+scipy==1.18.1
 
 # YouTube capture (src/capture/youtube.py). curl_cffi gives yt-dlp browser
-# impersonation. yt-dlp 2026.3.17 supports ONLY curl_cffi 0.5.10 and 0.10.x-0.14.x
-# (its darwin build pins 0.13.0; 0.15.0 is rejected) — so curl_cffi is pinned
-# exactly and MUST be bumped together with yt-dlp.
-yt-dlp==2026.3.17
-curl_cffi==0.13.0
+# impersonation. yt-dlp's darwin build accepts only the curl_cffi series it was
+# built against (2026.8.19 → curl_cffi 0.16.x), so curl_cffi is pinned exactly and
+# MUST be bumped together with yt-dlp. These two pins are what the installed .venv
+# runs since R1b (uv sync of requirements.lock, 2026-10-05); requirements.lock is
+# the authoritative resolution (`uv pip compile requirements-dev.txt`).
+yt-dlp==2026.8.19
+curl_cffi==0.16.3

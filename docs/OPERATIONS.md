@@ -1,6 +1,13 @@
 # Second Brain — Operations
 
-> Last updated: 2026-06-16
+> Last updated: 2026-10-06 (R5 operations layer; the job table below predates R4/R5 — `scheduling/README.md` is authoritative)
+
+## Operations layer (R5)
+
+* **One job boundary.** Every launchd job runs `scripts/jobs/job_wrapper.sh` → `python -m src.operations.jobs <script> <job-name>`: PATH, `AWS_PROFILE=second-brain-jobs`, `umask 077`, `caffeinate`, one `flock` per job, a per-job deadline (`SECOND_BRAIN_JOB_TIMEOUT_<NAME>` in each plist; the runner never lets the default fall below the floors `dream-cycle` 6 h, `bookmarks` 3 h, `backup`/`verify`/`weekly-digest`/`codex-capture`/`distill` 2 h), SIGTERM → 120 s grace → SIGKILL on deadline, the per-day log and the durable status `logs/jobs/<job-name>.json`. The capture API runs in service mode (health probes, no deadline while healthy, back-off and ≤ 1 notification / 30 min during an outage). Contract: `scheduling/README.md`.
+* **Liveness** (`com.second-brain.liveness`, 09:00): policy in `config/liveness.toml` — the R1 channel thresholds unchanged; `ide_chat` re-armed (R4); `distilled_chat` and `weekly_digest` watched as **advisory** (known-disabled/failing producers, by explicit config with a reason); a generic "produced zero rows for longer than its own cadence tolerates" rule over every `source_type`; `dream_cycle_runs.completed_at` ≤ 7 d and 0-candidate-run detection; a sweep of `logs/jobs/*.json` (last exit non-zero, no status update for longer than the job's expected interval). Every finding lands in `logs/jobs/liveness-report.json`; osascript is a supplement.
+* **Backup** (`config/backup.toml`): one encrypted bundle per night (DB dump + repository + `.env` + knowledge sources), only the `.tar.gpg` goes to Drive and is read back and compared; retention 7 d local / 30 d remote (`*.gpg` only); weekly verify picks the newest file of either naming scheme, fails if older than 36 h, and fully restores bundles into a throwaway cluster. `docs/DISASTER-RECOVERY.md`.
+* **PostgreSQL is never auto-started by a job** any more: jobs exit 69 with a named cause (`scripts/jobs/_preflight.sh`).
 
 ## Model Backend Profile
 
@@ -170,7 +177,9 @@ psql -h 127.0.0.1 -U memory_bank -d memory_bank
 | Check | Command | Expected |
 |---|---|---|
 | All jobs loaded | `launchctl list \| grep second-brain` | jobs present, exit code 0 |
-| Backup ran today | `cat logs/backup-$(date +%Y%m%d).log` | "Backup complete" |
+| Backup ran today | `cat logs/backup-$(date +%Y%m%d).log`; `ls -t backups/*.receipt.json \| head -1 \| xargs cat` | `OK (exit 0)`; `"remote_verified": true` |
+| Every job's last run | `for f in logs/jobs/*.json; do python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['job'], d['state'], d.get('exit_code'))" "$f"; done` | `succeeded 0` (capture-api: `running`) |
+| Liveness report | `python3 -c "import json; r=json.load(open('logs/jobs/liveness-report.json')); print(r['healthy'], r['required_failures'], r['advisories'])"` | `True [] [...]` (advisories: distilled_chat, weekly_digest while disabled/failing) |
 | QD sync running | `cat logs/qd-sync-$(date +%Y%m%d).log` | Hourly entries |
 | AWS SSO valid | `aws sts get-caller-identity` | Returns account info |
 | PostgreSQL up | `pg_isready -h 127.0.0.1 -p 5432 -U memory_bank` | "accepting connections" |
