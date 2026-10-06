@@ -1,29 +1,93 @@
 # Agent Memory Architecture — Disaster Recovery Runbook
 
-> Last updated: 2026-06-08
-> Backup schedule: Daily at 2:00 AM (launchd)
-> Verification schedule: Weekly, Sundays at 3:00 AM (launchd)
-> Encryption: AES-256 via GPG
+> Last updated: 2026-10-06 (R5 — encrypted bundles)
+> Backup schedule: Daily at 2:00 AM (launchd `com.second-brain.backup`, via `job_wrapper.sh`, deadline 2 h)
+> Verification schedule: Weekly, Sundays at 3:00 AM (`com.second-brain.verify`, deadline 2 h)
+> Encryption: AES-256 via GPG (symmetric, passphrase file `.backup-key`, 0600)
 > RPO: 24 hours | RTO: ~15-30 minutes
 
 > ## BACKUP POSTURE — single-cloud (Google Drive) + local · ACCEPTED 2026-06-12
-> **AWS S3 was de-scoped** (brittle overnight SSO). Backups now go to **Google Drive + local
-> only** (code/config also in git on `origin`/`mini`). This means:
-> - The old "**Either Google OR AWS alone is sufficient**" dual-cloud guarantee **no longer holds**
->   for data — offsite redundancy is now **single-cloud (Google Drive)**.
-> - **Scenario 2 (recovery from AWS S3) is UNAVAILABLE** — no S3 backups since 2026-06-01.
-> - The AWS sections below are retained for **historical reference only** (S3 is not planned to return).
->
-> **DECISION (2026-06-12): ACCEPTED.** Single-cloud (Google Drive) + local is the intended posture;
-> S3 will **not** be re-established. Google Drive is the sole offsite path — the weekly backup-verify
-> job and the 7-day local copy are the safety net. Verify the Google Drive leg diligently.
+> **AWS S3 was de-scoped** (brittle overnight SSO). Backups go to **Google Drive + local
+> only** (code/config also in git on `origin`/`mini`). Scenario 2 (S3) is UNAVAILABLE and
+> retained for historical reference only. Google Drive is the sole offsite path — the
+> weekly verify job and the 7-day local copy are the safety net.
+
+## R5 backup contract (`scripts/jobs/backup.sh` → `scripts/maintenance/backup_bundle.py create`)
+
+| | Pre-R5 (`memory_bank_<ts>.dump.gpg` + 4 `*.json.gpg`) | R5 (`second-brain_<UTC stamp>.tar.gpg` + `.receipt.json`) |
+|---|---|---|
+| Database | `pg_dump -Fc` | same, `--no-owner --no-acl`, inside the bundle as `database.dump` |
+| JSON fallbacks | 4 `row_to_json` exports (incl. dormant KG tables) | dropped — the custom dump is restore-tested weekly instead |
+| Repository | `backups/config/` copies of docs/migrations/README (local only after R1) | `repository/{src,scripts,docs,config,migrations,scheduling,.kiro,README.md,requirements*.txt,requirements.lock,docker-compose.yml,pyproject.toml}` inside the bundle |
+| Knowledge sources | `rsync` to `backups/kb-sources/` (local only after R1) | `knowledge-sources/` inside the bundle, path from `config/backup.toml` (`~/Work/Tools/Crawlee/knowledge/sources`); a configured path that is missing/a symlink **fails the job** (E-N3) |
+| Secrets | none | `repository/.env` (`CAPTURE_API_TOKEN`) is **inside the bundle on purpose** — a replacement host needs it. Acceptable only because the bundle is ciphertext end to end: plaintext exists in a 0700 temp dir under `backups/` for the duration of the run and is deleted before the `.tar.gpg` is published; rclone is handed nothing but the `.tar.gpg` (`tests/test_backup_bundle.py::test_only_the_encrypted_bundle_is_ever_passed_to_rclone`). `.backup-key` itself is excluded. |
+| Integrity | gpg decrypts | manifest v2: SHA-256 + size + mode (0600/0700) per file, `pg_restore --list` of the dump, decrypt-and-verify of the just-written ciphertext before publishing |
+| Cloud | `rclone copy backups/ … --include "*.gpg"` + `rclone lsf` | `rclone copyto <bundle> gdrive:memory-bank-backups/<bundle>`, then **download it again and compare SHA-256** (`remote_verified` in the receipt) |
+| Retention (E-N2) | local 7 d / remote 30 d (`*.gpg`) | **same policy**, from `config/backup.toml`: local `*.gpg` + `*.receipt.json` older than 7 d at the root of `backups/` (both naming schemes, so the pre-R5 files age out too); remote `rclone delete gdrive:memory-bank-backups/ --min-age 30d --include "*.gpg" --max-depth 1`. Pruning runs **only after** the new bundle is verified (remote only after read-back matched). `0` disables a leg. |
+| Plaintext on the remote | the two `rclone sync`s of kb-sources/config stopped in R1; historical trees frozen | **never touched by any job**; retirement is the CONFIRM-REQUIRED manual step below |
+| Postgres down | `brew services start` silently | exit 69, no auto-start (`scripts/jobs/_preflight.sh`) |
+
+Receipt (`backups/second-brain_<stamp>.receipt.json`): `sha256`, `bytes`, `files`, `payload_verified`, `file_modes_verified`, `remote_verified`, `knowledge_sources_included`, `pruned_local` (names), `pruned_remote` (bool), `retention`.
+
+### Verify (weekly, `scripts/jobs/verify_backup.sh`)
+1. `rclone lsf gdrive:memory-bank-backups --files-only --max-depth 1 --include '*.gpg'` — **both** naming schemes are listed, because during the transition the remote holds pre-R5 dumps next to bundles.
+2. `backup_bundle.py select-latest`: newest by the timestamp in the name; **fails if older than 36 h** (`[verify].max_age_hours`; E-N9 — a Drive copy that stopped updating no longer passes because it decrypts).
+3. Bundle → `backup_bundle.py verify <file> --restore`: manifest checksums/modes, then a **full `pg_restore` into a fresh socket-only cluster** under `/private/tmp`, reporting per-table row counts; legacy dump → `backup_bundle.py verify-legacy` (decrypt + `pg_restore --list`, the pre-R5 check), so old files stay verifiable until they age out.
+Time budget: ~1.1 GB download (Drive-bound) + decrypt ~10 s + restore ~4 min (219 s on the R3 clone); per-command cap 3600 s, job deadline 7200 s.
+
+### Restore a bundle (new machine or corrupted database)
+```bash
+# key: ~/second-brain/.backup-key (or the OneDrive recovery copy — see "Key custody" / "Encryption Key Storage")
+rclone lsf gdrive:memory-bank-backups --files-only --include 'second-brain_*.tar.gpg' | sort | tail -1   # newest bundle
+rclone copyto gdrive:memory-bank-backups/<bundle> /private/tmp/restore/<bundle>
+# 1. verify (incl. a full restore into a throwaway cluster; prints row counts)
+SECOND_BRAIN_PROFILE=controlled .venv/bin/python scripts/maintenance/backup_bundle.py verify /private/tmp/restore/<bundle> --restore --key ~/second-brain/.backup-key
+# 2. unpack for a real restore
+umask 077; mkdir -p /private/tmp/restore/payload
+gpg --batch --pinentry-mode loopback --passphrase-file ~/second-brain/.backup-key --output /private/tmp/restore/payload.tar --decrypt /private/tmp/restore/<bundle>
+tar -xf /private/tmp/restore/payload.tar -C /private/tmp/restore/payload      # database.dump, manifest.json, repository/, knowledge-sources/
+# 3. database (native PG 17 + pgvector; `migrations/` are NOT needed — the dump carries the schema and the schema_migrations ledger)
+brew services start postgresql@17
+createuser -s memory_bank 2>/dev/null || true; createdb -O memory_bank memory_bank 2>/dev/null || true
+psql -h localhost -U memory_bank -d memory_bank -c "CREATE EXTENSION IF NOT EXISTS vector;"
+PGOPTIONS='-c maintenance_work_mem=1GB' pg_restore -h localhost -U memory_bank -d memory_bank --no-owner --no-acl -j 4 /private/tmp/restore/payload/database.dump
+psql -h localhost -U memory_bank -d memory_bank -c "ALTER DATABASE memory_bank SET hnsw.ef_search = 200"   # database-level GUC is not in a dump
+# 4. code, config, secrets, knowledge sources
+git clone <origin> ~/second-brain && cd ~/second-brain && git checkout <commit from repository/…>   # or copy repository/ wholesale
+cp /private/tmp/restore/payload/repository/.env ~/second-brain/.env && chmod 600 ~/second-brain/.env
+rsync -a /private/tmp/restore/payload/knowledge-sources/ ~/Work/Tools/Crawlee/knowledge/sources/
+uv venv .venv && uv pip sync --python .venv/bin/python requirements.lock
+# 5. clean up plaintext
+rm -rf /private/tmp/restore
+```
+Legacy `memory_bank_<ts>.dump.gpg` files restore as before (Scenario 3 below).
+
+### Historical plaintext on Google Drive — CONFIRM-REQUIRED manual retirement
+Until 2026-10-05 the nightly job `rclone sync`ed `backups/kb-sources/` (personal knowledge corpus) and `backups/config/` (docs, migrations, Kiro skills) to `gdrive:memory-bank-backups/{kb-sources,config}/` in **plaintext**. R1 stopped refreshing them; no R5 job touches them (retention is `--include "*.gpg" --max-depth 1`). They should be removed, by hand, **only after** the first R5 bundle's receipt shows `"remote_verified": true` and `verify_backup.sh` has passed on it — the bundle then contains everything those trees held, encrypted.
+```bash
+# 1. LIST FIRST (read-only) — confirm these are the two plaintext trees and nothing else
+rclone lsf gdrive:memory-bank-backups/ --dirs-only                 # expect exactly: config/  kb-sources/
+rclone size gdrive:memory-bank-backups/kb-sources/
+rclone size gdrive:memory-bank-backups/config/
+rclone lsf gdrive:memory-bank-backups/kb-sources/ --recursive | head -20
+rclone lsf gdrive:memory-bank-backups/config/ --recursive | head -20
+# 2. CONFIRM with the operator, then purge (irreversible on Drive after the trash window)
+rclone purge gdrive:memory-bank-backups/kb-sources/
+rclone purge gdrive:memory-bank-backups/config/
+# 3. verify
+rclone lsf gdrive:memory-bank-backups/ --dirs-only                 # expect no output
+rclone lsf gdrive:memory-bank-backups/ --files-only --include '*.gpg' | wc -l   # ciphertext untouched
+```
+(`rclone delete` removes files but leaves the directory objects; `purge` removes the tree. The local `backups/kb-sources/` and `backups/config/` directories are harmless and may be deleted once the first bundle is verified.)
+
+---
 
 ### Known Failure Modes
 
 | Issue | Impact | Mitigation |
 |---|---|---|
 | Google OAuth token expiry | Google Drive uploads fail → **no offsite backup** (S3 de-scoped, so Google is the only cloud) | Uses refresh token — hasn't expired in practice. Re-auth: `rclone config reconnect gdrive:`. Local copy still retained 7 days. |
-| PostgreSQL not running at 2 AM | Backup aborts | Pre-flight check; `brew services` auto-starts `postgresql@17` at login |
+| PostgreSQL not running at 2 AM | Backup exits 69 (`PostgreSQL is not reachable … not auto-started`), recorded in `logs/jobs/backup.json`, reported by the 09:00 liveness sweep | `brew services restart postgresql@17`; jobs no longer auto-start the service (R5, see `scripts/jobs/_preflight.sh`) |
 | ~~AWS SSO token expiry~~ | ~~S3 uploads fail~~ | **N/A — S3 de-scoped 2026-06-01.** SSO now only affects Bedrock embedding/generation. |
 
 ### AWS SSO Recovery
@@ -135,14 +199,7 @@ aws secretsmanager create-secret \
 
 ## Backup Script
 
-The backup script lives at `scripts/jobs/backup.sh`. It handles:
-- PostgreSQL dump (`pg_dump -Fc`)
-- JSON fallback exports (memories, entities, entity_edges, memory_entities)
-- GPG encryption (AES-256)
-- Upload to Google Drive (S3 de-scoped 2026-06-01)
-- Local retention (7 days), cloud retention (30 days)
-
-Do not duplicate the script here — see the source file for current implementation.
+`scripts/jobs/backup.sh` (preflight: tools, `pg_isready`) → `scripts/maintenance/backup_bundle.py create` (policy in `config/backup.toml`). See "R5 backup contract" at the top. Do not duplicate the script here — see the source for the current implementation. The "What's Backed Up" table and Scenarios 1/3/4 below describe the **legacy** `.dump.gpg`/`.json.gpg` layout, still valid for files produced before R5 (they remain on the remote until the 30-day retention removes them).
 
 ---
 
@@ -330,7 +387,7 @@ aws secretsmanager update-secret --secret-id memory-bank-key \
 
 ## Backup Verification (Weekly)
 
-Runs every Sunday at 3 AM via `scripts/jobs/verify_backup.sh`. Checks BOTH destinations independently — downloads latest dump, decrypts, validates with `pg_restore -l`.
+Runs every Sunday at 3 AM via `scripts/jobs/verify_backup.sh` — see "Verify" in the R5 contract above (freshness ≤ 36 h, both naming schemes, full restore for bundles, `pg_restore -l` for legacy dumps).
 
 See the script source for current implementation. Do not duplicate here.
 

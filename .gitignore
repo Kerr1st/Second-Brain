@@ -19,6 +19,8 @@ docker/data/
 *.dump
 *.dump.gpg
 *.json.gpg
+*.tar.gpg
+*.receipt.json
 
 # OS
 .DS_Store

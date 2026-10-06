@@ -1,0 +1,40 @@
+# Backup policy — read by scripts/maintenance/backup_bundle.py (create / verify /
+# select-latest), which scripts/jobs/backup.sh and verify_backup.sh call.
+# Override the file with SECOND_BRAIN_BACKUP_CONFIG; individual values can be
+# overridden by the matching environment variable noted on each line.
+
+[bundle]
+# Only ciphertext ever leaves this machine: one AES-256 GPG bundle per run,
+# `backups/second-brain_<UTC stamp>.tar.gpg` + `.receipt.json`.
+output = "backups"                         # relative to the repo root
+remote = "gdrive:memory-bank-backups"      # SECOND_BRAIN_BACKUP_REMOTE ("" = local only)
+key = ".backup-key"                        # SECOND_BRAIN_BACKUP_KEY (0600 passphrase file)
+
+# Knowledge sources are part of every bundle by default (E-N3). A configured path
+# that is missing or a symlink FAILS the backup instead of silently omitting it.
+# SECOND_BRAIN_KB_SOURCES overrides; set it to "" to exclude deliberately.
+kb_sources = "~/Work/Tools/Crawlee/knowledge/sources"
+
+# Retention (E-N2) — the same policy the pre-R5 backup.sh applied:
+#   local  : *.gpg under `output` older than N days are deleted (both the new
+#            second-brain_*.tar.gpg and the legacy memory_bank_*.dump.gpg /
+#            *.json.gpg from the transition);
+#   remote : `rclone delete <remote> --min-age Nd --include "*.gpg"` — ciphertext
+#            only, root of the remote only; the historical plaintext trees
+#            (kb-sources/, config/) are NEVER touched by this job (manual step in
+#            docs/DISASTER-RECOVERY.md).
+# Pruning runs only AFTER the new bundle is verified (locally, and on the remote
+# after read-back). Set to 0 to disable a leg.
+local_retention_days = 7                   # SECOND_BRAIN_BACKUP_LOCAL_RETENTION_DAYS
+remote_retention_days = 30                 # SECOND_BRAIN_BACKUP_REMOTE_RETENTION_DAYS
+
+# Per external command wall-clock cap (pg_dump, gpg, rclone, pg_restore …). The
+# 1.1 GB dump restores in ~4 min on this Mac; the Drive upload/download of the
+# bundle is the slow leg.                   # SECOND_BRAIN_BACKUP_COMMAND_TIMEOUT_S
+command_timeout_s = 3600
+
+[verify]
+# Weekly verify (Sun 03:00) fails when the newest encrypted file on the remote is
+# older than this (daily backup at 02:00 → normally ≤ 25 h; one missed night = 49 h
+# → ❌).                                    # SECOND_BRAIN_BACKUP_MAX_AGE_HOURS
+max_age_hours = 36
