@@ -480,4 +480,5 @@ def test_bundle_from_a_disposable_database_restores_into_another_with_identical_
     assert check['restore_verified'] is True
     assert check['restore']['public_tables'] == len(tables)
     assert check['restore']['row_counts'] == expected
+    print('\nrestore roundtrip row_counts (source == restored):', json.dumps(expected, sort_keys=True))
     assert not list(Path('/private/tmp').glob('sb-verify-*')), 'temporary plaintext must be removed'
