@@ -132,6 +132,11 @@ zero_candidate_runs_required = 2
 # tolerate a single flaky night as ⚠.
 [jobs]
 failure_days = 0
+# exit 68 / state `network_unavailable`: the wrapper's network preflight never saw
+# DNS come up (launchd started the job in a dark wake) and did not start the job.
+# Infrastructure, not the job: ⚠ with the reason, counted on its own
+# `consecutive_network_failures`; ❌ once it happened this many scheduled runs in a row.
+network_failures_required = 2
 
 [jobs.expected_interval_hours]
 backup = 30            # daily 02:00 (+2 h deadline)

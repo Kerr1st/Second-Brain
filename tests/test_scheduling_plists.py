@@ -99,6 +99,25 @@ def test_long_jobs_have_floors_well_above_the_observed_maximum():
     assert set(TIMEOUT_FLOORS) <= set(JOB_NAMES.values())
 
 
+# Jobs that talk to the network (Bedrock, Slack/Outlook MCP, YouTube, Crawlee, Drive,
+# AWS credentials): launchd fires them in a dark wake before DNS is up (weekly-digest
+# failed every Monday 06:00 since 09-07; dream-cycle 09-30 02:00), so the wrapper
+# must wait for the network first.  Purely local jobs (chat/browser/qd capture, the
+# liveness sweep, the capture-api service) are not flagged.
+NETWORK_JOBS = {"weekly-digest", "dream-cycle", "codex-capture", "distill", "backup", "capture-slack", "capture-outlook",
+                "youtube", "bookmarks", "ingest", "credentials", "verify"}
+
+
+def test_network_dependent_plists_opt_into_the_preflight_and_local_ones_do_not():
+    flagged = {label for label, plist in PLISTS.items()
+               if plist.get("EnvironmentVariables", {}).get("SECOND_BRAIN_JOB_NEEDS_NETWORK") == "1"}
+    assert flagged == NETWORK_JOBS
+    for label in EXPECTED_LABELS - NETWORK_JOBS:
+        assert "SECOND_BRAIN_JOB_NEEDS_NETWORK" not in PLISTS[label].get("EnvironmentVariables", {}), label
+    # the Monday digest is the case that motivated it
+    assert PLISTS["weekly-digest"]["StartCalendarInterval"] == {"Weekday": 1, "Hour": 6, "Minute": 0}
+
+
 def test_dream_cycle_keeps_mon_wed_fri_0200_and_gives_launchd_time_for_the_grace():
     plist = PLISTS["dream-cycle"]
     assert plist["StartCalendarInterval"] == [{"Weekday": d, "Hour": 2, "Minute": 0} for d in (1, 3, 5)]

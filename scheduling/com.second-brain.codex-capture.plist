@@ -33,6 +33,8 @@
 	<string>/Users/kerrfir/second-brain</string>
 	<key>EnvironmentVariables</key>
 	<dict>
+		<key>SECOND_BRAIN_JOB_NEEDS_NETWORK</key>
+		<string>1</string>
 		<key>SECOND_BRAIN_PROFILE</key>
 		<string>controlled</string>
 		<key>AWS_PROFILE</key>

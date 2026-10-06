@@ -3,9 +3,11 @@
 No launchd, no osascript (SECOND_BRAIN_NOTIFY=0), no caffeinate, no database.
 """
 import fcntl
+import functools
 import json
 import os
 import signal
+import socket
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -14,8 +16,8 @@ from pathlib import Path
 import pytest
 
 import src.operations.jobs as jobs
-from src.operations.jobs import (DEFAULT_FLOOR_S, DEFAULT_TIMEOUT_S, TIMEOUT_FLOORS, resolve_timeout, run_job,
-                                 service_backoff, should_notify, timeout_env_name)
+from src.operations.jobs import (DEFAULT_FLOOR_S, DEFAULT_TIMEOUT_S, TIMEOUT_FLOORS, network_backoff, resolve_timeout,
+                                 run_job, service_backoff, should_notify, timeout_env_name)
 from src.operations.liveness import inspect_statuses
 
 
@@ -363,6 +365,188 @@ def test_should_notify_respects_interval_and_tolerates_missing_or_bad_stamps():
     assert should_notify({"last_notified_at": "garbage"}, now, 1800) is True
     assert should_notify({"last_notified_at": (now - timedelta(minutes=10)).isoformat()}, now, 1800) is False
     assert should_notify({"last_notified_at": (now - timedelta(minutes=31)).isoformat()}, now, 1800) is True
+
+
+# ------------------------------------------------------------- network preflight
+
+class _FakeNet:
+    """Fake resolver + clock: ``fail_first`` resolution attempts raise gaierror, each
+    sleep advances the fake clock. No real DNS, no real waiting."""
+
+    def __init__(self, fail_first, monkeypatch):
+        self.fail_first, self.attempts, self.sleeps, self.now = fail_first, 0, [], 1000.0
+
+        def resolve(host):
+            self.attempts += 1
+            self.host = host
+            if self.attempts <= self.fail_first:
+                raise socket.gaierror(8, "nodename nor servname provided, or not known")
+
+        def sleep(seconds):
+            self.sleeps.append(seconds)
+            self.now += seconds
+        monkeypatch.setattr(jobs, "_resolve_host", resolve)
+        monkeypatch.setattr(jobs, "wait_for_network",
+                            functools.partial(jobs.wait_for_network, sleep=sleep, clock=lambda: self.now))
+
+
+def test_network_backoff_doubles_and_is_capped():
+    assert network_backoff(0) == 0
+    assert [network_backoff(n) for n in (1, 2, 3, 4, 5, 6, 20)] == [5, 10, 20, 40, 60, 60, 60]
+
+
+def test_wait_for_network_succeeds_after_n_failures_with_backoff(monkeypatch):
+    net = _FakeNet(fail_first=3, monkeypatch=monkeypatch)
+    result = jobs.wait_for_network("probe.example", 900)
+    assert result["reachable"] is True and result["attempts"] == 4
+    assert net.sleeps == [5, 10, 20] and result["waited_s"] == 35
+    assert net.host == "probe.example"
+    assert "gaierror" in result["last_error"]
+
+
+def test_wait_for_network_gives_up_inside_the_budget_and_never_sleeps_past_it(monkeypatch):
+    net = _FakeNet(fail_first=10 ** 6, monkeypatch=monkeypatch)
+    result = jobs.wait_for_network("probe.example", 100)
+    assert result["reachable"] is False
+    assert sum(net.sleeps) == 100 and net.sleeps == [5, 10, 20, 40, 25]      # last sleep clipped to the budget
+    assert result["attempts"] == 6 and result["waited_s"] == 100
+
+
+def test_network_preflight_defaults_are_the_documented_ones():
+    assert jobs.DEFAULT_NETWORK_WAIT_S == 15 * 60
+    assert jobs.DEFAULT_NETWORK_PROBE_HOST == "bedrock-runtime.us-east-1.amazonaws.com"
+    assert jobs.EXIT_NETWORK_UNAVAILABLE == 68 and 68 not in {0, 1, 69, 75, 78, 124, 127}
+
+
+def test_job_without_the_flag_never_resolves_anything(job_env, monkeypatch):
+    net = _FakeNet(fail_first=10 ** 6, monkeypatch=monkeypatch)
+    path = script(job_env, "pass")
+    assert run_job(str(path), "test", repo=job_env, timeout=5) == 0
+    assert net.attempts == 0
+    value = status(job_env)
+    assert value["needs_network"] is False and "network_reachable" not in value and value["consecutive_network_failures"] == 0
+
+
+def test_flagged_job_waits_for_dns_then_runs_and_records_the_wait(job_env, monkeypatch):
+    """Dark wake: the first attempts fail, the job must not start until the host resolves."""
+    monkeypatch.setenv("SECOND_BRAIN_JOB_NEEDS_NETWORK", "1")
+    monkeypatch.setenv("SECOND_BRAIN_JOB_NETWORK_PROBE_HOST", "probe.example")
+    net = _FakeNet(fail_first=2, monkeypatch=monkeypatch)
+    path = script(job_env, "from pathlib import Path; Path('ran.marker').write_text('x')")
+    assert run_job(str(path), "weekly-digest", repo=job_env, timeout=5) == 0
+    assert (job_env / "ran.marker").exists() and net.host == "probe.example" and net.attempts == 3
+    value = status(job_env, "weekly-digest")
+    assert value["state"] == "succeeded" and value["needs_network"] is True
+    assert value["network_reachable"] is True and value["network_attempts"] == 3 and value["network_waited_s"] == 15
+    assert value["network_probe_host"] == "probe.example" and value["network_wait_budget_s"] == jobs.DEFAULT_NETWORK_WAIT_S
+    assert value["consecutive_network_failures"] == 0
+    log = next((job_env / "logs").glob("*.log")).read_text()
+    assert "probe.example does not resolve" in log and "resolved after 3 attempt(s), 15s; deadline 5s starts now" in log
+
+
+def test_flagged_job_is_not_started_when_dns_never_comes_up_and_exits_68(job_env, monkeypatch):
+    monkeypatch.setenv("SECOND_BRAIN_JOB_NEEDS_NETWORK", "1")
+    monkeypatch.setenv("SECOND_BRAIN_JOB_NETWORK_WAIT_S", "120")
+    monkeypatch.setenv("SECOND_BRAIN_NOTIFY", "1")
+    calls = []
+    monkeypatch.setattr(jobs.subprocess, "run", lambda *a, **k: calls.append(a[0]))
+    net = _FakeNet(fail_first=10 ** 6, monkeypatch=monkeypatch)
+    path = script(job_env, "from pathlib import Path; Path('ran.marker').write_text('x')")
+    # a prior real failure must be left alone: the network streak is its own counter
+    (job_env / "status").mkdir()
+    (job_env / "status/weekly-digest.json").write_text(json.dumps(
+        {"job": "weekly-digest", "state": "failed", "consecutive_failures": 3, "first_failure_at": "2026-09-28T06:00:00+00:00",
+         "last_success_at": "2026-08-31T06:30:00+00:00"}))
+    assert run_job(str(path), "weekly-digest", repo=job_env, timeout=5) == 68
+    assert not (job_env / "ran.marker").exists(), "the job must not run without network"
+    assert sum(net.sleeps) == 120 and net.host == jobs.DEFAULT_NETWORK_PROBE_HOST
+    value = status(job_env, "weekly-digest")
+    assert value["state"] == "network_unavailable" and value["exit_code"] == 68
+    assert value["network_reachable"] is False and value["network_waited_s"] == 120
+    assert value["consecutive_network_failures"] == 1 and value["last_network_failure_at"]
+    assert value["consecutive_failures"] == 3 and value["first_failure_at"] == "2026-09-28T06:00:00+00:00"
+    assert value["last_success_at"] == "2026-08-31T06:30:00+00:00"
+    assert not [c for c in calls if c[0] == "osascript"], "infrastructure is reported by liveness, not a 06:00 notification"
+    log = next((job_env / "logs").glob("*.log")).read_text()
+    assert "Network unavailable: bedrock-runtime.us-east-1.amazonaws.com did not resolve within 120s" in log
+    assert "FAILED (exit 68): network unavailable" in log
+    # second run in a row: the streak grows; a run that gets through resets it
+    assert run_job(str(path), "weekly-digest", repo=job_env, timeout=5) == 68
+    assert status(job_env, "weekly-digest")["consecutive_network_failures"] == 2
+    net.fail_first = 0
+    assert run_job(str(path), "weekly-digest", repo=job_env, timeout=5) == 0
+    value = status(job_env, "weekly-digest")
+    assert value["consecutive_network_failures"] == 0 and value["consecutive_failures"] == 0 and value["state"] == "succeeded"
+
+
+def test_deadline_starts_after_the_network_wait_not_at_launch(job_env, monkeypatch):
+    """A 15 min wait must not eat the job's deadline: the fake clock says the wait
+    took 600 s while the job's deadline is 2 s — the job still gets its full 2 s."""
+    monkeypatch.setenv("SECOND_BRAIN_JOB_NEEDS_NETWORK", "1")
+    net = _FakeNet(fail_first=6, monkeypatch=monkeypatch)        # 5+10+20+40+60+60 = 195 s of fake waiting
+    path = script(job_env, "import time; time.sleep(0.5)")
+    assert run_job(str(path), "test", repo=job_env, timeout=2) == 0
+    value = status(job_env)
+    assert value["network_waited_s"] == 195 and "timed_out" not in value
+    assert value["state"] == "succeeded" and value["duration_s"] < 2
+    assert sum(net.sleeps) == 195
+
+
+def test_preflight_holds_a_sleep_assertion_only_while_waiting(job_env, monkeypatch):
+    """caffeinate -s -i must be running during the wait (a dark wake ends in minutes)
+    and gone afterwards; the job itself still gets the plain caffeinate -i."""
+    monkeypatch.setenv("SECOND_BRAIN_JOB_NEEDS_NETWORK", "1")
+    monkeypatch.setenv("SECOND_BRAIN_CAFFEINATE", "1")
+    fake = script(job_env, "#!/bin/bash\nprintf '%s\\t%s\\t%s\\n' \"$$\" \"$1\" \"$2\" >> \"$(dirname \"$0\")/caffeinate.calls\"\n"
+                           "if [ \"$1\" = -s ]; then trap 'exit 0' TERM; while :; do sleep 0.05; done; fi\n"
+                           "shift; exec \"$@\"\n", name="caffeinate")
+    monkeypatch.setattr(jobs, "CAFFEINATE", str(fake))
+    pids = []
+    real_hold = jobs._hold_awake
+
+    def hold(env):
+        holder = real_hold(env)
+        pids.append(holder.pid)
+        calls_file = job_env / "caffeinate.calls"
+        deadline = time.monotonic() + 5                 # the fake clock makes the wait instant; let bash start
+        while time.monotonic() < deadline and not (calls_file.exists() and "-s" in calls_file.read_text()):
+            time.sleep(0.02)
+        assert holder.poll() is None, "the assertion holder must still be running while we wait"
+        return holder
+    monkeypatch.setattr(jobs, "_hold_awake", hold)
+    _FakeNet(fail_first=1, monkeypatch=monkeypatch)
+    path = script(job_env, "pass")
+    assert run_job(str(path), "test", repo=job_env, timeout=5) == 0
+    calls = [line.split("\t")[1:] for line in (job_env / "caffeinate.calls").read_text().splitlines()]
+    assert calls[0] == ["-s", "-i"], calls                       # assertion held during the wait
+    assert calls[1] == ["-i", sys.executable], calls             # the job itself, as before
+    assert len(pids) == 1
+    with pytest.raises(ProcessLookupError):
+        os.kill(pids[0], 0)                                         # released before the job started
+
+
+def test_preflight_hold_is_skipped_when_caffeinate_is_disabled(job_env, monkeypatch):
+    monkeypatch.setenv("SECOND_BRAIN_JOB_NEEDS_NETWORK", "1")
+    monkeypatch.setattr(jobs, "_hold_awake", lambda env: pytest.fail("must not be reached") if env.get("SECOND_BRAIN_CAFFEINATE") != "0" else None)
+    _FakeNet(fail_first=0, monkeypatch=monkeypatch)
+    assert run_job(str(script(job_env, "pass")), "test", repo=job_env, timeout=5) == 0
+
+
+def test_liveness_classifies_network_unavailable_as_infrastructure_advisory_then_required(job_env, monkeypatch):
+    monkeypatch.setenv("SECOND_BRAIN_JOB_NEEDS_NETWORK", "1")
+    monkeypatch.setenv("SECOND_BRAIN_JOB_NETWORK_WAIT_S", "10")
+    _FakeNet(fail_first=10 ** 6, monkeypatch=monkeypatch)
+    path = script(job_env, "pass")
+    assert run_job(str(path), "weekly-digest", repo=job_env, timeout=5) == 68
+    (first,) = inspect_statuses(job_env / "status")
+    assert first["state"] == "network_unavailable" and first["healthy"] is False and first["severity"] == "advisory"
+    assert first["infrastructure"] is True and first["consecutive_network_failures"] == 1 and first["persistent"] is False
+    assert "network unavailable at launch (exit 68" in first["message"] and "dark wake" in first["message"]
+    assert run_job(str(path), "weekly-digest", repo=job_env, timeout=5) == 68
+    (second,) = inspect_statuses(job_env / "status")
+    assert second["severity"] == "required" and second["persistent"] is True and second["consecutive_network_failures"] == 2
+    (lenient,) = inspect_statuses(job_env / "status", network_failures_required=3)
+    assert lenient["severity"] == "advisory"
 
 
 # ------------------------------------------------------------------- liveness glue

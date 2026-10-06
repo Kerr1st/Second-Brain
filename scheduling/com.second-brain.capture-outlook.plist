@@ -20,6 +20,8 @@
 	</dict>
 	<key>EnvironmentVariables</key>
 	<dict>
+		<key>SECOND_BRAIN_JOB_NEEDS_NETWORK</key>
+		<string>1</string>
 		<key>SECOND_BRAIN_JOB_TIMEOUT_CAPTURE_OUTLOOK</key>
 		<string>3600</string>
 	</dict>

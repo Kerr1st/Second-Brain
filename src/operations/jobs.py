@@ -26,6 +26,20 @@ deadline once the service is up; a bounded startup; recurring local health
 probes; on failure the wrapper exits so launchd restarts it, but it backs off
 and notifies at most once per ``SECOND_BRAIN_NOTIFY_INTERVAL_S`` so a database
 outage is one notification, not one per restart.
+
+Network preflight (``SECOND_BRAIN_JOB_NEEDS_NETWORK=1``).  launchd fires the
+02:00/06:00 jobs during a *dark (maintenance) wake*; the job starts before the
+network stack is up and the first Bedrock call dies with
+``EndpointConnectionError`` / ``nodename nor servname provided`` (weekly-digest
+every Monday since 2026-09-07, dream-cycle 2026-09-30).  For jobs flagged in
+their plist the runner first waits — holding a ``caffeinate -s -i`` assertion so
+the Mac does not fall asleep again meanwhile — until
+``SECOND_BRAIN_JOB_NETWORK_PROBE_HOST`` resolves (``socket.getaddrinfo`` only, no
+HTTP), with backoff, for at most ``SECOND_BRAIN_JOB_NETWORK_WAIT_S``.  The job's
+deadline starts *after* that wait.  If the host still does not resolve the job is
+not started and the wrapper exits ``68`` ("network unavailable"), recorded as
+state ``network_unavailable`` with its own ``consecutive_network_failures``
+counter — infrastructure, not a job failure, and liveness reports it as such.
 """
 from __future__ import annotations
 
@@ -36,6 +50,7 @@ import math
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -48,6 +63,11 @@ DEFAULT_GRACE_S = 120.0
 DEFAULT_SERVICE_STARTUP_S = 120.0
 DEFAULT_NOTIFY_INTERVAL_S = 1800.0
 DEFAULT_SERVICE_BACKOFF_MAX_S = 300.0
+DEFAULT_NETWORK_WAIT_S = 900.0
+DEFAULT_NETWORK_PROBE_HOST = "bedrock-runtime.us-east-1.amazonaws.com"
+NETWORK_BACKOFF_MAX_S = 60.0
+EXIT_NETWORK_UNAVAILABLE = 68
+CAFFEINATE = "/usr/bin/caffeinate"
 
 # Documented minimum deadlines per job name (seconds).  Derived from the observed
 # wall-clock durations in /Users/kerrfir/second-brain/logs (first/last line of
@@ -144,6 +164,10 @@ def environment(repo: Path) -> dict:
 
 class _JobInterrupted(BaseException):
     """Unwind waits immediately so scheduler signals cannot strand a child."""
+
+
+class _NetworkUnavailable(Exception):
+    """The preflight budget is spent and the probe host still does not resolve."""
 
 
 def _group_alive(pgid: int) -> bool:
@@ -290,6 +314,76 @@ def _acquire_lock(lock, *, wait_s: float) -> bool:
             time.sleep(0.1)
 
 
+# ------------------------------------------------------------ network preflight
+
+def _resolve_host(host: str):
+    """DNS only — the cheapest honest signal that the network is up after a dark wake."""
+    socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+
+
+def network_backoff(failed_attempts: int, maximum: float = NETWORK_BACKOFF_MAX_S) -> float:
+    """Seconds to wait after ``failed_attempts`` resolution failures: 5, 10, 20, 40, 60, 60 …"""
+    if failed_attempts <= 0:
+        return 0.0
+    return float(min(maximum, 5.0 * 2 ** (failed_attempts - 1)))
+
+
+def wait_for_network(host: str, budget_s: float, *, resolve=None, sleep=None, clock=None, log=None) -> dict:
+    """Retry resolving ``host`` with backoff until it resolves or ``budget_s`` is spent.
+    Returns ``{"host", "budget_s", "reachable", "attempts", "waited_s", "last_error"}``.
+    The hooks exist so tests can use a fake resolver and clock; production uses
+    ``socket.getaddrinfo``, ``time.sleep`` and ``time.monotonic``."""
+    resolve = resolve or _resolve_host
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    start = clock()
+    attempts, last_error = 0, None
+    while True:
+        attempts += 1
+        try:
+            resolve(host)
+            return {"host": host, "budget_s": budget_s, "reachable": True, "attempts": attempts,
+                    "waited_s": round(clock() - start, 3), "last_error": last_error}
+        except OSError as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        remaining = budget_s - (clock() - start)
+        if remaining <= 0:
+            return {"host": host, "budget_s": budget_s, "reachable": False, "attempts": attempts,
+                    "waited_s": round(clock() - start, 3), "last_error": last_error}
+        delay = min(network_backoff(attempts), remaining)
+        if log is not None:
+            log.write(f"[{_stamp()}] Network preflight: {host} does not resolve ({last_error}); "
+                      f"attempt {attempts}, retry in {delay:.0f}s ({remaining:.0f}s of {budget_s:.0f}s left)\n")
+            log.flush()
+        sleep(delay)
+
+
+def _hold_awake(env):
+    """``caffeinate -s -i`` for the duration of the preflight wait: a dark wake ends
+    after a few minutes unless something asserts, and the job has not started yet
+    (its own ``caffeinate -i`` wraps only the child)."""
+    if env.get("SECOND_BRAIN_CAFFEINATE", "1") == "0" or not Path(CAFFEINATE).exists():
+        return None
+    try:
+        return subprocess.Popen([CAFFEINATE, "-s", "-i"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
+def _release_awake(holder):
+    if holder is None:
+        return
+    try:
+        holder.terminate()
+        holder.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            holder.kill()
+        except OSError:
+            pass
+
+
 def run_job(script: str, name: str, args=(), *, repo=None, timeout=None, service=None) -> int:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
         raise ValueError("invalid job name")
@@ -328,12 +422,18 @@ def run_job(script: str, name: str, args=(), *, repo=None, timeout=None, service
                 previous = json.loads(status_path.read_text())
             except (OSError, ValueError):
                 pass
+        needs_network = env.get("SECOND_BRAIN_JOB_NEEDS_NETWORK") == "1"
+        network_wait_s = _positive_float(env, "SECOND_BRAIN_JOB_NETWORK_WAIT_S", str(DEFAULT_NETWORK_WAIT_S))
+        probe_host = env.get("SECOND_BRAIN_JOB_NETWORK_PROBE_HOST", DEFAULT_NETWORK_PROBE_HOST).strip() or DEFAULT_NETWORK_PROBE_HOST
         status = {"schema_version": 1, "job": name, "state": "running", "started_at": _stamp(),
                   "pid": os.getpid(), "timeout_s": timeout, "timeout_source": timeout_source,
                   "grace_s": grace, "exit_code": None,
+                  "needs_network": needs_network,
                   "last_success_at": previous.get("last_success_at"),
                   "consecutive_failures": previous.get("consecutive_failures", 0),
                   "first_failure_at": previous.get("first_failure_at"),
+                  "consecutive_network_failures": previous.get("consecutive_network_failures", 0),
+                  "last_network_failure_at": previous.get("last_network_failure_at"),
                   "last_notified_at": previous.get("last_notified_at")}
         _atomic_json(status_path, status)
         path = Path(script)
@@ -341,12 +441,13 @@ def run_job(script: str, name: str, args=(), *, repo=None, timeout=None, service
             path = repo / path
         command = [env["SECOND_BRAIN_PYTHON"], str(path)] if path.suffix == ".py" else [str(path)]
         command += list(args)
-        if env.get("SECOND_BRAIN_CAFFEINATE", "1") != "0" and Path("/usr/bin/caffeinate").exists():
-            command = ["/usr/bin/caffeinate", "-i", *command]
+        if env.get("SECOND_BRAIN_CAFFEINATE", "1") != "0" and Path(CAFFEINATE).exists():
+            command = [CAFFEINATE, "-i", *command]
         started = time.monotonic()
         child = None
         interrupted = None
         stopping = False
+        network_unavailable = False
 
         def stop(signum, _frame):
             nonlocal interrupted
@@ -365,6 +466,28 @@ def run_job(script: str, name: str, args=(), *, repo=None, timeout=None, service
                         # A plist pointing at a deleted/renamed script (E-N5) must read as
                         # "launch failed", not as the interpreter's own exit 2.
                         raise FileNotFoundError(str(path))
+                    if needs_network:
+                        # Dark-wake guard: do not start (and do not start the deadline)
+                        # until the network is up; stay awake while waiting.
+                        holder = _hold_awake(env)
+                        try:
+                            preflight = wait_for_network(probe_host, network_wait_s, log=log)
+                        finally:
+                            _release_awake(holder)
+                        status.update(network_probe_host=probe_host, network_wait_budget_s=network_wait_s,
+                                      network_attempts=preflight["attempts"], network_waited_s=preflight["waited_s"],
+                                      network_reachable=preflight["reachable"])
+                        if not preflight["reachable"]:
+                            network_unavailable = True
+                            log.write(f"[{_stamp()}] Network unavailable: {probe_host} did not resolve within "
+                                      f"{network_wait_s:.0f}s ({preflight['attempts']} attempts; {preflight['last_error']}); "
+                                      f"job not started\n")
+                            raise _NetworkUnavailable()
+                        log.write(f"[{_stamp()}] Network preflight: {probe_host} resolved after {preflight['attempts']} attempt(s), "
+                                  f"{preflight['waited_s']:.0f}s; deadline {timeout:.0f}s starts now\n")
+                        log.flush()
+                        _atomic_json(status_path, status)
+                    started = time.monotonic()
                     child = subprocess.Popen(command, cwd=repo, env=env, stdout=log, stderr=subprocess.STDOUT,
                                              start_new_session=True)
                     try:
@@ -384,10 +507,13 @@ def run_job(script: str, name: str, args=(), *, repo=None, timeout=None, service
                     except (ValueError, TypeError):
                         _stop_child(child, grace)
                         code = 78
+                except _NetworkUnavailable:
+                    code = EXIT_NETWORK_UNAVAILABLE
                 except OSError as exc:
                     log.write(f"Launch failed: {type(exc).__name__}: {path}\n")
                     code = 127
-                log.write(f"[{_stamp()}] {'OK' if code == 0 else 'FAILED'} (exit {code})\n")
+                log.write(f"[{_stamp()}] {'OK' if code == 0 else 'FAILED'} (exit {code})"
+                          f"{': network unavailable' if code == EXIT_NETWORK_UNAVAILABLE and network_unavailable else ''}\n")
         except _JobInterrupted:
             code = 128 + interrupted
             status["interrupted_by"] = interrupted
@@ -410,16 +536,26 @@ def run_job(script: str, name: str, args=(), *, repo=None, timeout=None, service
         if interrupted:
             code = 128 + interrupted
             status["interrupted_by"] = interrupted
-        status.update(state="interrupted" if interrupted else "succeeded" if code == 0 else "failed", exit_code=code,
+        network_unavailable = network_unavailable and code == EXIT_NETWORK_UNAVAILABLE and not interrupted
+        status.update(state="interrupted" if interrupted else "network_unavailable" if network_unavailable
+                      else "succeeded" if code == 0 else "failed", exit_code=code,
                       finished_at=_stamp(), duration_s=round(time.monotonic() - started, 3))
-        if code:
+        if network_unavailable:
+            # Infrastructure, not the job: its own counter, the job's failure streak untouched.
+            status["consecutive_network_failures"] += 1
+            status["last_network_failure_at"] = status["finished_at"]
+        elif code:
             status["consecutive_failures"] += 1
             status["first_failure_at"] = status["first_failure_at"] or status["finished_at"]
         else:
             status.update(consecutive_failures=0, first_failure_at=None, last_success_at=status["finished_at"])
+        if status.get("network_reachable") or not needs_network:
+            status["consecutive_network_failures"] = 0
         # Headless status is primary. Optional desktop notification cannot change exit.
+        # A network-unavailable start is reported by the liveness sweep (advisory, ❌
+        # when it repeats), not by a 06:00 notification nobody is awake for.
         notify_interval = _positive_float(env, "SECOND_BRAIN_NOTIFY_INTERVAL_S", str(DEFAULT_NOTIFY_INTERVAL_S))
-        notify = bool(code) and env.get("SECOND_BRAIN_NOTIFY", "1") != "0" and (
+        notify = bool(code) and not network_unavailable and env.get("SECOND_BRAIN_NOTIFY", "1") != "0" and (
             not service or should_notify(previous, datetime.now(timezone.utc), notify_interval))
         if notify:
             status["last_notified_at"] = _stamp()

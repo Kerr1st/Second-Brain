@@ -24,6 +24,8 @@
 	<string>/Users/kerrfir/second-brain</string>
 	<key>EnvironmentVariables</key>
 	<dict>
+		<key>SECOND_BRAIN_JOB_NEEDS_NETWORK</key>
+		<string>1</string>
 		<key>SECOND_BRAIN_JOB_TIMEOUT_WEEKLY_DIGEST</key>
 		<string>7200</string>
 	</dict>

@@ -180,12 +180,17 @@ def dream_cycle_findings(runs: list[dict], now: datetime, policy: dict) -> list[
 
 # ------------------------------------------------------------ job status sweep
 
-def inspect_statuses(directory, *, now=None, failure_days=1, expected_interval_hours=None) -> list[dict]:
+def inspect_statuses(directory, *, now=None, failure_days=1, expected_interval_hours=None,
+                     network_failures_required=2) -> list[dict]:
     """Read ``<dir>/*.json`` written by src.operations.jobs.  Flags: a persisted
     non-zero exit (``failed``/``interrupted`` older than ``failure_days``), a running
     batch job past its deadline, a service whose heartbeat went stale, and — new in
     R5 — a status file not updated for longer than the job's expected interval, or
-    a configured job with no status file at all (advisory: not yet run once)."""
+    a configured job with no status file at all (advisory: not yet run once).
+    ``network_unavailable`` (exit 68: the preflight never saw DNS come up after a
+    dark wake, the job was not started) is infrastructure, not the job: advisory
+    with the reason, ❌ once it has happened ``network_failures_required`` scheduled
+    runs in a row."""
     now = now or datetime.now(timezone.utc)
     expected = dict(expected_interval_hours or {})
     results = []
@@ -199,7 +204,16 @@ def inspect_statuses(directory, *, now=None, failure_days=1, expected_interval_h
             job = value["job"]
             seen.add(job)
             result = {"job": job, "state": state, "exit_code": value.get("exit_code"), "healthy": True, "severity": "required"}
-            if state in {"failed", "interrupted"}:
+            if state == "network_unavailable":
+                streak = int(value.get("consecutive_network_failures") or 1)
+                persistent = streak >= network_failures_required
+                result.update(healthy=False, persistent=persistent, consecutive_network_failures=streak,
+                              infrastructure=True, severity="required" if persistent else "advisory",
+                              message=f"job {job} not started: network unavailable at launch (exit {value.get('exit_code')}, "
+                                      f"probe {value.get('network_probe_host')}, waited {value.get('network_waited_s')}s) — "
+                                      f"infrastructure (dark wake before the network was up), {streak} scheduled run(s) in a row"
+                                      + ("" if persistent else f"; ❌ at {network_failures_required}"))
+            elif state in {"failed", "interrupted"}:
                 first = datetime.fromisoformat(value["first_failure_at"])
                 age = (now - first).total_seconds() / 86400
                 persistent = age >= failure_days
@@ -246,7 +260,8 @@ def job_findings(directory, policy: dict, now=None) -> list[dict]:
     cfg = policy.get("jobs", {})
     out = []
     for r in inspect_statuses(directory, now=now, failure_days=int(cfg.get("failure_days", 1)),
-                              expected_interval_hours=cfg.get("expected_interval_hours", {})):
+                              expected_interval_hours=cfg.get("expected_interval_hours", {}),
+                              network_failures_required=int(cfg.get("network_failures_required", 2))):
         out.append(_finding("job", r["job"], r["state"], healthy=r["healthy"], severity=r.get("severity", "required"),
                             message=r.get("message", ""), **{k: v for k, v in r.items()
                                                              if k not in {"job", "state", "healthy", "severity", "message"}}))
