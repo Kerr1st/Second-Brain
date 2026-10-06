@@ -44,6 +44,18 @@ COMMAND_TIMEOUT_S = 3600
 # Both encrypted-file naming schemes that may coexist on the remote during the
 # transition from the pre-R5 backup.sh (memory_bank_<ts>.dump.gpg) to bundles.
 BUNDLE_NAME = re.compile(r'^second-brain_(\d{8}T\d{6})(\d{6})?Z\.tar\.gpg$')
+BUNDLE_SUFFIX = '.tar.gpg'
+RECEIPT_SUFFIX = '.receipt.json'
+
+
+def receipt_path(archive) -> Path:
+    """``second-brain_<stamp>.tar.gpg`` → ``second-brain_<stamp>.receipt.json`` (the
+    documented name; ``Path.with_suffix`` would keep the ``.tar`` and produce
+    ``…tar.receipt.json``)."""
+    archive = Path(archive)
+    if not archive.name.endswith(BUNDLE_SUFFIX):
+        raise ValueError(f'not a bundle name: {archive.name}')
+    return archive.with_name(archive.name[:-len(BUNDLE_SUFFIX)] + RECEIPT_SUFFIX)
 LEGACY_NAME = re.compile(r'^memory_bank_(\d{8})_(\d{6})\.dump\.gpg$')
 
 
@@ -319,10 +331,13 @@ def create_bundle(repo, output, key, kb=None, remote=None, *, local_retention_da
                   'files': len(files)}
         # Retention only once this bundle is itself verified (locally; and on the
         # remote only when the read-back matched) — a failed upload prunes nothing remote.
-        record['pruned_local'] = prune_local(output, local_retention_days, keep=[target, target.with_suffix('.receipt.json')])
+        receipt = receipt_path(target)
+        record['receipt'] = str(receipt)
+        record['pruned_local'] = prune_local(output, local_retention_days, keep=[target, receipt])
         record['pruned_remote'] = bool(remote_verified and remote_retention_days and prune_remote(remote, remote_retention_days))
         record['retention'] = {'local_days': local_retention_days, 'remote_days': remote_retention_days}
-        target.with_suffix('.receipt.json').write_text(json.dumps(record, indent=2) + '\n')
+        receipt.write_text(json.dumps(record, indent=2) + '\n')
+        receipt.chmod(0o600)
         return record
 
 

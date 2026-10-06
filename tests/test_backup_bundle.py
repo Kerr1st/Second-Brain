@@ -52,6 +52,29 @@ def _repo(tmp_path, text='private synthetic document'):
     return repo
 
 
+# ----------------------------------------------------------------- receipt name (S3-3)
+
+def test_receipt_is_named_second_brain_stamp_receipt_json_next_to_the_bundle(tmp_path):
+    """Docs, runbook and retention say ``second-brain_<stamp>.receipt.json``; the code
+    used ``Path.with_suffix`` on ``.tar.gpg`` and wrote ``…tar.receipt.json``."""
+    key, repo = _key(tmp_path), _repo(tmp_path)
+    with patch.object(backup, 'command', side_effect=fake_dump):
+        result = backup.create_bundle(repo, tmp_path / 'backups', key)
+    archive = Path(result['archive'])
+    assert backup.BUNDLE_NAME.match(archive.name)
+    stamp = archive.name[len('second-brain_'):-len('.tar.gpg')]
+    receipt = archive.with_name(f'second-brain_{stamp}.receipt.json')
+    assert receipt.is_file() and result['receipt'] == str(receipt)
+    assert receipt.stat().st_mode & 0o077 == 0
+    assert json.loads(receipt.read_text())['archive'] == str(archive)
+    produced = sorted(p.name for p in (tmp_path / 'backups').iterdir())
+    assert produced == sorted([archive.name, receipt.name])
+    assert not any(name.endswith('.tar.receipt.json') for name in produced)
+    assert backup.receipt_path('x/second-brain_20261006T020000000000Z.tar.gpg') == Path('x/second-brain_20261006T020000000000Z.receipt.json')
+    with pytest.raises(ValueError):
+        backup.receipt_path('memory_bank_20261006_020005.dump.gpg')
+
+
 # --------------------------------------------------------------- roundtrip (fake DB)
 
 def test_encrypted_roundtrip_preserves_sources_and_cleans_plaintext(tmp_path):
@@ -64,7 +87,7 @@ def test_encrypted_roundtrip_preserves_sources_and_cleans_plaintext(tmp_path):
         assert check['payload_verified'] and not check['restore_verified'] and check['format'] == 'bundle'
     assert (repo / 'README.md').read_text() == 'private synthetic document'
     assert not list((tmp_path / 'backups').glob('.sb-backup-*'))
-    receipt = json.loads(Path(result['archive']).with_suffix('.receipt.json').read_text())
+    receipt = json.loads(backup.receipt_path(result['archive']).read_text())
     assert receipt['remote_verified'] is False and receipt['knowledge_sources_included'] is False
     assert 'repository/.env' in {m for m in _members(result['archive'], key)}  # .env rides inside, encrypted
 
