@@ -36,6 +36,9 @@ from src.capture.render import render_document
 
 logger = logging.getLogger(__name__)
 
+# Playlists whose last enumeration returned entries but a non-zero yt-dlp exit.
+last_enumeration_partial: set = set()
+
 # Intentional-interest playlists -> engagement-tier label stored on each memory.
 PLAYLISTS = {
     "LL": "liked",
@@ -92,7 +95,17 @@ def list_playlist(playlist_id: str) -> list[dict]:
             "channel": e.get("channel") or e.get("uploader") or "",
         })
     if proc.returncode != 0:
-        raise RuntimeError(f"YouTube enumeration failed (exit {proc.returncode})")
+        if not entries:
+            # Nothing enumerated and yt-dlp unhappy: that is a failed playlist,
+            # never an empty success (F-032).
+            raise RuntimeError(f"YouTube enumeration failed (exit {proc.returncode})")
+        # yt-dlp exits non-zero when *some* entries of a playlist cannot be
+        # extracted (private/removed videos) while still listing the rest. Keep
+        # what it listed and say so; discarding the whole playlist would make a
+        # single dead liked video hide every other new one, nightly (D N-8).
+        logger.warning("YouTube enumeration of %s was partial (yt-dlp exit %d); %d entries kept",
+                       playlist_id, proc.returncode, len(entries))
+        last_enumeration_partial.add(playlist_id)
     return entries
 
 
@@ -159,7 +172,8 @@ def capture(playlists=None, min_duration: int = MIN_DURATION_DEFAULT,
             limit: int | None = None, dry_run: bool = False) -> dict:
     """Enumerate playlists, fetch transcripts for NEW videos, ingest them."""
     playlists = playlists or list(PLAYLISTS)
-    stats = {"processed": 0, "skipped": 0, "failed": 0, "no_transcript": 0, "planned": 0}
+    stats = {"processed": 0, "skipped": 0, "failed": 0, "no_transcript": 0, "planned": 0, "partial_enumeration": 0}
+    last_enumeration_partial.clear()
 
     if not is_reachable():
         logger.error("Database unreachable; aborting.")
@@ -178,6 +192,8 @@ def capture(playlists=None, min_duration: int = MIN_DURATION_DEFAULT,
             stats["failed"] += 1
             continue
         logger.info("Playlist %s (%s): %d videos enumerated", pid, engagement, len(entries))
+        if pid in last_enumeration_partial:
+            stats["partial_enumeration"] += 1
         for e in entries:
             if limit is not None and attempted >= limit:
                 break
@@ -203,12 +219,11 @@ def capture(playlists=None, min_duration: int = MIN_DURATION_DEFAULT,
                 continue
             # The shared pipeline accounts for falsy ingest results and failures.
             def store(items, source_type):
-                from psycopg2 import Error as DatabaseError
                 result = {"processed": 0, "skipped": 0, "failed": 0}
                 for url, md in items:
                     try:
                         saved = ingest_content(md, source_type=source_type, source_url=url)
-                    except (DatabaseError, OSError, RuntimeError, ValueError):
+                    except Exception:  # noqa: BLE001 - one video never aborts the channel (R3 S3-8)
                         logger.exception("YouTube ingest failed")
                         result["failed"] += 1
                     else:

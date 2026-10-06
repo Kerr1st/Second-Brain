@@ -116,12 +116,21 @@ class RolloutTurnAssembler:
             self.pending_prompts.clear()
         if payload["type"] == "task_started":
             if native_id != self.message_turn_id:
-                self.pending_messages.clear()
-                self.message_turn_id = None
+                self._drop_pending_messages("superseded_by_new_turn")
             self.active_turn_id = native_id
         elif native_id == self.message_turn_id or payload["type"] == "turn_aborted":
-            self.pending_messages.clear()
-            self.message_turn_id = None
+            # F-085: a turn that completes (or aborts) without a final_answer
+            # loses its authored prompt. That is still dropped (there is no
+            # outcome to pair it with) but no longer silently: the count is
+            # part of the task's ``capture_drop_counts`` provenance.
+            self._drop_pending_messages("task_complete_without_final" if payload["type"] == "task_complete"
+                                        else "aborted_messages")
+
+    def _drop_pending_messages(self, reason):
+        if self.pending_messages:
+            self.drops[reason] += len(self.pending_messages)
+        self.pending_messages.clear()
+        self.message_turn_id = None
 
     def _user(self, payload):
         authored = _authored_text_message(payload)

@@ -68,8 +68,8 @@ def scrape_with_cookies(name, url):
             f.write(content)
         return True
 
-    except (OSError, ValueError, requests.RequestException) as e:
-        print(f"    ✗ Cookie fetch failed: {e}")
+    except Exception as e:  # noqa: BLE001 - one bookmark never aborts the batch (and `requests` may be unbound on ImportError)
+        print(f"    ✗ Cookie fetch failed: {type(e).__name__}")
         return False
 
 

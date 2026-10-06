@@ -1,0 +1,378 @@
+"""Slack rate limits (fix 6), channel ``main()`` exit contracts (fix 7) and the
+failure taxonomy for unexpected exception types (fix 9 / D N-7).
+
+Hermetic: fake MCP sessions, stubbed collectors, no DB, no network.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import subprocess
+from datetime import date
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData
+
+from src.capture import mcp_client as mc
+from src.capture import slack, outlook
+from src.capture.mcp_client import (
+    EXIT_AUTH, EXIT_ERROR, EXIT_TRANSPORT, CaptureFailure, McpClient, McpRateLimited, McpToolError,
+    rate_limit_retry_after, is_rate_limited,
+)
+
+RATE_LIMIT_TEXT = json.dumps({
+    "error": "RATE_LIMIT_EXCEEDED",
+    "message": 'Rate limit exceeded for tool "get_messages": 120 calls per 60s window. Retry after 38s.',
+    "details": {"operation": "get_messages", "timeout": 37937},
+    "timestamp": "2026-10-06T02:04:51.078Z",
+}, indent=2)
+
+
+def _reply(text, is_error=False):
+    return SimpleNamespace(content=[SimpleNamespace(text=text)], isError=is_error)
+
+
+class FakeSession:
+    def __init__(self, *script):
+        self.script = list(script)
+        self.calls = []
+
+    async def call_tool(self, tool, params):
+        self.calls.append((tool, params))
+        item = self.script.pop(0) if self.script else _reply('{"ok": true}')
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+def _client(session, **kw):
+    client = McpClient("/nonexistent/server", [], reconnect_backoff=0, **kw)
+    client._session = session
+    return client
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(mc.asyncio, "sleep", fake_sleep)
+    return slept
+
+
+# --------------------------------------------------------------------------- #
+# Fix 6 — Retry-After is honoured within a bounded budget                        #
+# --------------------------------------------------------------------------- #
+class TestRateLimitDetection:
+    def test_slack_mcp_rate_limit_text_is_recognised_with_its_retry_after(self):
+        assert is_rate_limited(RATE_LIMIT_TEXT)
+        assert rate_limit_retry_after(RATE_LIMIT_TEXT) == 38.0
+        assert rate_limit_retry_after('{"details": {"timeout": 1500}}') == 1.5
+        assert rate_limit_retry_after("Retry after 250ms") == 0.25
+        assert rate_limit_retry_after("no hint") is None
+        assert not is_rate_limited("rate limited")  # free-form text stays an ordinary tool error
+
+    def test_rate_limited_tool_error_is_a_tool_error_subclass_with_retry_after(self):
+        client = _client(FakeSession(_reply(RATE_LIMIT_TEXT, is_error=True)))
+        with pytest.raises(McpRateLimited) as exc:
+            asyncio.run(client.call_json("get_messages"))
+        assert isinstance(exc.value, McpToolError) and exc.value.retry_after == 38.0
+        assert client.rate_limit_hits == 1
+
+
+class TestRateLimitBackoff:
+    def test_retry_after_is_awaited_then_the_call_succeeds(self, no_sleep):
+        session = FakeSession(_reply(RATE_LIMIT_TEXT, is_error=True), _reply('{"messages": []}'))
+        client = _client(session, rate_limit_retries=3)
+        assert asyncio.run(client.call_json("get_messages", {"channel": "C1"})) == {"messages": []}
+        assert no_sleep == [38.0] and client.rate_limit_waited == 38.0 and client.rate_limit_hits == 1
+        assert [c[0] for c in session.calls] == ["get_messages", "get_messages"]
+
+    def test_single_wait_is_capped_and_missing_retry_after_uses_the_fallback(self, no_sleep):
+        session = FakeSession(_reply(RATE_LIMIT_TEXT, is_error=True),
+                              _reply('{"error":"RATE_LIMIT_EXCEEDED","message":"Rate limit exceeded"}', is_error=True),
+                              _reply('{"ok": 1}'))
+        client = _client(session, rate_limit_retries=3, rate_limit_max_wait=10)
+        assert asyncio.run(client.call_json("get_messages")) == {"ok": 1}
+        assert no_sleep == [10.0, mc.DEFAULT_RATE_LIMIT_FALLBACK_WAIT]
+
+    def test_retries_are_bounded_per_call_and_the_last_refusal_propagates(self, no_sleep):
+        session = FakeSession(*[_reply(RATE_LIMIT_TEXT, is_error=True)] * 5)
+        client = _client(session, rate_limit_retries=2)
+        with pytest.raises(McpRateLimited):
+            asyncio.run(client.call_json("get_messages"))
+        assert len(session.calls) == 3 and no_sleep == [38.0, 38.0]
+
+    def test_total_wait_budget_is_per_session(self, no_sleep):
+        session = FakeSession(_reply(RATE_LIMIT_TEXT, is_error=True), _reply('{"ok": 1}'),
+                              _reply(RATE_LIMIT_TEXT, is_error=True), _reply('{"ok": 2}'))
+        client = _client(session, rate_limit_retries=3, rate_limit_wait_budget=50)
+        assert asyncio.run(client.call_json("a")) == {"ok": 1}
+        with pytest.raises(McpRateLimited):  # 38 + 38 > 50: no second sleep
+            asyncio.run(client.call_json("b"))
+        assert no_sleep == [38.0] and client.rate_limit_hits == 2
+
+    def test_rate_limit_retries_are_off_unless_the_adapter_opts_in(self, no_sleep):
+        client = _client(FakeSession(_reply(RATE_LIMIT_TEXT, is_error=True), _reply('{"ok": 1}')))
+        with pytest.raises(McpRateLimited):
+            asyncio.run(client.call_json("x"))
+        assert no_sleep == []
+
+    def test_rate_limited_reply_never_triggers_a_reconnect(self, no_sleep):
+        client = _client(FakeSession(_reply(RATE_LIMIT_TEXT, is_error=True)))
+        with pytest.raises(McpRateLimited):
+            asyncio.run(client.call_json("x"))
+        assert client.reconnects_used == 0
+
+
+HEALTHY = {"sections": [{"channels": [{"id": "C1", "name": "eng"}, {"id": "C2", "name": "ops"}]}]}
+
+
+def _throttled_call(refuse_channels):
+    """A fake slack-mcp: get_messages is refused for ``refuse_channels`` (post-budget)."""
+    async def call(tool, params):
+        if tool == "list_my_channels":
+            return HEALTHY
+        if tool == "list_dms":
+            return {"dms": []}
+        assert tool == "get_messages"
+        if params["channel"] in refuse_channels:
+            raise McpRateLimited(f"get_messages: {RATE_LIMIT_TEXT}", 38.0)
+        return {"channel": {"purpose": ""}, "messages": [
+            {"timestamp": params["since"], "user": {"id": "U1", "realName": "Ann"}, "text": "hello there"}], "hasMore": False}
+    return call
+
+
+class TestSlackCountsRefusedConversationDays:
+    def test_collect_counts_still_rate_limited_days_as_failed_not_dropped(self):
+        days = [date(2026, 10, 3), date(2026, 10, 4)]
+        items = asyncio.run(slack.collect(_throttled_call({"C2"}), days, set()))
+        assert len(items) == 2                     # C1 x 2 days captured
+        assert items.failed == 2 and items.rate_limited == 2  # C2 x 2 days lost, visibly
+
+    def test_run_is_partial_and_main_exits_non_zero(self, monkeypatch):
+        class Throttled:
+            rate_limit_hits = 4
+            rate_limit_waited = 76.0
+
+            def __init__(self):
+                self.call_json = _throttled_call({"C2"})
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return None
+
+        monkeypatch.setattr(slack, "McpClient", lambda *a, **k: Throttled())
+        monkeypatch.setattr("src.db.get_processed_source_urls", lambda *a, **k: set())
+        monkeypatch.setattr("src.ingest.ingest_batch", lambda items, st: {"processed": len(items), "skipped": 0, "failed": 0})
+        monkeypatch.setattr(slack, "completed_days", lambda n: [date(2026, 10, 3)])
+        stats = slack.capture(days_back=1)
+        assert stats["processed"] == 1 and stats["failed"] == 1 and stats["rate_limited"] == 1
+        assert stats["throttle"] == {"hits": 4, "waited_s": 76.0}
+        monkeypatch.setattr("sys.argv", ["prog"])
+        monkeypatch.setattr(slack, "capture", lambda **kw: stats)
+        assert slack.main() == EXIT_ERROR
+
+    def test_slack_opts_into_the_client_rate_limit_budget(self, monkeypatch):
+        seen = {}
+
+        class Recording:
+            def __init__(self, *a, **k):
+                seen.update(k)
+                self.rate_limit_hits = 0
+                self.rate_limit_waited = 0.0
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return None
+
+            async def call_json(self, tool, params=None):
+                return HEALTHY if tool == "list_my_channels" else {"dms": []}
+
+        monkeypatch.setattr(slack, "McpClient", Recording)
+        monkeypatch.setattr("src.db.get_processed_source_urls", lambda *a, **k: set())
+        slack.capture(days_back=1, dry_run=True)
+        assert seen["rate_limit_retries"] == slack.SLACK_RATE_LIMIT_RETRIES >= 1
+        assert seen["rate_limit_max_wait"] == slack.SLACK_RATE_LIMIT_MAX_WAIT > 0
+        assert seen["rate_limit_wait_budget"] == slack.SLACK_RATE_LIMIT_WAIT_BUDGET >= seen["rate_limit_max_wait"]
+
+
+# --------------------------------------------------------------------------- #
+# Fix 9 — every exception type still yields a classified exit code (N-7)         #
+# --------------------------------------------------------------------------- #
+class _Client:
+    reconnects_used = 0
+    rate_limit_hits = 0
+    rate_limit_waited = 0.0
+
+    def __init__(self, error):
+        self.error = error
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return None
+
+    async def call_json(self, tool, params=None):
+        if tool in (slack.PROBE_TOOL,):
+            return HEALTHY
+        raise self.error
+
+
+def _exception_group(inner):
+    return ExceptionGroup("unhandled errors in a TaskGroup", [inner])
+
+
+@pytest.mark.parametrize("error,expected", [
+    (KeyError("channelId"), EXIT_ERROR),
+    (TypeError("'NoneType' object is not subscriptable"), EXIT_ERROR),
+    (_exception_group(McpError(ErrorData(code=0, message="Connection closed"))), EXIT_TRANSPORT),
+    (_exception_group(RuntimeError("AUTH_ERROR: Failed to refresh authentication token")), EXIT_AUTH),
+], ids=["KeyError", "TypeError", "ExceptionGroup(transport)", "ExceptionGroup(auth)"])
+def test_slack_unexpected_exception_types_are_classified_and_exit_non_zero(monkeypatch, error, expected):
+    monkeypatch.setattr(slack, "McpClient", lambda *a, **k: _Client(error))
+    monkeypatch.setattr("src.db.get_processed_source_urls", lambda *a, **k: set())
+    monkeypatch.setattr("src.capture.mcp_client.notify", lambda *a, **k: True)
+    monkeypatch.setattr("sys.argv", ["prog"])
+    with pytest.raises(CaptureFailure) as exc:
+        slack.capture(days_back=1)
+    assert exc.value.exit_code == expected
+    assert slack.main() == expected
+
+
+@pytest.mark.parametrize("error,expected", [
+    (KeyError("id"), EXIT_ERROR),
+    (_exception_group(McpError(ErrorData(code=0, message="Connection closed"))), EXIT_TRANSPORT),
+], ids=["KeyError", "ExceptionGroup(transport)"])
+def test_outlook_unexpected_exception_types_are_classified_and_exit_non_zero(monkeypatch, error, expected):
+    class Client(_Client):
+        async def call_json(self, tool, params=None):
+            raise self.error
+
+    monkeypatch.setattr(outlook, "McpClient", lambda *a, **k: Client(error))
+    monkeypatch.setattr("src.db.get_processed_source_urls", lambda *a, **k: set())
+    monkeypatch.setattr("src.capture.mcp_client.notify", lambda *a, **k: True)
+    monkeypatch.setattr("sys.argv", ["prog"])
+    with pytest.raises(CaptureFailure) as exc:
+        outlook.capture(days_back=1)
+    assert exc.value.exit_code == expected
+    assert outlook.main() == expected
+
+
+def test_keyboard_interrupt_is_never_reclassified(monkeypatch):
+    monkeypatch.setattr(slack, "McpClient", lambda *a, **k: _Client(KeyboardInterrupt()))
+    monkeypatch.setattr("src.db.get_processed_source_urls", lambda *a, **k: set())
+    with pytest.raises(KeyboardInterrupt):
+        slack.capture(days_back=1)
+
+
+# --------------------------------------------------------------------------- #
+# Fix 7 — browser / youtube / crawlee / scrape_bookmarks main() exit codes       #
+# --------------------------------------------------------------------------- #
+class TestMainExitCodes:
+    def test_browser_main_maps_failures_to_non_zero(self, monkeypatch):
+        from src.capture import browser
+        monkeypatch.setattr("sys.argv", ["prog", "--no-scrape"])
+        monkeypatch.setattr(browser, "capture", lambda **kw: {"processed": 2, "skipped": 0, "failed": 1, "reading": 0})
+        assert browser.main() == 1
+        monkeypatch.setattr(browser, "capture", lambda **kw: {"processed": 2, "skipped": 0, "failed": 0, "reading": 0})
+        assert browser.main() == 0
+
+    def test_browser_missing_history_is_a_failure_not_a_clean_noop(self, tmp_path, monkeypatch):
+        from src.capture import browser
+        monkeypatch.setattr("src.db.get_processed_source_urls", lambda *a, **k: set())
+        stats = browser.capture(days_back=1, history_path=str(tmp_path / "absent"), scrape=False)
+        assert stats["failed"] == 1 and stats["processed"] == 0
+        monkeypatch.setattr("sys.argv", ["prog", "--no-scrape"])
+        monkeypatch.setattr(browser, "capture", lambda **kw: stats)
+        assert browser.main() == 1
+
+    def test_youtube_main_maps_failures_to_non_zero(self, monkeypatch):
+        from src.capture import youtube
+        monkeypatch.setattr("sys.argv", ["prog"])
+        monkeypatch.setattr(youtube, "capture", lambda **kw: {"processed": 0, "skipped": 3, "failed": 2, "no_transcript": 0, "planned": 0})
+        assert youtube.main() == 1
+        monkeypatch.setattr(youtube, "capture", lambda **kw: {"processed": 1, "skipped": 3, "failed": 0, "no_transcript": 1, "planned": 0})
+        assert youtube.main() == 0
+
+    def test_youtube_unreachable_database_exits_non_zero(self, monkeypatch):
+        from src.capture import youtube
+        monkeypatch.setattr(youtube, "is_reachable", lambda: False)
+        monkeypatch.setattr("sys.argv", ["prog"])
+        assert youtube.main() == 1
+
+    def test_youtube_partial_enumeration_keeps_entries_and_is_counted_not_failed(self, monkeypatch):
+        from src.capture import youtube
+        proc = subprocess.CompletedProcess([], 1, '{"id":"v1","title":"t","duration":600}\n', "ERROR: Private video")
+        monkeypatch.setattr(youtube, "_ytdlp", lambda *a, **k: proc)
+        entries = youtube.list_playlist("LL")
+        assert [e["id"] for e in entries] == ["v1"] and "LL" in youtube.last_enumeration_partial
+        monkeypatch.setattr(youtube, "is_reachable", lambda: True)
+        monkeypatch.setattr(youtube, "get_processed_source_urls", lambda c: {"https://www.youtube.com/watch?v=v1"})
+        stats = youtube.capture(playlists=["LL"], dry_run=True)
+        assert stats["partial_enumeration"] == 1 and stats["failed"] == 0 and stats["skipped"] == 1
+        empty = subprocess.CompletedProcess([], 1, "", "no credentials")
+        monkeypatch.setattr(youtube, "_ytdlp", lambda *a, **k: empty)
+        with pytest.raises(RuntimeError):
+            youtube.list_playlist("LL")
+
+    def test_crawlee_main_maps_failures_to_non_zero(self, monkeypatch, capsys):
+        from src.capture import crawlee
+        monkeypatch.setattr("sys.argv", ["prog", "--dry-run"])
+        monkeypatch.setattr(crawlee, "capture", lambda **kw: {"article": {"processed": 0, "skipped": 0, "failed": 1}, "source_files": {"failed": 0}})
+        assert crawlee.main() == 1
+        monkeypatch.setattr(crawlee, "capture", lambda **kw: {"article": {"processed": 1, "skipped": 0, "failed": 0}, "source_files": {"failed": 0}})
+        assert crawlee.main() == 0
+        monkeypatch.setattr(crawlee, "capture", lambda **kw: {"failed": 1, "reason": "missing_source_store"})
+        assert crawlee.main() == 1
+        assert "missing_source_store" in capsys.readouterr().out
+
+    def test_crawlee_compat_script_delegates_to_the_channel_main(self):
+        import importlib.util, pathlib
+        spec = importlib.util.spec_from_file_location("crawlee_ingest", pathlib.Path("scripts/crawlee_ingest.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        from src.capture import crawlee
+        assert module.main is crawlee.main
+
+    def test_scrape_bookmarks_main_maps_failures_to_non_zero(self, tmp_path, monkeypatch):
+        import importlib.util, pathlib
+        spec = importlib.util.spec_from_file_location("scrape_bookmarks", pathlib.Path("scripts/scrape_bookmarks.py"))
+        sb = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sb)
+        bookmarks = tmp_path / "Bookmarks"
+        bookmarks.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
+            {"type": "url", "name": "Public", "url": "https://example.org/public"},
+            {"type": "url", "name": "Internal", "url": "https://w.amazon.com/bin/view/Thing"}]}}}))
+        monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
+        monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: False)
+        monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls: {"processed": 1, "skipped": 0, "failed": 0})
+        assert sb.main() == 1                      # the internal fetch failed
+        monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: True)
+        assert sb.main() == 0
+        monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls: {"processed": 0, "skipped": 0, "failed": 1})
+        assert sb.main() == 1                      # the public batch failed
+
+    def test_scrape_with_crawlee_reports_only_index_verified_successes(self, tmp_path, monkeypatch):
+        import importlib.util, pathlib
+        spec = importlib.util.spec_from_file_location("scrape_bookmarks", pathlib.Path("scripts/scrape_bookmarks.py"))
+        sb = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sb)
+        monkeypatch.setattr(sb, "CRAWLEE_DIR", str(tmp_path))
+        indexed = [set(), {"https://example.org/a"}]
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: indexed.pop(0))
+        monkeypatch.setattr(sb.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
+        stats = sb.scrape_with_crawlee([("A", "https://example.org/a"), ("B", "https://example.org/b")])
+        assert stats == {"processed": 1, "skipped": 0, "failed": 1}
+        assert not list(tmp_path.glob(".sb-urls-*"))  # the temp URL file is always removed

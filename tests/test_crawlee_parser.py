@@ -232,9 +232,11 @@ def test_is_http_url_accepts(good):
     assert crawlee.is_http_url(good) is True
 
 
-def test_unindexed_cookie_source_is_captured_once_and_shared_filter_knows_it(store):
+def test_unindexed_cookie_source_is_captured_once_and_shared_filter_knows_it(store, monkeypatch):
     from src.capture.filters import load_indexed_urls
     from src.capture.crawlee import capture
+    import src.db
+    monkeypatch.setattr(src.db, "get_processed_source_urls", lambda channel: set())
     content = _source_file(URL_ORPHAN, "Cookie page", "Saved internal page.")
     (store["sources"] / "cookie.md").write_text(content)
     (store["output"] / "duplicate.md").write_text(content)

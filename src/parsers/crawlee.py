@@ -256,11 +256,18 @@ def find_unindexed_output_files(indexed_urls):
     return unindexed
 
 
-def parse_all(already_processed=None):
+def parse_all(already_processed=None, *, max_unindexed_sources=None):
     """Yield all Crawlee content ready for ingestion.
 
     Args:
         already_processed: set of source URLs already in the database.
+        max_unindexed_sources: upper bound on *never-indexed* source documents
+            (cookie-captured pages that have no ``index.md`` row) yielded per
+            call; ``None`` means unbounded. Indexed entries are never bounded.
+            The number held back is recorded as
+            ``last_parse_stats["unindexed_sources_deferred"]`` so the first run
+            of this channel after R4 is an explicit, paced decision rather than
+            a surprise ingest of the whole backlog (D N-6).
 
     Yields:
         (source_url, source_type, markdown_content) tuples. ``source_url`` is
@@ -268,6 +275,9 @@ def parse_all(already_processed=None):
         file are dropped (counted as ``unresolved`` in ``last_parse_stats``).
     """
     already_processed = already_processed or set()
+    if max_unindexed_sources is not None and (isinstance(max_unindexed_sources, bool)
+                                              or not isinstance(max_unindexed_sources, int) or max_unindexed_sources < 0):
+        raise ValueError("max_unindexed_sources must be a non-negative integer or None")
 
     # 1. Indexed content from knowledge/sources/, resolved by exact Source: match
     entries = parse_index()
@@ -298,9 +308,14 @@ def parse_all(already_processed=None):
     indexed_urls = {e["url"] for e in entries}
     unindexed_sources = set(source_map) - indexed_urls
     last_parse_stats["unindexed_sources"] = len(unindexed_sources)
-    for url in sorted(unindexed_sources):
-        if url in already_processed:
-            continue
+    pending = [url for url in sorted(unindexed_sources) if url not in already_processed]
+    last_parse_stats["unindexed_sources_new"] = len(pending)
+    if max_unindexed_sources is not None:
+        last_parse_stats["unindexed_sources_deferred"] = max(0, len(pending) - max_unindexed_sources)
+        pending = pending[:max_unindexed_sources]
+    else:
+        last_parse_stats["unindexed_sources_deferred"] = 0
+    for url in pending:
         filepath = source_map[url]
         with open(filepath) as handle:
             content = handle.read()

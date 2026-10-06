@@ -166,7 +166,10 @@ class TestCapture:
         assert stats["processed"] == 0 and stats["reading"] == 2
         assert {u for _, u in sent} == {"https://example.com/article", "https://example.org/background-tab"}
 
-    def test_missing_history_is_a_clean_noop(self, tmp_path, monkeypatch):
+    def test_missing_history_is_a_failure_not_an_empty_success(self, tmp_path, monkeypatch):
         import src.db
         monkeypatch.setattr(src.db, "get_processed_source_urls", lambda st: set())
-        assert b.capture(history_path=str(tmp_path / "nope"))["processed"] == 0
+        stats = b.capture(history_path=str(tmp_path / "nope"))
+        assert stats["processed"] == 0 and stats["failed"] == 1
+        from src.capture.common import exit_code
+        assert exit_code(stats) == 1
