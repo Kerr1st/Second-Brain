@@ -156,3 +156,13 @@ weekly-digest = 192    # Mon 06:00
 youtube = 30
 # capture-api is a KeepAlive service: judged on its heartbeat, not an interval.
 # distill is launchctl-disabled: no status file is expected; not listed on purpose.
+
+# --- per-job advisory list (S3-1) ------------------------------------------------
+# A job listed here is still swept and reported, but a failed/interrupted/
+# network_unavailable status is ⚠, never ❌, and never fails the sweep — for jobs
+# whose failure is KNOWN and being worked on. The reason is mandatory (the loader
+# refuses an entry without one) so the list cannot silently become a mute button.
+# Mirrors `severity = "advisory"` on channels. Remove the entry when the condition
+# in the reason is met.
+[jobs.advisory]
+weekly-digest = "network preflight pending verification; remove after two consecutive OK runs"

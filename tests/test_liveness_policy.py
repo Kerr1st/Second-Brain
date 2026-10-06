@@ -217,6 +217,68 @@ def test_status_sweep_ignores_its_own_report_and_flags_unreadable_files(tmp_path
     assert [r["job"] for r in results] == ["broken"] and results[0]["state"] == "invalid_status"
 
 
+# ------------------------------------------------------- [jobs.advisory] (S3-1)
+
+def test_weekly_digest_is_an_advisory_job_by_explicit_config_with_the_verification_reason(policy):
+    assert policy["jobs"]["advisory"] == {
+        "weekly-digest": "network preflight pending verification; remove after two consecutive OK runs"}
+    assert "weekly-digest" in policy["jobs"]["expected_interval_hours"]      # still swept, still expected to run
+    assert policy["jobs"]["network_failures_required"] == 2
+
+
+def test_policy_rejects_an_advisory_job_without_a_reason(tmp_path):
+    base = '[channels.x]\npredicate = "source_type = \'x\'"\nmax_age_days = 3\nseverity = "required"\n'
+    bad = tmp_path / "liveness.toml"
+    bad.write_text(base + '[jobs.advisory]\nweekly-digest = ""\n')
+    with pytest.raises(ValueError, match="reason"):
+        load_policy(bad)
+    bad.write_text(base + '[jobs]\nadvisory = ["weekly-digest"]\n')
+    with pytest.raises(ValueError, match="advisory"):
+        load_policy(bad)
+    bad.write_text(base + '[jobs.advisory]\nweekly-digest = "known; being fixed"\n')
+    assert load_policy(bad)["jobs"]["advisory"] == {"weekly-digest": "known; being fixed"}
+    assert load_policy(tmp_path / "liveness.toml")["jobs"]["expected_interval_hours"] == {}
+
+
+def test_advisory_job_failure_is_reported_with_its_reason_but_never_fails_the_sweep(tmp_path, policy):
+    """S3-1: under failure_days = 0 a Monday failure of the known-failing digest would be
+    ❌ every day until the next Monday. Listed in [jobs.advisory] it is ⚠ with the reason."""
+    failed = dict(state="failed", exit_code=1, consecutive_failures=5, first_failure_at=(NOW - timedelta(days=8)).isoformat(),
+                  finished_at=(NOW - timedelta(hours=3)).isoformat())
+    _status(tmp_path / "weekly-digest.json", job="weekly-digest", **failed)
+    _status(tmp_path / "backup.json", job="backup", **failed)                          # same failure, not advisory
+    _status(tmp_path / "youtube.json", job="youtube", state="succeeded", exit_code=0,
+            started_at=(NOW - timedelta(hours=8)).isoformat(), finished_at=(NOW - timedelta(hours=8)).isoformat())
+    findings = {f["subject"]: f for f in liveness.job_findings(tmp_path, policy, now=NOW)}
+    digest, backup = findings["weekly-digest"], findings["backup"]
+    assert digest["healthy"] is False and digest["severity"] == "advisory" and not required_failure(digest)
+    assert digest["advisory_reason"] == "network preflight pending verification; remove after two consecutive OK runs"
+    assert "last exit 1" in digest["message"] and "advisory: network preflight pending verification" in digest["message"]
+    assert required_failure(backup) and "advisory" not in backup["message"]
+    assert findings["youtube"]["healthy"] and "advisory_reason" not in findings["youtube"]
+    report = liveness.write_report(tmp_path / "liveness-report.json", list(findings.values()), NOW)
+    assert report["required_failures"] == ["backup"] and report["advisories"] == ["weekly-digest"]
+    # a persistent network_unavailable streak on an advisory job is ⚠ too — the list is the override
+    _status(tmp_path / "weekly-digest.json", job="weekly-digest", state="network_unavailable", exit_code=68,
+            consecutive_network_failures=3, network_probe_host="h", network_waited_s=900.0)
+    (digest,) = [f for f in liveness.job_findings(tmp_path, policy, now=NOW) if f["subject"] == "weekly-digest"]
+    assert digest["severity"] == "advisory" and digest["infrastructure"] is True and not required_failure(digest)
+    # an advisory job that succeeds is plain ✅
+    _status(tmp_path / "weekly-digest.json", job="weekly-digest", state="succeeded", exit_code=0,
+            started_at=(NOW - timedelta(hours=3)).isoformat(), finished_at=(NOW - timedelta(hours=3)).isoformat())
+    (digest,) = [f for f in liveness.job_findings(tmp_path, policy, now=NOW) if f["subject"] == "weekly-digest"]
+    assert digest["healthy"] is True and digest["severity"] == "required" and "advisory" not in digest["message"]
+
+
+def test_the_advisory_list_is_config_not_a_hard_coded_exclusion(tmp_path):
+    """Without the entry the same status is ❌ (the predicate did not change)."""
+    _status(tmp_path / "weekly-digest.json", job="weekly-digest", state="failed", exit_code=1, consecutive_failures=1,
+            first_failure_at=(NOW - timedelta(hours=3)).isoformat())
+    (plain,) = inspect_statuses(tmp_path, now=NOW, failure_days=0)
+    (listed,) = inspect_statuses(tmp_path, now=NOW, failure_days=0, advisory={"weekly-digest": "being fixed"})
+    assert plain["severity"] == "required" and listed["severity"] == "advisory" and listed["advisory_reason"] == "being fixed"
+
+
 # ------------------------------------------------------- end to end (database)
 
 def _seed(conn, source_type, days_ago, count=1):

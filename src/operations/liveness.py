@@ -47,7 +47,14 @@ def load_policy(path=None) -> dict:
             raise ValueError(f"channel {label}: a non-required channel must state its reason")
     policy.setdefault("zero_output", {})
     policy.setdefault("dream_cycle", {})
-    policy.setdefault("jobs", {}).setdefault("expected_interval_hours", {})
+    jobs = policy.setdefault("jobs", {})
+    jobs.setdefault("expected_interval_hours", {})
+    advisory = jobs.setdefault("advisory", {})
+    if not isinstance(advisory, dict):
+        raise ValueError("[jobs.advisory] must be a table of job name = reason")
+    for job, reason in advisory.items():
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"[jobs.advisory] {job}: an advisory job must state its reason")
     return policy
 
 
@@ -181,7 +188,7 @@ def dream_cycle_findings(runs: list[dict], now: datetime, policy: dict) -> list[
 # ------------------------------------------------------------ job status sweep
 
 def inspect_statuses(directory, *, now=None, failure_days=1, expected_interval_hours=None,
-                     network_failures_required=2) -> list[dict]:
+                     network_failures_required=2, advisory=None) -> list[dict]:
     """Read ``<dir>/*.json`` written by src.operations.jobs.  Flags: a persisted
     non-zero exit (``failed``/``interrupted`` older than ``failure_days``), a running
     batch job past its deadline, a service whose heartbeat went stale, and — new in
@@ -190,9 +197,11 @@ def inspect_statuses(directory, *, now=None, failure_days=1, expected_interval_h
     ``network_unavailable`` (exit 68: the preflight never saw DNS come up after a
     dark wake, the job was not started) is infrastructure, not the job: advisory
     with the reason, ❌ once it has happened ``network_failures_required`` scheduled
-    runs in a row."""
+    runs in a row.  ``advisory``: job → reason (``[jobs.advisory]``); an unhealthy
+    status of such a job is reported ⚠ with the reason and never fails the sweep."""
     now = now or datetime.now(timezone.utc)
     expected = dict(expected_interval_hours or {})
+    advisory = dict(advisory or {})
     results = []
     seen = set()
     for path in sorted(Path(directory).glob("*.json")):
@@ -246,6 +255,9 @@ def inspect_statuses(directory, *, now=None, failure_days=1, expected_interval_h
                     result.update(healthy=False, state="stale_status", idle_hours=round(idle_h, 1),
                                   message=f"job {job} has not been started for {idle_h:.0f}h (expected every {expected[job]}h) — is its plist loaded?")
             result.setdefault("message", f"job {job} {result['state']} (exit {result['exit_code']})")
+            if not result["healthy"] and job in advisory:
+                result.update(severity="advisory", advisory_reason=advisory[job],
+                              message=f"{result['message']} — advisory: {advisory[job]}")
         except (OSError, ValueError, KeyError, TypeError):
             result = {"job": path.stem, "state": "invalid_status", "healthy": False, "severity": "required",
                       "message": f"job {path.stem}: unreadable status file"}
@@ -261,7 +273,8 @@ def job_findings(directory, policy: dict, now=None) -> list[dict]:
     out = []
     for r in inspect_statuses(directory, now=now, failure_days=int(cfg.get("failure_days", 1)),
                               expected_interval_hours=cfg.get("expected_interval_hours", {}),
-                              network_failures_required=int(cfg.get("network_failures_required", 2))):
+                              network_failures_required=int(cfg.get("network_failures_required", 2)),
+                              advisory=cfg.get("advisory", {})):
         out.append(_finding("job", r["job"], r["state"], healthy=r["healthy"], severity=r.get("severity", "required"),
                             message=r.get("message", ""), **{k: v for k, v in r.items()
                                                              if k not in {"job", "state", "healthy", "severity", "message"}}))
