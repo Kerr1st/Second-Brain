@@ -100,9 +100,14 @@ reason = "weekly_digest.sh has failed every Monday since 2026-09-07 (Bedrock End
 history_days = 90
 min_silent_days_advisory = 2
 min_silent_days_required = 7
-# never flagged: retired/one-time/known-disabled producers and synthesis outputs
+# an enumerated type needs this many capture days in the window before its cadence
+# counts as learned (sparse quick_desktop_* types otherwise flap as ⚠ daily)
+min_history_days_advisory = 10
+# never flagged: retired/one-time/known-disabled producers and synthesis outputs.
+# "quick_desktop" (bare) is a legacy label — 10 rows, last written 2026-06-30; the
+# live QD stages write quick_desktop_<kind>, which the LIKE predicate enumerates.
 ignore = [
-  "quick_desktop_doc", "quick_desktop_session_event",
+  "quick_desktop_doc", "quick_desktop_session_event", "quick_desktop",
   "distilled_chat", "distilled_agent_task", "weekly_digest",
   "dream_cycle", "manual", "file",
 ]

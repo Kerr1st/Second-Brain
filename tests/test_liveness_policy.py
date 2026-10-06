@@ -129,6 +129,17 @@ def test_zero_output_flags_the_slack_rate_limit_gap_as_advisory_for_an_enumerate
     assert finding["age_days"] == 3 and finding["tolerance_days"] == 2
 
 
+def test_sparse_enumerated_types_have_no_learnable_cadence_and_are_not_flagged(policy):
+    """quick_desktop_profile has 6 rows ever; two capture days in 90 d is not a
+    cadence. Its fixed channel threshold (quick_desktop_synth, 21 d) is the rule."""
+    today = date(2026, 10, 6)
+    last_seen = {"quick_desktop_profile": date(2026, 9, 1), "api_browser": date(2026, 9, 1)}
+    days_seen = {"quick_desktop_profile": [date(2026, 8, 20), date(2026, 9, 1)], "api_browser": [date(2026, 8, 20), date(2026, 9, 1)]}
+    findings = {f["subject"]: f for f in zero_output_findings(today, last_seen, days_seen, enumerated={"quick_desktop_profile"}, policy=policy)}
+    assert findings["quick_desktop_profile"]["healthy"] and findings["quick_desktop_profile"]["state"] == "insufficient_history"
+    assert required_failure(findings["api_browser"])      # unenumerated: sparse or not, dead is dead
+
+
 def test_zero_output_respects_the_ignore_list_and_the_required_floor(policy):
     today = date(2026, 10, 6)
     last_seen = {"distilled_chat": date(2026, 9, 22), "codex_task": date(2026, 10, 1), "manual": date(2025, 1, 1)}

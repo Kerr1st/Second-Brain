@@ -106,6 +106,7 @@ def zero_output_findings(today: date, last_seen: dict, days_seen: dict, enumerat
     ignore = set(cfg.get("ignore", []))
     floor_adv = int(cfg.get("min_silent_days_advisory", 2))
     floor_req = int(cfg.get("min_silent_days_required", 7))
+    min_history = int(cfg.get("min_history_days_advisory", 10))
     findings = []
     for source_type in sorted(last_seen):
         if source_type in ignore:
@@ -113,8 +114,16 @@ def zero_output_findings(today: date, last_seen: dict, days_seen: dict, enumerat
         covered = source_type in enumerated
         severity = "advisory" if covered else "required"
         floor = floor_adv if covered else floor_req
-        tolerance = tolerance_days(days_seen.get(source_type, []), floor)
+        history = days_seen.get(source_type, [])
+        tolerance = tolerance_days(history, floor)
         age = (today - last_seen[source_type]).days
+        if covered and len(set(history)) < min_history:
+            # A sparse enumerated type (a handful of capture days in the window) has
+            # no learnable cadence; its fixed channel threshold is the only rule.
+            findings.append(_finding("zero_output", source_type, "insufficient_history", healthy=True, severity=severity,
+                                     message=f"{source_type}: {len(set(history))} capture days in the window — cadence not "
+                                             f"learnable, fixed channel threshold applies", age_days=age, enumerated=covered))
+            continue
         if age > tolerance:
             findings.append(_finding("zero_output", source_type, "zero_output", healthy=False, severity=severity,
                                      message=(f"{source_type} produced zero rows for {age}d; its own cadence tolerates "
