@@ -42,7 +42,10 @@ def capture(*, dry_run=False, max_unindexed=None):
             groups[source].append((url, content))
     summary = {source: run_channel(source, items, dry_run=dry_run) for source, items in groups.items()}
     stats = crawlee.last_parse_stats
-    summary["source_files"] = {"failed": stats.get("unresolved", 0),
+    # Index rows without a source file ("unresolved") are a long-standing store
+    # condition (66 today), reported for the operator but not a run failure:
+    # failing every night on them would only train people to ignore the job.
+    summary["source_files"] = {"failed": 0, "unresolved": stats.get("unresolved", 0),
                                "unindexed_output": stats.get("unindexed_output", 0),
                                "unindexed_sources": stats.get("unindexed_sources", 0),
                                "unindexed_sources_new": stats.get("unindexed_sources_new", 0),

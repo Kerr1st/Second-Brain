@@ -183,3 +183,20 @@ def test_merge_tags_keeps_order_and_dedups():
     from src.ingest import merge_tags
     assert merge_tags(["b", "a"], ["a", "c", "b", "c"]) == ["b", "a", "c"]
     assert merge_tags(None, ["x"]) == ["x"] and merge_tags(["x"], None) == ["x"]
+
+
+def test_run_records_dry_run_classifies_new_changed_unchanged(test_conn, monkeypatch):
+    from src.capture.framework import run_records
+    import src.ingest
+    monkeypatch.setattr(src.ingest, "generate_embedding", lambda text: [0.1] * 1024)
+    monkeypatch.setattr(src.ingest, "_discover_relationships", lambda *a: None)
+    run_records([_fact_record()], refresh=True)
+    changed = _fact_record(); changed["content"] = "edited upstream"
+    new = _fact_record(); new["source_url"] = "qd://memory/9002"
+    preview = run_records([changed, new], dry_run=True, refresh=True)["quick_desktop_people"]
+    assert preview["planned"] == 2 and preview["dry_run"] is True
+    assert (preview["new"], preview["changed"], preview["unchanged"]) == (1, 1, 0)
+    assert run_records([_fact_record()], dry_run=True, refresh=True)["quick_desktop_people"]["unchanged"] == 1
+    with test_conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE source_url = 'qd://memory/9002'")
+        assert cur.fetchone()[0] == 0, "dry run wrote nothing"

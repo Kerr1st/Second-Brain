@@ -92,6 +92,12 @@ def run_records(records, *, dry_run=False, refresh=False, ingest=None) -> dict:
         mappings[(source, url)] = record
     summary = {}
     for source, items in groups.items():
+        if dry_run:
+            # A real preview: classify each record against the stored row (reads
+            # only) so the first run after a deploy is predictable, not a guess.
+            summary[source] = _preview_records(source, items)
+            continue
+
         def store(batch, source_type, **_kwargs):
             result = {"processed": 0, "skipped": 0, "failed": 0}
             for url, content in batch:
@@ -108,3 +114,22 @@ def run_records(records, *, dry_run=False, refresh=False, ingest=None) -> dict:
             return result
         summary[source] = run_channel(source, items, dry_run=dry_run, ingest=store, normalize_headers=False)
     return summary
+
+
+def _preview_records(source_type, items) -> dict:
+    from src.db import find_captured_source
+    stats = run_channel(source_type, items, dry_run=True, normalize_headers=False)
+    stats.update({"new": 0, "changed": 0, "unchanged": 0})
+    seen = set()
+    for url, content in items:
+        if not isinstance(url, str) or not url.strip() or url in seen:
+            continue
+        seen.add(url)
+        existing = find_captured_source(source_type, url)
+        if existing is None:
+            stats["new"] += 1
+        elif existing["content"] == content:
+            stats["unchanged"] += 1
+        else:
+            stats["changed"] += 1
+    return stats

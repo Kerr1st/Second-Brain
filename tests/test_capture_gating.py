@@ -80,8 +80,22 @@ def test_crawlee_channel_dry_run_reports_the_gate_and_prefilters_both_channels(t
     result = channel.capture(dry_run=True, max_unindexed=2)
     assert sorted(asked) == ["article", "youtube"]
     assert result["article"]["planned"] == 2
-    assert result["source_files"] == {"failed": 0, "unindexed_output": 0, "unindexed_sources": 3,
+    assert result["source_files"] == {"failed": 0, "unresolved": 0, "unindexed_output": 0, "unindexed_sources": 3,
                                       "unindexed_sources_new": 3, "unindexed_sources_deferred": 1, "max_unindexed_per_run": 2}
+    assert exit_code(result) == 0
+
+
+def test_crawlee_unresolved_index_rows_are_reported_not_failed(tmp_path, monkeypatch):
+    """An index row without a source file is a store condition (66 live today),
+    not a failure of tonight's run; R1 reported it the same way."""
+    crawlee = _crawlee_store(tmp_path, monkeypatch, unindexed=0)
+    with open(crawlee.INDEX_PATH, "a") as handle:
+        handle.write("| Gone | [u](https://example.org/no-file) | web-page | s | 2026-01-01 |\n")
+    from src.capture import crawlee as channel
+    import src.db
+    monkeypatch.setattr(src.db, "get_processed_source_urls", lambda c: set())
+    result = channel.capture(dry_run=True)
+    assert result["source_files"]["unresolved"] == 1 and result["source_files"]["failed"] == 0
     assert exit_code(result) == 0
 
 
