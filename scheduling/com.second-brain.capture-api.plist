@@ -2,20 +2,36 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key>
-    <string>com.second-brain.capture-api</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>/Users/kerrfir/second-brain/scripts/jobs/capture_api.sh</string>
-    </array>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/kerrfir/Library/Logs/second-brain/capture-api-stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/kerrfir/Library/Logs/second-brain/capture-api-stderr.log</string>
-    <!-- Secrets are deliberately NOT in this file (it is tracked in git).
-         CAPTURE_API_TOKEN is read from the gitignored .env by capture_api.sh. -->
+	<key>Label</key>
+	<string>com.second-brain.capture-api</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh</string>
+		<string>/Users/kerrfir/second-brain/scripts/jobs/capture_api.sh</string>
+		<string>capture-api</string>
+	</array>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/kerrfir/Library/Logs/second-brain/capture-api-stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/kerrfir/Library/Logs/second-brain/capture-api-stderr.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SECOND_BRAIN_JOB_SERVICE</key>
+		<string>1</string>
+		<key>SECOND_BRAIN_SERVICE_STARTUP_TIMEOUT_S</key>
+		<string>120</string>
+		<key>SECOND_BRAIN_HEALTH_URL</key>
+		<string>http://127.0.0.1:8100/health</string>
+		<key>SECOND_BRAIN_NOTIFY_INTERVAL_S</key>
+		<string>1800</string>
+	</dict>
+	<!-- Secrets are deliberately NOT in this file (it is tracked in git).
+	     CAPTURE_API_TOKEN is read from the gitignored .env by capture_api.sh.
+	     KeepAlive service under the wrapper's service mode: bounded startup, health
+	     probes, no deadline while healthy, back-off + one notification per 30 min
+	     during an outage (src/operations/jobs.py). -->
 </dict>
 </plist>

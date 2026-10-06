@@ -40,5 +40,14 @@
 	</array>
 	<key>WorkingDirectory</key>
 	<string>/Users/kerrfir/second-brain</string>
+	<key>ExitTimeOut</key>
+	<integer>150</integer>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SECOND_BRAIN_JOB_TIMEOUT_DREAM_CYCLE</key>
+		<string>21600</string>
+		<key>SECOND_BRAIN_JOB_GRACE_S</key>
+		<string>120</string>
+	</dict>
 </dict>
 </plist>

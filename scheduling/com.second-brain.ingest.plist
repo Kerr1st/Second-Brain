@@ -18,5 +18,10 @@
 		<key>Minute</key>
 		<integer>0</integer>
 	</dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SECOND_BRAIN_JOB_TIMEOUT_CRAWLEE_INGEST</key>
+		<string>3600</string>
+	</dict>
 </dict>
 </plist>

@@ -124,10 +124,14 @@ def test_launch_agent_runs_general_capture_every_six_hours_without_backfill():
 
     assert job["Label"] == "com.second-brain.codex-capture"
     assert job["StartInterval"] == 21600
+    # R5: through the shared wrapper (lock, 2 h deadline, logs/jobs/codex-capture.json).
     assert job["ProgramArguments"] == [
         "/bin/bash",
+        "/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh",
         "/Users/kerrfir/second-brain/scripts/jobs/codex_capture.sh",
+        "codex-capture",
     ]
+    assert int(job["EnvironmentVariables"]["SECOND_BRAIN_JOB_TIMEOUT_CODEX_CAPTURE"]) >= 7200
     assert "--backfill" not in job["ProgramArguments"]
     assert "CODEX_CAPTURE_CANARY_TASK_ID" not in job.get("EnvironmentVariables", {})
     # The corpus must not reach Kiro or Fable: pin the privacy-compatible profile.

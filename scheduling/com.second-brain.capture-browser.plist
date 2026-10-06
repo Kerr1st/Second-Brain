@@ -2,21 +2,26 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key>
-    <string>com.second-brain.capture-browser</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh</string>
-        <string>/Users/kerrfir/second-brain/scripts/jobs/capture_browser.sh</string>
-        <string>capture-browser</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>1</integer>
-        <key>Minute</key>
-        <integer>15</integer>
-    </dict>
+	<key>Label</key>
+	<string>com.second-brain.capture-browser</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh</string>
+		<string>/Users/kerrfir/second-brain/scripts/jobs/capture_browser.sh</string>
+		<string>capture-browser</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>1</integer>
+		<key>Minute</key>
+		<integer>15</integer>
+	</dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SECOND_BRAIN_JOB_TIMEOUT_CAPTURE_BROWSER</key>
+		<string>3600</string>
+	</dict>
 </dict>
 </plist>

@@ -6,35 +6,41 @@
   is one Bedrock Opus 5 call (~$0.10), so a permanently failing task would cost ~$2.40/day
   hourly versus ~$0.40 at this cadence. Codex sessions are bursty, and unchanged tasks
   cost nothing, so 6 hours loses no coverage. See docs/PLAN-capture-repair.md.
+  R5: runs through job_wrapper.sh (lock, 2 h deadline, logs/jobs/codex-capture.json);
+  the installed copy of this plist must be replaced by a symlink (scheduling/README.md).
   Paths are absolute and machine-specific (launchd does not expand ~ or $HOME here).
 -->
 <plist version="1.0">
 <dict>
-    <key>Label</key>
-    <string>com.second-brain.codex-capture</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/bash</string>
-        <string>/Users/kerrfir/second-brain/scripts/jobs/codex_capture.sh</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>SECOND_BRAIN_PROFILE</key>
-        <string>controlled</string>
-        <key>AWS_PROFILE</key>
-        <string>second-brain-jobs</string>
-        <key>CODEX_HOME</key>
-        <string>/Users/kerrfir/.codex</string>
-    </dict>
-    <key>StartInterval</key>
-    <integer>21600</integer>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>/Users/kerrfir/second-brain/logs/codex-capture.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/kerrfir/second-brain/logs/codex-capture.log</string>
-    <key>WorkingDirectory</key>
-    <string>/Users/kerrfir/second-brain</string>
+	<key>Label</key>
+	<string>com.second-brain.codex-capture</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh</string>
+		<string>/Users/kerrfir/second-brain/scripts/jobs/codex_capture.sh</string>
+		<string>codex-capture</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>21600</integer>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>/Users/kerrfir/second-brain/logs/codex-capture-launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/kerrfir/second-brain/logs/codex-capture-launchd.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/kerrfir/second-brain</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SECOND_BRAIN_PROFILE</key>
+		<string>controlled</string>
+		<key>AWS_PROFILE</key>
+		<string>second-brain-jobs</string>
+		<key>CODEX_HOME</key>
+		<string>/Users/kerrfir/.codex</string>
+		<key>SECOND_BRAIN_JOB_TIMEOUT_CODEX_CAPTURE</key>
+		<string>7200</string>
+	</dict>
 </dict>
 </plist>

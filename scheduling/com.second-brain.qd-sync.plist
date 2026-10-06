@@ -21,5 +21,10 @@
 	<false/>
 	<key>Nice</key>
 	<integer>10</integer>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SECOND_BRAIN_JOB_TIMEOUT_QD_SYNC</key>
+		<string>3600</string>
+	</dict>
 </dict>
 </plist>

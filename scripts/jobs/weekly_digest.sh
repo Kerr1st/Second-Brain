@@ -39,15 +39,11 @@ export BEDROCK_REGION="${BEDROCK_REGION:-us-east-1}"
 
 cd "$REPO_ROOT"
 
-# PostgreSQL runs natively (Homebrew postgresql@17); start it if launchd woke us first.
-if ! pg_isready -h 127.0.0.1 -p 5432 -U memory_bank >/dev/null 2>&1; then
-  brew services start postgresql@17 >/dev/null 2>&1
-  sleep 5
-fi
-if ! pg_isready -h 127.0.0.1 -p 5432 -U memory_bank >/dev/null 2>&1; then
-  echo "ABORT: PostgreSQL is not reachable" >&2
-  exit 1
-fi
+# PostgreSQL runs natively (Homebrew postgresql@17). Not auto-started here any more
+# (R5): see scripts/jobs/_preflight.sh for why; exit 69 classifies "database down".
+# shellcheck source=scripts/jobs/_preflight.sh
+. "$REPO_ROOT/scripts/jobs/_preflight.sh"
+require_postgres
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] weekly-digest starting (profile=$SECOND_BRAIN_PROFILE, cap=\$$SECOND_BRAIN_DIGEST_CAP_USD)"
 exec "$PYTHON" "$REPO_ROOT/scripts/weekly_digest.py" "$@"
