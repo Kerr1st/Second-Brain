@@ -18,6 +18,8 @@
 		<key>Minute</key>
 		<integer>45</integer>
 	</dict>
+	<key>ExitTimeOut</key>
+	<integer>150</integer>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>SECOND_BRAIN_JOB_NEEDS_NETWORK</key>

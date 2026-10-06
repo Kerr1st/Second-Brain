@@ -17,6 +17,8 @@
 	<string>/Users/kerrfir/Library/Logs/second-brain/capture-api-stdout.log</string>
 	<key>StandardErrorPath</key>
 	<string>/Users/kerrfir/Library/Logs/second-brain/capture-api-stderr.log</string>
+	<key>ExitTimeOut</key>
+	<integer>150</integer>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>SECOND_BRAIN_JOB_SERVICE</key>

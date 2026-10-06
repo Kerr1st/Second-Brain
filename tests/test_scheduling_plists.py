@@ -128,6 +128,20 @@ def test_dream_cycle_keeps_mon_wed_fri_0200_and_gives_launchd_time_for_the_grace
     assert plist["ExitTimeOut"] >= grace + 20
 
 
+@pytest.mark.parametrize("label", sorted(EXPECTED_LABELS))
+def test_every_plist_gives_launchd_the_wrappers_grace_plus_margin_on_bootout(label):
+    """S3-2: the wrapper's grace is 120 s for every job, but launchd SIGKILLs a
+    booted-out job after its default 20 s ExitTimeOut. The child runs in its own
+    session (start_new_session), so a bootout mid-run (rollback, logout, reboot)
+    would leave it finishing alone with the status stuck at `running` until
+    overdue_running. Every plist must let the wrapper's TERM → grace → KILL finish."""
+    plist = PLISTS[label]
+    grace = float(plist.get("EnvironmentVariables", {}).get("SECOND_BRAIN_JOB_GRACE_S", DEFAULT_GRACE_S))
+    assert "ExitTimeOut" in plist, f"{label}: no ExitTimeOut (launchd default is 20 s < grace {grace:.0f}s)"
+    assert isinstance(plist["ExitTimeOut"], int)
+    assert plist["ExitTimeOut"] >= grace + 20, f"{label}: ExitTimeOut {plist['ExitTimeOut']} < grace {grace:.0f} + 20"
+
+
 def test_capture_api_is_a_wrapped_keepalive_service_without_a_batch_deadline():
     plist = PLISTS["capture-api"]
     env = plist["EnvironmentVariables"]

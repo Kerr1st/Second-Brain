@@ -31,6 +31,8 @@
 	<string>/Users/kerrfir/second-brain/logs/codex-capture-launchd.log</string>
 	<key>WorkingDirectory</key>
 	<string>/Users/kerrfir/second-brain</string>
+	<key>ExitTimeOut</key>
+	<integer>150</integer>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>SECOND_BRAIN_JOB_NEEDS_NETWORK</key>

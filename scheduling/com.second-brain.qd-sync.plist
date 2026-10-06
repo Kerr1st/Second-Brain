@@ -21,6 +21,8 @@
 	<false/>
 	<key>Nice</key>
 	<integer>10</integer>
+	<key>ExitTimeOut</key>
+	<integer>150</integer>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>SECOND_BRAIN_JOB_TIMEOUT_QD_SYNC</key>
