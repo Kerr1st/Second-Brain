@@ -35,8 +35,8 @@ Every job runs through one boundary, `scripts/jobs/job_wrapper.sh` →
 | `com.second-brain.weekly-digest` | Mon 06:00 | `scripts/jobs/weekly_digest.sh` → `weekly-digest` | `7200` (observed 5–98 min; floor 2 h) | `SECOND_BRAIN_JOB_NEEDS_NETWORK=1`; `WorkingDirectory` | Weekly digest (Nova on Bedrock; failing since 09-07 → liveness advisory) |
 | `com.second-brain.credentials` | Daily 07:00 | `scripts/jobs/verify_credentials.sh` → `credentials` | `3600` (observed ≤ 1 min) | `SECOND_BRAIN_JOB_NEEDS_NETWORK=1` | Credential probe (required/advisory classification unchanged) |
 | `com.second-brain.liveness` | Daily 09:00 | `scripts/jobs/verify_liveness.sh` → `liveness` | `3600` (observed seconds) | — | Capture liveness (`config/liveness.toml`), job status sweep, durable `logs/jobs/liveness-report.json` |
-| `com.second-brain.qd-sync` | Every 3600 s (`StartInterval`) | `scripts/jobs/qd_sync.sh` → `qd-sync` | `3600` (observed seconds; R4 first run ≈ 270 embeddings) | `Nice=10`; launchd stdout → `logs/qd-sync-launchd.log` | Quick Desktop sync (facts, tags, feed, chats; the Slack knowledge-graph writer was retired in R7, migration 018). **Installed file was a copy → replace with a symlink** |
-| `com.second-brain.codex-capture` | Every 21600 s (6 h) | `scripts/jobs/codex_capture.sh` → `codex-capture` | `7200` (≤ 5 metered Opus calls/run; floor 2 h) | `SECOND_BRAIN_JOB_NEEDS_NETWORK=1`; `SECOND_BRAIN_PROFILE=controlled`, `AWS_PROFILE=second-brain-jobs`, `CODEX_HOME=/Users/kerrfir/.codex`; launchd stdout → `logs/codex-capture-launchd.log`; `WorkingDirectory` | Codex task capture. **Installed file was a copy → replace with a symlink** |
+| `com.second-brain.qd-sync` | Every 3600 s (`StartInterval`) | `scripts/jobs/qd_sync.sh` → `qd-sync` | `3600` (observed seconds; R4 first run ≈ 270 embeddings) | `Nice=10`; launchd stdout → `logs/qd-sync-launchd.log` | Quick Desktop sync (facts, tags, feed, chats; the Slack knowledge-graph writer and its tables were retired in R7, migration 018). **Installed file was a copy → replace with a symlink** |
+| `com.second-brain.codex-capture` | Every 21600 s (6 h) | `scripts/jobs/codex_capture.sh` → `codex-capture` | `7200` (≤ 5 metered Opus calls/run; floor 2 h) | `SECOND_BRAIN_JOB_NEEDS_NETWORK=1`; `SECOND_BRAIN_PROFILE=controlled`, `AWS_PROFILE=second-brain-jobs`, `CODEX_HOME=<home>/.codex` (the plist carries the absolute path — launchd does not expand `~`); launchd stdout → `logs/codex-capture-launchd.log`; `WorkingDirectory` | Codex task capture. **Installed file was a copy → replace with a symlink** |
 | `com.second-brain.capture-api` | `KeepAlive` service | `scripts/jobs/capture_api.sh` → `capture-api` | none while healthy; startup bounded by `SECOND_BRAIN_SERVICE_STARTUP_TIMEOUT_S=120` | `SECOND_BRAIN_JOB_SERVICE=1`, `SECOND_BRAIN_HEALTH_URL=http://127.0.0.1:8100/health`, `SECOND_BRAIN_NOTIFY_INTERVAL_S=1800`; stdout/err → `~/Library/Logs/second-brain/` | HTTP capture endpoint (port 8100). Token comes from the gitignored `.env`, never the plist |
 
 Every plist carries `ExitTimeOut=150` (launchd's grace on bootout ≥ the wrapper's 120 s grace + 20).
@@ -71,7 +71,7 @@ Exit codes a log reader can classify: `0` ok · `1` job failure · `3`/`4` auth/
 
 ```bash
 # Install one job (symlink, never a copy)
-ln -sfn /Users/kerrfir/second-brain/scheduling/com.second-brain.<name>.plist ~/Library/LaunchAgents/
+ln -sfn "$HOME/second-brain/scheduling/com.second-brain.<name>.plist" ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.second-brain.<name>.plist
 
 # Reload a job after a checkout changed its plist
@@ -82,7 +82,7 @@ find ~/Library/LaunchAgents -maxdepth 1 -name 'com.second-brain.*.plist' -type f
 
 # Status: loaded labels (16; distill stays disabled) and the last run of each job
 launchctl list | grep second-brain
-for f in /Users/kerrfir/second-brain/logs/jobs/*.json; do python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['job'], d['state'], d.get('exit_code'), d.get('finished_at'))" "$f"; done
+for f in ~/second-brain/logs/jobs/*.json; do python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['job'], d['state'], d.get('exit_code'), d.get('finished_at'))" "$f"; done
 ```
 
 ## Logs and status

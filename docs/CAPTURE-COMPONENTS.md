@@ -1,124 +1,37 @@
-# Capture — Component Architecture
+# Capture components
 
-**Status: reference for the component build-out.** Captures the target structure so each
-piece can be built, tested, scheduled, and replaced **independently**. Grounded in the
-2026-06-08 capture/ingest audit. YouTube (`src/capture/youtube.py`) is the first component
-and the reference implementation for the contract below.
+Source adapters acquire evidence; common ingestion stores it atomically. A capture report is evidence about that attempt, not proof that every source surface was observed. Code: `src/capture/`, `src/parsers/`, `src/ingest.py`; schedules in [scheduling/README.md](../scheduling/README.md).
 
-## Why components
-Today capture is the most sprawled part of the system: ~15 scripts, an external Node tool,
-and **3 duplicate storage paths**. The goal is to make capture a set of small components with
-clear boundaries so we can work on one without touching the others, and so the shared spine
-(storage, distillation, retrieval) stays consistent across every source.
+| Surface | Entry point (job) | Identity and evidence boundary |
+|---|---|---|
+| Codex tasks | `src/capture/codex.py`, `src/capture/sources/codex_turns.py` (`codex-capture`, every 6 h) | User prompt plus visible final outcome, stable task/turn identity (`RolloutTurnAssembler`, drop counters, `rollout_fingerprint`); excludes hidden reasoning, tool output and delegated activity. The paid semantic pass is a separate metered role with its own run threshold |
+| Kiro IDE and CLI chats | `src/capture/chats.py`, `src/parsers/kiro_sessions.py`, `src/parsers/{ide_chat,cli_chat}.py` (`chat-capture`, 02:30) | Native IDE `~/.kiro/sessions/<workspace>/<session>/session.json` + `messages.jsonl`, user and assistant `Say` only; legacy `.chat` exports and CLI JSONL; bounded 50 sessions per run per channel, newest first; incomplete sessions reported, not failed; a session UUID is never a project |
+| Slack | `src/capture/slack.py` (`capture-slack`, 01:00) | Conversation-day identity, original timestamps and links; honours `Retry-After` within a bounded budget; a day still lost after the budget is a failure |
+| Outlook mail and calendar | `src/capture/outlook.py` (`capture-outlook`, 00:45) | Per-message / per-event identity; mail and calendar are different channels; an item without a timestamp is one failed item, not an aborted run |
+| Browser | `src/capture/browser.py` (`capture-browser`, 01:15) | Chrome history from a SQLite backup copy, canonical URL filtering (`filters.py`); a history visit is not a page capture; missing History is a failure |
+| YouTube | `src/capture/youtube.py` (`youtube`, 01:30) | Video identity and transcript availability (yt-dlp); blocked or missing transcripts are reported; a non-zero enumeration with partial entries is `partial_enumeration` |
+| Quick Desktop | `src/capture/qd.py` with stages `facts, tags, feed, chats` (`qd-sync`, hourly) | Typed upstream records (`qd://memory/<id>`, `qd://entity/<id>`, `qd-feed://`, `qd-chat://`); refreshes the eligible snapshot every run, no cursor file; the document channel (`qd_docs.py`) and the Slack knowledge-graph writer are retired — the `graph` stage was removed in R7 together with its tables |
+| Crawlee and bookmarks | `src/capture/crawlee.py`, `scripts/crawlee_ingest.py` (`crawlee-ingest`, 03:00); `scripts/scrape_bookmarks.py` (`bookmarks`, Saturday) | Index-verified scraped pages; at most `--max-unindexed` (25) never-indexed internal documents per run; unresolved index rows are reported, not failed |
+| Manual / MCP / HTTP | `src/mcp_server.py` (`memory_create`, `memory_learn`), `src/capture_api.py` (`capture-api`, service) | Explicit caller-provided evidence; endpoint availability is not observed capture volume |
 
-## System components (top level)
-Second Brain is four components with clean boundaries (verified: the core does not import
-capture):
+Quick Desktop, Amazon Quick, Amazon Q Developer, Kiro and Codex are distinct source identities. Do not collapse them because an older document used the names interchangeably.
 
-```
-CAPTURE  →  RETRIEVAL substrate  →  SYNTHESIS (dream cycle)  →  DELIVERY (Express)
-```
+## Common flow
 
-- **Retrieval** — `db`, `embeddings`, `search` (hybrid BM25+vector+RRF + cognitive rerank).
-- **Synthesis** — `dream_cycle/*` (Explorer → Thinker → 4 evaluators), consensus-gated.
-- **Delivery** — `express` (`brief` / push / `memory_brief`).
-- **Capture** — the subject of this doc; decomposed below.
+`src/capture/framework.py` supplies preflight → collection/window → render and identity validation → ingestion → outcome (`run_channel` for documents, `run_records` for typed Quick Desktop records). `render.py` owns the one-line underscore-only metadata headers and HTML-to-text conversion; `window.py` owns zoneinfo-aware local-day windows including 23- and 25-hour days; `filters.py` owns the URL exclusion vocabulary and the indexed-URL inventory.
 
-This doc decomposes **Capture**. The same component treatment can later apply to the others.
+`processed` counts stored work. Dry runs report `planned` and classify each record `new` / `changed` / `unchanged` by reading the stored row; processed stays zero. A failed item is counted in `CaptureBatch.failed`, logged with its identity, and makes `main()` exit non-zero (exit 1; 3/4 for auth/transport in the MCP-backed channels) while the rest of the batch continues. Empty source identities never reach embeddings or storage; a repeated URL in a batch is handled once. Every channel runs under the job runner, so a failure is also a durable status and a liveness finding ([OPERATIONS.md](OPERATIONS.md)).
 
-## Capture = source connectors + a shared spine
+Growing sessions refresh a stable raw parent and keep previous children as superseded evidence when they are cited. Source replacement prepares embeddings before the transaction; existing complete data survives failure. Metadata patches merge keys (tags are merged, not overwritten); a refreshed row keeps `created_at`, which liveness uses as the capture-time column.
 
-```
-                       ┌─────────── source connectors ───────────┐
-   youtube  kiro_chat  web  quick_desktop        (each: enumerate + fetch)
-                       └──────────────────┬──────────────────────┘
-                                          ▼
-                          SPINE:  store → ingest (chunk + parent/chunk + relationships)
-                                          ▼
-                                  distill  (raw → semantic decision/insight)   ← the value step
-                                          ▼
-                              memories (Postgres/pgvector)  → retrieval → synthesis
-```
+The native IDE format is qualified with synthetic fixtures (`tests/fixtures/`); finding a session directory proves format presence, not complete historic coverage. Historical `.chat` data remains distinct from native sessions and is never refreshed.
 
-A **connector** owns only *"how do I reach this source and normalize it to markdown."*
-Everything after that (dedup, storage, chunking, distillation, retrieval) is **shared spine**.
+## Codex semantic capture
 
-## The connector contract (what makes a source separately-workable)
-Every source connector implements three things — nothing more:
+Raw tasks and turns are preserved independently of the paid semantic pass (`codex_semantic` role, Bedrock). New turns are processed in frozen bounded batches with bounded previous-segment context; oversize turns stay verbatim with an explicit report; validated semantic output is cached before embeddings and persistence so a storage retry never buys the same inference again. Contract failures and infrastructure failures are distinct; new arrivals do not revive an abandoned batch; one run-wide spend tracker covers the pass and exhaustion skips later semantics while raw capture continues. Open findings: F-086 (legacy turn identity wins over the native one), F-094 (private/incognito Quick Desktop chats are filtered only by message count and deletion), F-090 (Quick Desktop rows that fell out of the eligible selection stay active) — tracked in [PLAN-refactor.md](PLAN-refactor.md).
 
-```python
-SOURCE_TYPE = "youtube"                 # 1. its label
+## Retired paths and maintenance
 
-def enumerate() -> Iterable[Item]:      # 2. list what's available (id/url, title, metadata)
-    ...
+The two-phase staging hop (`chat_extract.py` → `staging/chats` → `ingest_staged.sh`), the one-shot `scripts/migrate/` migrators, `codex-canary`, the Quick Desktop document channel and the Slack knowledge-graph writer are gone; `scripts/maintenance/drain_staged_chats.py` remains for staged leftovers. `quick_desktop_doc` is historical vocabulary, not a source.
 
-def fetch(item) -> str | None:          # 3. produce markdown + metadata header, or None to skip
-    ...
-```
-
-A shared **runner** then does the cross-cutting work once, for every connector:
-dedup (`get_processed_source_urls(SOURCE_TYPE)`), `ingest_content(md, source_type=...)`,
-stats, `--limit`/`--dry-run`, and request backoff. (Today `youtube.py` inlines its own
-runner; the refactor lifts that into a shared `run(connector, ...)`.)
-
-Markdown each connector emits uses a metadata header the ingest pipeline parses:
-```
-# <title>
-Source: <url>
-Type: <source-specific>
-Engagement: <tier>        # e.g. liked | watch_later — interest signal for Phase 2
----
-<body>
-```
-
-## Source connectors (status)
-
-| Connector | Signal | Current home | State / work to bring into structure |
-|---|---|---|---|
-| **youtube** ✅ | Liked + Watch Later transcripts | `src/capture/youtube.py` | Done — reference impl. Refactor: split connector vs. shared runner. |
-| **kiro_chat** | Kiro IDE + CLI chat sessions | `chat_extract.py`, `batch_ingest_{parallel,staged}.py`, `ingest_chats.py`, `parsers/{ide,cli}_chat.py` | Consolidate 4 scripts → one connector. IDE source idle since 2026-02-18 (resumes when editor is used). |
-| **web** | Articles / bookmarks | `crawlee_ingest.py`, `scrape_bookmarks.py`, `parsers/crawlee.py` (+ external Node) | Bring in-repo (drop external Crawlee dependency), like youtube. |
-| **quick_desktop** | QD docs / feed / chat / 9 micro-cats | `migrate/{ingest_doc_chunks,ingest_eventlog,migrate_quick_desktop}.py`, `ingest_qd_chats.py`, `qd_sync.sh`, `qd_profile.py` | Consolidate. **Bug:** micro-cats (~1,140 recs) created with **no embeddings** → invisible to vector search. |
-| ~~capture_api~~ | Slack / browser / email (HTTP) | `src/capture_api.py` + `capture-api` launchd job + `test_capture_api.py` | **Retire** — 0 captures ever. |
-| ~~migrations~~ | Claude / ChatGPT / Notion (one-time) | `migrate/migrate_{claude,chatgpt,notion}.py` | **Archive** — 0 rows present. |
-
-## Shared spine
-
-- **store** — the single primitive: `embed → classify → depth → create_memory`.
-  *Currently triplicated* (`ingest.ingest_content`, `capture_api._store_memory`,
-  `mcp_server.memory_create`) → collapse to one `store.py`; the other two call it.
-- **ingest / pipeline** — metadata-header parse + section chunking + parent (unembedded) +
-  embedded chunks + relationship discovery. Healthy today (`src/ingest.py`); keep
-  `ingest_content`'s signature stable (6 callers).
-- **distill** — raw chunks → semantic `decision`/`insight` memories. **The value-multiplier**
-  (synthesis cites distilled memories, not raw chunks). Today: chat-only, and only ~8% of IDE
-  sessions distilled (459/5,493). Target: generalize to any `source_type` + backfill.
-
-## Target layout
-```
-src/capture/
-  store.py            # the one storage primitive (all writers route here)
-  pipeline.py         # chunk + parent/chunk + relationships  (today's ingest.py)
-  distill.py          # raw → semantic, generalized to any source_type
-  runner.py           # shared capture loop: enumerate → dedup → fetch → ingest → stats
-  sources/
-    youtube.py  ✅
-    kiro_chat.py    web.py    quick_desktop.py
-```
-
-## Migration path (incremental — never a big-bang rewrite)
-1. **Retire dead** — `capture_api` (+ job + test), one-off migrations, the `import_slack_graph`/entity-KG path. (Verify-before-cut; each its own commit.)
-2. **Lift one connector at a time** onto the shared spine, newest pattern first
-   (`youtube` ✅ → `kiro_chat` → `web` → `quick_desktop`), retiring its scattered scripts as it lands.
-3. **Collapse the 3 store paths → 1** (`store.py`); point `mcp_server`/any HTTP writer at it.
-4. **Generalize `distill`** to any source_type + backfill (the highest-leverage step for synthesis).
-5. Keep the test suite green and commit per step (origin + mini).
-
-## Status snapshot
-- ✅ `youtube` connector shipped (`ac3054d`); reference contract established.
-- ▢ Extract shared `runner.py` from `youtube.py`.
-- ▢ Collapse the 3 store paths → `store.py`.
-- ▢ Lift `kiro_chat`, `web`, `quick_desktop` connectors.
-- ▢ Generalize `distill` + backfill (IDE remainder, youtube, articles).
-- ▢ Retire `capture_api` + one-off migrations.
-- ▢ Fix `quick_desktop` micro-category embeddings.
+Deduplication and rechunking are separate resumable maintenance programs (`scripts/maintenance/dedup_corpus.py`, `rechunk_and_embed.py`, `prepare_release.py`); their dry-run manifests enumerate identity, references, row versions and prospective embedding work before any mutation, and application is the pending R6 step ([RELEASES.md](RELEASES.md)). Identical text is insufficient to merge independent projects.

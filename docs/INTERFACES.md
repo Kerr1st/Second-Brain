@@ -1,92 +1,37 @@
-# Interfaces and configuration — original implementation
+# Interface contracts
 
-Source-reviewed 2026-09-10. Commands below describe interfaces; model calls, DB writes, mail, and maintenance are explicitly identified. [Operations](OPERATIONS.md) supplies setup and isolation prerequisites.
+The canonical vocabularies and argument helpers live in `src/validation.py`. Unknown types, statuses, sources and relations are rejected at the boundary; migration 016 reinforces the source vocabulary with a `NOT VALID` CHECK, so historical out-of-vocabulary rows stay readable but new ones are refused. Historical data requires a measured migration, not silent relabeling.
 
-## Nine MCP tools
+## MCP
 
-The server is `src/mcp_server.py`, stdio transport. The exact callable definitions are the source of truth; these are the current public arguments.
+`src/mcp_server.py` exposes `memory_create`, `memory_search`, `memory_read`, `memory_update`, `memory_relate`, `memory_list`, `memory_recent_activity`, `memory_graph`, `memory_learn` and `memory_brief` over stdio (`scripts/jobs/mcp_serve.sh` is the launcher editor sessions point at). Read the registered function signatures for the exact schema.
 
-| Tool | Arguments (required first; defaults shown) | Result and side effects |
-|---|---|---|
-| `memory_create` | `type,title,content`; `tags,source_type,source_url,metadata,project,encoding_context=None` | Embeds content, computes class/depth, writes memory. Returns ID string and optional depth/question warnings |
-| `memory_search` | `query`; `type=None,limit=10,project=None,source_type=None,since_days=None,status=None` | Embeds query, retrieves/reranks, increments access counters. Returns results+temporal/schema context; previews capped at 500 characters |
-| `memory_read` | `memory_id` | Full row excluding embedding; no access-counter write; error object if absent |
-| `memory_update` | `memory_id`; `title,content,status,tags,summary,type=None` | Updates supplied fields; content change re-embeds/reclassifies/rescores. Returns confirmation string |
-| `memory_relate` | `source_id,target_id,relation_type`; `note=None` | Upserts directed relationship with note |
-| `memory_list` | `type=None,source_type=None,status=None,limit=20` | Recent record metadata, no relevance scoring or embedding call |
-| `memory_graph` | `memory_id` | Memory summary and relationship projections. Underlying query includes both edge directions, but output always reports stored `target_id`; incoming-edge neighbor handling is defective |
-| `memory_learn` | `content,topics`; `source=None` | Embeds/searches comma-separated topics and returns related snippets+instructions. **Does not itself write insights or run the dream cycle**; caller must synthesize/create/relate |
-| `memory_brief` | `window_days=14,use_llm=False` | Markdown briefing; deterministic by default, optional Kiro editor; no delivery receipt written |
+Search/list limits are clamped to 1–100 and time windows to 0–365 days. Recent activity uses 1–90 days and 0–20 samples per source. Booleans, non-finite or fractional numbers and malformed integers are invalid. `memory_learn` accepts at most four distinct comma-separated topics of at most 200 characters before it invokes embeddings. `memory_graph` returns the neighbouring memory for either edge direction and excludes expired edges. `memory_read` does not ship the `search_vector` column.
 
-`memory_graph` traverses memory relationships, not the imported entity graph. The graph projection bug means an incoming edge can return the requested record itself as `target_id`; consult the stored source/target before interpreting direction.
+Dictionary tools return `{error: message}`, string tools return `Error: message`, and list tools raise a safe `ValueError` which MCP reports as an error. Operational, pool and database diagnostics do not cross the boundary (`_guarded` translates residual psycopg2 shape errors); programming defects still surface for repair. Source SQL, constraint names, private row values and DSNs are never error messages.
 
-Memory type strings used by interfaces: research, synthesis, idea, connection, priority, question, insight, decision, project, source. The DB/schema helpers also support `schema`, which is an abstract memory grouping via `derived_from`; the core does not prove that such records are populated. Status values used include active, explored, archived, superseded, user_rejected. SQL does not constrain these to enums.
+### `memory_brief` and metered spend
 
-Relationship meanings are directed: A `supports` B means A provides evidence for B; A `derived_from` B means A synthesizes B; A `superseded_by` B means B replaces A. Other conventional labels: contradicts, extends, inspires, blocks, requires, related_to. Do not reverse support direction as an older tutorial did.
+`memory_brief(window_days=14, use_llm=False)` composes the Express briefing (insights, contradictions, resurfaced memories, digests, questions) and ranks it. With `use_llm=False` (the default) no backend is resolved and nothing is spent. With `use_llm=True` the briefing goes through `express.edit_briefing`, which resolves the `editor` role of the active profile (`controlled`: Amazon Nova 2 Lite on direct Bedrock, Flex tier, 4,096 output tokens) and calls it once through `invoke_metered` with its own `SpendTracker`, threshold `SECOND_BRAIN_EDITOR_CAP_USD` (default **$0.25**, a post-response stop threshold that one call can overshoot). The role is a corpus role, so the Kiro/Fable denial applies. A recoverable editor failure (`RuntimeError`, `OSError`, `ValueError`, including a malformed editor reply) falls back to deterministic ranking and records `editor_error`; spend and usage failures propagate without a second call. The briefing dict carries `editor` (`llm` | `deterministic` | `empty`), `editor_cost_usd` and `editor_spend_unknown`; the rendered Markdown the MCP client receives does not itemize cost, so an MCP caller who passes `use_llm=True` is accepting a metered Bedrock call per invocation. The scheduled email push is a separate product decision and is not enabled by this tool.
 
-## Synthetic first-record check
+### Trusted and read-only registries
 
-Use an isolated test database and a fictional source. Create a decision with explicit status and evidence rather than invented benchmark claims:
+The interactive MCP registry includes writes and access reinforcement. `src/mcp_readonly.py` is an explicit separate registry with no write tools and a search that does not reinforce access counts, intended for discovery agents. **At the R7 head no adapter attaches it:** the Claude Code Explorer still starts `python -m src.mcp_server` (`src/backends/claude_code.py`), so the Explorer's capability boundary is the full server plus the orchestrator's deterministic storage authorization, not a read-only tool surface. Switching the Explorer to `src.mcp_readonly` with exact tool grants is a documented open item of the routing lane ([PLAN-refactor.md](PLAN-refactor.md), "Status"). A prompt saying "read only" is not the capability boundary.
 
-> WHAT: For a fictional workshop exercise, test both supported execution modes before sharing the lab. WHY: The starter code may depend on a hosted proxy that participants will not have afterward. STATUS: Proposed test, not an observed outcome. Questions this answers: How should the fictional workshop's portability be checked?
+## Source and candidate contracts
 
-Call create, retain returned ID, search for a paraphrase, read the full record, update tags, create a second fictional evidence record, and relate evidence→decision with `supports`. Record actual responses, expected source content, DB writes and provider call outcomes. A successful round trip proves that transport/store/search path for this fixture; it does not prove good discoveries.
+Capture documents require a non-empty canonical source identity (channel + URL; `project` is descriptive, not part of identity) and preserve channel, source location, project when supported, author/role and time metadata. Stable identities let a changed source refresh transactionally; old chunks that are cited stay as superseded history. Source acquisition success, ingestion success and model success have separate outcomes and exit codes ([CAPTURE-COMPONENTS.md](CAPTURE-COMPONENTS.md)).
 
-## Main CLI contracts
+Dream candidates are proposals with cited source ids, an operation and an optional target. Only exact `ACCEPT`/`REJECT` verdicts count as votes. Storage independently authorizes targets and evidence and commits each candidate atomically. Audit and revision metadata stay visible in the ledger but are excluded from the voting projection.
 
-All commands run with the repository virtual environment and root working directory.
+## HTTP capture API
 
-| Script/module | Options | External calls / mutations |
-|---|---|---|
-| `scripts/brief.py` | `--window-days N`, `--no-llm`, `--json`, `--useful TARGET`, `--less TARGET`, `--mute TARGET`, `--unmute TARGET`, `--prefs` | DB reads; default Kiro editor. Feedback flags write DB. `--json` emits composed items before editor |
-| `scripts/express_push.py` | `--dry-run`, `--force`, `--no-llm` | Gate+composition, optional Kiro; SMTP send and local state write unless dry-run. `--force` bypasses previous-run suppression, not the quality trigger |
-| `scripts/dream_cycle_run.py` | required `--run-type scheduled|post_learn|session_start|user_triggered`; `--topic TEXT`, `--memory-ids ID,ID` | Model/MCP/embedding calls, memory/run/candidate writes, digest file. Exit2 on aborted/fatal, otherwise0 |
-| `scripts/distill_sessions.py` | `--dry-run`, `--limit N`, repeatable `--source-type T`, `--skip-contradictions` | Kiro even in dry-run; Bedrock+memory/relationship writes otherwise |
-| `scripts/weekly_digest.py` | `--days N` (7), `--dry-run` | Kiro even in dry-run; embedding+memory+notification otherwise |
-| `scripts/chat_extract.py` | `--backfill`, `--dry-run` | Source/DB reads, logging/staging; backfill ignores skip state |
-| `scripts/batch_ingest_staged.py` | `--dry-run`, `--limit N` | DB reads; normal execution embeds/writes/moves source files |
-| `scripts/batch_ingest_parallel.py` | `--workers N` (10), `--limit N` | Concurrent embedding/store writes; no dry-run |
-| `scripts/ingest_qd_chats.py` | `--dry-run`, `--limit N`, `--min-messages N` (2) | Read QD/DB; normal path embedding/store |
-| `src.capture.youtube` | `--dry-run`, `--limit N`, `--min-duration N` (300), `--playlists IDS...` | Remote playlist enumeration/cookies even in dry-run; transcript acquisition/store otherwise |
-| `scripts/eval/run_evaluation.py` | `--tier golden|curated|cold_warm|ablation|consolidation|trends`, `--limit N`, `--dry-run` | Normal tiers read DB, call embeddings, write evaluation artifacts; dry-run only prints tier list |
-| `scripts/eval/recall_check.py` | `--threshold FLOAT` (0.85), `--verbose` | Query embeddings and exact-versus-index search; threshold controls exit, not usefulness |
+`src/capture_api.py` (port 8100, launched by `scripts/jobs/capture_api.sh` in service mode) accepts explicit caller-provided evidence under a bearer token read from the gitignored `.env`; the launcher refuses to start without it. Labels are `api_browser`, `api_email`, `api_slack`. `/health` returns 503 whenever the database is unreachable, which the job runner treats as a failed probe.
 
-Other entrypoints and their purpose are listed in [Capture](CAPTURE-COMPONENTS.md). Manual maintenance scripts are not normal capture stages: `backfill_projects.py`, `redistill_capped.py`, `jobs/reindex_embedding.sh`, `jobs/dedup_ide_backfill.sh`. Review their arguments and target paths before use. The existing parallel ingestion path uses a shared `SimpleConnectionPool`; increasing workers is not a demonstrated concurrency-safety fix.
+## Python and shell
 
-Feedback target forms: hexadecimal item prefix (optional leading `#`), kind (`insight`, `contradiction`, `resurface`, `digest`, `question`), or topic/project string. `--useful`, `--less`, `--mute` set latest preference; `--unmute` removes the target's preference. These are **delivery preferences**, not per-version acceptance/correction/outcome ratings.
+The `src.db` facade retains supported imports while implementation lives in concern-specific modules (`pool`, `columns`, `memories`, `relationships`, `capture_queries`, `search_queries`, `express_queries`, `maintenance`). Optional `conn=` arguments join an existing transaction; callers must not commit a borrowed transaction. The dream-cycle repository facade separates runs, feedback, metrics, attention and briefing policy.
 
-## HTTP capture
+Every application path works with DML-only privileges (migration 017); DDL, `TRUNCATE`, `REINDEX` and `VACUUM` belong to the owner role and appear only in migrations, owner-gated maintenance scripts and the test fixture's owner connection. `migrations/migrate.sh` reads `DB_MIGRATE_USER`, `DB_OWNER_ROLE`, `DB_APP_ROLE`, `DB_MIGRATE_PASSWORD` and `MIGRATE_UNTIL` from the environment and exits 2 when the connected role neither owns the database nor is a direct member of its owner (superuser status is not an exemption), or when owner and app role are the same name; migration 017 itself RAISEs if the app role is a member of the owner role or lacks DML after the grants.
 
-`python -m src.capture_api` serves `/health` (DB reachability only) and authenticated POST endpoints `/capture`, `/capture/slack`, `/capture/browser`, `/capture/email`. Generic capture requires title/content, supports type/source/tags/metadata/project/context, bounds title to 500 / content to 100,000 characters, and embeds before storage. Specialized endpoints normalize caller-supplied payloads; they are not background connectors. Token missing at module CLI startup exits 1; bad bearer authorization returns 401.
-
-## Environment/configuration
-
-| Name | Default/behavior | Scope |
-|---|---|---|
-| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | localhost, 5432,memory_bank role/database; code contains a development password default | Python DB client, read at import; choose explicit credentials/target, not fallback for a shared deployment |
-| `DB_POOL_MIN`, `DB_POOL_MAX` | 1,5; some ingestion scripts set max 20 | Python pool sizing; no global source transaction |
-| `TEST_DB_NAME` | memory_bank_test | Tests create/delete data in this target. **No production-name safety guard** |
-| `BEDROCK_REGION` | us-east-1 | Embedding client |
-| `EMBEDDING_MODEL` | amazon.titan-embed-text-v2:0 | Model name override; request format/dimension remain Titan-style 1024, not arbitrary model compatibility |
-| Standard AWS profile/credential variables | Boto3 chain and CLI-specific behavior | Credentials are separate from model-backend TOML |
-| `SECOND_BRAIN_PROFILE` | laptop | Six dream-cycle roles only |
-| `SECOND_BRAIN_BACKENDS_CONFIG` | repo config/backends.toml | Profile file |
-| `KIRO_CLI`, `CLAUDE_CLI`, `CODEX_CLI` | Kiro user-local path; claude/codex executable names | Backend executables |
-| `KIRO_LLM_METRICS_DIR` | repo logs/llm_metrics | Per-call metrics/debug context; do not assume these files are public-safe |
-| `CAPTURE_API_TOKEN`, `CAPTURE_API_HOST`, `CAPTURE_API_PORT` | Token required (read from gitignored `.env` by `scripts/jobs/capture_api.sh`);127.0.0.1;8100 | Optional HTTP capture listener |
-| `EXPRESS_EMAIL_TO`, `EXPRESS_EMAIL_FROM`, `GMAIL_APP_PASSWORD` | No default credentials | Gmail SMTP STARTTLS; absent configuration skips delivery with exit 0 |
-
-Shell wrappers frequently hardcode DB host/port and original home paths; `DB_*` overrides do not make every wrapper portable. No automatic `.env` loading or secret-manager retrieval is present in the normal application path. Preserve secrets outside committed docs/configuration.
-
-## Terminology
-
-- **Memory:** stored text+metadata, optionally embedded; not every memory is a verified fact.
-- **Distillation:** extraction of durable claims from raw content, currently a separate chat process.
-- **Discovery:** proposal connecting existing evidence to a useful current action.
-- **Consensus:** four role-based judgments with a three-vote acceptance threshold, not proof or Bayesian confidence.
-- **Confidence:** source/model-assigned metadata; QD imports upstream numeric confidence; no unified calibrated probability.
-- **Depth:** text heuristic used in warnings/ranking, not human quality score.
-- **Retrieval reinforcement:** stored access counts/timestamps influence future ranking; no measured outcome implied.
-- **Source provenance:** IDs/URLs/file metadata and source links. Original does not validate exact quotes or immutable revisions.
-- **Delivered:** actually shown or sent; original has no precise per-item versioned delivery ledger.
-- **Useful:** user judges relevant/new/actionable and preferably applies it with an observed benefit; not interchangeable with accepted.
+Job wrappers preserve the child's exit code, enforce one lock and one deadline per job and write machine-readable status under `logs/jobs/` ([scheduling/README.md](../scheduling/README.md) lists the exit-code taxonomy). A timeout, capture failure, missing prerequisite or empty required output is never success. Maintenance commands default to a dry-run manifest; mutation requires the explicit application of a qualified plan.

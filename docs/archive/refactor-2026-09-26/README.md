@@ -1,0 +1,3 @@
+# Refactor-branch ledgers (historical)
+
+Verbatim copies of the two execution ledgers of `codex/refactor-safety-routing` @ `74ba02d` (2026-09-26): the foundation record for `bf854cd` and the full-plan completion ledger. They describe that branch at that date — its test total, its "not deployed" status, its remaining gates — and were never updated afterwards. The branch itself was not deployed; its content reached the installed system through the reviewed release line described in [RELEASES.md](../../RELEASES.md), which supersedes every status statement in these files. Relative links inside them point at paths that existed on that branch. They contain the host paths of the September inspection and are kept only as evidence.

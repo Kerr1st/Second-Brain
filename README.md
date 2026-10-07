@@ -1,97 +1,44 @@
 # Second Brain
 
-A personal knowledge management and ideation system powered by AI. Gives AI agents persistent memory across sessions, turning them into thinking partners that accumulate knowledge over time.
+Second Brain captures work context across the user's work surfaces (chats, Codex tasks, Slack, Outlook, browser, YouTube, Quick Desktop, Crawlee) into PostgreSQL + pgvector, retrieves it over MCP, and runs a scheduled multi-seat discovery cycle that looks for evidence-backed connections across projects. A useful discovery names a current problem, cites evidence, explains what transfers and proposes a next step; more records or reviewer agreement alone do not count.
 
-~122K memories. 10 migrations. Native PostgreSQL 17 + pgvector (plus a dormant imported knowledge graph). MCP server (9 tools) for agent access. Dream cycle for autonomous synthesis. Express delivery layer (on-demand briefing, gated email push, in-session tool, feedback).
+Start with [docs/START-HERE.md](docs/START-HERE.md). [docs/RELEASES.md](docs/RELEASES.md) says which release is built, reviewed or deployed; nothing else in this tree is a claim about the installed system.
 
-## Quickstart
-
-```bash
-# PostgreSQL 17 + pgvector (native, via Homebrew) — serves localhost:5432, auto-starts at login
-brew install postgresql@17 pgvector
-brew services start postgresql@17
-
-# Create virtualenv and install dependencies
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Apply database migrations
-./migrations/migrate.sh
-
-# Start the MCP server
-python -m src.mcp_server
-```
-
-## Running Tests
-
-```bash
-# All tests
-.venv/bin/python -m pytest
-
-# Specific test file
-.venv/bin/python -m pytest tests/test_db.py
-
-# Quick smoke test (core modules)
-.venv/bin/python -m pytest tests/test_db.py tests/test_search.py tests/test_mcp_server.py -q
-```
-
-Tests require a running PostgreSQL instance (native, on `localhost:5432`). The test fixture creates an isolated `memory_bank_test` database. Embedding calls are mocked — no Bedrock credentials needed for tests.
-
-## Documentation
-
-**New to Second Brain? Start with the [User Guide](docs/user-guide/index.md)** — what it is, how to install and configure it, day-to-day use, and operations. The references below are deeper design and architecture docs.
-
-| Doc | What it covers |
+| Need | Document |
 |---|---|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, database schema, search architecture, tech stack |
-| [OPERATIONS.md](docs/OPERATIONS.md) | Scheduled jobs, backup, SSO management, monitoring |
-| [EXPRESS-PLAN.md](docs/EXPRESS-PLAN.md) | Express delivery layer: briefing, gated email push, in-context tool, feedback loop |
-| [DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) | Backup topology, recovery procedures, encryption keys |
-| [DESIGN-DECISIONS.md](docs/DESIGN-DECISIONS.md) | Why key architectural choices were made (cognitive science rationale) |
-| [QUICK-DESKTOP-INTEGRATION.md](docs/QUICK-DESKTOP-INTEGRATION.md) | Quick Desktop sync design and knowledge graph import |
-| [HYBRID-CHAT-EXTRACTION.md](docs/HYBRID-CHAT-EXTRACTION.md) | Chat ingestion pipeline spec |
+| Orientation, purpose, what to read per component | [Start here](docs/START-HERE.md) |
+| Release line R1 … R7: what changed, status, private notes | [Releases](docs/RELEASES.md) |
+| Storage, retrieval, discovery, delivery | [Architecture](docs/ARCHITECTURE.md) |
+| Capture channels and identity | [Capture](docs/CAPTURE-COMPONENTS.md) |
+| Model routing, spend, data boundaries | [Models](docs/MODEL-BACKENDS.md) |
+| Jobs, roles, release and maintenance procedure | [Operations](docs/OPERATIONS.md), [scheduling/README.md](scheduling/README.md) |
+| Backups, restore, key custody | [Recovery](docs/DISASTER-RECOVERY.md) |
+| MCP, Python and shell contracts | [Interfaces](docs/INTERFACES.md) |
+| Tests, effectiveness, owned hazards | [Validation](docs/VALIDATION.md) |
+| Specifications | [Spec index](docs/SPEC-INDEX.md) |
+| Counted facts generated from source | [Runtime inventory](docs/generated/runtime-inventory.md) |
 
-## Project Structure
+## Develop and verify
 
-```
-src/                Core library (MCP server, DB, search, embeddings, ingestion, parsers)
-  dream_cycle/      Four-agent autonomous learning pipeline
-  parsers/          Chat and content parsers
-  prompts/          Agent prompt templates
-scripts/
-  jobs/             Scheduled job scripts (backup, sync, scrape, ingest)
-  migrate/          Data migration and sync scripts
-    migrate_quick_desktop.py   QD memories + KG entities/edges
-    enrich_qd_tags.py          QD memory tags + domains
-    ingest_eventlog.py         QD feed events + interactions
-    import_slack_graph.py      Slack channels + users → KG
-    ingest_doc_chunks.py       QD pre-chunked documents (hourly)
-  eval/             Evaluation framework (retrieval quality metrics)
-  batch_ingest_parallel.py   Parallel batch ingest (20 workers)
-  ingest_qd_chats.py         Quick Desktop chat session extractor
-migrations/         Numbered SQL migrations (000-010) + runner script
-scheduling/         macOS launchd plists (9 jobs, all installed)
-tests/              643 tests (property-based, unit, integration, E2E)
-docs/               Architecture specs and runbooks
-docker/             Legacy container data dir (gitignored) — retained as migration rollback, removed in Phase 5
-staging/            Transient pipeline data (gitignored)
+Python 3.14, PostgreSQL 17 with pgvector, macOS (`sandbox-exec`). Install the locked dependencies and run the suite only through the isolated runner:
+
+```sh
+uv venv .venv && uv pip sync --python .venv/bin/python requirements.lock   # or: python3 -m venv .venv && .venv/bin/pip install -r requirements.lock
+SECOND_BRAIN_PROFILE=controlled .venv/bin/python scripts/test_isolated.py -- -q
 ```
 
-## Current Status
+The runner creates a disposable socket-only cluster with three roles (`sb_test_owner` runs `migrations/migrate.sh`, `sb_test` is the NOSUPERUSER application role every application path runs as, `sb_test_legacy` stands in for the pre-R7 superuser), isolates HOME, metrics and credentials, and blocks provider and network access before collection. Direct `pytest` refuses to run. Missing prerequisites are errors, not fallbacks. See [tests/README.md](tests/README.md).
 
-**Working:**
-- Memory CRUD, hybrid search, reranking, retrieval reinforcement
-- MCP server (9 tools) connected to Kiro CLI and Claude Code
-- Quick Desktop hourly sync (memories, tags, KG, chats, feed events, Slack graph)
-- Daily encrypted backups to Google Drive + local (S3 de-scoped 2026-06-01)
-- Chat extraction, Crawlee ingestion, bookmark/YouTube scraping
-- Dream cycle pipeline (daily at noon; chains the Express email push)
-- Express delivery — on-demand `brief`, gated Gmail push, `memory_brief` MCP tool, feedback loop
-- All 9 LaunchAgents installed and operational
-- 643 tests (unit, property-based, integration, E2E)
+Do not run `migrations/migrate.sh`, the job installers or any `scripts/maintenance/*` apply mode against an existing installation as a development step. [Operations](docs/OPERATIONS.md) and the private release notes listed in [Releases](docs/RELEASES.md) describe the maintenance windows, hard gates and rollbacks.
 
-**Planned:**
-- Entity extraction on ingest (auto-populate knowledge graph from all sources)
-- Dream cycle integration with knowledge graph (Explorer uses graph traversal)
-- Metadata extraction on ingest (people, topics, action items)
+## Layout
+
+```
+src/            application code: db/ (pool, queries, maintenance), capture/, dream_cycle/, operations/, skim/, backends/, mcp_server.py, mcp_readonly.py
+scripts/        jobs/ (launchd targets through job_wrapper.sh), maintenance/ (backup bundle, dedup/rechunk planners, graph export, app-role smoke), eval/, docs/inventory.py, test_isolated.py
+migrations/     000 … 018 + migrate.sh (transactional ledger, advisory lock, owner-role gate)
+scheduling/     17 launchd plists (symlinked into ~/Library/LaunchAgents on the installed Mac)
+config/         backends.toml (profiles/roles), backup.toml, liveness.toml, skim.toml
+tests/          isolated suite (see tests/README.md)
+docs/           current guides; docs/archive/ holds dated, superseded material
+```
