@@ -416,3 +416,37 @@ def test_transaction_timeout_profiles(test_db,clean_tables,monkeypatch):
     # A pooled connection outside transaction() carries no leaked timeout.
     with db.get_connection() as conn,conn.cursor() as cur:
         cur.execute("SELECT current_setting('statement_timeout')");assert cur.fetchone()[0]=='0'
+
+
+def test_referenced_chunks_is_one_pass_and_finds_json_array_and_fk_citations(test_db,clean_tables):
+    """R7 (review R3 S3): the reference check is batched per parent -- one indexed query for
+    the FK-shaped citations, one scan per jsonb / array column -- and finds a chunk id
+    cited in a JSON document (any case), in a text[] (tags, slice memory_ids) and by FK."""
+    from src.db.maintenance import _referenced_chunks
+    parent=db.create_memory('source','Doc','body',source_type='article',source_url='test://refs')
+    chunks=[db.create_memory('source',f'c{i}','x',parent_id=parent,source_type='article',source_url='test://refs',metadata={'chunk_index':i}) for i in range(5)]
+    json_cited,array_cited,fk_cited,slice_cited,loose=chunks
+    db.create_memory('idea','Cites in metadata','x',metadata={'see':{'chunk':json_cited.upper()}})
+    db.create_memory('idea','Cites in tags','x',tags=[array_cited])
+    other=db.create_memory('idea','Other','x')
+    db.create_relationship(other,fk_cited,'supports')
+
+    class Counting:
+        def __init__(self,cur):self.cur,self.n=cur,0
+        def execute(self,*a,**k):self.n+=1;return self.cur.execute(*a,**k)
+        def __getattr__(self,name):return getattr(self.cur,name)
+    with db.get_connection() as conn,conn.cursor() as cur:
+        cur.execute("INSERT INTO dream_cycle_runs (run_type, started_at) VALUES ('scheduled', now()) RETURNING id")
+        run=cur.fetchone()[0]
+        cur.execute("INSERT INTO dream_cycle_slices (run_id, position, memory_ids, memory_titles) VALUES (%s, 0, %s, %s)",(run,[slice_cited],['t']))
+        conn.commit()
+        cur.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND (data_type='jsonb' OR udt_name IN ('_text','_uuid'))")
+        columns=cur.fetchone()[0]
+        counting=Counting(cur)
+        assert _referenced_chunks(counting,chunks)=={json_cited,array_cited,fk_cited,slice_cited}
+        # Cost shape: layout check + FK query + column inventory + one scan per jsonb/array column,
+        # whatever the number of chunks (the per-chunk LIKE scans of memories.metadata are gone).
+        assert counting.n==columns+3
+        counting.n=0
+        assert _referenced_chunks(counting,chunks*4)=={json_cited,array_cited,fk_cited,slice_cited} and counting.n==columns+3
+        assert _referenced_chunks(counting,[])==set()

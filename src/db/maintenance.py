@@ -398,27 +398,43 @@ def apply_rechunk(plan, expected_sha256, *, embed, cache_dir):
         applied+=1
     return applied
 
-def _chunk_is_referenced(cur, chunk_id):
-    """True when any ledger, edge, skim, slice array or JSON document cites the chunk."""
+UUID_SHAPE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+
+
+def _referenced_chunks(cur, chunk_ids):
+    """The subset of ``chunk_ids`` that any ledger, edge, skim, slice array or JSON document cites.
+
+    One pass per parent, not per chunk (R7, review R3 S3): the FK-shaped checks are
+    one indexed query over the whole id list; every jsonb column is scanned once,
+    extracting the UUID-shaped substrings of each row and intersecting them with the
+    list (the previous ``::text LIKE '%id%'`` per chunk was a full scan of
+    ``memories.metadata`` for every superseded chunk); every text[]/uuid[] column is
+    scanned once with its elements unnested against the list. Cost is independent
+    of the number of chunks; semantics are the same or more generous (a cited id
+    is retained whatever its case).
+    """
+    chunk_ids = [str(c) for c in chunk_ids]
+    if not chunk_ids:
+        return set()
     _check_reference_layout(cur)
-    cur.execute("""SELECT EXISTS(SELECT 1 FROM memory_relationships WHERE source_id=%s OR target_id=%s)
-                       OR EXISTS(SELECT 1 FROM dream_cycle_candidates WHERE created_memory_id=%s OR target_memory_id=%s)
-                       OR EXISTS(SELECT 1 FROM memory_skim WHERE memory_id=%s)
-                       OR EXISTS(SELECT 1 FROM memories WHERE parent_id=%s)""", (chunk_id,)*6)
-    if cur.fetchone()[0]:
-        return True
-    cur.execute("SELECT table_name,column_name,udt_name FROM information_schema.columns WHERE table_schema='public' AND (data_type='jsonb' OR udt_name IN ('_text','_uuid'))")
+    cur.execute("""SELECT c::text FROM unnest(%s::uuid[]) AS c
+                   WHERE EXISTS(SELECT 1 FROM memory_relationships WHERE source_id=c OR target_id=c)
+                      OR EXISTS(SELECT 1 FROM dream_cycle_candidates WHERE created_memory_id=c OR target_memory_id=c)
+                      OR EXISTS(SELECT 1 FROM memory_skim WHERE memory_id=c)
+                      OR EXISTS(SELECT 1 FROM memories WHERE parent_id=c)""", (chunk_ids,))
+    referenced = {r[0] for r in cur.fetchall()}
+    cur.execute("SELECT table_name,column_name,udt_name FROM information_schema.columns WHERE table_schema='public' AND (data_type='jsonb' OR udt_name IN ('_text','_uuid')) ORDER BY 1,2")
     for table, column, typ in cur.fetchall():
         if typ == 'jsonb':
-            query = sql.SQL('SELECT 1 FROM {} WHERE {}::text LIKE %s LIMIT 1').format(sql.Identifier(table), sql.Identifier(column))
-            cur.execute(query, ('%'+chunk_id+'%',))
+            query = sql.SQL("""SELECT DISTINCT lower(m[1]) FROM {} t, regexp_matches(t.{}::text, %s, 'gi') AS m
+                               WHERE lower(m[1]) = ANY(%s::text[])""").format(sql.Identifier(table), sql.Identifier(column))
+            cur.execute(query, (UUID_SHAPE, chunk_ids))
         else:
-            cast = sql.SQL('uuid') if typ == '_uuid' else sql.SQL('text')
-            query = sql.SQL('SELECT 1 FROM {} WHERE %s::{} = ANY({}) LIMIT 1').format(sql.Identifier(table), cast, sql.Identifier(column))
-            cur.execute(query, (chunk_id,))
-        if cur.fetchone():
-            return True
-    return False
+            query = sql.SQL("""SELECT DISTINCT lower(e::text) FROM {} t, unnest(t.{}) AS e
+                               WHERE lower(e::text) = ANY(%s::text[])""").format(sql.Identifier(table), sql.Identifier(column))
+            cur.execute(query, (chunk_ids,))
+        referenced.update(r[0] for r in cur.fetchall())
+    return referenced
 
 
 def purge_superseded_chunks(conn, parent_id):
@@ -430,14 +446,13 @@ def purge_superseded_chunks(conn, parent_id):
     with conn.cursor() as cur:
         cur.execute("SELECT id::text FROM memories WHERE parent_id=%s AND status='superseded' ORDER BY id FOR UPDATE", (parent_id,))
         superseded = [r[0] for r in cur.fetchall()]
-        deleted = retained = 0
-        for chunk_id in superseded:
-            if _chunk_is_referenced(cur, chunk_id):
-                retained += 1
-                continue
-            cur.execute("DELETE FROM memories WHERE id=%s AND status='superseded'", (chunk_id,))
-            deleted += cur.rowcount
-    return {'deleted': deleted, 'retained_referenced': retained}
+        referenced = _referenced_chunks(cur, superseded)
+        doomed = [c for c in superseded if c not in referenced]
+        deleted = 0
+        if doomed:
+            cur.execute("DELETE FROM memories WHERE id = ANY(%s::uuid[]) AND status='superseded'", (doomed,))
+            deleted = cur.rowcount
+    return {'deleted': deleted, 'retained_referenced': len(superseded) - len(doomed)}
 
 
 def plan_metadata_repairs():
