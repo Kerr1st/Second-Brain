@@ -20,9 +20,14 @@ Safety:
 Restore: ``INSERT INTO memories SELECT * FROM memories_dedup_backup_<stamp>;`` then
 the same for the relationships table.
 
+Roles (R7, migration 017): ``--apply`` creates the two backup tables and runs
+``VACUUM ANALYZE``; both need ownership, which the application role no longer
+has. Run it as the owner: ``DB_USER=memory_bank_owner``. The dry run is SELECTs
+and works as either role.
+
 Usage:
     .venv/bin/python scripts/cleanup_duplicate_sources.py            # dry run
-    .venv/bin/python scripts/cleanup_duplicate_sources.py --apply
+    DB_USER=memory_bank_owner .venv/bin/python scripts/cleanup_duplicate_sources.py --apply
 """
 from __future__ import annotations
 
