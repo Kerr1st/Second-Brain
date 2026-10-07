@@ -74,8 +74,20 @@ def test_db(test_schema):
     return test_schema
 
 
+def owner_connect(dbname=TEST_DB_NAME):
+    """A connection as the OWNER role (DB_MIGRATE_USER), for DDL/TRUNCATE in tests.
+
+    The application role (DB_USER) holds only what migration 017 grants: DML.
+    Anything structural a test needs -- creating a scratch table, truncating
+    between tests, pg_restore -- goes through this connection, exactly as it
+    would in production through memory_bank_owner.
+    """
+    return psycopg2.connect(**{**_TEST_CONFIG, "dbname": dbname, "user": os.environ["DB_MIGRATE_USER"]})
+
+
 def _truncate_test_tables():
-    with db.get_connection() as conn:
+    conn = owner_connect()
+    try:
         with conn.cursor() as cur:
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename <> 'schema_migrations'")
             tables = [row[0] for row in cur.fetchall()]
@@ -83,6 +95,8 @@ def _truncate_test_tables():
                 cur.execute(sql.SQL("TRUNCATE {} RESTART IDENTITY CASCADE").format(
                     sql.SQL(", ").join(sql.Identifier("public", table) for table in tables)))
         conn.commit()
+    finally:
+        conn.close()
 
 
 @pytest.fixture()

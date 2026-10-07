@@ -180,17 +180,22 @@ def test_pool_exhaustion_times_out(test_db,monkeypatch):
 
 
 def test_dedup_refuses_unknown_foreign_keys_and_rolls_back(test_db,clean_tables):
+    from tests.conftest import owner_connect
     first=db.create_memory('source','A','body',source_type='article',source_url='test://unknown')
     second=db.create_memory('source','A','body',source_type='article',source_url='test://unknown')
     plan=plan_dedup()
+    owner=owner_connect();owner.autocommit=True
     try:
-        with db.transaction() as conn,conn.cursor() as cur:
+        # DDL is the owner's; the app role (017) cannot create tables.
+        with owner.cursor() as cur:
             cur.execute('CREATE TABLE maintenance_unknown_ref(memory_id uuid REFERENCES memories(id))')
+        with db.transaction() as conn,conn.cursor() as cur:
             cur.execute('INSERT INTO maintenance_unknown_ref VALUES(%s)',(second,))
         with pytest.raises(ValueError,match='Unrecognized references'):apply_dedup(plan,digest(plan))
         assert db.get_memory(first) and db.get_memory(second)
     finally:
-        with db.transaction() as conn,conn.cursor() as cur:cur.execute('DROP TABLE maintenance_unknown_ref')
+        with owner.cursor() as cur:cur.execute('DROP TABLE IF EXISTS maintenance_unknown_ref')
+        owner.close()
 
 
 def test_rechunk_storage_failure_reuses_prepared_vectors(test_db,clean_tables,tmp_path,monkeypatch):
@@ -215,19 +220,20 @@ def test_dedup_rejects_status_drift(test_db,clean_tables):
 
 def test_release_repairs_are_dry_run_and_resumable(test_db,clean_tables):
     from uuid import uuid4
-    from src.db.maintenance import plan_metadata_repairs,apply_metadata_repairs,plan_role_and_index_retirement
+    from src.db.maintenance import plan_metadata_repairs,apply_metadata_repairs,plan_role_audit
     project=str(uuid4());mid=db.create_memory('source','Legacy','content',project=project,source_url='test://legacy')
     plan=plan_metadata_repairs()
     assert db.get_memory(mid)['project']==project
     assert apply_metadata_repairs(plan,digest(plan))==1
     assert apply_metadata_repairs(plan,digest(plan))==0
     row=db.get_memory(mid);assert row['project'] is None;assert row['metadata']['legacy_uuid_project']==project
-    roles=plan_role_and_index_retirement()
-    assert roles['currently_superuser'] is False
-    assert any('NOSUPERUSER' in statement for statement in roles['proposed_sql'])
-    with db.get_connection() as conn,conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM pg_roles WHERE rolname='second_brain_owner'")
-        assert cur.fetchone()[0]==0
+    # The suite runs as the separated app role (017 already applied by the owner):
+    # the audit finds nothing left to do and never proposes DDL of its own.
+    roles=plan_role_audit()
+    assert roles['kind']=='role-audit' and roles['currently_superuser'] is False
+    assert roles['application_role']!=roles['owner_role'] and roles['app_is_owner_member'] is False
+    assert roles['objects_not_owned_by_owner']==[] and roles['structural_privileges']==[]
+    assert roles['remaining_steps']==[] and 'proposed_sql' not in roles
 
 
 def test_dedup_remaps_slice_array_and_feedback(test_db,clean_tables):

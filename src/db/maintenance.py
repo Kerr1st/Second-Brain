@@ -495,37 +495,56 @@ def apply_metadata_repairs(plan,expected_sha256):
     return count
 
 
-def plan_role_and_index_retirement(owner_role='second_brain_owner',migration_role='second_brain_migrator'):
-    """Prepare SQL for a separately authorized admin; never execute DDL here."""
+def plan_role_audit():
+    """Read-only audit of the F-138 role model after migration 017; never executes DDL.
+
+    Reports whether the connected application role is still a superuser (the
+    separate CONFIRM-REQUIRED operator step ``ALTER ROLE <app> NOSUPERUSER``),
+    which objects are not owned by the database owner, which privileges beyond
+    DML the application role holds, and the indexes with zero scans (evidence
+    for review, not authority to drop). The role model itself is created by
+    ``migrations/017_role_separation.sql`` through ``migrate.sh``; this function
+    only tells the operator what remains.
+    """
     with get_connection() as conn,conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute('SELECT current_user AS name,rolsuper FROM pg_roles WHERE rolname=current_user');application=cur.fetchone()
-        app=application['name']
-        if len({app,owner_role,migration_role})!=3:raise ValueError('Application, owner and migration roles must be distinct')
+        cur.execute("""SELECT current_user AS name, r.rolsuper, r.rolcreaterole, r.rolcreatedb, o.rolname AS owner_role,
+                              EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.roleid=o.oid AND m.member=r.oid) AS app_is_owner_member
+                       FROM pg_roles r, pg_database d JOIN pg_roles o ON o.oid=d.datdba
+                       WHERE r.rolname=current_user AND d.datname=current_database()""")
+        role=cur.fetchone()
+        app,owner=role['name'],role['owner_role']
+        cur.execute("""SELECT c.oid::regclass::text AS object, c.relkind, c.relowner::regrole::text AS owner
+                       FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                       WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','S','f') AND c.relowner<>(SELECT datdba FROM pg_database WHERE datname=current_database())
+                       AND NOT EXISTS (SELECT 1 FROM pg_depend x WHERE x.classid='pg_class'::regclass AND x.objid=c.oid AND x.deptype='e')
+                       ORDER BY 1""")
+        not_owned=[dict(row) for row in cur.fetchall()]
+        cur.execute("SELECT extname, extowner::regrole::text AS owner FROM pg_extension WHERE extname='vector'")
+        extension=cur.fetchone()
+        structural=[]
+        if not role['rolsuper']:  # has_*_privilege is always true for a superuser
+            cur.execute("""SELECT c.oid::regclass::text AS object,
+                                  array_remove(ARRAY[CASE WHEN has_table_privilege(c.oid,'TRUNCATE') THEN 'TRUNCATE' END,
+                                                     CASE WHEN has_table_privilege(c.oid,'REFERENCES') THEN 'REFERENCES' END,
+                                                     CASE WHEN has_table_privilege(c.oid,'TRIGGER') THEN 'TRIGGER' END],NULL) AS extra
+                           FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p') ORDER BY 1""")
+            structural=[dict(row) for row in cur.fetchall() if row['extra']]
+            cur.execute("SELECT has_schema_privilege('public','CREATE') AS can_create")
+            if cur.fetchone()['can_create']:
+                structural.append({'object':'schema public','extra':['CREATE']})
         cur.execute("SELECT schemaname,indexrelname,idx_scan,pg_get_indexdef(indexrelid) AS definition FROM pg_stat_user_indexes WHERE schemaname='public' AND idx_scan=0 ORDER BY indexrelname")
         indexes=[dict(row) for row in cur.fetchall()]
-        def render(template,*names):return sql.SQL(template).format(*(sql.Identifier(n) for n in names)).as_string(conn)
-        statements=[render('CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE',owner_role),
-                    render('CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE',migration_role),
-                    render('GRANT {} TO {}',owner_role,migration_role),
-                    render('GRANT USAGE ON SCHEMA public TO {}',app),
-                    render('GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO {}',app),
-                    render('GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO {}',app)]
-        cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")
-        statements += [render('ALTER TABLE public.{} OWNER TO {}',row['tablename'],owner_role) for row in cur.fetchall()]
-        cur.execute("SELECT sequencename FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename")
-        statements += [render('ALTER SEQUENCE public.{} OWNER TO {}',row['sequencename'],owner_role) for row in cur.fetchall()]
-        cur.execute("""SELECT p.oid::regprocedure::text AS identity FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-            WHERE n.nspname='public' AND NOT EXISTS(SELECT 1 FROM pg_depend d WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e')""")
-        statements += [sql.SQL('ALTER FUNCTION {} OWNER TO {}').format(sql.SQL(row['identity']),sql.Identifier(owner_role)).as_string(conn) for row in cur.fetchall()]
-        statements += [render('GRANT USAGE,CREATE ON SCHEMA public TO {}',owner_role),
-                       render('ALTER DATABASE {} OWNER TO {}',database_identity(conn)[0],owner_role)]
-        statements += [render('ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA public GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO {}',owner_role,app),
-                       render('ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA public GRANT USAGE,SELECT ON SEQUENCES TO {}',owner_role,app),
-                       render('ALTER ROLE {} NOSUPERUSER NOCREATEDB NOCREATEROLE',app)]
-        return {'version':1,'kind':'role-index-review','database':database_identity(conn),'application_role':app,
-                'currently_superuser':application['rolsuper'],'owner_role':owner_role,'migration_role':migration_role,
-                'prerequisites':['Admin must inspect existing roles/ownership and authentication before adapting SQL.',
-                                 'Backup restore and migrations must be qualified using the separate migrator.',
-                                 'Never grant owner membership to the application role.',
-                                 'Zero scan count is evidence for review, not automatic authority to drop an index.'],
-                'proposed_sql':statements,'unused_indexes':indexes}
+        remaining=[]
+        if app==owner:remaining.append('migration 017 has not run: the application role still owns the database')
+        if role['rolsuper']:remaining.append(f'ALTER ROLE {app} NOSUPERUSER  -- CONFIRM-REQUIRED operator step, after the $0 smoke as {app}')
+        if role['rolcreaterole'] or role['rolcreatedb']:remaining.append(f'ALTER ROLE {app} NOCREATEDB NOCREATEROLE')
+        if role['app_is_owner_member']:remaining.append(f'REVOKE {owner} FROM {app}')
+        if not_owned:remaining.append('re-run migrations/migrate.sh as the owner so 017 converges ownership')
+        if extension and extension['owner']==app:remaining.append('vector extension still owned by the application role (017 moves it)')
+        if structural:remaining.append('revoke the structural privileges listed; 017 grants DML only')
+        return {'version':2,'kind':'role-audit','database':database_identity(conn),'application_role':app,'owner_role':owner,
+                'currently_superuser':role['rolsuper'],'app_is_owner_member':role['app_is_owner_member'],
+                'objects_not_owned_by_owner':not_owned,'vector_extension':extension,'structural_privileges':structural,
+                'remaining_steps':remaining,'unused_indexes':indexes,
+                'prerequisites':['Zero scan count is evidence for review, not automatic authority to drop an index.',
+                                 'ALTER ROLE ... NOSUPERUSER is never executed by code; it is the operator\'s confirm-required step (R7 runbook).']}

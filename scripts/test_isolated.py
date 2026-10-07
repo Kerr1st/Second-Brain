@@ -18,8 +18,18 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# Owner/app split (R7, migration 017): ``sb_test_owner`` owns every database and
+# runs migrations/migrate.sh; ``sb_test`` is the application role and holds only
+# what 017 grants. Both are NOSUPERUSER. The bootstrap database mirrors the
+# installed system before 017: one LOGIN SUPERUSER role (``sb_test_legacy``, the
+# stand-in for ``memory_bank``) owns the database and the vector extension, and
+# tests/test_migration_017.py drives it through 017 → NOSUPERUSER → 018.
+APP_USER, OWNER_USER = "sb_test", "sb_test_owner"
+LEGACY_USER, BOOTSTRAP_OWNER = "sb_test_legacy", "sb_test_bootstrap_owner"
 DATABASES = ("sb_suite_test", "sb_migration_fresh_test", "sb_migration_failure_test", "sb_migration_concurrent_test",
-             "sb_migration_016_upgrade_test")
+             "sb_migration_016_upgrade_test", "sb_migration_018_graph_test", "sb_migration_app_role_test",
+             "sb_restore_roundtrip_test")
+BOOTSTRAP_DATABASE = "sb_migration_bootstrap_test"
 
 
 def main() -> int:
@@ -46,7 +56,7 @@ def main() -> int:
         "AWS_CONFIG_FILE": str(area / "absent-aws-config"),
         "AWS_SHARED_CREDENTIALS_FILE": str(area / "absent-aws-credentials"),
         "AWS_EC2_METADATA_DISABLED": "true", "AWS_DEFAULT_REGION": "us-east-1",
-        "DB_HOST": str(sockets), "DB_PORT": "5432", "DB_USER": "sb_test",
+        "DB_HOST": str(sockets), "DB_PORT": "5432", "DB_USER": APP_USER, "DB_MIGRATE_USER": OWNER_USER,
         "DB_NAME": DATABASES[0], "DB_PASSWORD": "", "TEST_DB_NAME": DATABASES[0],
         "PGPASSFILE": str(area / "absent-pgpass"),
         "CODEX_HOME": str(home / ".codex"), "SECOND_BRAIN_PROFILE": "controlled",
@@ -69,14 +79,23 @@ def main() -> int:
             run([str(pg_bin / "pg_ctl"), "-D", str(data), "-l", str(area / "postgres.log"), "-w", "start"], stdout=log, stderr=subprocess.STDOUT)
             started = True
             psql = [str(pg_bin / "psql"), "-X", "-v", "ON_ERROR_STOP=1", "-h", str(sockets), "-p", "5432", "-U", "sb_test_admin"]
-            run(psql + ["-d", "postgres", "-c", "CREATE ROLE sb_test LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;"], stdout=log, stderr=subprocess.STDOUT)
+            for role in (OWNER_USER, APP_USER):
+                run(psql + ["-d", "postgres", "-c", f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;"], stdout=log, stderr=subprocess.STDOUT)
             for database in DATABASES:
-                run(psql + ["-d", "postgres", "-c", f'CREATE DATABASE "{database}" OWNER sb_test;'], stdout=log, stderr=subprocess.STDOUT)
+                run(psql + ["-d", "postgres", "-c", f'CREATE DATABASE "{database}" OWNER {OWNER_USER};'], stdout=log, stderr=subprocess.STDOUT)
+                # pgvector is not a trusted extension: only a superuser can create it.
                 run(psql + ["-d", database, "-c", "CREATE EXTENSION vector;"], stdout=log, stderr=subprocess.STDOUT)
+            # Pre-017 shape of the installed system: the application role is a superuser
+            # that owns the database and the extension (created here *as* that role).
+            run(psql + ["-d", "postgres", "-c", f"CREATE ROLE {LEGACY_USER} LOGIN SUPERUSER;"], stdout=log, stderr=subprocess.STDOUT)
+            run(psql + ["-d", "postgres", "-c", f'CREATE DATABASE "{BOOTSTRAP_DATABASE}" OWNER {LEGACY_USER};'], stdout=log, stderr=subprocess.STDOUT)
+            run(psql[:-1] + [LEGACY_USER, "-d", BOOTSTRAP_DATABASE, "-c", "CREATE EXTENSION vector;"], stdout=log, stderr=subprocess.STDOUT)
             actual = run(psql + ["-d", "postgres", "-Atc", "SHOW data_directory"], capture_output=True, text=True).stdout.strip()
             assert Path(actual).resolve() == data.resolve(), "Unexpected PostgreSQL identity"
         marker = area / "disposable.json"
-        marker.write_text(json.dumps({"host": str(sockets), "port": 5432, "user": "sb_test", "databases": DATABASES, "data_directory": str(data), "metrics": str(area / "metrics")}))
+        marker.write_text(json.dumps({"host": str(sockets), "port": 5432, "user": APP_USER, "owner_user": OWNER_USER,
+                                      "bootstrap": {"database": BOOTSTRAP_DATABASE, "legacy_user": LEGACY_USER, "owner_user": BOOTSTRAP_OWNER},
+                                      "databases": [*DATABASES, BOOTSTRAP_DATABASE], "data_directory": str(data), "metrics": str(area / "metrics")}))
         env["SECOND_BRAIN_TEST_MANIFEST"] = str(marker)
         # OS policy also covers psql and commands started by shell-script tests.
         # Only this cluster's private Unix socket permits outbound connections.

@@ -10,8 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = ROOT / "migrations"
 
 
-def config(name):
-    return {"host": os.environ["DB_HOST"], "port": int(os.environ["DB_PORT"]), "user": os.environ["DB_USER"], "dbname": name}
+def config(name, user=None):
+    """Owner-role connection by default: the ledger is owner-only until 017 grants the app role SELECT."""
+    return {"host": os.environ["DB_HOST"], "port": int(os.environ["DB_PORT"]), "user": user or os.environ["DB_MIGRATE_USER"], "dbname": name}
 
 
 def command_env(name, directory):

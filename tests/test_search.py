@@ -424,10 +424,14 @@ class TestFtsOnlyRanksLexicalMatches:
         """The shared test DB's HNSW graph degrades after a suite's worth of
         insert/delete churn and can under-return on approximate scans. This test
         needs the vector leg to see both rows, so rebuild the (tiny) index first."""
-        with db.get_connection() as conn:
+        from tests.conftest import owner_connect
+        conn = owner_connect()  # REINDEX needs ownership; the app role (017) holds DML only
+        try:
             with conn.cursor() as cur:
                 cur.execute("REINDEX INDEX idx_memories_embedding")
             conn.commit()
+        finally:
+            conn.close()
 
     def test_lexical_match_outranks_vector_only_neighbor(self, test_db, clean_tables, mock_embedding):
         self._rebuild_vector_index()

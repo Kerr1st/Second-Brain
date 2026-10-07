@@ -27,8 +27,12 @@ def install():
     if (os.environ.get("DB_HOST") != str(host) or os.environ.get("DB_NAME") not in manifest["databases"]
             or os.environ.get("TEST_DB_NAME") != os.environ.get("DB_NAME")
             or os.environ.get("DB_USER") != manifest["user"]
+            or os.environ.get("DB_MIGRATE_USER") != manifest["owner_user"]
             or os.environ.get("KIRO_LLM_METRICS_DIR") != manifest["metrics"]):
         raise RuntimeError("Test environment does not match disposable manifest")
+    # The application role, the owner role that runs migrations, and the two roles of
+    # the pre-017 bootstrap scenario. Never the cluster superuser (sb_test_admin).
+    users = {manifest["user"], manifest["owner_user"], manifest["bootstrap"]["legacy_user"], manifest["bootstrap"]["owner_user"]}
 
     import psycopg2
     from psycopg2.extensions import parse_dsn
@@ -39,7 +43,7 @@ def install():
         values.update(kwargs)
         if (values.get("host") != str(host) or str(values.get("port", "5432")) != str(manifest["port"])
                 or values.get("dbname", values.get("database")) not in manifest["databases"]
-                or values.get("user") != manifest["user"] or values.get("hostaddr") or values.get("service")):
+                or values.get("user") not in users or values.get("hostaddr") or values.get("service")):
             raise RuntimeError("Refusing PostgreSQL connection outside disposable test manifest")
         return original_connect(dsn, *args, **kwargs)
     psycopg2.connect = guarded_connect

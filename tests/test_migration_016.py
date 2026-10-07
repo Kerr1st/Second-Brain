@@ -41,7 +41,8 @@ R3_WRITER_LABELS = ["api_browser", "api_email", "api_slack", "dream_cycle", "man
 
 
 def _config(name):
-    return {"host": os.environ["DB_HOST"], "port": int(os.environ["DB_PORT"]), "user": os.environ["DB_USER"], "dbname": name}
+    """Owner-role connection: these tests seed and inspect schema state before 017 exists."""
+    return {"host": os.environ["DB_HOST"], "port": int(os.environ["DB_PORT"]), "user": os.environ["DB_MIGRATE_USER"], "dbname": name}
 
 
 def _run(name, directory):
@@ -53,16 +54,16 @@ def _pg(name, tool, *args, check=True):
     """Run a PostgreSQL client tool (pg_dump / pg_restore) against the test cluster."""
     binary = shutil.which(tool, path=os.environ["PATH"])
     assert binary, f"{tool} not on PATH"
-    command = [binary, "-h", os.environ["DB_HOST"], "-p", os.environ["DB_PORT"], "-U", os.environ["DB_USER"], "-d", name, *args]
+    command = [binary, "-h", os.environ["DB_HOST"], "-p", os.environ["DB_PORT"], "-U", os.environ["DB_MIGRATE_USER"], "-d", name, *args]
     result = subprocess.run(command, capture_output=True, text=True, timeout=120)
     assert not check or result.returncode == 0, result.stdout + result.stderr
     return result
 
 
-def _dir_through_014(tmp_path):
-    """A migrations directory holding 000..014 only (the live ledger shape)."""
+def _dir_through(tmp_path, last):
+    """A migrations directory holding 000..<last> only (014 = the live ledger shape; 016 = R3)."""
     for path in sorted(MIGRATIONS.glob("[0-9]*.sql")):
-        if int(path.name[:3]) <= 14:
+        if int(path.name[:3]) <= last:
             shutil.copyfile(path, tmp_path / path.name)
     return tmp_path
 
@@ -109,7 +110,8 @@ def test_live_vocabularies_are_admitted_by_016_checks_and_by_validation():
 @pytest.fixture(scope="module")
 def upgraded(tmp_path_factory):
     name = "sb_migration_016_upgrade_test"
-    result = _run(name, _dir_through_014(tmp_path_factory.mktemp("through014")))
+    result = _run(name, _dir_through(tmp_path_factory.mktemp("through014"), 14))
+    through_016 = _dir_through(tmp_path_factory.mktemp("through016"), 16)
     assert result.returncode == 0, result.stdout + result.stderr
     seeded = {}
     with psycopg2.connect(**_config(name)) as conn, conn.cursor() as cur:
@@ -147,7 +149,8 @@ def upgraded(tmp_path_factory):
     # The pre-window backup of the runbook: a custom-format dump of the 014 state.
     seeded["pre_016_dump"] = str(tmp_path_factory.mktemp("dump") / "pre016.dump")
     _pg(name, "pg_dump", "-Fc", "-f", seeded["pre_016_dump"])
-    result = _run(name, MIGRATIONS)
+    seeded["through_016"] = through_016
+    result = _run(name, through_016)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.count("apply:") == 1 and "apply: 016_data_integrity.sql" in result.stdout
     assert result.stdout.count("(already applied)") == 14
@@ -264,7 +267,7 @@ def test_016_rerun_after_a_restore_based_rollback_succeeds(upgraded):
         assert objects[0] is True                                          # the leftover: corpus_maintenance survives --clean
         cur.execute("SELECT stats->>'legacy_candidates_deferred', candidates_deferred FROM dream_cycle_runs WHERE id=%s", (seeded["run"],))
         assert cur.fetchone() == (None, 3)
-    result = _run(name, MIGRATIONS)
+    result = _run(name, seeded["through_016"])
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.count("apply:") == 1 and "apply: 016_data_integrity.sql" in result.stdout
     with psycopg2.connect(**_config(name)) as conn, conn.cursor() as cur:
@@ -284,7 +287,7 @@ def test_016_rerun_on_a_fully_migrated_schema_with_a_lost_ledger_row_succeeds(up
         _assert_post_016(cur)
         cur.execute("DELETE FROM schema_migrations WHERE version = '016_data_integrity.sql'")
         conn.commit()
-    result = _run(name, MIGRATIONS)
+    result = _run(name, seeded["through_016"])
     assert result.returncode == 0, result.stdout + result.stderr
     assert "apply: 016_data_integrity.sql" in result.stdout
     with psycopg2.connect(**_config(name)) as conn, conn.cursor() as cur:

@@ -544,8 +544,10 @@ class TestMigrationIdempotent:
 
     def test_apply_migration_twice(self, test_db, clean_tables):
         """Execute migration 005 SQL twice — second run should produce no errors."""
+        from tests.conftest import owner_connect
         migration_sql = _read_migration_005()
-        with db.get_connection() as conn:
+        conn = owner_connect()  # DDL is the owner's (017); the app role cannot alter the schema
+        try:
             # First application (already applied by test_db fixture, but run again)
             with conn.cursor() as cur:
                 cur.execute(migration_sql)
@@ -555,6 +557,8 @@ class TestMigrationIdempotent:
             with conn.cursor() as cur:
                 cur.execute(migration_sql)
             conn.commit()
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------
