@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import psycopg2
 import psycopg2.errors
@@ -239,6 +240,38 @@ def test_app_role_dump_restores_as_the_owner_into_a_fresh_database_and_017_regra
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
             cur.execute("TRUNCATE memories")
         conn.rollback()
+
+
+def test_smoke_app_role_passes_as_the_separated_app_role_and_refuses_structure(test_schema, clean_tables, tmp_path):
+    """scripts/maintenance/smoke_app_role.py is the runbook's check before and after the
+    operator demotes memory_bank: every application path works with 017's grants, the
+    rolled-back write leaves nothing, and every structural statement is refused."""
+    with psycopg2.connect(**test_schema) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO memories (type, title, content, source_type, source_url) VALUES ('source', 'smoke seed', 'row', 'slack', 'slack://seed') RETURNING id")
+        seed = cur.fetchone()[0]
+        cur.execute("INSERT INTO memories (type, title, content) VALUES ('idea', 'neighbour', 'row') RETURNING id")
+        cur.execute("INSERT INTO memory_relationships (source_id, target_id, relation_type) VALUES (%s, %s, 'related_to')", (seed, cur.fetchone()[0]))
+        conn.commit()
+    env = {**os.environ, "SECOND_BRAIN_PROFILE": "controlled"}
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/maintenance/smoke_app_role.py")], env=env, capture_output=True, text=True, timeout=120, cwd=ROOT)
+    report = json.loads(result.stdout)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert report["role"]["name"] == APP and report["role"]["superuser"] is False and report["role"]["database_owner"] == OWNER
+    assert report["role"]["member_of_owner"] is False and report["role"]["create_on_public"] is False
+    names = [s["name"] for s in report["steps"]]
+    assert {"memory_list", "memory_read", "memory_graph", "search_legs_fetch_candidates", "dream_cycle_memory_stats",
+            "dream_cycle_run_lock_advisory", "capture_find_captured_source", "express_read_briefing", "write_round_trip_rolled_back"} <= set(names)
+    assert all(s["ok"] for s in report["steps"]), [s for s in report["steps"] if not s["ok"]]
+    assert report["permission_errors"] == []
+    write = next(s for s in report["steps"] if s["name"] == "write_round_trip_rolled_back")
+    assert write["result"] == {"inserted": 2, "deleted_in_txn": 2, "committed_rows": 0}
+    assert report["structural"] == {name: "refused" for name in ("create_table", "truncate", "alter_database_set", "create_index", "drop_table")}
+    assert report["verdict"]["structural_all_refused"] is True
+    with psycopg2.connect(**test_schema) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE title LIKE 'smoke-app-role-%'")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT to_regclass('smoke_app_role_should_fail')")
+        assert cur.fetchone()[0] is None
 
 
 # --------------------------------------------------------------------------- migrate.sh refusals
