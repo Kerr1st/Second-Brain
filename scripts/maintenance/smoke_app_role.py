@@ -45,7 +45,7 @@ sys.path.insert(0, str(ROOT))
 
 STRUCTURAL = (
     ("create_table", "CREATE TABLE smoke_app_role_should_fail (id int)"),
-    ("truncate", "TRUNCATE memories"),
+    ("truncate", "TRUNCATE corpus_maintenance"),  # small table; a superuser run would hold its lock only until the rollback
     ("alter_database_set", "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET hnsw.ef_search = 200', current_database()); END $$"),
     ("create_index", "CREATE INDEX smoke_app_role_should_fail ON memories (title)"),
     ("drop_table", "DROP TABLE corpus_maintenance"),
