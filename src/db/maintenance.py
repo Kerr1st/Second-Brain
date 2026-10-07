@@ -112,7 +112,7 @@ def _check_reference_layout(cur):
         WHERE c.contype='f' AND c.confrelid='memories'::regclass""")
     allowed = {('memories', 'parent_id'), ('memory_relationships', 'source_id'),
                ('memory_relationships', 'target_id'), ('dream_cycle_candidates', 'created_memory_id'),
-               ('memory_skim', 'memory_id'), ('memory_entities', 'memory_id')}
+               ('memory_skim', 'memory_id')}
     unknown = set(cur.fetchall()) - allowed
     if unknown:
         raise ValueError(f"Unrecognized references require a migration policy: {sorted(unknown)}")
@@ -138,10 +138,6 @@ def _remap_references(conn, old, new):
         cur.execute('UPDATE memories SET parent_id=%s WHERE parent_id=%s', (new,old))
         for column in ('created_memory_id', 'target_memory_id'):
             cur.execute(sql.SQL('UPDATE dream_cycle_candidates SET {}=%s WHERE {}=%s').format(sql.Identifier(column),sql.Identifier(column)), (new,old))
-        cur.execute("""INSERT INTO memory_entities(memory_id,entity_id,relation,created_at)
-            SELECT %s,entity_id,relation,created_at FROM memory_entities WHERE memory_id=%s
-            ON CONFLICT DO NOTHING""", (new,old))
-        cur.execute('DELETE FROM memory_entities WHERE memory_id=%s', (old,))
         # Retain conflicting skims verbatim in the survivor's metadata before deletion.
         cur.execute("""SELECT row_to_json(s) FROM memory_skim s WHERE s.memory_id=%s AND EXISTS
             (SELECT 1 FROM memory_skim n WHERE n.memory_id=%s AND n.model=s.model AND n.prompt_version=s.prompt_version)""", (old,new))
@@ -408,8 +404,7 @@ def _chunk_is_referenced(cur, chunk_id):
     cur.execute("""SELECT EXISTS(SELECT 1 FROM memory_relationships WHERE source_id=%s OR target_id=%s)
                        OR EXISTS(SELECT 1 FROM dream_cycle_candidates WHERE created_memory_id=%s OR target_memory_id=%s)
                        OR EXISTS(SELECT 1 FROM memory_skim WHERE memory_id=%s)
-                       OR EXISTS(SELECT 1 FROM memory_entities WHERE memory_id=%s)
-                       OR EXISTS(SELECT 1 FROM memories WHERE parent_id=%s)""", (chunk_id,)*7)
+                       OR EXISTS(SELECT 1 FROM memories WHERE parent_id=%s)""", (chunk_id,)*6)
     if cur.fetchone()[0]:
         return True
     cur.execute("SELECT table_name,column_name,udt_name FROM information_schema.columns WHERE table_schema='public' AND (data_type='jsonb' OR udt_name IN ('_text','_uuid'))")

@@ -217,3 +217,36 @@ def test_suite_database_dropped_its_empty_graph_tables_without_a_marker(test_sch
         assert _present(cur) == []
         assert _markers(cur) == []
         assert "018_retire_knowledge_graph.sql" in _ledger(cur)
+
+
+def test_018_is_the_last_word_on_the_graph_in_the_repo():
+    """After R7 nothing a job can execute names the three tables, except the export
+    script and the migrations (008 creates, 016 trims, 018 drops).  ``entity_edges``
+    and ``memory_entities`` are unique names; ``entities`` is also a skim-record field,
+    so for it only SQL-shaped references count."""
+    import re
+    unique = re.compile(r"\b(entity_edges|memory_entities)\b")
+    sql_entities = re.compile(r"\b(FROM|INTO|JOIN|UPDATE|TABLE|TRUNCATE|ON)\s+(public\.)?entities\b|to_regclass\(\W*entities\b|'entities'", re.IGNORECASE)
+    allowed = {"scripts/maintenance/export_graph_tables.py"}
+    # Quick Desktop's own sqlite store has a table called ``entities``; its one reader
+    # is pinned here and must query QD's sqlite connection, never PostgreSQL.
+    qd_sqlite_reader = "src/capture/quick_desktop.py"
+    tracked = subprocess.run(["git", "ls-files", "--", "src", "scripts", "scheduling", "config"], cwd=ROOT,
+                             capture_output=True, text=True, check=True).stdout.split()
+    offenders = []
+    for rel in tracked:
+        path = ROOT / rel
+        if rel in allowed or not path.is_file():
+            continue
+        text = path.read_text(errors="replace")
+        if rel == qd_sqlite_reader:
+            assert "qd_conn.execute" in text and "psycopg2" not in text and "get_connection" not in text.split("def fetch_kg_decisions")[1].split("def ")[0]
+            text = text.replace("FROM entities e", "FROM <qd sqlite entities> e")
+        for number, line in enumerate(text.splitlines(), 1):
+            if unique.search(line) or sql_entities.search(line):
+                offenders.append(f"{rel}:{number}: {line.strip()}")
+    assert offenders == [], "\n".join(offenders)
+    for retired in ("src/capture/slack_graph.py", "scripts/maintenance/import_slack_graph.py", "tests/test_slack_graph.py"):
+        assert not (ROOT / retired).exists(), retired
+    qd = (ROOT / "src/capture/qd.py").read_text()
+    assert "slack_graph" not in qd and '"graph"' not in qd

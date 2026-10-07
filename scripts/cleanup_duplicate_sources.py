@@ -11,8 +11,8 @@ Safety:
 * ``--apply`` first copies every doomed ``memories`` row into
   ``memories_dedup_backup_<stamp>`` and every ``memory_relationships`` row that
   touches one into ``memory_relationships_dedup_backup_<stamp>`` (same columns),
-  then deletes in one transaction. Cascades take care of ``memory_relationships``,
-  ``memory_entities`` and ``memory_skim``.
+  then deletes in one transaction. Cascades take care of ``memory_relationships``
+  and ``memory_skim``.
 * Rows referenced by ``dream_cycle_candidates.created_memory_id`` (no cascade) or
   cited in an ACCEPTED candidate's ``source_memories`` are exempt: they are the
   evidence behind an accepted insight and stay.

@@ -8,13 +8,12 @@ from src.capture.common import exit_code
 
 
 def capture(*, dry_run=False):
-    from src.capture import quick_desktop, qd_eventlog, qd_chats, qd_tags, slack_graph
-    # Same order as scripts/jobs/qd_sync.sh at 8dd3bb7 (facts, tags, feed, graph, chats).
-    # "graph" is the Slack knowledge-graph writer: kept running until R7 (user decision
-    # 2026-10-06); a failure there is counted like any other stage, never hidden.
+    from src.capture import quick_desktop, qd_eventlog, qd_chats, qd_tags
+    # Same order as scripts/jobs/qd_sync.sh at 8dd3bb7 (facts, tags, feed, chats). The
+    # Slack knowledge-graph writer that ran between feed and chats was retired in R7
+    # together with its tables (migration 018, D4).
     stages = {"facts": quick_desktop.capture, "tags": qd_tags.enrich_memories,
-              "feed": qd_eventlog.ingest_eventlog, "graph": slack_graph.run_import,
-              "chats": qd_chats.capture}
+              "feed": qd_eventlog.ingest_eventlog, "chats": qd_chats.capture}
     # QD document export is a retired channel. Its replay adapter remains available
     # as python -m src.capture.qd_docs, not an hourly false-health signal.
     results = {}

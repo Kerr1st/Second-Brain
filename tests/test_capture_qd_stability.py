@@ -200,3 +200,51 @@ def test_run_records_dry_run_classifies_new_changed_unchanged(test_conn, monkeyp
     with test_conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM memories WHERE source_url = 'qd://memory/9002'")
         assert cur.fetchone()[0] == 0, "dry run wrote nothing"
+
+
+# --------------------------------------------------------------------------- #
+# R7 — the hourly job is four stages; the graph writer is gone (migration 018)  #
+# --------------------------------------------------------------------------- #
+
+class TestQdSyncStagesAfterR7:
+    def _stub_stages(self, monkeypatch, calls, feed=None):
+        from src.capture import quick_desktop, qd_eventlog, qd_chats, qd_tags
+
+        def stage(name):
+            def run(*, dry_run=False):
+                calls.append((name, dry_run))
+                return {"processed": 0, "failed": 0}
+            return run
+        monkeypatch.setattr(quick_desktop, "capture", stage("facts"))
+        monkeypatch.setattr(qd_tags, "enrich_memories", stage("tags"))
+        monkeypatch.setattr(qd_eventlog, "ingest_eventlog", feed or stage("feed"))
+        monkeypatch.setattr(qd_chats, "capture", stage("chats"))
+        monkeypatch.setattr(qd_eventlog, "INTERACTIONS_PATH", "/nonexistent/interactions.jsonl")
+
+    def test_four_stages_in_the_8dd3bb7_order_with_the_job_dry_run_flag(self, monkeypatch):
+        from src.capture import qd
+        calls = []
+        self._stub_stages(monkeypatch, calls)
+        result = qd.capture(dry_run=True)
+        assert [name for name, _ in calls] == ["facts", "tags", "feed", "chats"]
+        assert all(dry_run is True for _, dry_run in calls)
+        assert set(result) == {"facts", "tags", "feed", "chats"}
+
+    def test_a_failing_stage_is_counted_and_never_hides_the_others(self, monkeypatch):
+        from src.capture import qd
+        from src.capture.common import exit_code
+        calls = []
+
+        def broken(*, dry_run=False):
+            calls.append(("feed", dry_run))
+            raise RuntimeError("eventlog unreadable")
+        self._stub_stages(monkeypatch, calls, feed=broken)
+        result = qd.capture(dry_run=False)
+        assert result["feed"] == {"failed": 1}
+        assert [name for name, _ in calls] == ["facts", "tags", "feed", "chats"]
+        assert exit_code(result) == 1
+
+    def test_no_graph_writer_is_importable(self):
+        import importlib
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("src.capture.slack_graph")
