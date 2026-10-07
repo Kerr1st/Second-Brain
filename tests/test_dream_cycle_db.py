@@ -103,6 +103,21 @@ def test_empty_metrics_and_memory_stats_have_stable_shapes():
     assert db.get_strategy_usage() == {}
 
 
+def test_tier_metrics_compute_on_completed_runs_with_candidates():
+    """R7 rehearsal finding: with completed runs present, the run-id list (text from
+    RealDictCursor) was compared to the uuid column without a cast -- the empty-shape
+    test above never reached that query."""
+    run = db.create_run("scheduled")
+    db.store_candidate(run, candidate() | {"strategy_that_found_it": "temporal"}, votes(), "ACCEPTED")
+    db.store_candidate(run, candidate() | {"strategy_that_found_it": "contradiction"}, votes(), "REJECTED")
+    db.complete_run(run, {"candidates_generated": 2, "candidates_accepted": 1, "candidates_rejected": 1}, "digest")
+    tier1 = db.get_tier1_metrics(3)
+    assert tier1["acceptance_rate"] == 0.5 and tier1["strategy_diversity"] == 2 and tier1["acceptance_rate_trend"] == [0.5]
+    tier2 = db.get_tier2_metrics(3)
+    assert tier2["user_rejection_rate"] == 0.0 and tier2["rejection_reason_clusters"] == {}
+    assert db.get_strategy_usage(3) == {"temporal": 1, "contradiction": 1}
+
+
 def test_invalid_model_target_is_preserved_in_json_but_not_sql_uuid():
     run = db.create_run("scheduled")
     c = candidate() | {"operation": "UPDATE", "target_memory_id": "hallucinated"}

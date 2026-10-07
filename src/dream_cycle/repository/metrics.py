@@ -83,7 +83,7 @@ def get_tier1_metrics(n_cycles: int=10, *, db: Database) -> dict:
                                OR evaluator_d_verdict = 'REJECT')
                     ) AS non_unanimous
                 FROM dream_cycle_candidates
-                WHERE run_id = ANY(%s)
+                WHERE run_id = ANY(%s::uuid[])
                 """, (run_ids,))
             row = cur.fetchone()
             t_accepted = row['total_accepted']
@@ -92,7 +92,7 @@ def get_tier1_metrics(n_cycles: int=10, *, db: Database) -> dict:
             cur.execute("""
                 SELECT count(DISTINCT candidate_json->>'strategy_that_found_it') AS diversity
                 FROM dream_cycle_candidates
-                WHERE run_id = ANY(%s)
+                WHERE run_id = ANY(%s::uuid[])
                   AND candidate_json->>'strategy_that_found_it' IS NOT NULL
                 """, (run_ids,))
             strategy_diversity = cur.fetchone()['diversity']
@@ -134,7 +134,7 @@ def get_tier2_metrics(n_cycles: int=10, *, db: Database) -> dict:
                     count(*) FILTER (WHERE final_verdict = 'ACCEPTED') AS total_accepted,
                     count(*) FILTER (WHERE final_verdict = 'ACCEPTED' AND user_rejected_at IS NOT NULL) AS total_rejected
                 FROM dream_cycle_candidates
-                WHERE run_id = ANY(%s)
+                WHERE run_id = ANY(%s::uuid[])
                 """, (run_ids,))
             row = cur.fetchone()
             total_accepted = row['total_accepted']
@@ -143,7 +143,7 @@ def get_tier2_metrics(n_cycles: int=10, *, db: Database) -> dict:
             cur.execute("""
                 SELECT user_rejection_reason, count(*) AS cnt
                 FROM dream_cycle_candidates
-                WHERE run_id = ANY(%s)
+                WHERE run_id = ANY(%s::uuid[])
                   AND user_rejected_at IS NOT NULL
                   AND user_rejection_reason IS NOT NULL
                 GROUP BY user_rejection_reason
