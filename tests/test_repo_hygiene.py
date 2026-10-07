@@ -88,3 +88,97 @@ class TestNoSecretsInTrackedConfig:
         text = (REPO / "scheduling" / "com.second-brain.capture-api.plist").read_text()
         assert "CAPTURE_API_TOKEN</key>" not in text
         assert "scripts/jobs/capture_api.sh" in text
+
+
+class TestDocumentationContracts:
+    """R7 documentation guardrails (PLAN-refactor Phase 6/7): counted facts are
+    generated from source, hazards have owners, canonical links resolve, and the
+    live documents carry no personal identifiers."""
+
+    # Live documentation = what START-HERE points at. Dated archives and the two
+    # audit records keep their original text and are deliberately not scanned.
+    LIVE_DOC_GLOBS = ("README.md", "scheduling/README.md", "tests/README.md", "docs/*.md",
+                      "docs/generated/*", ".kiro/specs/*/*")
+    HISTORICAL_PREFIXES = ("AUDIT-",)
+
+    def _live_docs(self) -> list[Path]:
+        docs = []
+        for pattern in self.LIVE_DOC_GLOBS:
+            # `git ls-files -- 'docs/*.md'` recurses; keep the top level of docs/ only.
+            for p in _tracked([pattern]):
+                rel = p.relative_to(REPO).as_posix()
+                if not p.is_file() or p.name.startswith(self.HISTORICAL_PREFIXES):
+                    continue
+                if rel.startswith(("docs/archive/", "docs/audit-")):
+                    continue
+                docs.append(p)
+        assert docs, "no live documentation tracked"
+        return sorted(set(docs))
+
+    def test_generated_inventory_matches_source(self):
+        import json
+        import sys
+        sys.path.insert(0, str(REPO))
+        from scripts.docs.inventory import markdown, snapshot
+        facts = snapshot(REPO)
+        assert json.loads((REPO / "docs/generated/runtime-inventory.json").read_text()) == facts, \
+            "docs/generated/runtime-inventory.json drifted: run .venv/bin/python scripts/docs/inventory.py"
+        assert (REPO / "docs/generated/runtime-inventory.md").read_text() == markdown(facts)
+        # The generated files must never carry the installed Mac's home path (plist arguments are relativized).
+        assert "/Users/" not in (REPO / "docs/generated/runtime-inventory.json").read_text()
+        assert facts["default_profile"] == "controlled" and facts["migration_high_water"] == "018_retire_knowledge_graph.sql"
+
+    def test_hazards_have_owners_and_closure_evidence(self):
+        text = (REPO / "docs/VALIDATION.md").read_text()
+        rows = [line.split("|")[1:-1] for line in text.splitlines() if line.startswith("| H-")]
+        assert len(rows) >= 9, "VALIDATION.md must keep the owned-hazards table"
+        ids = [row[0].strip() for row in rows]
+        assert len(ids) == len(set(ids)), "duplicate hazard ids"
+        for row in rows:
+            assert len(row) == 4 and all(part.strip() for part in row), row
+            assert row[1].strip() not in {"TBD", "Unknown", "Unassigned", "—"}, row
+        for required in ("H-ISOLATION", "H-ROUTING", "H-RECOVERY", "H-PRIVILEGE", "H-GRAPH-DATA", "H-EFFECTIVENESS"):
+            assert required in ids, required
+
+    def test_canonical_links_resolve(self):
+        documents = [REPO / "README.md", REPO / "scheduling/README.md", *sorted((REPO / "docs").glob("*.md")),
+                     *sorted((REPO / ".kiro/specs").glob("*/*.md")),
+                     *sorted((REPO / "docs/archive").glob("*/README*.md"))]
+        broken = []
+        for doc in documents:
+            if doc.name.startswith(self.HISTORICAL_PREFIXES):
+                continue
+            for target in re.findall(r"\]\(([^)]+)\)", doc.read_text()):
+                target = target.split("#", 1)[0]
+                if not target or "://" in target or target.startswith("mailto:"):
+                    continue
+                if not (doc.parent / target).exists():
+                    broken.append(f"{doc.relative_to(REPO)}: {target}")
+        assert not broken, broken
+
+    def test_live_docs_carry_no_personal_identifiers(self):
+        """No e-mail addresses of the operator's employer domain and no absolute home
+        directory paths in the live documents (the installed Mac's paths belong in the
+        private release notes). Archived snapshots are exempt and tracked as-is."""
+        offenders = []
+        for doc in self._live_docs():
+            text = doc.read_text(errors="replace")
+            for needle in ("@amazon.com", "/Users/"):
+                if needle in text:
+                    line = next(i + 1 for i, l in enumerate(text.splitlines()) if needle in l)
+                    offenders.append(f"{doc.relative_to(REPO)}:{line}: {needle}")
+        assert not offenders, offenders
+
+    def test_retired_vocabulary_stays_out_of_live_docs(self):
+        """One name per concept: the panel is seats + a three-of-four rule; the
+        fault-tolerance analogy lives only in the archives."""
+        pattern = re.compile(r"byzantine|\bBFT\b|\bquorum\b", re.IGNORECASE)
+        offenders = [f"{doc.relative_to(REPO)}" for doc in self._live_docs() if pattern.search(doc.read_text(errors="replace"))]
+        assert not offenders, offenders
+
+    def test_graph_tables_are_not_described_as_live(self):
+        """After migration 018 no live guide may present the knowledge-graph tables
+        as part of the running system (archives keep the history)."""
+        live_claims = re.compile(r"(dormant|imported) knowledge graph|JSON exports? \(memories, entities|Slack graph\)|graph stage", re.IGNORECASE)
+        offenders = [f"{doc.relative_to(REPO)}" for doc in self._live_docs() if live_claims.search(doc.read_text(errors="replace"))]
+        assert not offenders, offenders

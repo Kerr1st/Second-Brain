@@ -1,0 +1,382 @@
+{
+  "adapters": [
+    "bedrock",
+    "claude_code",
+    "codex",
+    "kiro"
+  ],
+  "default_profile": "controlled",
+  "profiles": [
+    "bedrock",
+    "controlled",
+    "laptop",
+    "mini"
+  ],
+  "roles": [
+    "advocate",
+    "codex_semantic",
+    "distill",
+    "editor",
+    "epistemologist",
+    "explorer",
+    "methodologist",
+    "skeptic",
+    "skim",
+    "thinker"
+  ],
+  "migrations": [
+    "000_migrations_table.sql",
+    "001_initial_schema.sql",
+    "002_v2_columns.sql",
+    "003_dream_cycle.sql",
+    "004_evaluator_d.sql",
+    "005_question_weighted_search.sql",
+    "006_encoding_context.sql",
+    "007_schema_type.sql",
+    "008_knowledge_graph.sql",
+    "009_hnsw_recall.sql",
+    "010_express_feedback.sql",
+    "011_backend_provenance.sql",
+    "012_dream_cycle_slices.sql",
+    "013_evaluator_details.sql",
+    "014_memory_skim.sql",
+    "016_data_integrity.sql",
+    "017_role_separation.sql",
+    "018_retire_knowledge_graph.sql"
+  ],
+  "migration_high_water": "018_retire_knowledge_graph.sql",
+  "scheduled_spend_threshold_usd": 9.0,
+  "library_spend_threshold_usd": 5.0,
+  "schedules": [
+    {
+      "file": "com.second-brain.backup.plist",
+      "label": "com.second-brain.backup",
+      "calendar": {
+        "Hour": 2,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/backup.sh",
+        "backup"
+      ],
+      "deadline_s": 7200,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.bookmarks.plist",
+      "label": "com.second-brain.bookmarks",
+      "calendar": {
+        "Weekday": 6,
+        "Hour": 1,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/scrape_bookmarks.py",
+        "bookmarks"
+      ],
+      "deadline_s": 10800,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.capture-api.plist",
+      "label": "com.second-brain.capture-api",
+      "calendar": null,
+      "interval_seconds": null,
+      "keep_alive": true,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/capture_api.sh",
+        "capture-api"
+      ],
+      "deadline_s": null,
+      "needs_network": false,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.capture-browser.plist",
+      "label": "com.second-brain.capture-browser",
+      "calendar": {
+        "Hour": 1,
+        "Minute": 15
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/capture_browser.sh",
+        "capture-browser"
+      ],
+      "deadline_s": 3600,
+      "needs_network": false,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.capture-outlook.plist",
+      "label": "com.second-brain.capture-outlook",
+      "calendar": {
+        "Hour": 0,
+        "Minute": 45
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/capture_outlook.sh",
+        "capture-outlook"
+      ],
+      "deadline_s": 3600,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.capture-slack.plist",
+      "label": "com.second-brain.capture-slack",
+      "calendar": {
+        "Hour": 1,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/capture_slack.sh",
+        "capture-slack"
+      ],
+      "deadline_s": 3600,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.chat-extract.plist",
+      "label": "com.second-brain.chat-extract",
+      "calendar": {
+        "Hour": 2,
+        "Minute": 30
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/capture_chats.sh",
+        "chat-capture"
+      ],
+      "deadline_s": 3600,
+      "needs_network": false,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.codex-capture.plist",
+      "label": "com.second-brain.codex-capture",
+      "calendar": null,
+      "interval_seconds": 21600,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/codex_capture.sh",
+        "codex-capture"
+      ],
+      "deadline_s": 7200,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.credentials.plist",
+      "label": "com.second-brain.credentials",
+      "calendar": {
+        "Hour": 7,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/verify_credentials.sh",
+        "credentials"
+      ],
+      "deadline_s": 3600,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.distill.plist",
+      "label": "com.second-brain.distill",
+      "calendar": {
+        "Hour": 5,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/distill_sessions.py",
+        "distill"
+      ],
+      "deadline_s": 7200,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.dream-cycle.plist",
+      "label": "com.second-brain.dream-cycle",
+      "calendar": [
+        {
+          "Weekday": 1,
+          "Hour": 2,
+          "Minute": 0
+        },
+        {
+          "Weekday": 3,
+          "Hour": 2,
+          "Minute": 0
+        },
+        {
+          "Weekday": 5,
+          "Hour": 2,
+          "Minute": 0
+        }
+      ],
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/dream_cycle_scheduled.sh",
+        "dream-cycle"
+      ],
+      "deadline_s": 21600,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.ingest.plist",
+      "label": "com.second-brain.ingest",
+      "calendar": {
+        "Hour": 3,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/crawlee_ingest.py",
+        "crawlee-ingest"
+      ],
+      "deadline_s": 3600,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.liveness.plist",
+      "label": "com.second-brain.liveness",
+      "calendar": {
+        "Hour": 9,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/verify_liveness.sh",
+        "liveness"
+      ],
+      "deadline_s": 3600,
+      "needs_network": false,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.qd-sync.plist",
+      "label": "com.second-brain.qd-sync",
+      "calendar": null,
+      "interval_seconds": 3600,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/qd_sync.sh",
+        "qd-sync"
+      ],
+      "deadline_s": 3600,
+      "needs_network": false,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.verify.plist",
+      "label": "com.second-brain.verify",
+      "calendar": {
+        "Weekday": 0,
+        "Hour": 3,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/verify_backup.sh",
+        "verify"
+      ],
+      "deadline_s": 7200,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.weekly-digest.plist",
+      "label": "com.second-brain.weekly-digest",
+      "calendar": {
+        "Weekday": 1,
+        "Hour": 6,
+        "Minute": 0
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/weekly_digest.sh",
+        "weekly-digest"
+      ],
+      "deadline_s": 7200,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    },
+    {
+      "file": "com.second-brain.youtube.plist",
+      "label": "com.second-brain.youtube",
+      "calendar": {
+        "Hour": 1,
+        "Minute": 30
+      },
+      "interval_seconds": null,
+      "keep_alive": false,
+      "arguments": [
+        "/bin/bash",
+        "scripts/jobs/job_wrapper.sh",
+        "scripts/jobs/youtube_scrape.sh",
+        "youtube"
+      ],
+      "deadline_s": 3600,
+      "needs_network": true,
+      "exit_timeout_s": 150
+    }
+  ]
+}
