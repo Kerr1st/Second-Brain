@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import subprocess
 import re
 import time
@@ -288,9 +289,19 @@ class AgenticCliInvoker:
             )
             raise
 
+    @staticmethod
+    def raw_debug_dir() -> str:
+        """Directory for the best-effort raw-output dumps.
+
+        ``SECOND_BRAIN_RAW_DEBUG_DIR`` if set, else the process temp dir
+        (``TMPDIR``-aware, so the isolated test runner's dumps land in its
+        disposable evidence area instead of a shared ``/tmp``).
+        """
+        return os.environ.get("SECOND_BRAIN_RAW_DEBUG_DIR") or tempfile.gettempdir()
+
     def _dump_raw_debug(self, name: str, raw: str) -> None:
-        """Best-effort dump of the raw output to /tmp for debugging."""
-        path = os.path.join("/tmp", self._raw_debug_filename(name))
+        """Best-effort dump of the raw output for debugging (see :meth:`raw_debug_dir`)."""
+        path = os.path.join(self.raw_debug_dir(), self._raw_debug_filename(name))
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(raw)
@@ -409,7 +420,7 @@ class AgenticCliInvoker:
         return {}
 
     def _raw_debug_filename(self, name: str) -> str:
-        """Filename for the raw-output debug dump under /tmp."""
+        """Filename for the raw-output debug dump under :meth:`raw_debug_dir`."""
         return f"{self.BACKEND_NAME}_agent_{name}_raw.txt"
 
     # ------------------------------------------------------------------ #
