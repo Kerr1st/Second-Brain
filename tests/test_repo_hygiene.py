@@ -148,6 +148,10 @@ class TestDocumentationContracts:
         for doc in documents:
             if doc.name.startswith(self.HISTORICAL_PREFIXES):
                 continue
+            # An archive whose provenance file is README-ARCHIVE.md keeps the preserved top-level
+            # README.md verbatim beside it; its links point at the original tree, by design.
+            if doc.name == "README.md" and (doc.parent / "README-ARCHIVE.md").exists():
+                continue
             for target in re.findall(r"\]\(([^)]+)\)", doc.read_text()):
                 target = target.split("#", 1)[0]
                 if not target or "://" in target or target.startswith("mailto:"):

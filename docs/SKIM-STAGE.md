@@ -20,7 +20,7 @@ A dream-cycle run examines about 30 arrival memories — 0–5 Explorer slices o
 
 ## Model and request shape
 
-Role `skim` in `config/backends.toml`, identical in all five profiles:
+Role `skim` in `config/backends.toml`, identical in all four profiles:
 `skim = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }`.
 The `options` table is passed to the adapter's constructor (only `bedrock` accepts one; `ADAPTER_OPTIONS` in `src/backends/resolver.py`). The resolver rejects a skim on any MCP-capable backend (Kiro, Claude Code, Codex) at config load and again at resolution (`assert_backend_supports_role`, `src/backends/base.py`).
 

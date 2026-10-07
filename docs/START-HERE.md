@@ -1,6 +1,6 @@
 # Start here: Second Brain
 
-Reviewed against the R7 head of the release line (see [RELEASES.md](RELEASES.md) for heads and status). This is an implementation guide, not a claim about a running installation. The pre-refactor orientation of 2026-09-10 and the refactor branch's own version of this file are preserved in [the installed-snapshot archive](archive/2026-09-10-installed/README.md); what they got right about evidence boundaries is kept below.
+Reviewed against the R7 head of the release line (see [RELEASES.md](RELEASES.md) for heads and status). This is an implementation guide, not a claim about a running installation. The pre-refactor orientation of 2026-09-10 and the refactor branch's own version of this file are preserved in [the installed-snapshot archive](archive/2026-09-10-installed/README-ARCHIVE.md); what they got right about evidence boundaries is kept below.
 
 ## Purpose
 
