@@ -384,11 +384,11 @@ class TestMainExitCodes:
         monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: False)
-        monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls: {"processed": 1, "skipped": 0, "failed": 0})
+        monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls, **kw: {"processed": 1, "skipped": 0, "failed": 0})
         assert sb.main() == 1                      # the internal fetch failed
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: True)
         assert sb.main() == 0
-        monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls: {"processed": 0, "skipped": 0, "failed": 1})
+        monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls, **kw: {"processed": 0, "skipped": 0, "failed": 1})
         assert sb.main() == 1                      # the public batch failed
 
     def test_scrape_with_crawlee_reports_only_index_verified_successes(self, tmp_path, monkeypatch):
@@ -401,5 +401,5 @@ class TestMainExitCodes:
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: indexed.pop(0))
         monkeypatch.setattr(sb.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
         stats = sb.scrape_with_crawlee([("A", "https://example.org/a"), ("B", "https://example.org/b")])
-        assert stats == {"processed": 1, "skipped": 0, "failed": 1}
+        assert stats == {"processed": 1, "skipped": 0, "failed": 1, "timed_out_batches": 0, "deferred": 0}
         assert not list(tmp_path.glob(".sb-urls-*"))  # the temp URL file is always removed
