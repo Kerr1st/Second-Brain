@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from src.backends.base import (
-    AGENT_ROLES, CORPUS_ROLES, DENIED_BACKENDS_FOR_CORPUS, DENIED_MODEL_SUBSTRINGS,
+    AGENT_ROLES, CORPUS_ROLES, GROUNDING_AUDITOR_ROLE, DENIED_BACKENDS_FOR_CORPUS, DENIED_MODEL_SUBSTRINGS,
     BACKEND_CAPABILITIES, Invoker, assert_backend_supports_role, assert_corpus_route,
 )
 from src.backends.bedrock import BedrockInvoker
@@ -60,7 +60,7 @@ SKIM_ROLE = "skim"
 DISTILL_ROLE = "distill"
 CODEX_SEMANTIC_ROLE = "codex_semantic"
 EDITOR_ROLE = "editor"
-DREAM_ROLES = (*AGENT_ROLES, SKIM_ROLE)
+DREAM_ROLES = (*AGENT_ROLES, GROUNDING_AUDITOR_ROLE, SKIM_ROLE)
 VALID_ROLES = (*DREAM_ROLES, DISTILL_ROLE, CODEX_SEMANTIC_ROLE, EDITOR_ROLE)
 
 _REQUIRED_ROLES = frozenset(VALID_ROLES)
@@ -191,6 +191,12 @@ class Resolver:
         profile: dict[str, RoleBackend],
         adapters: dict[str, type] | None = None,
     ):
+        # A hand-built (partial) profile that seats a skeptic but no grounding
+        # auditor inherits the skeptic route for the audit, which is what every
+        # committed profile configures explicitly. Committed profiles must name
+        # the role (``_validate_profile``).
+        if GROUNDING_AUDITOR_ROLE not in profile and "skeptic" in profile:
+            profile = {**profile, GROUNDING_AUDITOR_ROLE: replace(profile["skeptic"], role=GROUNDING_AUDITOR_ROLE)}
         self._profile = profile
         self._adapters = adapters if adapters is not None else DEFAULT_ADAPTERS
         self._cache: dict[tuple, Invoker] = {}

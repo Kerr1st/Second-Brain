@@ -50,8 +50,11 @@ def invoke_evaluator(
         prompt = get_evaluator_prompt(role=role, candidate_json=candidate_json_str,
                                       source_memories_content=source_memories_content)
 
+    # The audit's request text is unchanged from when it ran as the skeptic
+    # seat, so moving it to its own role changes routing labels, not the prompt.
+    seat_label = "skeptic" if role == GROUNDING_AUDIT_ROLE else role
     user_message = (
-        f"Please evaluate this candidate insight as the {role}. "
+        f"Please evaluate this candidate insight as the {seat_label}. "
         "Return your verdict as JSON with 'verdict', 'score', 'blocking_issues', "
         "'advisory_issues' and 'reasoning' fields."
     )

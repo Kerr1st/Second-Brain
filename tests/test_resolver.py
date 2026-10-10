@@ -36,7 +36,7 @@ def _skim():
 
 def _profile_rows(role_backend="claude_code", skim_backend="bedrock", skim_model=SKIM_MODEL, skim_options=""):
     """TOML lines for a complete profile: agent roles on ``role_backend``, skim as given."""
-    rows = [f'{r} = {{ backend = "{role_backend}", model = "m", effort = "high" }}' for r in AGENT_ROLES]
+    rows = [f'{r} = {{ backend = "{role_backend}", model = "m", effort = "high" }}' for r in (*AGENT_ROLES, "grounding_auditor")]
     rows.append(f'skim = {{ backend = "{skim_backend}", model = "{skim_model}", effort = "low"{skim_options} }}')
     rows.extend(f'{r} = {{ backend = "bedrock", model = "safe-model" }}' for r in (DISTILL_ROLE, CODEX_SEMANTIC_ROLE, EDITOR_ROLE))
     return "\n".join(rows) + "\n"
@@ -299,7 +299,7 @@ class TestSkimRole:
     options (temperature 0, Flex tier, 4096 tokens) are expressed in the toml."""
 
     def test_valid_roles_are_the_agent_roles_plus_skim(self):
-        assert DREAM_ROLES == (*AGENT_ROLES, SKIM_ROLE)
+        assert DREAM_ROLES == (*AGENT_ROLES, "grounding_auditor", SKIM_ROLE)
         assert VALID_ROLES == (*DREAM_ROLES, DISTILL_ROLE, CODEX_SEMANTIC_ROLE, EDITOR_ROLE)
         assert "skim" not in AGENT_ROLES
 

@@ -8,13 +8,15 @@ from src.models import CandidateInsight, EvaluatorVerdict
 from src.prompts.revision import REVISION_PROMPT, REVISION_SCHEMA, build_revision_request
 from src.dream_cycle.packet import format_sources_for_evaluator
 from src.dream_cycle.budget import *
+from src.dream_cycle.budget import GROUNDING_AUDIT_ROLE  # "grounding_auditor"
 from src.dream_cycle.parsing import _as_str_list, _unwrap_nested_candidate
 logger = logging.getLogger(__name__)
 
 def _ground_candidate(self, candidate: CandidateInsight) -> CandidateInsight:
     """Audit a candidate against its sources and repair it once before the panel.
 
-    One graded call by the ``GROUNDING_AUDIT_ROLE`` seat's backend lists blocking
+    One graded, metered call on the dedicated ``grounding_auditor`` role (routed
+    like the skeptic seat in every committed profile) lists blocking
     and advisory defects; if there are any, one tool-less call by the Thinker's
     backend repairs the candidate (remove/correct unsupported details, narrow the
     claim, fix attribution, keep evidence). The panel then votes on the result.

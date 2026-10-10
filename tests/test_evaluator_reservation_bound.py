@@ -48,7 +48,7 @@ def _bedrock_evaluator_seats():
     assert default == "controlled"
     seats = []
     for pname, profile in profiles.items():
-        for role in EVALUATORS:
+        for role in (*EVALUATORS, GROUNDING_AUDIT_ROLE):
             spec = profile[role]
             if spec.backend == "bedrock":
                 seats.append(pytest.param(pname, spec, id=f"{pname}-{role}"))
@@ -77,7 +77,10 @@ def test_every_bedrock_evaluator_seat_pins_a_budget_above_observed_output(profil
 
 
 def test_grounding_audit_runs_on_a_bounded_evaluator_seat():
-    assert GROUNDING_AUDIT_ROLE in EVALUATORS
+    # The audit has its own role, routed exactly like the (bounded) skeptic seat.
+    profiles, _ = load_profiles()
+    for profile in profiles.values():
+        assert profile[GROUNDING_AUDIT_ROLE].options == profile["skeptic"].options
 
 
 @pytest.mark.parametrize("profile_name,spec", _bedrock_evaluator_seats())

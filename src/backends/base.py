@@ -57,8 +57,13 @@ def _write_metrics_line(metrics: dict, run_id: str | None, metrics_dir: str) -> 
 
 # Corpus policy applies at resolution and immediately before invocation.
 AGENT_ROLES = ("explorer", "thinker", "skeptic", "advocate", "epistemologist", "methodologist")
+#: Pre-panel grounding audit (one graded, tool-less call per candidate). Its own
+#: role so it can be routed and budgeted apart from the panel; every committed
+#: profile routes it exactly like the skeptic seat. Its output reaches only the
+#: Thinker's revision call, never a panel seat.
+GROUNDING_AUDITOR_ROLE = "grounding_auditor"
 BEDROCK_ONLY_ROLES = frozenset({"skim", "distill", "codex_semantic", "editor"})
-CORPUS_ROLES = frozenset(AGENT_ROLES) | BEDROCK_ONLY_ROLES
+CORPUS_ROLES = frozenset(AGENT_ROLES) | {GROUNDING_AUDITOR_ROLE} | BEDROCK_ONLY_ROLES
 DENIED_BACKENDS_FOR_CORPUS = frozenset({"kiro"})
 DENIED_MODEL_SUBSTRINGS = frozenset({"fable"})
 
@@ -77,7 +82,7 @@ def corpus_role_for_stage(stage: str | None) -> str | None:
     if isinstance(stage, str) and stage.startswith(("evaluator:", "replay:")):
         return stage.split(":", 1)[1]
     return {
-        "revision": "thinker", "grounding_audit": "epistemologist",
+        "revision": "thinker", "grounding_audit": GROUNDING_AUDITOR_ROLE,
         "weekly_digest": "skim", "skim_probe": "skim", "revise_probe": "thinker", "express_editor": "editor",
         "distill_contradiction": "distill", "redistill": "distill",
     }.get(stage)

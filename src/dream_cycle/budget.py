@@ -10,10 +10,11 @@ THINKER_TIMEOUT_S = int(os.environ.get("THINKER_TIMEOUT", "1200"))
 
 GROUNDING_SPEND_SHARE = float(os.environ.get("GROUNDING_SPEND_SHARE", "0.8"))
 
-# R1 decision kept in R3: the grounding audit runs on the skeptic seat (whose
-# Bedrock ``max_tokens`` budget R1 sized for it). 74ba02d's dedicated
-# ``grounding_auditor`` role is a backends/config change and is not ported here.
-GROUNDING_AUDIT_ROLE = "skeptic"
+# The grounding audit runs on its own ``grounding_auditor`` role. Every committed
+# profile routes it exactly like the skeptic seat (same backend, model, effort and
+# options — and so the same cached invoker), so the R1 sizing of that seat's
+# Bedrock ``max_tokens`` budget still applies (routing lane, PLAN item 6).
+from src.backends.base import GROUNDING_AUDITOR_ROLE as GROUNDING_AUDIT_ROLE
 
 MAX_CANDIDATES_PER_SLICE = 2
 
@@ -36,6 +37,7 @@ EST_JUDGE_CANDIDATE_USD = 0.70
 _RESERVE_FLOOR_USD = {
     "thinker": EST_THINKER_CALL_USD,
     "skeptic": EST_JUDGE_CANDIDATE_USD,
+    GROUNDING_AUDIT_ROLE: EST_JUDGE_CANDIDATE_USD,
     "advocate": EST_JUDGE_CANDIDATE_USD,
     "epistemologist": EST_JUDGE_CANDIDATE_USD,
     "methodologist": EST_JUDGE_CANDIDATE_USD,

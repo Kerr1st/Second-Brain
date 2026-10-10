@@ -27,6 +27,13 @@
 # run cap) and it is metered against the run cap like every other stage; any
 # skim failure is non-fatal (the Explorer gets the plain arrivals manifest).
 #
+# The `grounding_auditor` role runs the one pre-panel grounding audit per
+# candidate (src/dream_cycle/stages/grounding.py). It is a corpus role under the
+# same Kiro/Fable guard, metered like every seat, and in every profile below it
+# is a copy of that profile's `skeptic` line, so it shares the skeptic's cached
+# invoker and costs exactly what the audit cost on the skeptic seat. Its output
+# feeds only the Thinker's revision call, never a panel seat.
+#
 # Credentials are NOT stored here — they stay out-of-band / gitignored.
 # See docs/MODEL-BACKENDS.md.
 
@@ -36,6 +43,7 @@ default_profile = "controlled"
 explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 thinker        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "max" }
 skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+grounding_auditor = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
@@ -56,6 +64,7 @@ editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", ef
 explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 thinker        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "max" }
 skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+grounding_auditor = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
 methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
@@ -82,6 +91,7 @@ editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", ef
 explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-5",    effort = "high" }
 thinker        = { backend = "bedrock",     model = "global.anthropic.claude-opus-5", effort = "high" }
 skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+grounding_auditor = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
 advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
 epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
 methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
@@ -120,6 +130,7 @@ editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", ef
 explorer       = { backend = "claude_code", model = "global.anthropic.claude-sonnet-5",  effort = "high" }
 thinker        = { backend = "bedrock",     model = "global.anthropic.claude-opus-5",    effort = "high" }
 skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+grounding_auditor = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
 advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
 epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
 methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
