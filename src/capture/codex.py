@@ -56,6 +56,9 @@ SEMANTIC_PROMPT_VERSION = "codex-semantic-v2-bounded"
 SEMANTIC_BATCH_TURNS = 8
 SEMANTIC_BATCH_CHARS = 48_000
 SEMANTIC_PREVIOUS_CHARS = 12_000
+#: Characters per embedding call from this writer -- the corpus chunk bound
+#: (``chunk_by_section`` / ``plan_rechunk`` default). Longer rows get chunks.
+MAX_CHUNK_CHARS = 4_000
 SEMANTIC_COST_CAP_ENV = "SECOND_BRAIN_CODEX_SEMANTIC_COST_CAP_USD"
 
 #: Maximum invalid model results for one frozen batch of one Codex Task
@@ -911,9 +914,11 @@ def _process_semantics(captured, tail, services) -> None:
     segment_contents = tuple(
         _render_segment(segment, turn_lookup) for segment in result.segments
     )
-    segment_embeddings = tuple(services.embed(text) for text in segment_contents)
+    segment_embeddings = tuple(
+        _prepare_embedding(text, services.embed) for text in segment_contents
+    )
     memory_embeddings = tuple(
-        services.embed(memory.content) for memory in result.memories
+        _prepare_embedding(memory.content, services.embed) for memory in result.memories
     )
     _store_semantic_result(
         captured=captured,
@@ -981,6 +986,65 @@ def _render_segment(
     )
 
 
+@dataclass(frozen=True)
+class _PreparedEmbedding:
+    """One row's vectors: its own (``vector``) or, when oversize, its chunks'."""
+
+    vector: list[float] | None
+    chunks: tuple[tuple[str, list[float]], ...] = ()
+
+    @property
+    def stored_vector(self) -> str | None:
+        return None if self.vector is None else str(self.vector)
+
+
+def _prepare_embedding(text: str, embed) -> _PreparedEmbedding:
+    """Never send more than ``MAX_CHUNK_CHARS`` characters per embedding call.
+
+    Text within the bound is embedded whole. Longer text keeps its full content
+    on the row and is represented in the vector index by lossless
+    ``chunk_by_section`` children, exactly as the rechunk planner would lay it
+    out, so a later plan has nothing to repair.
+    """
+    from src.ingest import chunk_by_section
+
+    if len(text) <= MAX_CHUNK_CHARS:
+        return _PreparedEmbedding(vector=embed(text))
+    pieces = [piece for piece in chunk_by_section(text, MAX_CHUNK_CHARS) if piece.strip()]
+    return _PreparedEmbedding(vector=None, chunks=tuple((piece, embed(piece)) for piece in pieces))
+
+
+def _install_chunks(connection, parent_id, prepared: _PreparedEmbedding, *, fields, metadata) -> None:
+    """Replace the row's chunk set (possibly with none) in the caller's transaction.
+
+    The parent row must already be locked by the caller's UPDATE/INSERT. Old
+    chunks are superseded; those nothing cites are deleted, as in apply_rechunk.
+    """
+    from src.db.maintenance import install_chunk_set, purge_superseded_chunks
+
+    if not prepared.chunks:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM memories WHERE parent_id = %s AND status = 'active' LIMIT 1",
+                (parent_id,),
+            )
+            if cursor.fetchone() is None:
+                return
+    superseded = install_chunk_set(
+        connection, parent_id, list(prepared.chunks),
+        fields=fields, metadata=metadata, mem_class=fields["mem_class"],
+    )
+    if prepared.vector is not None:
+        # A row that fits one embedding again keeps its own vector.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE memories SET embedding = %s WHERE id = %s",
+                (prepared.stored_vector, parent_id),
+            )
+    if superseded:
+        purge_superseded_chunks(connection, parent_id)
+
+
 def _store_semantic_result(
     *,
     captured,
@@ -1014,7 +1078,7 @@ def _store_semantic_result(
                 next_index = previous.index + 1 if previous is not None else 0
                 for result_index, segment in enumerate(result.segments):
                     content = segment_contents[result_index]
-                    embedding = segment_embeddings[result_index]
+                    prepared = segment_embeddings[result_index]
                     if result_index == 0 and extends_previous:
                         segment_index = previous.index
                         segment_id = previous.memory_id
@@ -1034,7 +1098,7 @@ def _store_semantic_result(
                             (
                                 segment.title,
                                 content,
-                                str(embedding),
+                                prepared.stored_vector,
                                 json.dumps(metadata),
                                 segment_id,
                                 captured.memory_id,
@@ -1065,7 +1129,7 @@ def _store_semantic_result(
                             (
                                 segment.title,
                                 content,
-                                str(embedding),
+                                prepared.stored_vector,
                                 f"{captured.source_url}#segment-{segment_index}",
                                 TASK_SOURCE_TYPE,
                                 json.dumps(metadata),
@@ -1074,9 +1138,19 @@ def _store_semantic_result(
                             ),
                         )
                         segment_id = cursor.fetchone()[0]
+                    _install_chunks(
+                        connection, segment_id, prepared, metadata=metadata,
+                        fields={
+                            "type": "source", "title": segment.title,
+                            "source_url": f"{captured.source_url}#segment-{segment_index}",
+                            "source_type": TASK_SOURCE_TYPE, "project": None,
+                            "tags": ["codex", "topic-segment"], "mem_class": "source",
+                            "encoding_context": "Original Agent Turns grouped as one Topic Segment.",
+                        },
+                    )
                     segment_ids.append(segment_id)
 
-                for memory, embedding in zip(
+                for memory, prepared in zip(
                     result.memories, memory_embeddings, strict=True
                 ):
                     mem_class = (
@@ -1112,7 +1186,7 @@ def _store_semantic_result(
                             memory.kind,
                             memory.title,
                             memory.content,
-                            str(embedding),
+                            prepared.stored_vector,
                             captured.source_url,
                             MEMORY_SOURCE_TYPE,
                             json.dumps(metadata),
@@ -1121,6 +1195,16 @@ def _store_semantic_result(
                         ),
                     )
                     memory_id = cursor.fetchone()[0]
+                    _install_chunks(
+                        connection, memory_id, prepared, metadata=metadata,
+                        fields={
+                            "type": memory.kind, "title": memory.title,
+                            "source_url": captured.source_url,
+                            "source_type": MEMORY_SOURCE_TYPE, "project": None,
+                            "tags": ["codex", "task-memory"], "mem_class": mem_class,
+                            "encoding_context": encoding_context,
+                        },
+                    )
                     cursor.execute(
                         """
                         INSERT INTO memory_relationships (
