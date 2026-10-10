@@ -217,7 +217,6 @@ class TestClassification:
         "https://amazon.sharepoint.com/sites/x/Shared%20Documents/a.docx",
         "https://awsinsights.aws.dev/dashboard",
         "https://help.awsentral.aws.dev/",
-        "https://prod.d1234abcd.amplifyapp.com/",
         "https://studio.us-east-1.prod.workshops.aws/workshops/abc",
         "https://w.amazon.com/bin/view/X",            # existing internal list still applies
     ])
@@ -228,6 +227,7 @@ class TestClassification:
         "https://catalog.us-east-1.prod.workshops.aws/workshops/abc",   # public catalog
         "https://catalog.workshops.aws/x",
         "https://d3abc.cloudfront.net/page",                             # generic CDN: ledger decides
+        "https://prod.d1234abcd.amplifyapp.com/",                         # generic host: ledger decides
         "https://example.org/?next=https://amazon.sharepoint.com/",      # only the host counts
         "https://notaws.dev/",
         "https://www.ebay.com/itm/1",
