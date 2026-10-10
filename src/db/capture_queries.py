@@ -1,6 +1,6 @@
 """Queries for capture identity, arrival counts and temporal context."""
 from psycopg2.extras import RealDictCursor
-from .pool import get_connection, connection_scope
+from .pool import get_connection, connection_scope, transaction
 from .columns import iso
 from src.operations.liveness import CAPTURE_ROWS
 
@@ -144,3 +144,75 @@ def lock_source_identity(source_type, source_url, project=None, *, conn):
     key = json.dumps([source_type, source_url], separators=(',', ':'))
     with conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
+
+
+RETIRED_KEY = "capture_retired"
+RETIRED_REASON = "absent_from_source_selection"
+
+
+def reconcile_source_selection(url_prefixes, present, *, dry_run=False, now=None):
+    """Retire captured parents a snapshot source no longer selects; restore returners.
+
+    ``present`` is the complete set of ``(source_type, source_url)`` identities the
+    source selects this run; ``url_prefixes`` bounds which captured parents that
+    selection is authoritative for. A parent under a prefix that is not in
+    ``present`` (deleted upstream, now below the source's own threshold, or
+    re-labelled under another source type) is set ``status='superseded'``
+    together with its active chunks, and both carry ``metadata.capture_retired``
+    so the change is attributable and reversible: nothing is deleted, and only
+    rows this function retired are ever reactivated (when their identity is
+    selected again). Parents another writer superseded are left alone.
+
+    A prefix under which ``present`` holds no identity is refused and reported
+    in ``refused_prefixes``. Returns counts only.
+    """
+    import json
+    from datetime import datetime, timezone
+    prefixes = tuple(p for p in url_prefixes if isinstance(p, str) and p)
+    if not prefixes:
+        raise ValueError("url_prefixes must name at least one non-empty prefix")
+    present = {(st, url) for st, url in present}
+    # A prefix with no selected identity is refused, not emptied: an unreadable,
+    # truncated or newly created source must never retire a whole namespace.
+    refused = [p for p in prefixes if not any(url.startswith(p) for _, url in present)]
+    prefixes = tuple(p for p in prefixes if p not in refused)
+    extra = {**({"refused_prefixes": refused} if refused else {}), **({"dry_run": True} if dry_run else {})}
+    if not prefixes:
+        return {"retire": 0, "reactivate": 0, **extra}
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("""SELECT id::text, source_type, source_url, status, metadata ? %s AS retired FROM memories
+            WHERE parent_id IS NULL AND source_url IS NOT NULL
+              AND EXISTS (SELECT 1 FROM unnest(%s::text[]) AS p WHERE left(source_url, length(p)) = p)
+              AND (type = 'source' OR metadata->>'capture_identity' = 'true' OR source_type LIKE 'quick_desktop%%')
+              AND COALESCE(metadata->>'record_kind', '') NOT IN ('task_memory', 'topic_segment')""",
+                    (RETIRED_KEY, list(prefixes)))
+        rows = cur.fetchall()
+    retire = [(i, st, url) for i, st, url, status, _ in rows if status == "active" and (st, url) not in present]
+    restore = [(i, st, url) for i, st, url, status, marked in rows
+               if status == "superseded" and marked and (st, url) in present]
+    if dry_run:
+        return {"retire": len(retire), "reactivate": len(restore), **extra}
+    if not retire and not restore:
+        return {"retire": 0, "reactivate": 0, **extra}
+    stamp = json.dumps({RETIRED_KEY: {"reason": RETIRED_REASON,
+                        "at": (now or datetime.now(timezone.utc)).isoformat()}})
+    retired = reactivated = 0
+    with transaction() as conn:
+        for _, st, url in sorted(retire + restore, key=lambda r: (r[1], r[2])):
+            lock_source_identity(st, url, conn=conn)
+        with conn.cursor() as cur:
+            if retire:
+                ids = [r[0] for r in retire]
+                cur.execute("""UPDATE memories SET status='superseded', updated_at=now(), metadata=COALESCE(metadata,'{}'::jsonb) || %s::jsonb
+                    WHERE id = ANY(%s::uuid[]) AND status='active'""", (stamp, ids))
+                retired = cur.rowcount
+                cur.execute("""UPDATE memories SET status='superseded', updated_at=now(), metadata=COALESCE(metadata,'{}'::jsonb) || %s::jsonb
+                    WHERE parent_id = ANY(%s::uuid[]) AND status='active'""", (stamp, ids))
+            if restore:
+                ids = [r[0] for r in restore]
+                cur.execute("""UPDATE memories SET status='active', updated_at=now(), metadata=metadata - %s
+                    WHERE id = ANY(%s::uuid[]) AND status='superseded' AND metadata ? %s""", (RETIRED_KEY, ids, RETIRED_KEY))
+                reactivated = cur.rowcount
+                cur.execute("""UPDATE memories SET status='active', updated_at=now(), metadata=metadata - %s
+                    WHERE parent_id = ANY(%s::uuid[]) AND status='superseded' AND metadata ? %s""", (RETIRED_KEY, ids, RETIRED_KEY))
+    return {"retire": retired, "reactivate": reactivated, **extra}

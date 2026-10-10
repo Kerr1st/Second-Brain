@@ -39,6 +39,8 @@ CATEGORY_MAP = {
     "profile":        ("source",   "quick_desktop_profile"),
 }
 PROCEDURE_MAP = ("insight", "quick_desktop_procedure")
+MEMORY_URL_PREFIX = "qd://memory/"
+DECISION_URL_PREFIX = "qd://entity/"
 DEFAULT_MAP = ("source", "quick_desktop")
 
 
@@ -95,7 +97,7 @@ def map_memory(row):
     if row["name"]:
         title = row["name"]
 
-    source_url = f"qd://memory/{row['id']}"
+    source_url = f"{MEMORY_URL_PREFIX}{row['id']}"
 
     return {
         "type": sb_type,
@@ -121,7 +123,7 @@ def map_decision(row):
     """Map a QD Decision entity to Second Brain create_memory kwargs."""
     name = row["name"]
     text = row["text_content"] or name
-    source_url = f"qd://entity/{row['id']}"
+    source_url = f"{DECISION_URL_PREFIX}{row['id']}"
 
     return {
         "type": "decision",
@@ -143,8 +145,15 @@ def capture(*, dry_run=False, min_confidence=0.5, decisions=True):
     Numeric upstream IDs retain existing provenance URLs. No advancing cursor can
     skip a failed row or conceal an edit to an earlier fact. Graph tables are
     historical backup data; this channel no longer writes them.
+
+    The corpus mirrors the current selection (F-090): a ``qd://`` parent the
+    selection no longer contains (deleted upstream, below the threshold, or
+    re-labelled under another category) is retired as superseded history before
+    the refresh, and one that returns is reactivated. A dry run reports the
+    counts under ``"selection"`` without writing.
     """
     from src.capture.framework import run_records
+    from src.db import reconcile_source_selection
     conn = open_qd_db()
     try:
         records = [map_memory(row) for row in fetch_memories(conn, min_confidence)]
@@ -152,7 +161,13 @@ def capture(*, dry_run=False, min_confidence=0.5, decisions=True):
             records.extend(map_decision(row) for row in fetch_kg_decisions(conn))
     finally:
         conn.close()
-    return run_records(records, dry_run=dry_run, refresh=True)
+    # Decisions are authoritative for qd://entity/ only when they were read.
+    prefixes = (MEMORY_URL_PREFIX, DECISION_URL_PREFIX) if decisions else (MEMORY_URL_PREFIX,)
+    selection = reconcile_source_selection(
+        prefixes, {(r["source_type"], r["source_url"]) for r in records}, dry_run=dry_run)
+    summary = run_records(records, dry_run=dry_run, refresh=True)
+    summary["selection"] = selection
+    return summary
 
 
 def main():
