@@ -1,32 +1,31 @@
 # Refactor plan: streamlining Second Brain (v4)
 
-## Status (2026-10-06, R7 head)
+## Status (2026-10-09, R7 deployed)
 
-The plan below was authorized on 2026-09-26 and implemented on the refactor branch `codex/refactor-safety-routing` @ `74ba02d` (its ledgers: [docs/archive/refactor-2026-09-26/](archive/refactor-2026-09-26/README.md)). That branch was not deployed as one step. Its content was re-cut, re-reviewed and rehearsed as the staged release line in [RELEASES.md](RELEASES.md):
+The plan below was authorized on 2026-09-26 and implemented on the refactor branch `codex/refactor-safety-routing` @ `74ba02d` (its ledgers: [docs/archive/refactor-2026-09-26/](archive/refactor-2026-09-26/README.md)). That branch was not deployed as one step. Its content was re-cut, re-reviewed and rehearsed as the staged release line in [RELEASES.md](RELEASES.md), and deployed on 2026-10-09 in the order R3, R4, R5, R7, with the R6 corpus repair applied the same day (deployment records `R3-DEPLOYMENT.md` … `R7-DEPLOYMENT.md` in the operator's private review folder):
 
 | Release | Plan phases carried | Status |
 |---|---|---|
 | R1 `8dd3bb7` | 1a routing and accounting (items 1.1–1.6), 1.12 expiry rule, 1.19 isolation, 1.20 plaintext sync stop, migration runner port (1.13) | deployed 2026-10-05 |
 | R1b | 1.20 dependency upgrades (`requirements.lock`) | deployed 2026-10-05 |
-| R3 `e1cff5c` | 1b ingestion integrity, 1c relationships (016 backfill), 1d data layer and migration 016, 1e run integrity, 1.15 MCP, 4a/4e, 5 decomposition, 7 guardrails for those classes, 3 (dead helpers) | built, reviewed |
-| R4 `d063543` | 4b capture framework, 3 (staging hop, migrators, canary script), D5 native Kiro IDE capture | built, reviewed |
-| R5 `0302f0f` | 2 truthful operation, 1.20 encrypted bundles and verified restore, 3 (`codex-canary`) | built, reviewed |
-| R6 | D2 paid corpus repair (items 1.9–1.11 **application**) | pending authorization |
-| R7 | 1.14 runtime role separation (017, F-138), D4 graph writer and table retirement (018), 6 documentation and specs, 7 documentation guardrails | built, reviewed |
+| R3 `e1cff5c` | 1b ingestion integrity, 1c relationships (016 backfill), 1d data layer and migration 016, 1e run integrity, 1.15 MCP, 4a/4e, 5 decomposition, 7 guardrails for those classes, 3 (dead helpers) | deployed 2026-10-09 16:58 (migration 016) |
+| R4 `d063543` | 4b capture framework, 3 (staging hop, migrators, canary script), D5 native Kiro IDE capture | deployed 2026-10-09 18:08 |
+| R5 `0302f0f` | 2 truthful operation, 1.20 encrypted bundles and verified restore, 3 (`codex-canary`) | deployed 2026-10-09 18:52 |
+| R6 | D2 paid corpus repair (items 1.9–1.11 **application**) | applied 2026-10-09 (metadata 2,832 ops, dedup 70 ops; rechunk applied 2026-10-09, 8,240 ops / 96,331 Titan calls) |
+| R7 | 1.14 runtime role separation (017, F-138), D4 graph writer and table retirement (018), 6 documentation and specs, 7 documentation guardrails | deployed 2026-10-09 19:30 (017, 018, app role demoted) |
 
 Phase 0 is done (2026-09-24). Phase 4d's 20,000-test-line target was dropped as a goal; integrity and isolation regressions were kept (the isolated suite stood at 2,228 tests at the R7 database head). Phases 4c (shared backend base) and the routing-lane items below are partially carried: `src/mcp_readonly.py` exists but the Explorer still attaches the full MCP server; there is no dedicated `grounding_auditor` role (the audit runs through the skeptic seat's backend); the `latency_s` metrics rename was not done.
 
-**What remains after R7** (none of it is closed by a passing suite):
+**What remains after R7 and R6** (none of it is closed by a passing suite):
 
-1. **R6 corpus repair** — regenerate the metadata, dedup and rechunk manifests on the deployed corpus after R4's capture runs, price the embedding work, authorize, apply with `--allow-paid-embedding`, with the pre-window bundle as rollback.
-2. **Human evaluation trial** — re-prepare a frozen record/provider/cost manifest against the deployed release and obtain human grounding, novelty, uptake and outcome judgments ([VALIDATION.md](VALIDATION.md)); the refactor branch's trial runner was not ported.
-3. **Static IAM key replacement** — provision and verify an unattended credential provider for `second-brain-jobs`, then revoke the identified old key with a receipt; `~/.aws` residue is 0600 but still present.
-4. **OneDrive recovery-key verification** — confirm the key copy is retrievable from a second device or session ([DISASTER-RECOVERY.md](DISASTER-RECOVERY.md)).
-5. **Historical Drive plaintext purge** — the listing-first CONFIRM-REQUIRED step in the R5 runbook, after the first verified bundle.
-6. **Graph archive off-site** — copy `backups/graph-export/*.dump.gpg` to Drive after the R7 window; the archive is local-only until then.
-7. **Routing lane** — Explorer on `src.mcp_readonly` with exact tool grants, a dedicated `grounding_auditor` role, served-model metadata check for Claude Code, `latency_s` rename (F-145, F-061 residue).
-8. **Documented-open capture findings** — F-086 (legacy Codex turn identity wins), F-090 (Quick Desktop rows that fell out of the selection stay active), F-094 (private/incognito QD chats filtered only by count and deletion), and the remaining open rows of the [findings register](audit-2026-09-24/00-FINDINGS-REGISTER.md).
-9. **Operational residue** — stale databases `memory_bank_test` / `second_brain_codex_test` on the installed cluster (optional `DROP DATABASE` after R7), the 1,069 unembedded Quick Desktop fact parents (a rechunk-manifest item), the one-off cleanup of test-polluted metrics rows, `distill` re-enablement and e-mail delivery (product decisions).
+1. **Human evaluation trial** — re-prepare a frozen record/provider/cost manifest against the deployed release and obtain human grounding, novelty, uptake and outcome judgments ([VALIDATION.md](VALIDATION.md)); the refactor branch's trial runner was not ported.
+2. **Static IAM key replacement** — provision and verify an unattended credential provider for `second-brain-jobs`, then revoke the identified old key with a receipt; `~/.aws` residue is 0600 but still present.
+3. **OneDrive recovery-key verification** — confirm the key copy is retrievable from a second device or session ([DISASTER-RECOVERY.md](DISASTER-RECOVERY.md)).
+4. **Historical Drive plaintext purge** — the listing-first CONFIRM-REQUIRED step in the R5 runbook, after the first verified bundle.
+5. **Graph archive off-site** — copy `backups/graph-export/*.dump.gpg` to Drive after the R7 window; the archive is local-only until then.
+6. **Routing lane** — Explorer on `src.mcp_readonly` with exact tool grants, a dedicated `grounding_auditor` role, served-model metadata check for Claude Code, `latency_s` rename (F-145, F-061 residue).
+7. **Documented-open capture findings** — F-086 (legacy Codex turn identity wins), F-090 (Quick Desktop rows that fell out of the selection stay active), F-094 (private/incognito QD chats filtered only by count and deletion), and the remaining open rows of the [findings register](audit-2026-09-24/00-FINDINGS-REGISTER.md).
+8. **Operational residue** — stale databases `memory_bank_test` / `second_brain_codex_test` on the installed cluster (optional `DROP DATABASE` after R7), the one-off cleanup of test-polluted metrics rows, `distill` re-enablement and e-mail delivery (product decisions).
 
 **Evidence:** [AUDIT-2026-09-24.md](AUDIT-2026-09-24.md) and the [findings register](audit-2026-09-24/00-FINDINGS-REGISTER.md). Three independent code reviews on September 26 supported the correctness-first direction with the amendments below; each release had its own independent review afterwards. Historical corpus counts in this plan are audit observations, not current measurements. Original item numbers are stable for audit references; the text below is the authorized plan as written on 2026-09-26, kept for those references — the table above, not the per-item prose, says what was carried where.
 
@@ -62,7 +61,7 @@ Closed on 2026-10-09, both unrelated to the refactor: the identity in `config/sk
 
 ---
 
-## Phase 1 — Correctness and safety — carried by R1/R3 (1.14 by R7; 1.9–1.11 application pending as R6)
+## Phase 1 — Correctness and safety — carried by R1/R3 (1.14 by R7; 1.9–1.11 application by R6, applied 2026-10-09)
 
 Small, localised edits; nearly all the value. Ship as several merges. **Order within the phase matters and is given.**
 

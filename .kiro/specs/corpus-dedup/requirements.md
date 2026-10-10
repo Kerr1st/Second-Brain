@@ -1,6 +1,6 @@
 # Source identity and resumable repair: acceptance criteria
 
-Reviewed against the refactor source on 2026-09-26 and re-pinned to the R7 head of the release line on 2026-10-06. These requirements describe behavior, not deployed status; carried by: R3 (planners); R6 application pending authorization (see [RELEASES.md](../../../docs/RELEASES.md)).
+Reviewed against the refactor source on 2026-09-26 and re-pinned to the R7 head of the release line on 2026-10-06. These requirements describe behavior, not deployed status; carried by: R3 (planners); R6 application, applied 2026-10-09 (see [RELEASES.md](../../../docs/RELEASES.md)).
 
 1. Create a dry-run manifest of identities, row fingerprints and database incarnation before destructive repair.
 2. Merge only identical captured-source content with matching project/type/chunk identity and status; keep derived tasks distinct.

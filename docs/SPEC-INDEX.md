@@ -9,7 +9,7 @@ Twelve active families, each four short files (`requirements.md`, `design.md`, `
 | [db-layer-hardening](../.kiro/specs/db-layer-hardening/requirements.md) | Database lifecycle, SQL ownership, migrations, runtime roles | R3, R7 |
 | [relationship-lifecycle](../.kiro/specs/relationship-lifecycle/requirements.md) | Relationship provenance and expiry | R1 (expiry rule), R3 (016 backfill) |
 | [run-ledger](../.kiro/specs/run-ledger/requirements.md) | Discovery authorization and truthful completion | R3 |
-| [corpus-dedup](../.kiro/specs/corpus-dedup/requirements.md) | Source identity and resumable repair | R3 (planners), R6 (application, pending) |
+| [corpus-dedup](../.kiro/specs/corpus-dedup/requirements.md) | Source identity and resumable repair | R3 (planners), R6 (application, applied 2026-10-09) |
 | [project-auto-tagging](../.kiro/specs/project-auto-tagging/requirements.md) | Project attribution | R3, R4 |
 | [capture-framework](../.kiro/specs/capture-framework/requirements.md) | Capture channels and vocabulary | R4 |
 | [retrieval-regression-gate](../.kiro/specs/retrieval-regression-gate/requirements.md) | Retrieval regression and ranking ownership | R3 |
