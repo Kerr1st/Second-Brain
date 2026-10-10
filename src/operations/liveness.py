@@ -6,7 +6,9 @@ Reads ``config/liveness.toml`` (override with ``SECOND_BRAIN_LIVENESS_CONFIG``),
 runs read-only SELECTs against the DB named by ``DB_HOST/DB_PORT/DB_NAME/DB_USER``
 (the installed defaults are production; tests point them at a disposable
 cluster), inspects ``logs/jobs/*.json`` and writes every finding to
-``logs/jobs/liveness-report.json`` before printing.  Exit 1 iff a *required*
+``logs/jobs/liveness-report.json`` before printing.  Job-written backlog sidecars
+(``logs/jobs/<job>.backlog.json``, src.operations.backlog) are read by the
+``[backlog.<job>]`` check, never by the status sweep.  Exit 1 iff a *required*
 finding is unhealthy.  Nothing here notifies; the shell adapter and the wrapper do.
 
 Every predicate is a pure function over already-fetched rows so it can be tested
@@ -26,6 +28,8 @@ REPO = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = REPO / "config" / "liveness.toml"
 SEVERITIES = ("required", "advisory", "retired")
 NEVER = 99999
+#: Job-written backlog sidecars (src.operations.backlog) are not wrapper status records.
+BACKLOG_SUFFIX = ".backlog.json"
 
 #: Rows that are evidence of a capture. Index-only chunk rows are not: the Codex
 #: writer's ``*_chunk`` children of Topic Segments / task memories, and any chunk
@@ -62,6 +66,17 @@ def load_policy(path=None) -> dict:
     for job, reason in advisory.items():
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError(f"[jobs.advisory] {job}: an advisory job must state its reason")
+    backlog = policy.setdefault("backlog", {})
+    if not isinstance(backlog, dict):
+        raise ValueError("[backlog] must be a table of [backlog.<job>] entries")
+    for job, entry in backlog.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"[backlog.{job}] must be a table")
+        runs = entry.get("consecutive_runs")
+        if not isinstance(runs, int) or isinstance(runs, bool) or runs <= 0:
+            raise ValueError(f"[backlog.{job}] consecutive_runs must be a positive integer")
+        if not str(entry.get("reason", "")).strip():
+            raise ValueError(f"[backlog.{job}]: a backlog advisory must state its reason")
     return policy
 
 
@@ -212,7 +227,7 @@ def inspect_statuses(directory, *, now=None, failure_days=1, expected_interval_h
     results = []
     seen = set()
     for path in sorted(Path(directory).glob("*.json")):
-        if path.name == "liveness-report.json":
+        if path.name == "liveness-report.json" or path.name.endswith(BACKLOG_SUFFIX):
             continue
         try:
             value = json.loads(path.read_text())
@@ -286,6 +301,36 @@ def job_findings(directory, policy: dict, now=None) -> list[dict]:
                             message=r.get("message", ""), **{k: v for k, v in r.items()
                                                              if k not in {"job", "state", "healthy", "severity", "message"}}))
     return out
+
+
+def backlog_findings(directory, policy: dict) -> list[dict]:
+    """``<dir>/<job>.backlog.json`` (src.operations.backlog) for every ``[backlog.<job>]``:
+    ``consecutive_deferred_runs`` at or above ``consecutive_runs`` is an advisory with the
+    configured reason; a backlog never fails the sweep.  A missing state file is healthy
+    (the job has not completed a run that recorded it yet)."""
+    from src.operations import backlog as backlog_state
+    findings = []
+    for job, entry in sorted((policy.get("backlog") or {}).items()):
+        limit = int(entry["consecutive_runs"])
+        state = backlog_state.read_state(job, directory)
+        if not state:
+            findings.append(_finding("backlog", job, "no_state", healthy=True, severity="advisory",
+                                     message=f"{job}: no backlog state recorded yet", consecutive_runs=limit))
+            continue
+        streak = int(state.get("consecutive_deferred_runs") or 0)
+        deferred = int(state.get("deferred") or 0)
+        extra = {"consecutive_deferred_runs": streak, "deferred": deferred, "consecutive_runs": limit,
+                 "first_deferred_at": state.get("first_deferred_at")}
+        if streak >= limit:
+            findings.append(_finding("backlog", job, "persistent_backlog", healthy=False, severity="advisory",
+                                     message=f"{job}: {deferred} item(s) deferred, {streak} consecutive run(s) with "
+                                             f"deferrals (threshold {limit}) — advisory: {entry['reason']}",
+                                     advisory_reason=entry["reason"], **extra))
+        else:
+            findings.append(_finding("backlog", job, "healthy", healthy=True, severity="advisory",
+                                     message=f"{job} backlog ok ({deferred} deferred; {streak} consecutive / "
+                                             f"threshold {limit})", **extra))
+    return findings
 
 
 # ------------------------------------------------------------------- database
@@ -366,6 +411,7 @@ def run(policy, status_dir, *, conn=None, now=None, skip_db=False) -> list[dict]
                 if own:
                     conn.close()
     findings += job_findings(status_dir, policy, now=now)
+    findings += backlog_findings(status_dir, policy)
     return findings
 
 

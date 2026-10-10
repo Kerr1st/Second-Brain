@@ -281,6 +281,47 @@ def test_the_advisory_list_is_config_not_a_hard_coded_exclusion(tmp_path):
     assert plain["severity"] == "required" and listed["severity"] == "advisory" and listed["advisory_reason"] == "being fixed"
 
 
+# ------------------------------------------------------- persistent backlog
+
+def test_bookmarks_backlog_is_an_advisory_by_explicit_config_with_a_reason(policy):
+    entry = policy["backlog"]["bookmarks"]
+    assert entry["consecutive_runs"] == 3 and "deferred" in entry["reason"]
+
+
+def test_policy_rejects_a_backlog_entry_without_a_reason_or_threshold(tmp_path):
+    base = '[channels.x]\npredicate = "source_type = \'x\'"\nmax_age_days = 3\nseverity = "required"\n'
+    bad = tmp_path / "liveness.toml"
+    for body, match in (('[backlog.bookmarks]\nconsecutive_runs = 3\n', "reason"),
+                        ('[backlog.bookmarks]\nconsecutive_runs = 0\nreason = "r"\n', "positive"),
+                        ('[backlog]\nbookmarks = 3\n', "table")):
+        bad.write_text(base + body)
+        with pytest.raises(ValueError, match=match):
+            load_policy(bad)
+
+
+def test_persistent_backlog_is_advisory_only_at_the_threshold_and_never_fails(tmp_path, policy):
+    from src.operations import backlog
+    (finding,) = liveness.backlog_findings(tmp_path, policy)
+    assert finding["healthy"] and finding["state"] == "no_state"
+    for run in range(1, 4):
+        backlog.record_run("bookmarks", 40, tmp_path, now=NOW + timedelta(days=7 * run))
+        (finding,) = liveness.backlog_findings(tmp_path, policy)
+        assert finding["consecutive_deferred_runs"] == run and not required_failure(finding)
+        assert finding["healthy"] is (run < 3)
+    assert finding["state"] == "persistent_backlog" and finding["severity"] == "advisory"
+    assert finding["advisory_reason"] == policy["backlog"]["bookmarks"]["reason"] and "advisory:" in finding["message"]
+    assert finding["first_deferred_at"] == (NOW + timedelta(days=7)).isoformat()
+    # the sidecar is not mistaken for a wrapper status record
+    assert inspect_statuses(tmp_path, now=NOW) == []
+    report = liveness.write_report(tmp_path / "liveness-report.json", liveness.run(policy, tmp_path, now=NOW, skip_db=True), NOW)
+    assert report["healthy"] is True and "bookmarks" in report["advisories"]
+    # a run that drains the queue resets the streak
+    backlog.record_run("bookmarks", 0, tmp_path, now=NOW + timedelta(days=28))
+    (finding,) = liveness.backlog_findings(tmp_path, policy)
+    assert finding["healthy"] and finding["consecutive_deferred_runs"] == 0
+    assert backlog.read_state("bookmarks", tmp_path)["first_deferred_at"] is None
+
+
 # ------------------------------------------------------- end to end (database)
 
 def _seed(conn, source_type, days_ago, count=1):

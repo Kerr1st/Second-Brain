@@ -221,7 +221,27 @@ def main():
 
     print(f"\nInternal: {ok} scraped, {skipped_auth} skipped_auth, {fail} failed")
     print(f"Public: {public_stats}")
+    report_backlog(public_stats["deferred"])
     return int(bool(fail or public_stats["failed"]))
+
+
+def report_backlog(deferred):
+    """Track consecutive runs that deferred URLs; warn once the backlog persists.
+
+    A single deferral is normal (the rest is retried next run) and never fails
+    the job; the liveness sweep turns a persistent streak into an advisory."""
+    try:
+        from src.operations import backlog
+        state = backlog.record_run("bookmarks", deferred)
+        limit = backlog.threshold("bookmarks")
+    except Exception as exc:  # noqa: BLE001 - backlog bookkeeping must not change the job's outcome
+        print(f"WARNING: could not record the bookmarks backlog state: {type(exc).__name__}")
+        return None
+    streak = state["consecutive_deferred_runs"]
+    if streak >= limit:
+        print(f"WARNING: bookmarks backlog persists — {deferred} URL(s) deferred, {streak} consecutive "
+              f"run(s) with deferrals (threshold {limit}); the Crawlee budget is not draining the queue")
+    return state
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ def sb(tmp_path, monkeypatch):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     monkeypatch.setattr(mod, "CRAWLEE_DIR", str(tmp_path))
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
     return mod
 
 
@@ -151,3 +152,36 @@ class TestInternalAuth:
         assert "1 skipped_auth, 0 failed" in capsys.readouterr().out
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "failed")
         assert sb.main() == 1
+
+
+class TestBacklogAlarm:
+    """A deferral is normal; three runs in a row that defer are a WARNING (and a
+    liveness advisory) — still exit 0."""
+
+    def _main_with_deferrals(self, sb, tmp_path, monkeypatch, deferred):
+        bookmarks = tmp_path / "Bookmarks"
+        bookmarks.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
+            {"type": "url", "name": "Public", "url": "https://example.org/x"}]}}}))
+        monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
+        monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls, timeout=None: {
+            "processed": 0, "skipped": 0, "failed": 0, "timed_out_batches": 0, "deferred": deferred})
+        return sb.main()
+
+    def test_warning_only_after_three_consecutive_deferring_runs(self, sb, tmp_path, monkeypatch, capsys):
+        state = tmp_path / "jobs" / "bookmarks.backlog.json"
+        for run in (1, 2):
+            assert self._main_with_deferrals(sb, tmp_path, monkeypatch, 7) == 0
+            assert "WARNING" not in capsys.readouterr().out
+            assert json.loads(state.read_text())["consecutive_deferred_runs"] == run
+        assert self._main_with_deferrals(sb, tmp_path, monkeypatch, 7) == 0
+        out = capsys.readouterr().out
+        assert "WARNING: bookmarks backlog persists" in out and "3 consecutive" in out
+        assert self._main_with_deferrals(sb, tmp_path, monkeypatch, 0) == 0
+        assert "WARNING" not in capsys.readouterr().out
+        assert json.loads(state.read_text())["consecutive_deferred_runs"] == 0
+
+    def test_backlog_bookkeeping_failure_never_changes_the_exit(self, sb, tmp_path, monkeypatch, capsys):
+        (tmp_path / "jobs").write_text("not a directory")
+        assert self._main_with_deferrals(sb, tmp_path, monkeypatch, 7) == 0
+        assert "could not record the bookmarks backlog state" in capsys.readouterr().out

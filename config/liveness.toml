@@ -176,3 +176,13 @@ youtube = 30
 # in the reason is met.
 [jobs.advisory]
 weekly-digest = "network preflight pending verification; remove after two consecutive OK runs"
+
+# --- persistent job backlog --------------------------------------------------------
+# A job that legitimately leaves work for its next run records its own streak in
+# logs/jobs/<job>.backlog.json (src/operations/backlog.py).  `consecutive_runs`
+# consecutive runs that deferred work → ⚠ with the (mandatory) reason; a backlog is
+# never ❌ and one deferral is never reported.  The job prints a WARNING at the
+# same threshold.
+[backlog.bookmarks]
+consecutive_runs = 3
+reason = "scrape_bookmarks.py: the Crawlee time budget could not start every new public bookmark for 3+ runs in a row (deferred, retried next run); prune bookmarks, extend SECOND_BRAIN_JOB_TIMEOUT_BOOKMARKS or tune CRAWLEE_BATCH_*"
