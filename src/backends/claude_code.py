@@ -112,7 +112,28 @@ _SECOND_BRAIN_MCP = {
     }
 }
 
-__all__ = ["ClaudeCodeInvoker", "CLAUDE_CLI"]
+# Read-only discovery surface for the Explorer (F-145): ``python -m
+# src.mcp_readonly`` registers no mutating tool. The server key stays
+# ``second-brain`` so tool names are unchanged (``mcp__second-brain__<tool>``).
+_SECOND_BRAIN_READONLY_MCP = {
+    "second-brain": {
+        "command": sys.executable,
+        "args": ["-m", "src.mcp_readonly"],
+        "cwd": _REPO_ROOT,
+    }
+}
+
+#: Exact tool grants per stage that runs on the read-only server. Only the
+#: tools the Explorer prompt (src/prompts/explorer.py) and the MCP startup
+#: probe actually use; ``memory_graph`` is served read-only but not granted.
+#: Built-in tools (Bash, Read, Write, WebFetch, ...) are disabled via
+#: ``--tools ""``; MCP tools outside the list are not pre-approved and so are
+#: denied in non-interactive ``-p`` mode.
+READONLY_TOOL_GRANTS: dict[str, tuple[str, ...]] = {
+    "explorer": ("memory_search", "memory_list", "memory_read", "memory_recent_activity"),
+}
+
+__all__ = ["ClaudeCodeInvoker", "CLAUDE_CLI", "READONLY_TOOL_GRANTS"]
 
 
 class ClaudeCodeInvoker(AgenticCliInvoker):
@@ -168,9 +189,13 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         practice; it is cleared on entry to be safe against a prior partial run.
         """
         self._pending_mcp_configs.clear()
+        # The stage selects the MCP surface (read-only server + exact grants
+        # for the Explorer); the base command builder does not receive it.
+        self._current_stage = kwargs.get("stage")
         try:
             return super().invoke(*args, **kwargs)
         finally:
+            self._current_stage = None
             self._cleanup_mcp_configs()
 
     # --- Claude-Code-specific hooks ----------------------------------------
@@ -273,6 +298,13 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         """
         if not needs_tools:
             return ["--strict-mcp-config", "--tools", ""]
+        grants = READONLY_TOOL_GRANTS.get(getattr(self, "_current_stage", None) or "")
+        if grants is not None:
+            # Read-only server, no built-ins, and only the granted MCP tools.
+            config_path = self._write_mcp_config(name, servers=_SECOND_BRAIN_READONLY_MCP)
+            allowed = ",".join(f"mcp__second-brain__{tool}" for tool in grants)
+            return ["--mcp-config", config_path, "--strict-mcp-config",
+                    "--tools", "", "--allowedTools", allowed]
         config_path = self._write_mcp_config(name)
         return ["--mcp-config", config_path, "--strict-mcp-config"]
 
@@ -280,7 +312,7 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         """Filesystem path for the temp ``--mcp-config`` JSON file."""
         return os.path.join(tempfile.gettempdir(), f"{name}_mcp_config.json")
 
-    def _write_mcp_config(self, name: str) -> str:
+    def _write_mcp_config(self, name: str, servers: dict | None = None) -> str:
         """Write the Second Brain MCP server config and track it for cleanup.
 
         Claude Code's ``--mcp-config`` consumes the standard ``{"mcpServers":
@@ -291,7 +323,7 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         """
         path = self._mcp_config_path(name)
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"mcpServers": _SECOND_BRAIN_MCP}, f)
+            json.dump({"mcpServers": servers or _SECOND_BRAIN_MCP}, f)
         self._pending_mcp_configs.append(path)
         return path
 
