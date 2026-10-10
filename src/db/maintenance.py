@@ -237,11 +237,89 @@ def _repair_text(row, strip_known_ide_context=False):
     return text
 
 
+#: Codex record kinds whose rows may become chunk parents. Their chunks get a
+#: distinct ``<kind>_chunk`` record kind and keep only locating keys: a chunk is
+#: not itself a Topic Segment (the Codex writer finds segments by
+#: ``record_kind`` + ``segment_index`` under the task) nor a task memory, and the
+#: rechunk planner streams segments by record kind, so it must never see a chunk
+#: as one.
+CHUNKABLE_RECORD_KINDS = {'topic_segment': ('segment_index', 'task_source_url'),
+                          'task_memory': ('kind', 'task_source_url')}
+
+#: Rows the rechunk planner considers: top-level rows except the verbatim Codex
+#: Captured Task (represented by its Topic Segments), plus the Topic Segments
+#: themselves -- child rows that are chunk *parents* when oversize. Derived
+#: ``distilled_agent_task`` memories are top-level and follow the generic rules.
+RECHUNK_SCOPE = """status = 'active' AND (
+    (parent_id IS NULL AND (source_type IS NULL OR source_type <> 'codex_task'))
+    OR (parent_id IS NOT NULL AND source_type = 'codex_task'
+        AND metadata @> '{"record_kind": "topic_segment"}'::jsonb))"""
+
+
+def chunk_metadata(parent_metadata, index, total):
+    """Metadata for chunk ``index`` of ``total`` of a parent with ``parent_metadata``."""
+    meta = dict(parent_metadata or {})
+    kind = meta.get('record_kind')
+    if kind in CHUNKABLE_RECORD_KINDS:
+        meta = {k: meta[k] for k in CHUNKABLE_RECORD_KINDS[kind] if k in meta}
+        meta['record_kind'] = f'{kind}_chunk'
+    meta.update(chunk_index=index, total_chunks=total)
+    return meta
+
+
+def install_chunk_set(conn, parent_id, chunks, *, fields, metadata, mem_class, extra_metadata=None):
+    """Replace ``parent_id``'s active chunk set inside the caller's transaction.
+
+    ``chunks`` is a sequence of ``(text, vector)``; ``fields`` carries the copied
+    columns (type, title, source_url, source_type, project, tags,
+    encoding_context); ``mem_class`` is a value or a ``text -> class`` callable.
+    Active children become ``superseded`` (callers purge the uncited ones with
+    :func:`purge_superseded_chunks` in the same transaction) and the parent's own
+    vector is cleared: the vector leg does not exclude parents with chunks (only
+    the lexical leg does) and ``dedup_candidates`` groups a child row (a Topic
+    Segment) under *its* parent but its chunks under it, so a whole-row vector
+    beside the chunk vectors would be a second hit for the same text. Returns the
+    number of chunks superseded.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM memories WHERE parent_id=%s AND status='active' ORDER BY id FOR UPDATE", (parent_id,))
+        cur.execute("UPDATE memories SET status='superseded',updated_at=now() WHERE parent_id=%s AND status='active'", (parent_id,))
+        superseded = cur.rowcount
+        cur.execute("UPDATE memories SET embedding=NULL WHERE id=%s AND embedding IS NOT NULL", (parent_id,))
+    total = len(chunks)
+    for i, (text, vector) in enumerate(chunks):
+        create_memory(type=fields['type'], title=f"{fields['title']} (chunk {i+1}/{total})", content=text,
+                      embedding=vector, tags=fields.get('tags'), source_url=fields.get('source_url'),
+                      source_type=fields.get('source_type'), project=fields.get('project'), parent_id=parent_id,
+                      metadata={**chunk_metadata(metadata, i, total), **(extra_metadata or {})},
+                      mem_class=mem_class(text) if callable(mem_class) else mem_class,
+                      encoding_context=fields.get('encoding_context'), conn=conn)
+    return superseded
+
+
 def _active_children(cur, parent_id):
     cur.execute(f"""SELECT id, metadata->>'chunk_index' AS chunk_index, {_SQL_CONTENT_SHA256} AS content_sha256,
                            embedding IS NOT NULL AS embedded
                     FROM memories WHERE parent_id = %s AND status = 'active' ORDER BY id""", (parent_id,))
     return [dict(r) for r in cur.fetchall()]
+
+
+def oversize_vector_rows(max_chunk_chars=4000, *, conn=None):
+    """Corpus invariant probe (read-only): active, embedded, childless rows over the bound.
+
+    Every vector should describe at most ``max_chunk_chars`` characters, whatever
+    the source type or nesting depth; the list should be empty after a rechunk.
+    Returns ``[{id, source_type, record_kind, parent_id, chars}]`` without text.
+    """
+    from .pool import connection_scope
+    with connection_scope(conn) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""SELECT m.id::text, m.source_type, m.metadata->>'record_kind' AS record_kind,
+                              m.parent_id::text, length(m.content) AS chars
+                       FROM memories m
+                       WHERE m.status = 'active' AND m.embedding IS NOT NULL AND length(m.content) > %s
+                         AND NOT EXISTS (SELECT 1 FROM memories c WHERE c.parent_id = m.id AND c.status = 'active')
+                       ORDER BY chars DESC, m.id""", (max_chunk_chars,))
+        return [dict(r) for r in cur.fetchall()]
 
 
 def plan_rechunk(max_chunk_chars=4000, *, strip_known_ide_context=False):
@@ -259,6 +337,10 @@ def plan_rechunk(max_chunk_chars=4000, *, strip_known_ide_context=False):
       ~35,100 such children on the live corpus);
     * a childless row that is unembedded, or longer than the bound, gets a single
       leaf vector or a chunk set respectively.
+
+    Scope is :data:`RECHUNK_SCOPE`: Codex Topic Segments (child rows, parents of
+    their own chunks) and derived ``distilled_agent_task`` memories are planned
+    by the same rules; a row keeps its ID and content, its chunks carry vectors.
     """
     from src.ingest import chunk_by_section
     with get_connection() as conn:
@@ -268,8 +350,7 @@ def plan_rechunk(max_chunk_chars=4000, *, strip_known_ide_context=False):
               'pricing_basis':'Current corpus; regenerate after dedup before paid application', 'max_chunk_chars':max_chunk_chars,'operations':[],'embedding_calls':0,'input_characters':0,
               'skipped_complete_leaves':0}
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            for row in _stream_rows(conn, where="parent_id IS NULL AND status = 'active' AND (source_type IS NULL OR source_type <> ALL(%s))",
-                                    params=(['codex_task','distilled_agent_task'],)):
+            for row in _stream_rows(conn, where=RECHUNK_SCOPE):
                 rid=str(row['id'])
                 existing=_active_children(cur, rid)
                 may_strip = strip_known_ide_context and row['source_type'] == 'kiro_ide_chat'
@@ -387,12 +468,10 @@ def apply_rechunk(plan, expected_sha256, *, embed, cache_dir):
                     # Old chunks are replaced, not accumulated (review B N4): a chunk that
                     # nothing references is deleted (its text lives on in the parent and
                     # the new chunk set); a cited chunk is kept as superseded history.
-                    cur.execute("UPDATE memories SET status='superseded',updated_at=now() WHERE parent_id=%s AND status='active'",(rid,))
-                    for i,(text,vector) in enumerate(zip(chunks,vectors)):
-                        create_memory(type=row['type'], title=f"{row['title']} (chunk {i+1}/{len(chunks)})", content=text,
-                            embedding=vector,source_url=row['source_url'],source_type=row['source_type'],project=row['project'],
-                            parent_id=rid,metadata={**(row['metadata'] or {}),'chunk_index':i,'total_chunks':len(chunks),'maintenance_manifest':expected_sha256},
-                            mem_class=classify_memory(row['type'],text),conn=conn)
+                    install_chunk_set(conn, rid, list(zip(chunks, vectors)),
+                        fields={k: row[k] for k in ('type','title','source_url','source_type','project','tags','encoding_context')},
+                        metadata=row['metadata'], mem_class=lambda text: classify_memory(row['type'], text),
+                        extra_metadata={'maintenance_manifest': expected_sha256})
                     purge=purge_superseded_chunks(conn, rid)
                 cur.execute('INSERT INTO corpus_maintenance(manifest_sha256,operation_key,details) VALUES(%s,%s,%s::jsonb)',(expected_sha256,rid,json.dumps({'mode':op['mode'],'chunks':len(chunks),**purge})))
         applied+=1
