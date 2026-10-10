@@ -41,6 +41,21 @@ METRICS_DIR = os.environ.get(
 )
 
 
+#: One per-call wall-clock key for every backend's ``logs/llm_metrics`` line.
+#: Direct-API lines written before the routing lane used ``duration_s``.
+METRICS_LATENCY_KEY = "latency_s"
+_LEGACY_LATENCY_KEYS = ("duration_s",)
+
+
+def call_latency_s(record: dict) -> float | None:
+    """Per-call latency from a metrics line, tolerating the legacy ``duration_s``."""
+    for key in (METRICS_LATENCY_KEY, *_LEGACY_LATENCY_KEYS):
+        value = record.get(key) if isinstance(record, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
+
+
 def _write_metrics_line(metrics: dict, run_id: str | None, metrics_dir: str) -> None:
     """Append one JSONL record of an LLM call's metrics to ``metrics_dir``.
 

@@ -190,7 +190,7 @@ class DirectApiInvoker:
             )
 
         finally:
-            metrics["duration_s"] = round(time.monotonic() - t0, 3)
+            metrics["latency_s"] = round(time.monotonic() - t0, 3)
             self._record_metrics(metrics, run_id)
 
     # ------------------------------------------------------------------ #
@@ -224,7 +224,7 @@ class DirectApiInvoker:
             "usage_source": None,
             "real_input_tokens": None,
             "real_output_tokens": None,
-            "duration_s": None,
+            "latency_s": None,
         }
 
     def _parse(self, raw: str, metrics: dict) -> Any:
