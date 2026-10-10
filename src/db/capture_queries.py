@@ -2,6 +2,7 @@
 from psycopg2.extras import RealDictCursor
 from .pool import get_connection, connection_scope
 from .columns import iso
+from src.operations.liveness import CAPTURE_ROWS
 
 def get_arrivals_summary(since, samples_per_source=5):
     """What arrived since ``since``: per source, document/memory counts and the newest
@@ -10,6 +11,9 @@ def get_arrivals_summary(since, samples_per_source=5):
     Memories produced by the system itself (dream-cycle syntheses, distilled
     insights without a capture channel) have no source_type; they are labelled
     ``generated:<type>`` so the caller can tell captured life from synthesis.
+
+    Index-only chunk rows (Codex ``*_chunk`` children, rechunk-maintenance
+    chunks) are not arrivals: they are excluded exactly as liveness excludes them.
 
     Returns a list sorted by document count desc:
         [{"source_type", "documents", "memories", "samples": [{"id","title","type","created_at"}]}]
@@ -23,7 +27,7 @@ def get_arrivals_summary(since, samples_per_source=5):
                          CASE WHEN source_type = 'distilled_agent_task' THEN COALESCE(source_url, id::text)
                               ELSE id::text END END) AS documents,
                        count(*) AS memories
-                FROM memories WHERE created_at >= %s
+                FROM memories WHERE created_at >= %s AND """ + CAPTURE_ROWS + """
                 GROUP BY 1 ORDER BY 2 DESC, 3 DESC
                 """,
                 (since,),

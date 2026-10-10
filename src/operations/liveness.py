@@ -27,6 +27,13 @@ DEFAULT_CONFIG = REPO / "config" / "liveness.toml"
 SEVERITIES = ("required", "advisory", "retired")
 NEVER = 99999
 
+#: Rows that are evidence of a capture. Index-only chunk rows are not: the Codex
+#: writer's ``*_chunk`` children of Topic Segments / task memories, and any chunk
+#: a corpus-maintenance rechunk created (``maintenance_manifest``) -- a rechunk
+#: run today must not make a silent channel look fresh.
+CAPTURE_ROWS = ("COALESCE(metadata->>'record_kind', '') NOT IN ('topic_segment_chunk', 'task_memory_chunk') "
+                "AND NOT COALESCE(metadata ? 'maintenance_manifest', false)")
+
 
 # --------------------------------------------------------------------------- policy
 
@@ -296,7 +303,8 @@ def fetch_channel_ages(conn, policy) -> dict:
     for label, channel in policy["channels"].items():
         try:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT COALESCE(now()::date - MAX(created_at)::date, {NEVER}) FROM memories WHERE {channel['predicate']}")
+                cur.execute(f"SELECT COALESCE(now()::date - MAX(created_at)::date, {NEVER}) FROM memories "
+                            f"WHERE ({channel['predicate']}) AND {CAPTURE_ROWS}")
                 ages[label] = int(cur.fetchone()[0])
         except Exception:  # a broken predicate must surface as query_failed, not kill the sweep
             conn.rollback()
@@ -309,10 +317,10 @@ def fetch_output_history(conn, policy) -> tuple[dict, dict, set]:
     predicates = [c["predicate"] for c in policy["channels"].values() if c["severity"] != "retired"]
     with conn.cursor() as cur:
         cur.execute("SELECT source_type, MAX(created_at)::date FROM memories "
-                    "WHERE source_type IS NOT NULL AND source_type <> '' GROUP BY source_type")
+                    f"WHERE source_type IS NOT NULL AND source_type <> '' AND {CAPTURE_ROWS} GROUP BY source_type")
         last_seen = {row[0]: row[1] for row in cur.fetchall()}
         cur.execute("SELECT source_type, created_at::date FROM memories WHERE source_type IS NOT NULL AND source_type <> '' "
-                    "AND created_at >= now() - make_interval(days => %s) GROUP BY 1, 2", (history_days,))
+                    f"AND {CAPTURE_ROWS} AND created_at >= now() - make_interval(days => %s) GROUP BY 1, 2", (history_days,))
         days_seen: dict = {}
         for source_type, day in cur.fetchall():
             days_seen.setdefault(source_type, []).append(day)
