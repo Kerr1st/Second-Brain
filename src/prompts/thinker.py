@@ -87,6 +87,13 @@ Provide the target_memory_id of the memory to update.
 Provide the target_memory_id and a supersedes_reason explaining why the old \
 memory is being replaced. The old memory is preserved with status "superseded."
 
+UPDATE and SUPERSEDE may only target a memory marked "may_update": true in \
+memory_slice.memories — a discovery this system stored earlier. Every other \
+memory (captured evidence, guidance, anything marked "may_update": false or not \
+in the packet) is immutable: cite it in source_memories or relationships and \
+use CREATE instead. A candidate that targets an immutable memory is discarded \
+unjudged.
+
 ## Depth framework
 
 Every candidate MUST include:

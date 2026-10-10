@@ -21,6 +21,7 @@ import psycopg2
 import uuid
 
 from src.db import get_memories_by_ids, iso as _iso
+from src.dream_cycle.storage import is_mutable_target
 
 logger = logging.getLogger(__name__)
 
@@ -108,12 +109,15 @@ def build_packet(memories: list[dict]) -> list[dict]:
 
     The memory that crosses the total budget is cut to what remains; every
     memory after it keeps its id/title/metadata but carries no content.
+    ``may_update`` marks the memories an UPDATE/SUPERSEDE may target (the
+    storage authority predicate); everything else is immutable to the Thinker.
     """
     entries: list[dict] = []
     remaining = MAX_TOTAL_CONTENT_CHARS
     budget_hit = False
     for memory in memories:
         entry = packet_entry(memory)
+        entry["may_update"] = is_mutable_target(memory)
         if budget_hit:
             entry["content"] = ""
         elif len(entry["content"]) > remaining:

@@ -251,6 +251,14 @@ class TestThinkerPromptExplicit:
         ) in prompt
 
 
+    def test_thinker_prompt_restricts_mutations_to_marked_targets(self):
+        """Run 9bf4ade8: two UPDATEs to captured insights were proposed and blocked.
+        The prompt points the Thinker at the packet's may_update marker."""
+        prompt = get_thinker_prompt()
+        assert 'UPDATE and SUPERSEDE may only target a memory marked "may_update": true' in prompt
+        assert "use CREATE instead" in prompt
+
+
 # ---------------------------------------------------------------------------
 # Explicit tests for Evaluator prompts
 # ---------------------------------------------------------------------------

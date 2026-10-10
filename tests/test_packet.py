@@ -51,8 +51,30 @@ class TestBuildPacket:
         [entry] = build_packet([_mem(UUID_A, content="hello", title="Hi")])
         assert entry == {
             "id": UUID_A, "title": "Hi", "type": "notes", "project": None, "tags": ["x"],
-            "created_at": "2026-03-01T00:00:00+00:00", "content": "hello",
+            "created_at": "2026-03-01T00:00:00+00:00", "content": "hello", "may_update": False,
         }
+
+    @pytest.mark.parametrize("overrides, expected", [
+        ({"type": "insight", "metadata": {"dream_cycle": True}}, True),
+        ({"type": "synthesis", "metadata": '{"dream_cycle": true}'}, True),
+        ({"type": "insight", "metadata": {}}, False),                                     # not a discovery
+        ({"type": "notes", "metadata": {"dream_cycle": True}}, False),                    # captured type
+        ({"type": "insight", "metadata": {"dream_cycle": True}, "source_type": "file"}, False),
+        ({"type": "insight", "metadata": {"dream_cycle": True}, "parent_id": UUID_B}, False),
+        ({"type": "insight", "metadata": {"dream_cycle": True}, "tags": ["governing-guidance"]}, False),
+        ({"type": "insight", "metadata": {"dream_cycle": True, "capture_id": "c1"}}, False),
+    ])
+    def test_may_update_is_exactly_the_storage_target_predicate(self, overrides, expected):
+        from src.dream_cycle.storage import CandidateAuthorizationError, _assert_target_mutable
+        memory = _mem(UUID_A) | overrides
+        [entry] = build_packet([memory])
+        assert entry["may_update"] is expected
+        try:
+            _assert_target_mutable(memory, memory)
+            authorized = True
+        except CandidateAuthorizationError:
+            authorized = False
+        assert authorized is expected
 
     def test_per_memory_truncation(self):
         [entry] = build_packet([_mem(UUID_A, content="x" * (MAX_CONTENT_CHARS_PER_MEMORY + 500))])

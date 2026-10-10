@@ -106,6 +106,19 @@ def _assert_target_mutable(row: dict, snapshot: dict) -> None:
         raise CandidateAuthorizationError("Mutation target changed since evaluation; regenerate the candidate")
 
 
+def is_mutable_target(row: dict) -> bool:
+    """Whether :func:`_assert_target_mutable` accepts ``row`` as an UPDATE/SUPERSEDE target.
+
+    Used to mark targets in the Thinker packet; authorization still runs in full
+    (including the accepted-provenance lookup) before any paid call.
+    """
+    try:
+        _assert_target_mutable(row, row)
+    except CandidateAuthorizationError:
+        return False
+    return True
+
+
 def is_active_memory(row: dict | None) -> bool:
     """The lifecycle rule for anything a discovery cites, targets or relates to."""
     return bool(row) and row.get("status") == "active"
