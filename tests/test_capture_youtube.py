@@ -55,3 +55,81 @@ def test_list_playlist_skips_deleted_and_builds_canonical_url():
         entries = youtube.list_playlist("LL")
     assert [e["id"] for e in entries] == ["vid1", "vid4"]        # deleted/private skipped
     assert entries[0]["url"] == "https://www.youtube.com/watch?v=vid1"  # canonical url
+
+
+# --------------------------------------------------------------------------- #
+# fetch_transcript exit-code policy (2026-10-10: permanent no-transcript       #
+# videos were counted failed nightly and retried forever)                      #
+# --------------------------------------------------------------------------- #
+import logging
+import os
+
+import pytest
+
+_URL = "https://www.youtube.com/watch?v=vidX"
+_VTT = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhello world\n"
+
+
+def _fake_ytdlp(rc, stderr="", write_vtt=False):
+    def run(args, timeout=180):
+        if write_vtt:
+            out_dir = os.path.dirname(args[args.index("-o") + 1])
+            with open(os.path.join(out_dir, "vidX.en.vtt"), "w") as fh:
+                fh.write(_VTT)
+        return subprocess.CompletedProcess(args, rc, stdout="", stderr=stderr)
+    return run
+
+
+def test_fetch_transcript_reads_vtt_even_when_ytdlp_exits_non_zero():
+    with patch.object(youtube, "_ytdlp", _fake_ytdlp(1, "ERROR: one track failed", write_vtt=True)):
+        assert youtube.fetch_transcript(_URL) == "hello world"
+
+
+def test_fetch_transcript_clean_exit_without_vtt_is_no_transcript():
+    with patch.object(youtube, "_ytdlp", _fake_ytdlp(0)):
+        assert youtube.fetch_transcript(_URL) is None
+
+
+@pytest.mark.parametrize("stderr", [
+    "ERROR: [youtube] vidX: Video unavailable. This video has been removed by the uploader",
+    "ERROR: [youtube] vidX: Private video. Sign in if you've been granted access to this video",
+    "ERROR: [youtube] vidX: Sign in to confirm your age. This video may be inappropriate for some users.",
+    "ERROR: [youtube] vidX: Join this channel to get access to members-only content like this video",
+    "WARNING: There are no subtitles for the requested languages",
+    "ERROR: [youtube] vidX: Requested format is not available. Use --list-formats",
+])
+def test_fetch_transcript_permanent_errors_are_no_transcript(stderr, caplog):
+    with patch.object(youtube, "_ytdlp", _fake_ytdlp(1, "noise\n" * 200 + stderr)):
+        assert youtube.fetch_transcript(_URL) is None
+
+
+@pytest.mark.parametrize("stderr", [
+    "ERROR: [youtube] vidX: Unable to download webpage: HTTP Error 429: Too Many Requests",
+    "ERROR: [youtube] vidX: HTTP Error 503: Service Unavailable",
+    "ERROR: [youtube] vidX: Unable to download API page: <urlopen error [Errno 8] nodename nor servname provided>",
+    "ERROR: [youtube] vidX: Sign in to confirm you're not a bot. Use --cookies-from-browser",
+    "timeout",
+    "something nobody has seen before",
+])
+def test_fetch_transcript_transient_or_unknown_errors_raise_and_log_stderr_tail(stderr, caplog):
+    long_stderr = "x" * 1000 + stderr
+    with caplog.at_level(logging.WARNING, logger=youtube.logger.name), \
+            patch.object(youtube, "_ytdlp", _fake_ytdlp(1, long_stderr)):
+        with pytest.raises(RuntimeError):
+            youtube.fetch_transcript(_URL)
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert stderr[-60:] in logged
+    assert "x" * 400 not in logged                     # only the bounded tail is logged
+
+
+def test_capture_counts_permanent_errors_as_no_transcript_not_failed(monkeypatch):
+    monkeypatch.setattr(youtube, "is_reachable", lambda: True)
+    monkeypatch.setattr(youtube, "get_processed_source_urls", lambda st: set())
+    monkeypatch.setattr(youtube, "list_playlist", lambda pid: [
+        {"id": "vidX", "title": "T", "url": _URL, "duration": 900, "channel": "C"}])
+    monkeypatch.setattr(youtube, "_ytdlp", _fake_ytdlp(1, "ERROR: Video unavailable"))
+    stats = youtube.capture(playlists=["LL"])
+    assert stats["failed"] == 0 and stats["no_transcript"] == 1
+    monkeypatch.setattr(youtube, "_ytdlp", _fake_ytdlp(1, "HTTP Error 429: Too Many Requests"))
+    stats = youtube.capture(playlists=["LL"])
+    assert stats["failed"] == 1 and stats["no_transcript"] == 0

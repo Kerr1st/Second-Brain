@@ -49,6 +49,24 @@ IMPERSONATE = "chrome"
 BROWSER = "chrome"
 
 
+STDERR_TAIL_CHARS = 300
+# yt-dlp errors that mean "this video will never have a fetchable transcript".
+# Network errors, HTTP 429/5xx, timeouts, the "not a bot" sign-in check (an
+# IP/rate block) and anything unknown are NOT here: they stay failures so the
+# video is retried.
+_PERMANENT_NO_TRANSCRIPT_RE = re.compile(
+    r"video unavailable|this video is unavailable|private video|video is private|"
+    r"(has been|was) removed|video has been terminated|account associated with this video|"
+    r"age[- ]restricted|confirm your age|inappropriate for some users|"
+    r"members[- ]only|join this channel|sign in to confirm (?!you.?re not a bot)|"
+    r"no subtitles|there are no subtitles|no (automatic )?captions|"
+    r"requested format is not available", re.I)
+
+
+def _stderr_tail(stderr: str | None, limit: int = STDERR_TAIL_CHARS) -> str:
+    return re.sub(r"\s+", " ", (stderr or "")[-limit:]).strip()
+
+
 def _ytdlp(args: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
     """Invoke the venv's yt-dlp as a module (guarantees curl_cffi is on path)."""
     try:
@@ -148,11 +166,22 @@ def fetch_transcript(video_url: str) -> str | None:
             "-o", os.path.join(tmp, "%(id)s.%(ext)s"),
             video_url,
         ], timeout=120)
-        if proc.returncode != 0:
-            raise RuntimeError(f"YouTube transcript fetch failed (exit {proc.returncode})")
         vtts = [f for f in os.listdir(tmp) if f.endswith(".vtt")]
         if not vtts:
-            return None
+            if proc.returncode == 0:
+                return None
+            tail = _stderr_tail(proc.stderr)
+            if _PERMANENT_NO_TRANSCRIPT_RE.search(tail):
+                # The video will never yield a transcript: count it as
+                # no_transcript, not as a nightly failure retried forever.
+                logger.info("No transcript for %s (yt-dlp exit %d, permanent): %s",
+                            video_url, proc.returncode, tail)
+                return None
+            logger.warning("yt-dlp transcript fetch failed for %s (exit %d): %s",
+                           video_url, proc.returncode, tail)
+            raise RuntimeError(f"YouTube transcript fetch failed (exit {proc.returncode})")
+        # A subtitle file was written: use it even if yt-dlp exited non-zero
+        # (e.g. one of several requested tracks failed).
         vtts.sort(key=lambda f: (".en.vtt" not in f, len(f)))  # prefer plain ".en.vtt"
         with open(os.path.join(tmp, vtts[0]), encoding="utf-8", errors="replace") as fh:
             text = vtt_to_text(fh.read())
