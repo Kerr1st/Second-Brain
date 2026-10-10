@@ -58,7 +58,7 @@ Phase 0 is done (2026-09-24). Phase 4d's 20,000-test-line target was dropped as 
 | **D4** | Retire the unused graph writer or build a discovery reader. | Prepare retirement separately. `scripts/jobs/backup.sh` reads all three graph tables, so removing them requires coordinated backup/recovery changes and preserved history. Git cannot reverse deleted database data. |
 | **D5** | Restore Kiro IDE capture from the newer session format or retire it. | Qualify the format with synthetic fixtures and verify source identity, freshness, deduplication and completeness. Current activity and the claim that only a parser is missing are not yet established. |
 
-Still open from earlier, unrelated to the refactor: the identity name in `config/skim.toml` (`"Kerr First"`, never confirmed); Friday's 02:00 dream cycle and the closed lid.
+Still open from earlier, unrelated to the refactor: Friday's 02:00 dream cycle and the closed lid. (The identity in `config/skim.toml`, `"Kerr First"`, was confirmed correct by the user on 2026-10-09.)
 
 ---
 

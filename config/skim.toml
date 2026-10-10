@@ -41,6 +41,8 @@
 # The identity block is part of the prompt the model sees, so an edit here that
 # should re-skim already-skimmed documents also needs a PROMPT_VERSION bump in
 # src/prompts/skim.py (memory_skim is unique on (memory_id, model, prompt_version)).
+#
+# The [identity] values below were confirmed correct by the user on 2026-10-09.
 
 [identity]
 name = "Kerr First"
