@@ -23,6 +23,23 @@ INTERNAL_DOMAINS = re.compile(
     r"console\.harmony\.a2z)"
 )
 
+# Corporate sites behind SSO that Crawlee (no session) can only fail on: 403s,
+# sign-in redirects and "Execution context was destroyed" (2026-10-10 run).
+# They take the cookie path (skipped_auth when the session does not carry),
+# never Crawlee. Generic hosts (cloudfront.net) are left to the unreachable ledger.
+AUTH_REQUIRED = re.compile(
+    r"^https?://([^/?#]*\.)?("
+    r"sharepoint\.com|"                      # Microsoft 365 SSO
+    r"aws\.dev|"                             # internal AWS apps (awsinsights, awsentral, ...)
+    r"amplifyapp\.com|"                      # internal Amplify-hosted tools
+    r"studio\.[a-z0-9-]+\.prod\.workshops\.aws"  # Workshop Studio (authoring) - catalog is public
+    r")(:\d+)?([/?#]|$)", re.I)
+
+
+def needs_cookies(url: str) -> bool:
+    """Internal or SSO-only: fetched with Chrome cookies, never handed to Crawlee."""
+    return bool(INTERNAL_DOMAINS.search(url) or AUTH_REQUIRED.search(url))
+
 
 
 def load_indexed_urls(path, *, sources_dir=None) -> set[str]:

@@ -66,7 +66,7 @@ class TestCrawleeBatches:
         assert "TIMED OUT" in out and "batch 1/2" in out
         # batch 1: p0 already indexed (skipped), p0..p9 written before the kill -> p1..p9 processed,
         # p10..p49 failed; batch 2 completes all 10.
-        assert stats == {"processed": 9 + 10, "skipped": 1, "failed": 40, "timed_out_batches": 1, "deferred": 0}
+        assert stats == {"processed": 9 + 10, "skipped": 1, "failed": 40, "too_short": 0, "timed_out_batches": 1, "deferred": 0}
         assert not list(pathlib.Path(sb.CRAWLEE_DIR).glob(".sb-urls-*"))
 
     def test_total_budget_stays_under_the_deadline_and_defers_the_rest(self, sb, monkeypatch, capsys):
@@ -134,9 +134,12 @@ class TestInternalAuth:
     def test_sign_in_redirects_and_auth_refusals_are_skipped_auth(self, fetch, resp):
         assert fetch(resp) == "auth"
 
-    @pytest.mark.parametrize("resp", [_resp(status=404), _resp(status=500), _resp(text="tiny")])
+    @pytest.mark.parametrize("resp", [_resp(status=404), _resp(status=500)])
     def test_genuine_fetch_errors_stay_failed(self, fetch, resp):
         assert fetch(resp) == "failed"
+
+    def test_reached_but_tiny_page_is_too_short(self, fetch):
+        assert fetch(_resp(text="tiny")) == "too_short"
 
     def test_good_page_is_ok(self, fetch):
         assert fetch(_resp()) == "ok"
@@ -164,7 +167,7 @@ class TestBacklogAlarm:
             {"type": "url", "name": "Public", "url": "https://example.org/x"}]}}}))
         monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
-        monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls, timeout=None: {
+        monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls, timeout=None, **kw: {
             "processed": 0, "skipped": 0, "failed": 0, "timed_out_batches": 0, "deferred": deferred})
         return sb.main()
 

@@ -1,0 +1,237 @@
+"""Hermetic tests for the bookmarks unreachable ledger, the batch-scrape.js output
+parser and the auth-required classification. No node, network or Chrome."""
+import importlib.util
+import json
+import os
+import pathlib
+import stat
+import subprocess
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from src.capture import unreachable
+from src.capture.filters import AUTH_REQUIRED, needs_cookies
+from src.capture.unreachable import COOL_OFF, THRESHOLD, Ledger, url_key
+
+T0 = datetime(2026, 10, 10, 18, 0, tzinfo=timezone.utc)
+URL = "https://example.org/some/page?q=1"
+
+
+@pytest.fixture
+def ledger(tmp_path):
+    return Ledger(tmp_path / "jobs" / unreachable.FILENAME)
+
+
+class TestLedger:
+    @pytest.mark.parametrize("cls", ["auth", "timeout", "error"])
+    def test_skipped_only_after_threshold_consecutive_failures(self, ledger, cls):
+        for attempt in range(1, THRESHOLD):
+            ledger.record(URL, cls, now=T0 + timedelta(days=7 * attempt))
+            assert not ledger.should_skip(URL, now=T0 + timedelta(days=7 * attempt + 1))
+        third = T0 + timedelta(days=7 * THRESHOLD)
+        entry = ledger.record(URL, cls, now=third)
+        assert entry["consecutive_failures"] == THRESHOLD and entry["status"] == cls
+        assert ledger.should_skip(URL, now=third + timedelta(days=1))
+
+    def test_cool_off_expires_after_30_days_and_a_new_failure_restarts_it(self, ledger):
+        for i in range(THRESHOLD):
+            ledger.record(URL, "auth", now=T0 + timedelta(days=i))
+        last = T0 + timedelta(days=THRESHOLD - 1)
+        assert ledger.should_skip(URL, now=last + COOL_OFF - timedelta(seconds=1))
+        assert not ledger.should_skip(URL, now=last + COOL_OFF + timedelta(seconds=1))
+        retry = last + COOL_OFF + timedelta(days=1)
+        ledger.record(URL, "error", now=retry)                 # the one retry fails again
+        assert ledger.should_skip(URL, now=retry + timedelta(days=29))
+
+    def test_success_clears_the_streak(self, ledger):
+        ledger.record(URL, "error", now=T0)
+        ledger.record(URL, "error", now=T0)
+        ledger.record(URL, "ok", now=T0)
+        assert url_key(URL) not in ledger.entries
+        ledger.record(URL, "error", now=T0)
+        assert not ledger.should_skip(URL, now=T0)
+
+    def test_too_short_is_attempted_but_empty_for_30_days(self, ledger):
+        entry = ledger.record(URL, "too_short", now=T0)
+        assert entry["status"] == "too_short" and entry["consecutive_failures"] == 0
+        assert ledger.should_skip(URL, now=T0 + timedelta(days=29))
+        assert not ledger.should_skip(URL, now=T0 + timedelta(days=31))
+
+    def test_unknown_class_is_an_error(self, ledger):
+        assert ledger.record(URL, "weird", now=T0)["status"] == "error"
+
+    def test_saved_atomically_0600_and_holds_hash_and_domain_only(self, ledger, monkeypatch):
+        ledger.record(URL, "auth", now=T0)
+        ledger.save()
+        mode = stat.S_IMODE(os.stat(ledger.path).st_mode)
+        assert mode == 0o600
+        text = ledger.path.read_text()
+        assert URL not in text and "/some/page" not in text
+        data = json.loads(text)
+        assert data["urls"][url_key(URL)]["domain"] == "example.org"
+        assert not [p for p in ledger.path.parent.iterdir() if p.name.startswith(".unreachable-")]
+        reloaded = Ledger.load(ledger.path)
+        assert reloaded.entries == ledger.entries
+
+        # A failed write leaves the previous file intact and no temp file behind.
+        before = ledger.path.read_text()
+        ledger.record("https://other.example/x", "error", now=T0)
+
+        def boom(*a, **k):
+            raise OSError("disk full")
+        monkeypatch.setattr(unreachable.os, "replace", boom)
+        with pytest.raises(OSError):
+            ledger.save()
+        assert ledger.path.read_text() == before
+        assert not [p for p in ledger.path.parent.iterdir() if p.name.startswith(".unreachable-")]
+
+    def test_missing_or_corrupt_file_is_an_empty_ledger(self, tmp_path):
+        assert Ledger.load(tmp_path / "nope.json").entries == {}
+        bad = tmp_path / "bad.json"
+        bad.write_text("{not json")
+        assert Ledger.load(bad).entries == {}
+        bad.write_text(json.dumps({"urls": {"k": "not-a-dict", "j": {"skip_until": "garbage"}}}))
+        loaded = Ledger.load(bad)
+        assert list(loaded.entries) == ["j"]
+
+    def test_default_path_follows_the_status_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "s"))
+        assert unreachable.default_path() == tmp_path / "s" / "bookmarks.unreachable.json"
+
+
+@pytest.fixture
+def sb(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("scrape_bookmarks", pathlib.Path("scripts/scrape_bookmarks.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "CRAWLEE_DIR", str(tmp_path))
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
+    return mod
+
+
+SAMPLE = """Loaded 6 URLs from /tmp/.sb-urls-x.txt
+INFO  PlaywrightCrawler: Starting the crawler.
+✓ Some page title
+⚠ Skip (too short): https://a.example/short
+WARN  PlaywrightCrawler: Reclaiming failed request back to the list or queue. Request blocked - received 403 status code. {"id":"1","url":"https://b.example/blocked","retryCount":1}
+ERROR PlaywrightCrawler: Request failed and reached maximum retries. Error: Request blocked - received 403 status code. {"id":"1","url":"https://b.example/blocked","method":"GET"}
+✗ https://b.example/blocked
+WARN  PlaywrightCrawler: Reclaiming failed request back to the list or queue. page.goto: Timeout 30000ms exceeded. {"id":"2","url":"https://c.example/slow","retryCount":3}
+✗ https://c.example/slow
+ERROR PlaywrightCrawler: Request failed and reached maximum retries. page.evaluate: Execution context was destroyed {"id":"3","url":"https://d.example/nav"}
+✗ https://d.example/nav
+✗ Some title that is not a url
+Done. Processed 6 URLs.
+"""
+
+
+class TestCrawleeOutputParser:
+    def test_lines_map_to_url_classes(self, sb):
+        assert sb.parse_crawlee_output(SAMPLE) == {
+            "https://a.example/short": "too_short",
+            "https://b.example/blocked": "auth",
+            "https://c.example/slow": "timeout",
+            "https://d.example/nav": "error",
+        }
+
+    def test_empty_or_missing_output(self, sb):
+        assert sb.parse_crawlee_output("") == {}
+        assert sb.parse_crawlee_output(None) == {}
+
+    def test_batch_outcomes_combine_index_and_output_and_survive_a_timeout(self, sb, monkeypatch):
+        urls = [("t", u) for u in ("https://ok.example/1", "https://a.example/short",
+                                   "https://b.example/blocked", "https://never.example/started")]
+        index = set()
+
+        def run(cmd, timeout=None, stdout=None, **kw):
+            stdout.write("✓ Fine\n⚠ Skip (too short): https://a.example/short\n✗ https://b.example/blocked\n")
+            stdout.flush()
+            index.add("https://ok.example/1")
+            raise subprocess.TimeoutExpired(cmd, timeout)
+
+        monkeypatch.setattr(sb.subprocess, "run", run)
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set(index))
+        outcomes = {}
+        stats = sb.scrape_with_crawlee(urls, timeout=5000, outcomes=outcomes)
+        assert outcomes == {"https://ok.example/1": "ok", "https://a.example/short": "too_short",
+                            "https://b.example/blocked": "error", "https://never.example/started": "timeout"}
+        assert stats["processed"] == 1 and stats["too_short"] == 1 and stats["failed"] == 2
+        assert stats["timed_out_batches"] == 1
+
+    def test_unlisted_url_after_a_normal_exit_is_an_error(self, sb, monkeypatch):
+        monkeypatch.setattr(sb.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0))
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
+        outcomes = {}
+        sb.scrape_with_crawlee([("t", "https://x.example/")], timeout=5000, outcomes=outcomes)
+        assert outcomes == {"https://x.example/": "error"}
+
+
+class TestMainWithLedger:
+    def _bookmarks(self, sb, tmp_path, monkeypatch, urls):
+        bookmarks = tmp_path / "Bookmarks"
+        bookmarks.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
+            {"type": "url", "name": f"B{i}", "url": u} for i, u in enumerate(urls)]}}}))
+        monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
+
+    def test_three_failed_runs_then_skipped_unreachable_neither_failed_nor_deferred(self, sb, tmp_path, monkeypatch, capsys):
+        internal, public, short = ("https://w.amazon.com/bin/view/A", "https://dead.example/x",
+                                   "https://empty.example/y")
+        self._bookmarks(sb, tmp_path, monkeypatch, [internal, public, short])
+        monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "auth")
+        seen = []
+
+        def crawlee(urls, timeout=None, outcomes=None, **kw):
+            seen.append(sorted(u for _, u in urls))
+            for _, u in urls:
+                outcomes[u] = "too_short" if u == short else "error"
+            failed = sum(1 for _, u in urls if u != short)
+            return {"processed": 0, "skipped": 0, "failed": failed, "too_short": len(urls) - failed,
+                    "timed_out_batches": 0, "deferred": 0}
+        monkeypatch.setattr(sb, "scrape_with_crawlee", crawlee)
+
+        assert sb.main() == 1                       # run 1: the public URL failed
+        assert sb.main() == 1                       # run 2
+        assert sb.main() == 1                       # run 3: third consecutive failure
+        assert seen == [[public, short], [public], [public]]   # too-short not re-scraped
+        capsys.readouterr()
+        assert sb.main() == 0                       # run 4: everything cooling off
+        out = capsys.readouterr().out
+        assert "skipped_unreachable (ledger cool-off): 3" in out
+        assert "Unreachable: 3 skipped_unreachable" in out
+        assert len(seen) == 3                       # Crawlee not called at all
+        assert json.loads((tmp_path / "jobs" / "bookmarks.backlog.json").read_text())["deferred"] == 0
+        assert "dead.example/x" not in (tmp_path / "jobs" / "bookmarks.unreachable.json").read_text()
+
+    def test_unreadable_ledger_never_changes_the_exit(self, sb, tmp_path, monkeypatch, capsys):
+        self._bookmarks(sb, tmp_path, monkeypatch, ["https://w.amazon.com/bin/view/A"])
+        monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "auth")
+        (tmp_path / "jobs").write_text("not a directory")
+        assert sb.main() == 0
+        assert "could not record the bookmarks unreachable ledger" in capsys.readouterr().out
+
+
+class TestClassification:
+    @pytest.mark.parametrize("url", [
+        "https://amazon.sharepoint.com/sites/x/Shared%20Documents/a.docx",
+        "https://awsinsights.aws.dev/dashboard",
+        "https://help.awsentral.aws.dev/",
+        "https://prod.d1234abcd.amplifyapp.com/",
+        "https://studio.us-east-1.prod.workshops.aws/workshops/abc",
+        "https://w.amazon.com/bin/view/X",            # existing internal list still applies
+    ])
+    def test_auth_only_sites_take_the_cookie_path(self, url):
+        assert needs_cookies(url)
+
+    @pytest.mark.parametrize("url", [
+        "https://catalog.us-east-1.prod.workshops.aws/workshops/abc",   # public catalog
+        "https://catalog.workshops.aws/x",
+        "https://d3abc.cloudfront.net/page",                             # generic CDN: ledger decides
+        "https://example.org/?next=https://amazon.sharepoint.com/",      # only the host counts
+        "https://notaws.dev/",
+        "https://www.ebay.com/itm/1",
+    ])
+    def test_public_and_generic_hosts_stay_on_crawlee(self, url):
+        assert not needs_cookies(url)
+        assert not AUTH_REQUIRED.search(url)

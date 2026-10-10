@@ -9,7 +9,7 @@ Internal Amazon links use Chrome cookies for authentication.
 import json, os, subprocess, re, sys, tempfile, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.capture.filters import SKIP_PATTERNS, INTERNAL_DOMAINS, load_indexed_urls as _load_indexed_urls
+from src.capture.filters import SKIP_PATTERNS, needs_cookies, load_indexed_urls as _load_indexed_urls
 from src.capture.render import html_to_text, render_document
 from urllib.parse import urlparse
 from datetime import datetime
@@ -77,7 +77,8 @@ def scrape_with_cookies(name, url):
     """Fetch an internal page using Chrome cookies, save as markdown.
 
     Returns "ok", "auth" (redirected to sign-in / refused for auth: counted as
-    skipped_auth) or "failed" (genuine fetch error)."""
+    skipped_auth), "too_short" (reached, but too little text to index),
+    "timeout" or "failed" (genuine fetch error)."""
     try:
         import browser_cookie3, requests
         from html.parser import HTMLParser
@@ -94,7 +95,7 @@ def scrape_with_cookies(name, url):
         text = html_to_text(resp.text)
 
         if len(text) < 200:
-            return "failed"
+            return "too_short"
 
         # Write with metadata header
         date = datetime.now().strftime("%Y-%m-%d")
@@ -109,38 +110,87 @@ def scrape_with_cookies(name, url):
 
     except Exception as e:  # noqa: BLE001 - one bookmark never aborts the batch (and `requests` may be unbound on ImportError)
         print(f"    ✗ Cookie fetch failed: {type(e).__name__}")
-        return "failed"
+        return "timeout" if "Timeout" in type(e).__name__ else "failed"
+
+
+# batch-scrape.js (stderr) prints one line per finished request:
+#   "✓ <title>"   indexed (detected through the index, as before)
+#   "✗ <url>"     failed after Crawlee's retries
+#   "⚠ Skip (too short): <url>"
+# Crawlee's own log lines carry {"url": ...} and say why a request failed.
+_TOO_SHORT_RE = re.compile(r"^\s*⚠ Skip \(too short\):\s*(\S+)\s*$")
+_FAILED_RE = re.compile(r"^\s*✗\s+(\S+)\s*$")
+_LOG_URL_RE = re.compile(r'"url":"([^"]+)"')
+_LOG_AUTH_RE = re.compile(r"\b(401|403|407)\b status code|status code:? (401|403|407)\b", re.I)
+_LOG_TIMEOUT_RE = re.compile(r"timed? ?out|TimeoutError", re.I)
+
+
+def parse_crawlee_output(text):
+    """Map URLs to "too_short" / "auth" / "timeout" / "error" from batch-scrape.js output."""
+    hints, outcomes = {}, {}
+    for line in (text or "").splitlines():
+        match = _LOG_URL_RE.search(line)
+        if match:
+            if _LOG_AUTH_RE.search(line):
+                hints[match.group(1)] = "auth"
+            elif _LOG_TIMEOUT_RE.search(line):
+                hints.setdefault(match.group(1), "timeout")
+            continue
+        match = _TOO_SHORT_RE.match(line)
+        if match:
+            outcomes[match.group(1)] = "too_short"
+            continue
+        match = _FAILED_RE.match(line)
+        if match and match.group(1).startswith("http"):
+            outcomes[match.group(1)] = "fail"
+    return {url: (hints.get(url, "error") if cls == "fail" else cls) for url, cls in outcomes.items()}
 
 
 def _run_crawlee_batch(batch, timeout):
-    """Run one Crawlee batch; returns (returncode or None on timeout)."""
+    """Run one Crawlee batch; returns (returncode or None on timeout, output text).
+
+    Output goes to a temporary file rather than a pipe, so what was printed
+    before a timeout kill is still readable."""
     fd, url_file = tempfile.mkstemp(prefix=".sb-urls-", suffix=".txt", dir=CRAWLEE_DIR)
+    log_fd, log_file = tempfile.mkstemp(prefix=".sb-out-", suffix=".log")
     try:
         with os.fdopen(fd, "w") as handle:
             for _, url in batch:
                 handle.write(url + "\n")
+        with os.fdopen(log_fd, "w") as log:
+            try:
+                result = subprocess.run(
+                    ["node", "batch-scrape.js", url_file], cwd=CRAWLEE_DIR,
+                    timeout=timeout, stdout=log, stderr=subprocess.STDOUT, text=True,
+                )
+                rc = result.returncode
+            except subprocess.TimeoutExpired:
+                rc = None
         try:
-            result = subprocess.run(
-                ["node", "batch-scrape.js", url_file], cwd=CRAWLEE_DIR,
-                timeout=timeout, capture_output=True, text=True,
-            )
-        except subprocess.TimeoutExpired:
-            return None
-        return result.returncode
+            with open(log_file, errors="replace") as log:
+                output = log.read()
+        except OSError:
+            output = ""
+        return rc, output
     finally:
         os.unlink(url_file)
+        if os.path.exists(log_file):
+            os.unlink(log_file)
 
 
-def scrape_with_crawlee(urls, timeout=None, batch_size=None, batch_timeout=None):
+def scrape_with_crawlee(urls, timeout=None, batch_size=None, batch_timeout=None, outcomes=None):
     """Scrape public URLs via Crawlee in bounded batches.
 
     ``timeout`` is the wall-clock budget for the whole call (default: the job
     deadline less a margin); each batch also has its own ``batch_timeout``.
     Only verified index additions count as processed, also after a timeout, so
     partial progress is kept. URLs never attempted because the budget ran out
-    are ``deferred`` (not failed; they are retried on the next run).
+    are ``deferred`` (not failed; they are retried on the next run). Pages
+    Crawlee reached but skipped as too short are ``too_short`` (not failed).
+    When given, ``outcomes`` is filled with url -> "ok" or a ledger class.
     """
-    stats = {"processed": 0, "skipped": 0, "failed": 0, "timed_out_batches": 0, "deferred": 0}
+    stats = {"processed": 0, "skipped": 0, "failed": 0, "too_short": 0, "timed_out_batches": 0, "deferred": 0}
+    outcomes = {} if outcomes is None else outcomes
     if not urls:
         return stats
     batch_size = batch_size or CRAWLEE_BATCH_SIZE
@@ -159,12 +209,17 @@ def scrape_with_crawlee(urls, timeout=None, batch_size=None, batch_timeout=None)
         this_timeout = min(batch_timeout, remaining)
         requested = {url for _, url in batch}
         skipped_here = requested & before
-        rc = _run_crawlee_batch(batch, this_timeout)
+        rc, output = _run_crawlee_batch(batch, this_timeout)
+        parsed = parse_crawlee_output(output)
         # Measure progress from the index whatever happened, so partial
         # successes in a timed-out or failed batch still count.
         after = load_indexed_urls()
         processed = len((requested - before) & after)
-        failed = len(requested - after)
+        missing = requested - after
+        for url in requested - before:
+            outcomes[url] = "ok" if url in after else parsed.get(url, "timeout" if rc is None else "error")
+        too_short = sum(1 for url in missing if outcomes.get(url) == "too_short")
+        failed = len(missing) - too_short
         if rc is None:
             stats["timed_out_batches"] += 1
             print(f"Crawlee batch {n}/{len(batches)} TIMED OUT after {this_timeout:.0f}s: "
@@ -174,6 +229,7 @@ def scrape_with_crawlee(urls, timeout=None, batch_size=None, batch_timeout=None)
         stats["processed"] += processed
         stats["skipped"] += len(skipped_here)
         stats["failed"] += failed
+        stats["too_short"] += too_short
         before = after
     return stats
 
@@ -192,14 +248,20 @@ def main():
     indexed = load_indexed_urls()
     new = [(n, u) for n, u in scrapable if u not in indexed]
 
-    internal = [(n, u) for n, u in new if INTERNAL_DOMAINS.search(u)]
-    public = [(n, u) for n, u in new if not INTERNAL_DOMAINS.search(u)]
+    ledger = _load_ledger()
+    unreachable = [(n, u) for n, u in new if ledger is not None and ledger.should_skip(u)]
+    skip = {u for _, u in unreachable}
+    pending = [(n, u) for n, u in new if u not in skip]
+    internal = [(n, u) for n, u in pending if needs_cookies(u)]
+    public = [(n, u) for n, u in pending if not needs_cookies(u)]
 
     print(f"Total: {len(all_urls)}, Scrapable: {len(scrapable)}, New: {len(new)}")
+    print(f"  skipped_unreachable (ledger cool-off): {len(unreachable)}")
     print(f"  Internal (cookies): {len(internal)}")
     print(f"  Public (Crawlee): {len(public)}")
 
-    ok = fail = skipped_auth = 0
+    ok = fail = skipped_auth = too_short = 0
+    outcomes = {}
 
     # Internal links with cookies
     if internal:
@@ -209,20 +271,58 @@ def main():
             outcome = scrape_with_cookies(name, url)
             if outcome is True or outcome == "ok":
                 ok += 1
+                outcomes[url] = "ok"
             elif outcome == "auth":
                 skipped_auth += 1
+                outcomes[url] = "auth"
+            elif outcome == "too_short":
+                too_short += 1
+                outcomes[url] = "too_short"
             else:
                 fail += 1
+                outcomes[url] = "timeout" if outcome == "timeout" else "error"
 
     # Public links with Crawlee: bounded batches, total kept under the job deadline.
     budget = job_deadline_s() - (time.monotonic() - started) - DEADLINE_MARGIN_S
-    public_stats = scrape_with_crawlee(public, timeout=max(0.0, budget)) if public else \
-        {"processed": 0, "skipped": 0, "failed": 0, "timed_out_batches": 0, "deferred": 0}
+    public_stats = scrape_with_crawlee(public, timeout=max(0.0, budget), outcomes=outcomes) if public else \
+        {"processed": 0, "skipped": 0, "failed": 0, "too_short": 0, "timed_out_batches": 0, "deferred": 0}
 
-    print(f"\nInternal: {ok} scraped, {skipped_auth} skipped_auth, {fail} failed")
+    print(f"\nInternal: {ok} scraped, {skipped_auth} skipped_auth, {fail} failed, {too_short} too_short")
     print(f"Public: {public_stats}")
+    record_unreachable(ledger, outcomes, len(unreachable))
     report_backlog(public_stats.get("deferred", 0))
     return int(bool(fail or public_stats["failed"]))
+
+
+def _load_ledger():
+    try:
+        from src.capture.unreachable import Ledger
+        return Ledger.load()
+    except Exception as exc:  # noqa: BLE001 - a broken ledger means "retry everything", never a crash
+        print(f"WARNING: could not read the bookmarks unreachable ledger: {type(exc).__name__}")
+        return None
+
+
+def record_unreachable(ledger, outcomes, skipped_unreachable):
+    """Persist this run's per-URL outcomes and print the ledger summary (counts only)."""
+    if ledger is None:
+        return None
+    from collections import Counter
+    counts = Counter(cls for cls in outcomes.values() if cls != "ok")
+    newly = 0
+    try:
+        for url, cls in outcomes.items():
+            was_skipping = ledger.skip_until(url) is not None
+            entry = ledger.record(url, cls)
+            if entry and entry.get("skip_until") and not was_skipping:
+                newly += 1
+        ledger.save()
+    except Exception as exc:  # noqa: BLE001 - ledger bookkeeping must not change the job's outcome
+        print(f"WARNING: could not record the bookmarks unreachable ledger: {type(exc).__name__}")
+        return None
+    print(f"Unreachable: {skipped_unreachable} skipped_unreachable, {newly} newly cooling off, "
+          f"attempt classes {dict(sorted(counts.items()))}, ledger {len(ledger.entries)} URL(s)")
+    return counts
 
 
 def report_backlog(deferred):
