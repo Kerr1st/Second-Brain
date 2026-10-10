@@ -96,7 +96,6 @@ def test_fetch_transcript_clean_exit_without_vtt_is_no_transcript():
     "ERROR: [youtube] vidX: Sign in to confirm your age. This video may be inappropriate for some users.",
     "ERROR: [youtube] vidX: Join this channel to get access to members-only content like this video",
     "WARNING: There are no subtitles for the requested languages",
-    "ERROR: [youtube] vidX: Requested format is not available. Use --list-formats",
 ])
 def test_fetch_transcript_permanent_errors_are_no_transcript(stderr, caplog):
     with patch.object(youtube, "_ytdlp", _fake_ytdlp(1, "noise\n" * 200 + stderr)):
@@ -108,6 +107,7 @@ def test_fetch_transcript_permanent_errors_are_no_transcript(stderr, caplog):
     "ERROR: [youtube] vidX: HTTP Error 503: Service Unavailable",
     "ERROR: [youtube] vidX: Unable to download API page: <urlopen error [Errno 8] nodename nor servname provided>",
     "ERROR: [youtube] vidX: Sign in to confirm you're not a bot. Use --cookies-from-browser",
+    "ERROR: [youtube] vidX: Requested format is not available. Use --list-formats",
     "timeout",
     "something nobody has seen before",
 ])

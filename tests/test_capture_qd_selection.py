@@ -270,8 +270,10 @@ def test_mass_retire_is_refused_but_the_refresh_still_runs(test_conn, upstream):
     preview = quick_desktop.capture(dry_run=True)
     assert preview["selection"]["guard"]["qd://memory/"] == {"candidates": 27, "active": 30, "cap": 25, "refuse": True}
     assert preview["selection"]["by_reason"]["deleted_upstream"] == 27 and preview["selection"]["retire"] == 0
+    assert preview["selection"]["retired_by_reason"] == {"deleted_upstream": 0, "below_threshold": 0, "relabelled": 0}
     result = quick_desktop.capture()
     assert result["selection"]["retire"] == 0 and result["selection"]["guard"]["qd://memory/"]["refuse"] is True
+    assert sum(result["selection"]["retired_by_reason"].values()) == 0
     assert result["quick_desktop_people"]["processed"] >= 1, "refresh still runs"
     assert [s for s, _ in _rows(test_conn, "qd://memory/1")[2]] == ["superseded", "active"]
     assert _rows(test_conn, "qd://memory/30")[0] == "active"
@@ -284,6 +286,7 @@ def test_at_the_cap_retirement_proceeds(test_conn, upstream):
     upstream.execute("DELETE FROM memories WHERE id > 5")  # exactly 25 = cap
     result = quick_desktop.capture()
     assert result["selection"]["retire"] == 25 and result["selection"]["guard"]["qd://memory/"]["refuse"] is False
+    assert result["selection"]["retired_by_reason"]["deleted_upstream"] == 25
 
 
 @pytest.mark.parametrize("how", ["argument", "env"])

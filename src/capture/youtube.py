@@ -59,8 +59,11 @@ _PERMANENT_NO_TRANSCRIPT_RE = re.compile(
     r"(has been|was) removed|video has been terminated|account associated with this video|"
     r"age[- ]restricted|confirm your age|inappropriate for some users|"
     r"members[- ]only|join this channel|sign in to confirm (?!you.?re not a bot)|"
-    r"no subtitles|there are no subtitles|no (automatic )?captions|"
-    r"requested format is not available", re.I)
+    r"no subtitles|there are no subtitles|no (automatic )?captions", re.I)
+# "Requested format is not available" is deliberately NOT permanent: it comes from
+# the yt-dlp player client / JS-challenge setup (see fetch_transcript), and is the
+# usual symptom when an extractor change breaks every video at once. It stays a
+# failure so a total yt-dlp outage exits non-zero instead of a quiet no_transcript.
 
 
 def _stderr_tail(stderr: str | None, limit: int = STDERR_TAIL_CHARS) -> str:

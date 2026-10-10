@@ -300,7 +300,8 @@ def reconcile_source_selection(url_prefixes, present, *, upstream_confidence=Non
     if skip_retirement and any(candidates.values()):
         logger.info("Selection reconcile: retirement skipped (%s)", skip_retirement)
     if dry_run or (not retire and not restore):
-        summary.update(retire=len(retire), reactivate=len(restore))
+        summary.update(retire=len(retire), reactivate=len(restore),
+                       retired_by_reason=_count_reasons(retire))
         return SelectionResult(summary, withheld=withheld)
     at = (now or datetime.now(timezone.utc)).isoformat()
     retired = 0
@@ -330,5 +331,14 @@ def reconcile_source_selection(url_prefixes, present, *, upstream_confidence=Non
             # A returner that lost a race to another writer stays history; never refresh it.
             done = set(restored)
             withheld.update((st, url) for pid, st, url in restore if pid not in done)
-    summary.update(retire=retired, reactivate=len(restored))
+    summary.update(retire=retired, reactivate=len(restored), retired_by_reason=_count_reasons(retire))
     return SelectionResult(summary, withheld=withheld)
+
+
+def _count_reasons(rows) -> dict:
+    """Reasons of the rows actually being retired. ``by_reason`` counts every
+    candidate, including those a guard-refused namespace keeps active."""
+    counts = dict.fromkeys(RETIRE_REASONS, 0)
+    for row in rows:
+        counts[row[3]] += 1
+    return counts
