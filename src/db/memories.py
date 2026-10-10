@@ -45,8 +45,9 @@ def chunk_parent_id(row):
     """The parent id of an index-only chunk row, else None.
 
     A chunk has ``parent_id`` and either ``metadata.chunk_index`` or a
-    ``metadata.record_kind`` ending in ``_chunk``. Relationships attach to the
-    parent (document / Topic Segment / task memory), never to its chunks."""
+    ``metadata.record_kind`` ending in ``_chunk``. Most relationships attach to
+    the parent (document / Topic Segment / task memory); chunks can carry their
+    own edges too (auto-linker), so callers should consider both."""
     if not row or not row.get("parent_id"):
         return None
     metadata = row.get("metadata") or {}

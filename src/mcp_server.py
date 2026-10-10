@@ -428,9 +428,11 @@ def memory_graph(memory_id: str) -> dict:
     Use it to traverse from a memory_search hit to related memories, then memory_read
     those target_ids to follow a chain of reasoning.
 
-    Relationships attach to parent memories, not to their index-only chunks: given
-    a chunk id the graph of its parent is returned, with "resolved_from_chunk" (the
-    id passed) and "memory_id" (the parent id) set.
+    Relationships attach mostly to parent memories, but chunks carry edges too
+    (the auto-linker and older writers link chunks). Given a chunk id, the
+    graph combines the chunk's own edges with its parent's, with
+    "resolved_from_chunk" (the id passed) and "memory_id" (the parent id) set;
+    each relationship's "anchor_id" says which of the two it hangs from.
 
     Returns {"error": "..."} for a malformed id or a memory that does not exist."""
     resolved_from = None
@@ -439,24 +441,36 @@ def memory_graph(memory_id: str) -> dict:
         mem = _guarded(get_memory, memory_id)
         if not mem:
             return {"error": "Not found"}
+        anchors = [memory_id]
         parent_id = chunk_parent_id(mem)
         parent = _guarded(get_memory, parent_id) if parent_id else None
         if parent:
             resolved_from, memory_id, mem = memory_id, str(parent["id"]), parent
-        rels = _guarded(get_relationships, memory_id)
+            anchors = [memory_id, resolved_from]
+        rels = [(anchor, r) for anchor in anchors for r in _guarded(get_relationships, anchor)]
     except ValidationError as e:
         return {"error": str(e)}
+
+    def _edge(anchor, r):
+        incoming = str(r["target_id"]) == anchor
+        return {"target_id": str(r.get("neighbor_id") or (r["source_id"] if incoming else r["target_id"])),
+                "relation_type": r["relation_type"], "note": r["note"],
+                "direction": "incoming" if incoming else "outgoing",
+                "title": r.get("title"), "type": r.get("type"),
+                **({"anchor_id": anchor} if resolved_from else {})}
+
+    edges, seen = [], set()
+    for anchor, r in rels:
+        key = (str(r.get("source_id")), str(r.get("target_id")), r.get("relation_type"))
+        if key in seen:
+            continue
+        seen.add(key)
+        edges.append(_edge(anchor, r))
     resolution = {"resolved_from_chunk": resolved_from, "memory_id": memory_id} if resolved_from else {}
     return {
         **resolution,
         "memory": {"id": str(mem["id"]), "title": mem["title"], "type": mem["type"]},
-        "relationships": [
-            {"target_id": str(r.get("neighbor_id") or (r["source_id"] if str(r["target_id"]) == memory_id else r["target_id"])),
-             "relation_type": r["relation_type"], "note": r["note"],
-             "direction": "incoming" if str(r["target_id"]) == memory_id else "outgoing",
-             "title": r.get("title"), "type": r.get("type")}
-            for r in rels
-        ],
+        "relationships": edges,
     }
 
 

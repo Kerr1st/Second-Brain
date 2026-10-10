@@ -292,11 +292,19 @@ def test_policy_rejects_a_backlog_entry_without_a_reason_or_threshold(tmp_path):
     base = '[channels.x]\npredicate = "source_type = \'x\'"\nmax_age_days = 3\nseverity = "required"\n'
     bad = tmp_path / "liveness.toml"
     for body, match in (('[backlog.bookmarks]\nconsecutive_runs = 3\n', "reason"),
+                        ('[backlog.bookmarks]\nconsecutive_runs = 3\nreason = 7\n', "reason"),
                         ('[backlog.bookmarks]\nconsecutive_runs = 0\nreason = "r"\n', "positive"),
                         ('[backlog]\nbookmarks = 3\n', "table")):
         bad.write_text(base + body)
         with pytest.raises(ValueError, match=match):
             load_policy(bad)
+
+
+def test_malformed_backlog_state_never_crashes_the_sweep(tmp_path, policy):
+    from src.operations import backlog
+    backlog.state_path("bookmarks", tmp_path).write_text('{"consecutive_deferred_runs": "x", "deferred": [1]}')
+    (finding,) = liveness.backlog_findings(tmp_path, policy)
+    assert finding["healthy"] and finding["consecutive_deferred_runs"] == 0 and finding["deferred"] == 0
 
 
 def test_persistent_backlog_is_advisory_only_at_the_threshold_and_never_fails(tmp_path, policy):

@@ -33,7 +33,7 @@
 1. **Environment:**
    - On the mini, install postgresql@17, pgvector, gnupg, awscli and uv, plus Claude Code on Bedrock (Explorer only). Clone from the bare repo and build the venv from `requirements.lock`.
    - Code prerequisites, on a branch:
-     - template `$HOME` in the 17 plists and `mcp_serve.sh` (today they hard-code `/Users/kerrfir`);
+     - template `$HOME` in the 17 plists and `mcp_serve.sh` (today they hard-code the operator's home directory);
      - `src/db/pool.py` sends a password only when `DB_PASSWORD` is set, so `~/.pgpass` works;
      - accept `PGSSLMODE`.
    - Verify: the isolated suite passes on the mini.

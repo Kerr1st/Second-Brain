@@ -283,9 +283,29 @@ class TestMemoryGraphMcp:
             assert out["memory"]["id"] == parent and out["memory"]["title"] == "Segment"
             (rel,) = out["relationships"]
             assert rel["target_id"] == other and rel["direction"] == "outgoing" and rel["note"] == "segment edge"
+            assert rel["anchor_id"] == parent
         # the parent itself is unchanged, without resolution keys
         out = memory_graph(parent)
         assert "resolved_from_chunk" not in out and [r["target_id"] for r in out["relationships"]] == [other]
+
+    def test_graph_of_a_chunk_keeps_the_chunks_own_edges(self, test_db, clean_tables):
+        """Production has ~2.5k live edges anchored on chunks (auto-linker); resolving
+        to the parent must not hide them."""
+        parent = _db.create_memory(type="source", title="Doc", content="parent", source_type="article")
+        chunk = _db.create_memory(type="source", title="Doc (chunk 1/1)", content="c1", source_type="article",
+                                  parent_id=parent, metadata={"chunk_index": 0, "total_chunks": 1})
+        p_target = _db.create_memory(type="idea", title="P", content="p")
+        c_target = _db.create_memory(type="idea", title="C", content="c")
+        c_source = _db.create_memory(type="idea", title="S", content="s")
+        _db.create_relationship(parent, p_target, "supports", "parent edge")
+        _db.create_relationship(chunk, c_target, "extends", "chunk edge")  # related_to is symmetric (canonical order), so no direction
+        _db.create_relationship(c_source, chunk, "derived_from", "into chunk")
+        from src.mcp_server import memory_graph
+        out = memory_graph(chunk)
+        assert out["resolved_from_chunk"] == chunk and out["memory_id"] == parent
+        got = {(r["target_id"], r["direction"], r["anchor_id"]) for r in out["relationships"]}
+        assert got == {(p_target, "outgoing", parent), (c_target, "outgoing", chunk), (c_source, "incoming", chunk)}
+        assert len(out["relationships"]) == 3
 
     def test_child_that_is_not_a_chunk_keeps_its_own_graph(self, test_db, clean_tables):
         parent = _db.create_memory(type="source", title="Day", content="parent", source_type="slack")

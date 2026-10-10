@@ -75,7 +75,8 @@ def load_policy(path=None) -> dict:
         runs = entry.get("consecutive_runs")
         if not isinstance(runs, int) or isinstance(runs, bool) or runs <= 0:
             raise ValueError(f"[backlog.{job}] consecutive_runs must be a positive integer")
-        if not str(entry.get("reason", "")).strip():
+        reason = entry.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
             raise ValueError(f"[backlog.{job}]: a backlog advisory must state its reason")
     return policy
 
@@ -317,8 +318,14 @@ def backlog_findings(directory, policy: dict) -> list[dict]:
             findings.append(_finding("backlog", job, "no_state", healthy=True, severity="advisory",
                                      message=f"{job}: no backlog state recorded yet", consecutive_runs=limit))
             continue
-        streak = int(state.get("consecutive_deferred_runs") or 0)
-        deferred = int(state.get("deferred") or 0)
+        def _count(key):
+            # A malformed state file must not crash the sweep (record_run tolerates it too).
+            try:
+                return max(0, int(state.get(key) or 0))
+            except (TypeError, ValueError):
+                return 0
+        streak = _count("consecutive_deferred_runs")
+        deferred = _count("deferred")
         extra = {"consecutive_deferred_runs": streak, "deferred": deferred, "consecutive_runs": limit,
                  "first_deferred_at": state.get("first_deferred_at")}
         if streak >= limit:
