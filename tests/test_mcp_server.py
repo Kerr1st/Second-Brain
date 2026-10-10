@@ -265,6 +265,51 @@ class TestMemoryGraphMcp:
         out = memory_graph(a)
         assert out["memory"]["id"] == a
         assert b in {rel["target_id"] for rel in out["relationships"]}
+        assert "resolved_from_chunk" not in out and "memory_id" not in out
+
+    def test_graph_of_a_chunk_returns_its_parents_relationships(self, test_db, clean_tables):
+        parent = _db.create_memory(type="source", title="Segment", content="parent", source_type="codex_task",
+                                   metadata={"record_kind": "topic_segment"})
+        other = _db.create_memory(type="idea", title="Other", content="other")
+        _db.create_relationship(parent, other, "supports", "segment edge")
+        by_index = _db.create_memory(type="source", title="Segment (chunk 1/2)", content="c1", source_type="codex_task",
+                                     parent_id=parent, metadata={"chunk_index": 0, "total_chunks": 2})
+        by_kind = _db.create_memory(type="source", title="Segment (chunk 2/2)", content="c2", source_type="codex_task",
+                                    parent_id=parent, metadata={"record_kind": "topic_segment_chunk"})
+        from src.mcp_server import memory_graph
+        for chunk in (by_index, by_kind):
+            out = memory_graph(chunk)
+            assert out["resolved_from_chunk"] == chunk and out["memory_id"] == parent
+            assert out["memory"]["id"] == parent and out["memory"]["title"] == "Segment"
+            (rel,) = out["relationships"]
+            assert rel["target_id"] == other and rel["direction"] == "outgoing" and rel["note"] == "segment edge"
+        # the parent itself is unchanged, without resolution keys
+        out = memory_graph(parent)
+        assert "resolved_from_chunk" not in out and [r["target_id"] for r in out["relationships"]] == [other]
+
+    def test_child_that_is_not_a_chunk_keeps_its_own_graph(self, test_db, clean_tables):
+        parent = _db.create_memory(type="source", title="Day", content="parent", source_type="slack")
+        child = _db.create_memory(type="source", title="Thread", content="child", source_type="slack",
+                                  parent_id=parent, metadata={"record_kind": "thread"})
+        other = _db.create_memory(type="idea", title="Other", content="other")
+        _db.create_relationship(child, other, "extends")
+        from src.mcp_server import memory_graph
+        out = memory_graph(child)
+        assert "resolved_from_chunk" not in out and out["memory"]["id"] == child
+        assert [r["target_id"] for r in out["relationships"]] == [other]
+
+    def test_graph_still_validates_the_id(self, test_db, clean_tables):
+        from src.mcp_server import memory_graph
+        assert "error" in memory_graph("not-a-uuid")
+
+    def test_chunk_parent_id_predicate(self):
+        pid = str(uuid.uuid4())
+        assert _db.chunk_parent_id({"parent_id": pid, "metadata": {"chunk_index": 0}}) == pid
+        assert _db.chunk_parent_id({"parent_id": pid, "metadata": {"record_kind": "task_memory_chunk"}}) == pid
+        assert _db.chunk_parent_id({"parent_id": pid, "metadata": {"record_kind": "thread"}}) is None
+        assert _db.chunk_parent_id({"parent_id": None, "metadata": {"chunk_index": 0}}) is None
+        assert _db.chunk_parent_id({"parent_id": pid, "metadata": None}) is None
+        assert _db.chunk_parent_id(None) is None
 
 
 class TestMemoryRelateMcp:

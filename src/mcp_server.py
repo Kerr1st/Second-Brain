@@ -27,7 +27,7 @@ import psycopg2.errors
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta, timezone
 from src.db import (
-    create_memory, get_memory, update_memory, list_memories, get_arrivals_summary, iso as _iso,
+    create_memory, get_memory, chunk_parent_id, update_memory, list_memories, get_arrivals_summary, iso as _iso,
     create_relationship, get_relationships, find_temporal_neighbors,
     find_schemas_for_memories,
 )
@@ -428,16 +428,27 @@ def memory_graph(memory_id: str) -> dict:
     Use it to traverse from a memory_search hit to related memories, then memory_read
     those target_ids to follow a chain of reasoning.
 
+    Relationships attach to parent memories, not to their index-only chunks: given
+    a chunk id the graph of its parent is returned, with "resolved_from_chunk" (the
+    id passed) and "memory_id" (the parent id) set.
+
     Returns {"error": "..."} for a malformed id or a memory that does not exist."""
+    resolved_from = None
     try:
         memory_id = uuid_or_error(memory_id, "memory_id")
         mem = _guarded(get_memory, memory_id)
         if not mem:
             return {"error": "Not found"}
+        parent_id = chunk_parent_id(mem)
+        parent = _guarded(get_memory, parent_id) if parent_id else None
+        if parent:
+            resolved_from, memory_id, mem = memory_id, str(parent["id"]), parent
         rels = _guarded(get_relationships, memory_id)
     except ValidationError as e:
         return {"error": str(e)}
+    resolution = {"resolved_from_chunk": resolved_from, "memory_id": memory_id} if resolved_from else {}
     return {
+        **resolution,
         "memory": {"id": str(mem["id"]), "title": mem["title"], "type": mem["type"]},
         "relationships": [
             {"target_id": str(r.get("neighbor_id") or (r["source_id"] if str(r["target_id"]) == memory_id else r["target_id"])),

@@ -41,6 +41,23 @@ def get_memory(memory_id, *, conn=None):
             return cur.fetchone()
 
 
+def chunk_parent_id(row):
+    """The parent id of an index-only chunk row, else None.
+
+    A chunk has ``parent_id`` and either ``metadata.chunk_index`` or a
+    ``metadata.record_kind`` ending in ``_chunk``. Relationships attach to the
+    parent (document / Topic Segment / task memory), never to its chunks."""
+    if not row or not row.get("parent_id"):
+        return None
+    metadata = row.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return None
+    kind = metadata.get("record_kind")
+    if metadata.get("chunk_index") is not None or (isinstance(kind, str) and kind.endswith("_chunk")):
+        return str(row["parent_id"])
+    return None
+
+
 def get_memories_by_ids(memory_ids):
     """Fetch several memories in one query, preserving the requested order.
 
