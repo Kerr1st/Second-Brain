@@ -223,3 +223,41 @@ def test_run_interrupted_is_not_swallowed_by_stage_fallbacks():
     """The per-stage ``except Exception`` fallbacks must not catch the stop request."""
     assert not issubclass(RunInterrupted, Exception)
     assert issubclass(RunInterrupted, BaseException)
+
+
+# ---------------------------------------------------------------------------
+# Storage failures after the panel: the reason is logged and persisted
+# ---------------------------------------------------------------------------
+
+def test_failure_message_is_one_line_and_truncated():
+    from src.dream_cycle.orchestrator import MAX_FAILURE_MESSAGE_CHARS, _failure_message
+    assert _failure_message(ValueError("bad\n  target")) == "ValueError: bad target"
+    long = _failure_message(RuntimeError("x" * 1000))
+    assert long.startswith("RuntimeError: xxx") and len(long) == MAX_FAILURE_MESSAGE_CHARS and long.endswith("…")
+
+
+def test_storage_failure_logs_and_persists_the_exception_message(caplog):
+    from src.dream_cycle.storage import CandidateAuthorizationError
+    orch = _orchestrator()
+    reason = "Every source and target must exist and be active " + "y" * 400
+    with patch("src.dream_cycle.orchestrator.dream_cycle_db") as mock_db, \
+         patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
+         patch.object(orch, "_skim_arrivals", return_value=None), \
+         patch.object(orch, "invoke_explorer", return_value=SLICES[:1]), \
+         patch.object(orch, "invoke_thinker", side_effect=_thinking(orch, lambda s: [_candidate()])), \
+         patch.object(orch, "_ground_candidate", side_effect=lambda c: c), \
+         patch.object(orch, "_invoke_evaluator_safe", side_effect=lambda c, role: _verdict(role)), \
+         patch("src.dream_cycle.orchestrator.store_accepted", side_effect=CandidateAuthorizationError(reason)), \
+         patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
+         caplog.at_level("WARNING", logger="src.dream_cycle.orchestrator"):
+        mock_db.create_run.return_value = "run-storage"
+        mock_db.get_memory_stats.return_value = _stats()
+        result = orch.run("scheduled")
+    assert result.candidates_accepted == 0 and not result.aborted_early
+    stored, verdicts, final = mock_db.store_candidate.call_args.args[1:4]
+    assert final == "BLOCKED" and verdicts  # the real votes are kept
+    assert stored["storage_error"] == "CandidateAuthorizationError"
+    assert stored["block_reason"].startswith("CandidateAuthorizationError: Every source and target must exist")
+    assert len(stored["block_reason"]) == 300
+    [record] = [r for r in caplog.records if "storage blocked" in r.getMessage()]
+    assert stored["block_reason"] in record.getMessage()

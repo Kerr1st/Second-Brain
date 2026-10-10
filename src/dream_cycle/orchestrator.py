@@ -77,6 +77,15 @@ class RunInterrupted(BaseException):
 
 _INTERRUPT_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
+#: Cap on a storage failure message in the log and the candidate's block_reason.
+MAX_FAILURE_MESSAGE_CHARS = 300
+
+
+def _failure_message(exc: BaseException) -> str:
+    """``Type: message`` on one line, truncated, for a candidate that failed storage."""
+    text = " ".join(f"{type(exc).__name__}: {exc}".split())
+    return text if len(text) <= MAX_FAILURE_MESSAGE_CHARS else text[:MAX_FAILURE_MESSAGE_CHARS - 1] + "…"
+
 from src.dream_cycle.budget import *
 from src.dream_cycle.budget import _skim_cap_usd
 from src.dream_cycle.parsing import _as_int, _as_str_list, _unwrap_nested_candidate
@@ -457,9 +466,10 @@ class DreamCycleOrchestrator(AgentRunner):
                 # The failed candidate transaction was rolled back in full. Keep
                 # prior successes, retain real votes, and distinguish authorization
                 # or storage failure from a quality rejection by the panel.
-                logger.warning("Candidate storage blocked for %s: %s", candidate.title, type(exc).__name__)
+                logger.warning("Candidate storage blocked for %s: %s", candidate.title, _failure_message(exc))
                 self._run_stats["candidates_storage_failed"] = self._run_stats.get("candidates_storage_failed", 0) + 1
-                dream_cycle_db.store_candidate(run_id, candidate_dict | {"storage_error": type(exc).__name__},
+                dream_cycle_db.store_candidate(run_id, candidate_dict | {"storage_error": type(exc).__name__,
+                                               "block_reason": _failure_message(exc)},
                                                verdicts_dict, "BLOCKED")
 
             logger.info(

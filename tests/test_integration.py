@@ -172,6 +172,7 @@ def test_failure_after_accepted_ledger_insert_rolls_back_every_discovery_write(p
     blocked = candidates[ACCEPTED_TITLE]
     assert blocked["final_verdict"] == "BLOCKED" and blocked["created_memory_id"] is None
     assert blocked["candidate_json"]["storage_error"] == "ValueError"
+    assert blocked["candidate_json"]["block_reason"] == "ValueError: Synthetic failure after the accepted ledger insert"
     assert_votes(blocked, ["ACCEPT"] * 4)
     assert not sql_rows("SELECT id FROM memories WHERE metadata->>'dream_cycle'='true'")
     assert not sql_rows("SELECT * FROM memory_relationships")
