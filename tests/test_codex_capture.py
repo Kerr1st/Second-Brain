@@ -1106,16 +1106,31 @@ def test_current_incomplete_execution_does_not_attach_to_later_final(tmp_path):
     assert len(turn.prompt_parts) == 1
 
 
-def test_current_and_legacy_mirrors_keep_legacy_identity(tmp_path):
+def test_current_and_legacy_mirrors_keep_native_identity(tmp_path):
+    """F-086: a legacy ``user_message`` mirror never re-keys a native turn.
+
+    Every stored Codex turn id is the native message id; a rollout that also
+    carries the legacy event must produce the same turns as the native-only
+    rollout, and the ignored mirror is counted, not silent. A legacy-only
+    rollout still captures under its legacy key.
+    """
     legacy = deepcopy(_turn_pairs()[0][0])
     legacy["payload"]["message"] = CURRENT_RECORDS[1]["payload"]["content"][0]["text"]
     records = (*CURRENT_RECORDS[:2], legacy, *CURRENT_RECORDS[2:])
     home = _current_home(tmp_path, records)
     with_mirror = _current_snapshot(home)
+    _write_excerpt(home, CURRENT_MANIFEST, CURRENT_RECORDS)
+    native_only = _current_snapshot(home)
     _write_excerpt(home, CURRENT_MANIFEST, (CURRENT_RECORDS[0], legacy, *CURRENT_RECORDS[2:]))
     legacy_only = _current_snapshot(home)
-    assert with_mirror.turns == legacy_only.turns
+    assert with_mirror.turns == native_only.turns
     assert len(with_mirror.turns) == 1
+    assert with_mirror.turns[0].turn_id == CURRENT_RECORDS[1]["payload"]["id"]
+    drops = json.loads(dict((f.key, f.value) for f in with_mirror.provenance)["capture_drop_counts"])
+    assert drops["legacy_mirror_ignored"] == 1
+    assert len(legacy_only.turns) == 1
+    assert legacy_only.turns[0].turn_id != CURRENT_RECORDS[1]["payload"]["id"]
+    assert legacy_only.turns[0].visible_outcome == native_only.turns[0].visible_outcome
 
 
 def test_old_history_resumed_in_current_format_preserves_turns(tmp_path):

@@ -53,8 +53,9 @@ def _record_timestamp(value: object) -> datetime | None:
 class RolloutTurnAssembler:
     """Named event handlers preserve source identity and explain skipped input.
 
-    Legacy prompt events remain opt-in at construction for historical capture
-    identity parity. Native-source code supplies attachment descriptors; the
+    Legacy prompt events remain opt-in at construction and identify a turn only
+    when no native message for that turn is pending (F-086: native wins).
+    Native-source code supplies attachment descriptors; the
     assembler never reads images, metadata stores, or filesystem state.
     """
     def __init__(self, task_id, *, legacy=False):
@@ -176,9 +177,23 @@ class RolloutTurnAssembler:
             self.drops["legacy_empty_prompt"] += 1
 
     def _final(self, payload):
-        prompts = self.pending_prompts
+        # F-086: the native message id is the identity every stored turn carries
+        # (``msg_*``). When a rollout mirrors the same prompt as a legacy
+        # ``event_msg.user_message`` too, the native message wins; the legacy
+        # event key is only the identity of legacy-only rollouts. Preferring the
+        # legacy key would re-key every turn of a rewritten rollout and append
+        # duplicates.
+        metadata = payload.get("internal_chat_message_metadata_passthrough")
+        native_matches = (isinstance(metadata, dict) and self.pending_messages
+                          and metadata.get("turn_id") == self.message_turn_id
+                          and self.message_turn_id not in self.unsupported_message_turns)
+        if native_matches:
+            if self.pending_prompts:
+                self.drops["legacy_mirror_ignored"] += len(self.pending_prompts)
+            prompts = self.pending_messages
+        else:
+            prompts = self.pending_prompts
         if not prompts:
-            metadata = payload.get("internal_chat_message_metadata_passthrough")
             if not isinstance(metadata, dict) or metadata.get("turn_id") != self.message_turn_id:
                 self.drops["final_turn_mismatch"] += 1
                 return
