@@ -22,6 +22,9 @@ docker/data/
 *.tar.gpg
 *.receipt.json
 
+# Dream-cycle explorer slice dumps (local, not source controlled)
+/.dream/
+
 # OS
 .DS_Store
 

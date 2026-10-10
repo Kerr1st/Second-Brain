@@ -81,7 +81,7 @@ class TestNoSecretsInTrackedConfig:
         assert not _tracked([".env"]), ".env must never be tracked"
         res = subprocess.run(["git", "check-ignore", "-q", ".env"], cwd=REPO)
         assert res.returncode == 0, ".env must be covered by .gitignore"
-        for artefact in ("backups/x.tar.gpg", "backups/x.receipt.json", "logs/jobs/x.json", ".backup-key"):
+        for artefact in ("backups/x.tar.gpg", "backups/x.receipt.json", "logs/jobs/x.json", ".backup-key", ".dream/x.json"):
             assert subprocess.run(["git", "check-ignore", "-q", artefact], cwd=REPO).returncode == 0, artefact
 
     def test_capture_api_plist_delegates_secrets_to_launcher(self):
