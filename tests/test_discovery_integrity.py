@@ -295,3 +295,82 @@ def test_slice_ids_in_non_canonical_form_still_authorize_the_candidate(corpus, m
     monkeypatch.setattr("src.dream_cycle.orchestrator.generate_digest", lambda *a, **kw: "fixture.md")
     result = orch.run("user_triggered")
     assert result.candidates_accepted == 1 and not result.aborted_early
+
+
+def _superseded_memory():
+    old = create_memory("insight", "Old view", "A view later replaced", metadata={"dream_cycle": True})
+    snapshot = dict(get_memory(old))
+    update_memory(old, status="superseded")
+    return old, snapshot
+
+
+@pytest.mark.parametrize("where", ["relationship", "source", "target", "missing"])
+def test_authorize_candidate_enforces_the_store_accepted_active_rule(corpus, where):
+    """Run 9bf4ade8: a relationship target that was superseded passed authorization,
+    was judged by the full panel, and only failed at store_accepted. The same
+    exist-and-active rule now runs before any paid call, with the same error."""
+    source, derived, context, run, c = corpus
+    if where == "missing":
+        ghost = "44444444-4444-4444-8444-444444444444"
+        context = {**context, ghost: {"id": ghost, "status": "active", "content": "gone"}}
+        c = replace(c, relationships=[{"target_id": ghost, "relation_type": "supports"}])
+    elif where == "target":
+        update_memory(derived, status="superseded")
+        c = replace(c, operation="UPDATE", target_memory_id=derived)
+    else:
+        old, snapshot = _superseded_memory()
+        context = {**context, old: snapshot}  # the Thinker read it while it was active
+        c = (replace(c, relationships=[{"target_id": old, "relation_type": "extends"}]) if where == "relationship"
+             else replace(c, source_memories=[source, old]))
+    with pytest.raises(CandidateAuthorizationError, match="exist and be active") as pre:
+        authorize_candidate(c, context)
+    before = _counts()
+    with pytest.raises(type(pre.value), match="exist and be active"):
+        store_accepted(c, run_id=run, verdicts=VOTES, authorized_memories=context)
+    assert _counts() == before
+
+
+def test_active_relationship_target_still_authorizes(corpus):
+    source, derived, context, _, c = corpus
+    c = replace(c, relationships=[{"target_id": derived, "relation_type": "extends"}])
+    assert authorize_candidate(c, context) == {source, derived}
+
+
+def test_superseded_relationship_target_is_blocked_before_any_paid_call(corpus, monkeypatch):
+    from src.dream_cycle import DreamCycleOrchestrator
+    from src.models import MemorySlice, EvaluatorVerdict
+    source, derived, context, _, candidate = corpus
+    old, snapshot = _superseded_memory()
+    context = {**context, old: snapshot}
+    bad = replace(candidate, title="Relates to a superseded memory",
+                  relationships=[{"target_id": old, "relation_type": "extends"}])
+    orch = DreamCycleOrchestrator()
+    memory_slice = MemorySlice("Supplied evidence", "cross_project_collision", [source, derived, old])
+    calls = {"evaluator": 0, "grounding": 0}
+    def think(_):
+        orch._slice_memory_cache = context.copy()
+        return [bad, candidate]
+    def evaluate(c, role, stage=None):
+        calls["evaluator"] += 1
+        return EvaluatorVerdict(role, "ACCEPT")
+    def ground(c):
+        calls["grounding"] += 1
+        return c
+    monkeypatch.setattr(orch, "_skim_arrivals", lambda *args: None)
+    monkeypatch.setattr(orch, "invoke_explorer", lambda *args: [memory_slice])
+    monkeypatch.setattr(orch, "_allocate_attention", lambda run, kind, at, slices: slices)
+    monkeypatch.setattr(orch, "invoke_thinker", think)
+    monkeypatch.setattr(orch, "_ground_candidate", ground)
+    monkeypatch.setattr(orch, "invoke_evaluator", evaluate)
+    monkeypatch.setattr("src.dream_cycle.orchestrator.generate_digest", lambda *a, **kw: "fixture.md")
+    result = orch.run("user_triggered")
+    assert result.candidates_accepted == 1 and not result.aborted_early
+    assert calls == {"evaluator": 4, "grounding": 1}  # the blocked candidate cost $0
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT final_verdict, evaluator_a_verdict, candidate_json->>'block_reason' FROM dream_cycle_candidates WHERE run_id=%s ORDER BY created_at", (result.run_id,))
+        rows = cur.fetchall()
+        cur.execute("SELECT stats FROM dream_cycle_runs WHERE id=%s", (result.run_id,))
+        stats = cur.fetchone()[0]
+    assert [r[0] for r in rows] == ["BLOCKED", "ACCEPTED"]
+    assert rows[0][1] is None and "exist and be active" in rows[0][2]
+    assert stats["candidates_blocked_unjudged"] == 1 and "candidates_storage_failed" not in stats

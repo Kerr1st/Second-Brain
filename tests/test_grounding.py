@@ -12,6 +12,7 @@ import pytest
 from src.backends.cost import SpendCapExceeded, SpendTracker
 from src.dream_cycle import orchestrator as o
 from src.dream_cycle.orchestrator import DreamCycleOrchestrator
+from src.dream_cycle.storage import validate_candidate
 from src.models import CandidateInsight, EvaluatorVerdict, MemorySlice
 from src.prompts.revision import REVISION_PROMPT, REVISION_SCHEMA, build_revision_request
 
@@ -208,6 +209,7 @@ class TestPipelineIntegration:
              patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
              patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
              patch("src.dream_cycle.orchestrator.check_duplicate", return_value=None), \
+             patch("src.dream_cycle.orchestrator.authorize_candidate", side_effect=validate_candidate), \
              patch("src.dream_cycle.orchestrator.store_accepted", side_effect=_stored):
             db.create_run.return_value = "run-p"
             db.get_memory_stats.return_value = {"total_count": 1, "recent_activity": 1, "date_range": {}}

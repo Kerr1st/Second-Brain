@@ -106,6 +106,28 @@ def _assert_target_mutable(row: dict, snapshot: dict) -> None:
         raise CandidateAuthorizationError("Mutation target changed since evaluation; regenerate the candidate")
 
 
+def is_active_memory(row: dict | None) -> bool:
+    """The lifecycle rule for anything a discovery cites, targets or relates to."""
+    return bool(row) and row.get("status") == "active"
+
+
+def _assert_all_active(ids: set[str], rows: dict[str, dict]) -> None:
+    """Every source, target and relationship target must exist and be active.
+
+    ``rows`` maps canonical id to the current database row. Shared by
+    :func:`authorize_candidate` (before any paid call) and :func:`store_accepted`
+    (under row locks after the panel), so the two can never drift.
+    """
+    if not ids <= rows.keys() or not all(is_active_memory(rows[mid]) for mid in ids):
+        raise CandidateAuthorizationError("Every source and target must exist and be active")
+
+
+def _current_rows(cur, ids: set[str], *, columns: str = "*", lock: bool = False) -> dict[str, dict]:
+    sql = f"SELECT {columns} FROM memories WHERE id = ANY(%s::uuid[]) ORDER BY id" + (" FOR UPDATE" if lock else "")
+    cur.execute(sql, (sorted(ids),))
+    return {str(row["id"]): dict(row) for row in cur.fetchall()}
+
+
 def _has_accepted_provenance(cur, target_id: str) -> bool:
     cur.execute("SELECT EXISTS(SELECT 1 FROM dream_cycle_candidates WHERE created_memory_id=%s AND final_verdict='ACCEPTED')", (target_id,))
     row = cur.fetchone()
@@ -115,23 +137,28 @@ def _has_accepted_provenance(cur, target_id: str) -> bool:
 def authorize_candidate(candidate: CandidateInsight, authorized_memories: dict[str, dict], *, conn=None) -> set[str]:
     """Everything that can be decided before spending on grounding and the panel.
 
-    Vocabulary, citation and relationship-target checks (:func:`validate_candidate`)
-    plus, for UPDATE/SUPERSEDE, the target authority rules from the supplied
-    snapshot (captured sources and guidance are immutable; only a discovery
-    type with ``dream_cycle`` metadata) and the accepted-discovery provenance
-    lookup (one cheap SELECT). ``store_accepted`` repeats all of it under row
-    locks after the panel as defence in depth. Raises CandidateAuthorizationError.
+    Vocabulary, citation and relationship-target checks (:func:`validate_candidate`);
+    for UPDATE/SUPERSEDE, the target authority rules from the supplied snapshot
+    (captured sources and guidance are immutable; only a discovery type with
+    ``dream_cycle`` metadata); then one cheap read of the current rows: every
+    source, target and relationship target must still exist and be active (the
+    rule ``store_accepted`` enforces, via the shared :func:`_assert_all_active`),
+    and a mutation target needs accepted-discovery provenance. ``store_accepted``
+    repeats all of it under row locks after the panel as defence in depth.
+    Raises CandidateAuthorizationError.
     """
     ids = validate_candidate(candidate, authorized_memories)
-    if candidate.operation in {"UPDATE", "SUPERSEDE"}:
+    mutation = candidate.operation in {"UPDATE", "SUPERSEDE"}
+    if mutation:
         target_id = _uuid(candidate.target_memory_id)
         snapshot = authorized_memories[target_id]
         _assert_target_mutable(snapshot, snapshot)
-        from src.db.pool import connection_scope
-        with connection_scope(conn) as scope:
-            with scope.cursor(cursor_factory=RealDictCursor) as cur:
-                if not _has_accepted_provenance(cur, target_id):
-                    raise CandidateAuthorizationError("Mutation target has no accepted discovery provenance")
+    from src.db.pool import connection_scope
+    with connection_scope(conn) as scope:
+        with scope.cursor(cursor_factory=RealDictCursor) as cur:
+            _assert_all_active(ids, _current_rows(cur, ids, columns="id, status"))
+            if mutation and not _has_accepted_provenance(cur, target_id):
+                raise CandidateAuthorizationError("Mutation target has no accepted discovery provenance")
     return ids
 
 
@@ -180,10 +207,8 @@ def store_accepted(candidate: CandidateInsight, *, run_id: str, verdicts: dict,
                     # is a duplicate and does not become a new memory (review C S3 2.4).
                     semantic_duplicate = _semantic_duplicate(cur, embedding)
             lock_ids = ids | ({duplicate_id} if duplicate_id else set())
-            cur.execute("SELECT * FROM memories WHERE id = ANY(%s::uuid[]) ORDER BY id FOR UPDATE", (sorted(lock_ids),))
-            rows = {str(row["id"]): dict(row) for row in cur.fetchall()}
-            if not ids <= rows.keys() or any(rows[mid].get("status") != "active" for mid in ids):
-                raise CandidateAuthorizationError("Every source and target must exist and be active")
+            rows = _current_rows(cur, lock_ids, lock=True)
+            _assert_all_active(ids, rows)
             for mid in ids:
                 if rows[mid].get("content") != authorized_memories[mid].get("content"):
                     raise CandidateAuthorizationError("Source or target changed since evaluation")

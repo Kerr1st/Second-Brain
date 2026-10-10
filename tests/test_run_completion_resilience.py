@@ -106,6 +106,13 @@ SLICES = [MemorySlice(name="s1", strategy="arrivals_synthesis", memory_ids=[SOUR
           MemorySlice(name="s2", strategy="arrivals_synthesis", memory_ids=[SOURCE_ID, OTHER_ID])]
 
 
+@pytest.fixture(autouse=True)
+def _no_database_authorization(monkeypatch):
+    """Keep the pure citation checks; skip the live-row read (no database here)."""
+    from src.dream_cycle.storage import validate_candidate
+    monkeypatch.setattr("src.dream_cycle.orchestrator.authorize_candidate", validate_candidate)
+
+
 def _completion(mock_db):
     mock_db.complete_run.assert_called_once()
     kwargs = mock_db.complete_run.call_args.kwargs
