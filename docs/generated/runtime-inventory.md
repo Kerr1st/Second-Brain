@@ -2,7 +2,7 @@
 
 Source-derived configuration, not installed or healthy service state. Regenerate with `.venv/bin/python scripts/docs/inventory.py`; `tests/test_repo_hygiene.py` fails on drift.
 
-Adapters: 4 (bedrock, claude_code, codex, kiro). Profiles: 4 (bedrock, controlled, laptop, mini). Roles per profile: 10 (advocate, codex_semantic, distill, editor, epistemologist, explorer, methodologist, skeptic, skim, thinker). Schedule templates: 17.
+Adapters: 4 (bedrock, claude_code, codex, kiro). Profiles: 4 (bedrock, controlled, laptop, mini). Roles per profile: 11 (advocate, codex_semantic, distill, editor, epistemologist, explorer, grounding_auditor, methodologist, skeptic, skim, thinker). Schedule templates: 17.
 Default profile: `controlled`. Migrations: 18 files, high-water `018_retire_knowledge_graph.sql`.
 Scheduled dream-cycle spend threshold: $9; library default: $5. Both stop after a metered response and can overshoot.
 

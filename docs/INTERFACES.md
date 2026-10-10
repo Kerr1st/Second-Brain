@@ -16,7 +16,7 @@ Dictionary tools return `{error: message}`, string tools return `Error: message`
 
 ### Trusted and read-only registries
 
-The interactive MCP registry includes writes and access reinforcement. `src/mcp_readonly.py` is an explicit separate registry with no write tools and a search that does not reinforce access counts, intended for discovery agents. **At the R7 head no adapter attaches it:** the Claude Code Explorer still starts `python -m src.mcp_server` (`src/backends/claude_code.py`), so the Explorer's capability boundary is the full server plus the orchestrator's deterministic storage authorization, not a read-only tool surface. Switching the Explorer to `src.mcp_readonly` with exact tool grants is a documented open item of the routing lane ([PLAN-refactor.md](PLAN-refactor.md), "Status"). A prompt saying "read only" is not the capability boundary.
+The interactive MCP registry includes writes and access reinforcement. `src/mcp_readonly.py` is an explicit separate registry with no write tools and a search that does not reinforce access counts, intended for discovery agents. The Claude Code Explorer attaches it (routing lane, branch `feat/routing-lane`): `--mcp-config` starts `python -m src.mcp_readonly`, `--tools ""` disables built-in tools and `--allowedTools` grants only `memory_search`, `memory_list`, `memory_read` and `memory_recent_activity` (`READONLY_TOOL_GRANTS`, `src/backends/claude_code.py`). `memory_graph` is served but not granted. Other tool-using stages still start `python -m src.mcp_server`. A prompt saying "read only" is not the capability boundary.
 
 ## Source and candidate contracts
 
