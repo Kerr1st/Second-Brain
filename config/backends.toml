@@ -40,13 +40,13 @@
 default_profile = "controlled"
 
 [profiles.laptop]
-explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-thinker        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "max" }
-skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-grounding_auditor = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+thinker        = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "max" }
+skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+grounding_auditor = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
 codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
@@ -56,18 +56,19 @@ editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", ef
 # Mac Mini: no Kiro -> Claude Code on Bedrock. The claude_code adapter is
 # implemented and validated end-to-end against the local ASBX `claude` build.
 #
-# Model ids are Bedrock inference-profile ids the Claude Code CLI accepts on
-# this build (confirmed live): `global.anthropic.claude-opus-4-8` is the latest
-# Opus. The short/dotted forms (`claude-opus-4.8`, `claude-opus-4-8`) and the
-# `opus` alias (which resolves to the older 4-6) are NOT used. For a cheaper /
-# faster instance, swap to `global.anthropic.claude-sonnet-4-6`.
-explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-thinker        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "max" }
-skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-grounding_auditor = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+# Model ids are Bedrock inference-profile ids the Claude Code CLI serves as
+# requested. 2026-10-10 live probe (stream-json system/init.model):
+# `global.anthropic.claude-opus-4-8` is REMAPPED by this Claude Code build to
+# `claude-opus-5-5[1m]` (the served-model check would abort every corpus stage),
+# while `global.anthropic.claude-opus-5` and `global.anthropic.claude-sonnet-5`
+# are served exactly. Re-probe before changing an id here.
+explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+thinker        = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "max" }
+skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+grounding_auditor = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
 skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
 codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }

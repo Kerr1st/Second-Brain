@@ -88,12 +88,16 @@ class TestLoadProfiles:
         Resolver(p)
 
     def test_laptop_profile_uses_safe_compatibility_route(self):
-        """Compatibility: laptop keeps Opus/effort choices on Claude Code."""
+        """Compatibility: laptop keeps Opus/effort choices on Claude Code.
+
+        Opus 5, not 4-8: a 2026-10-10 live probe showed this Claude Code build
+        remaps ``global.anthropic.claude-opus-4-8`` to ``claude-opus-5-5[1m]``,
+        which the served-model check rejects for corpus roles."""
         profiles, _ = load_profiles()
         laptop = profiles["laptop"]
         for role in AGENT_ROLES:
             assert laptop[role].backend == "claude_code"
-            assert laptop[role].model == "global.anthropic.claude-opus-4-8"
+            assert laptop[role].model == "global.anthropic.claude-opus-5"
         assert laptop["explorer"].effort == "high"
         assert laptop["thinker"].effort == "max"
         for ev in EVALUATORS:
