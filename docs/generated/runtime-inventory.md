@@ -18,7 +18,7 @@ Scheduled dream-cycle spend threshold: $9; library default: $5. Both stop after 
 | `com.second-brain.codex-capture` | 21600 seconds | `scripts/jobs/codex_capture.sh codex-capture` | 7200 | yes | false |
 | `com.second-brain.credentials` | {"Hour": 7, "Minute": 0} | `scripts/jobs/verify_credentials.sh credentials` | 3600 | yes | false |
 | `com.second-brain.distill` | {"Hour": 5, "Minute": 0} | `scripts/distill_sessions.py distill` | 7200 | yes | false |
-| `com.second-brain.dream-cycle` | [{"Hour": 2, "Minute": 0, "Weekday": 1}, {"Hour": 2, "Minute": 0, "Weekday": 3}, {"Hour": 2, "Minute": 0, "Weekday": 5}] | `scripts/jobs/dream_cycle_scheduled.sh dream-cycle` | 21600 | yes | false |
+| `com.second-brain.dream-cycle` | [{"Hour": 12, "Minute": 30, "Weekday": 1}, {"Hour": 12, "Minute": 30, "Weekday": 3}, {"Hour": 12, "Minute": 30, "Weekday": 5}] | `scripts/jobs/dream_cycle_scheduled.sh dream-cycle` | 21600 | yes | false |
 | `com.second-brain.ingest` | {"Hour": 3, "Minute": 0} | `scripts/crawlee_ingest.py crawlee-ingest` | 3600 | yes | false |
 | `com.second-brain.liveness` | {"Hour": 9, "Minute": 0} | `scripts/jobs/verify_liveness.sh liveness` | 3600 | no | false |
 | `com.second-brain.qd-sync` | 3600 seconds | `scripts/jobs/qd_sync.sh qd-sync` | 3600 | no | false |

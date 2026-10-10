@@ -9,12 +9,12 @@
 # (src/dream_cycle/orchestrator.py, R3). `exec` below makes the Python process the
 # group leader so there is no bash in between to die first.
 #
-# Model backends for the nightly run (see config/backends.toml):
+# Model backends for the scheduled run (see config/backends.toml):
 #   controlled = every seat on Bedrock in the user's own account; the corpus never
 #   reaches Kiro or a `fable` model (docs/PLAN-panel-acceptance.md §3).
 # Cost controls, two layers:
 #   - Real-time (here): SECOND_BRAIN_RUN_COST_CAP_USD=9 is the per-run budget (a
-#     10-candidate night with the grounding audit costs ~$8.50; runs Mon/Wed/Fri
+#     10-candidate run with the grounding audit costs ~$8.50; runs Mon/Wed/Fri
 #     only, see the plist). Exceeding it aborts the rest of the panel — candidates
 #     already accepted are kept, the digest is skipped. BEDROCK_MAX_TOKENS bounds a
 #     single Astra call at ~$0.90.

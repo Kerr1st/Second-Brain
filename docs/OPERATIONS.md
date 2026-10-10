@@ -28,7 +28,7 @@ Verification tools: `scripts/maintenance/prepare_release.py --roles-and-indexes 
 
 ## Scheduling and truthful health
 
-[scheduling/README.md](../scheduling/README.md) is the job table (17 plists, 16 labels loaded on the installed Mac, `distill` disabled by the operator) and the environment contract; [the generated inventory](generated/runtime-inventory.md) is the cadence table derived from the plists. Calendar entries are host local time; Weekday 1/3/5 at 02:00 is Monday/Wednesday/Friday. Plists are installed as **symlinks**, so a checkout changes the job definitions in place, effective at the next `launchctl bootout` + `bootstrap`; a copied plist silently keeps an old definition (the R5 runbook replaces the last two copies).
+[scheduling/README.md](../scheduling/README.md) is the job table (17 plists, 16 labels loaded on the installed Mac, `distill` disabled by the operator) and the environment contract; [the generated inventory](generated/runtime-inventory.md) is the cadence table derived from the plists. Calendar entries are host local time; the dream cycle's Weekday 1/3/5 at 12:30 is Monday/Wednesday/Friday. It moved from 02:00 to 12:30 on 2026-10-09: the Mac sleeps with the lid closed and dark-wake runs lose the network (the 2026-10-09 02:00 run failed on DNS), so it now runs midday while the machine is in use. Plists are installed as **symlinks**, so a checkout changes the job definitions in place, effective at the next `launchctl bootout` + `bootstrap`; a copied plist silently keeps an old definition (the R5 runbook replaces the last two copies).
 
 Every job runs `scripts/jobs/job_wrapper.sh` → `python -m src.operations.jobs <script> <job-name>`: PATH, `AWS_PROFILE=second-brain-jobs`, `SECOND_BRAIN_PROFILE=controlled`, `umask 077`, `caffeinate`, one `flock` per job, a committed per-job deadline with floors the runner never undercuts (dream-cycle 6 h, bookmarks 3 h, backup/verify/weekly-digest/codex-capture/distill 2 h, others 1 h), SIGTERM → 120 s grace → SIGKILL, the per-day log `logs/<job>-YYYYMMDD.log` and the durable status `logs/jobs/<job>.json` (state, exit code, timings, timeout source, last success, consecutive failures, first failure, last notification). Capture-api runs in service mode: bounded startup, `/health` probes, no deadline while healthy, back-off and at most one notification per 30 minutes during an outage. Jobs that need the network wait for DNS first (`SECOND_BRAIN_JOB_NEEDS_NETWORK=1`, up to 15 minutes under a sleep assertion) and exit 68 without starting if it never comes — dark-wake launches were the root cause of the chronic Monday weekly-digest failure. PostgreSQL is never auto-started by a job: `scripts/jobs/_preflight.sh` exits 69 with a named cause. Exit-code taxonomy and every variable: [scheduling/README.md](../scheduling/README.md).
 
@@ -49,7 +49,7 @@ Each release has a private runbook with a hard gate, a quiesce, a backup, the sw
 7. **Bootstrap** the 16 labels, watch capture-api come up healthy, run liveness by hand, restart editor sessions so their MCP servers load the new code, and check the next scheduled runs.
 8. **Rollback** = `git checkout -B main <previous head>` plus the previous plists; when a migration committed, restore the pre-window backup as the owner first. Git restores source; it cannot recover deleted data.
 
-Nothing in this sequence resumes the disabled distiller or enables e-mail delivery. Do not run a window between 01:30 and 05:00, within five minutes of the hour (qd-sync) or on Monday/Wednesday/Friday 02:00–06:00.
+Nothing in this sequence resumes the disabled distiller or enables e-mail delivery. Do not run a window between 01:30 and 05:00, within five minutes of the hour (qd-sync) or on Monday/Wednesday/Friday 12:30–16:30 (the dream cycle).
 
 ## Corpus maintenance (R6, pending authorization)
 
@@ -75,7 +75,7 @@ PostgreSQL 17 + pgvector run natively via Homebrew (`postgresql@17`, keg-only: `
 | Every job's last run | `for f in logs/jobs/*.json; do python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['job'], d['state'], d.get('exit_code'), d.get('timeout_s'))" "$f"; done` | `succeeded 0` (capture-api `running`) |
 | Liveness | `python3 -c "import json; r=json.load(open('logs/jobs/liveness-report.json')); print(r['healthy'], r['required_failures'], r['advisories'])"` | `True [] [...]` |
 | Backup | `tail -2 logs/backup-$(date +%Y%m%d).log`; `ls -t backups/*.receipt.json \| head -1 \| xargs cat` | `OK (exit 0)`; `"remote_verified": true` |
-| Dream cycle | `psql … -c "SELECT started_at, completed_at, candidates_generated, candidates_accepted, cost_usd FROM dream_cycle_runs ORDER BY started_at DESC LIMIT 1"` | `completed_at` set after Mon/Wed/Fri 02:00 |
+| Dream cycle | `psql … -c "SELECT started_at, completed_at, candidates_generated, candidates_accepted, cost_usd FROM dream_cycle_runs ORDER BY started_at DESC LIMIT 1"` | `completed_at` set after Mon/Wed/Fri 12:30 |
 | Roles | `.venv/bin/python scripts/maintenance/prepare_release.py --roles-and-indexes --output /tmp/audit.json` | `remaining_steps: []`, `currently_superuser: false` after R7 |
 | PostgreSQL | `pg_isready -h 127.0.0.1 -p 5432 -U memory_bank` | accepting connections |
 | Ledger | `psql … -tAc "SELECT count(*), max(version) FROM schema_migrations"` | matches [RELEASES.md](RELEASES.md) for the installed release |

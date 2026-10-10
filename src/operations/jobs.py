@@ -72,7 +72,7 @@ CAFFEINATE = "/usr/bin/caffeinate"
 # Documented minimum deadlines per job name (seconds).  Derived from the observed
 # wall-clock durations in /Users/kerrfir/second-brain/logs (first/last line of
 # each job log, 2026-09-05 … 2026-10-06):
-#   dream-cycle   39, 46, 53, 92, 204 min (Mon/Wed/Fri 02:00)      → 6 h
+#   dream-cycle   39, 46, 53, 92, 204 min (Mon/Wed/Fri; observed at 02:00, 12:30 since 2026-10-09) → 6 h
 #   bookmarks     39, 64, 64 min (sleep-inflated nights: 9 h, 13 h) → 3 h
 #   backup        14–31 min (pg_dump 1.1 GB + gpg + rclone)         → 2 h
 #   verify        1–5 min listing only; the new full-restore verify downloads

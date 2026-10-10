@@ -124,7 +124,7 @@ ignore = [
 
 # --- dream cycle --------------------------------------------------------------
 [dream_cycle]
-# Runs Mon/Wed/Fri 02:00; the longest normal gap is Fri→Mon = 3 d.  7 d means two
+# Runs Mon/Wed/Fri 12:30 (02:00 until 2026-10-09); the longest normal gap is Fri→Mon = 3 d.  7 d means two
 # consecutive scheduled runs never completed (completed_at stays NULL on a crash).
 max_completed_age_days = 7
 # A completed run that generated 0 candidates (observed 2026-09-30) is not healthy

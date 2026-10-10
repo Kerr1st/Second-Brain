@@ -118,9 +118,9 @@ def test_network_dependent_plists_opt_into_the_preflight_and_local_ones_do_not()
     assert PLISTS["weekly-digest"]["StartCalendarInterval"] == {"Weekday": 1, "Hour": 6, "Minute": 0}
 
 
-def test_dream_cycle_keeps_mon_wed_fri_0200_and_gives_launchd_time_for_the_grace():
+def test_dream_cycle_keeps_mon_wed_fri_1230_and_gives_launchd_time_for_the_grace():
     plist = PLISTS["dream-cycle"]
-    assert plist["StartCalendarInterval"] == [{"Weekday": d, "Hour": 2, "Minute": 0} for d in (1, 3, 5)]
+    assert plist["StartCalendarInterval"] == [{"Weekday": d, "Hour": 12, "Minute": 30} for d in (1, 3, 5)]
     grace = float(plist["EnvironmentVariables"].get("SECOND_BRAIN_JOB_GRACE_S", DEFAULT_GRACE_S))
     # launchd SIGKILLs the job ExitTimeOut seconds after bootout; the wrapper's
     # TERM → grace → KILL must fit inside it or the orchestrator's RunInterrupted
@@ -170,7 +170,7 @@ def test_schedules_match_the_readme_table():
     readme = (SCHEDULING / "README.md").read_text(encoding="utf-8")
     for label in EXPECTED_LABELS:
         assert f"`com.second-brain.{label}`" in readme, label
-    assert "Mon/Wed/Fri 02:00" in readme
+    assert "Mon/Wed/Fri 12:30" in readme
     for label, plist in PLISTS.items():
         for key in plist.get("EnvironmentVariables", {}):
             if key.startswith("SECOND_BRAIN_JOB_TIMEOUT_"):

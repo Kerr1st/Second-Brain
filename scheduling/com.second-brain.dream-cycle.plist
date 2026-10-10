@@ -17,25 +17,25 @@
 			<key>Weekday</key>
 			<integer>1</integer>
 			<key>Hour</key>
-			<integer>2</integer>
+			<integer>12</integer>
 			<key>Minute</key>
-			<integer>0</integer>
+			<integer>30</integer>
 		</dict>
 		<dict>
 			<key>Weekday</key>
 			<integer>3</integer>
 			<key>Hour</key>
-			<integer>2</integer>
+			<integer>12</integer>
 			<key>Minute</key>
-			<integer>0</integer>
+			<integer>30</integer>
 		</dict>
 		<dict>
 			<key>Weekday</key>
 			<integer>5</integer>
 			<key>Hour</key>
-			<integer>2</integer>
+			<integer>12</integer>
 			<key>Minute</key>
-			<integer>0</integer>
+			<integer>30</integer>
 		</dict>
 	</array>
 	<key>WorkingDirectory</key>

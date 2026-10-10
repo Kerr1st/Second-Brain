@@ -239,18 +239,18 @@
       "calendar": [
         {
           "Weekday": 1,
-          "Hour": 2,
-          "Minute": 0
+          "Hour": 12,
+          "Minute": 30
         },
         {
           "Weekday": 3,
-          "Hour": 2,
-          "Minute": 0
+          "Hour": 12,
+          "Minute": 30
         },
         {
           "Weekday": 5,
-          "Hour": 2,
-          "Minute": 0
+          "Hour": 12,
+          "Minute": 30
         }
       ],
       "interval_seconds": null,
