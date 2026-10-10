@@ -141,9 +141,9 @@ class TestCapture:
         monkeypatch.setattr(src.db, "get_processed_source_urls", lambda st: {"browser://history/2026-09-14"})
         monkeypatch.setattr(src.ingest, "ingest_batch", lambda items, st: ingested.setdefault(st, list(items)) and
                             {"processed": len(items), "skipped": 0, "failed": 0})
-        sent = []
+        sent, timeouts = [], []
         fake_sb = type("SB", (), {"load_indexed_urls": staticmethod(lambda: {"https://example.org/background-tab"}),
-                                  "scrape_with_crawlee": staticmethod(lambda urls: sent.extend(urls) or {"processed": len(urls), "failed": 0})})
+                                  "scrape_with_crawlee": staticmethod(lambda urls, **kw: sent.extend(urls) or timeouts.append(kw.get("timeout")) or {"processed": len(urls), "failed": 0})})
         monkeypatch.setitem(__import__("sys").modules, "scripts.scrape_bookmarks", fake_sb)
         monkeypatch.setattr(b, "completed_days", lambda n: [date(2026, 9, 14), date(2026, 9, 15)])
         stats = b.capture(days_back=2, history_path=history_db)
@@ -151,15 +151,16 @@ class TestCapture:
         assert [u for u, _ in ingested[b.SOURCE_TYPE]] == ["browser://history/2026-09-15"]
         assert sent == [("Deep article", "https://example.com/article")]   # indexed URL not re-sent
         assert not os.path.exists(history_db + ".tmp")
+        assert timeouts and all(t is not None and t < 3600 for t in timeouts)  # bounded below the job deadline
 
     def test_reading_retries_for_already_logged_days(self, history_db, monkeypatch):
         """A failed scrape must be retried while the day is in window, even though its log is ingested."""
         import src.db, src.ingest
         monkeypatch.setattr(src.db, "get_processed_source_urls", lambda st: {"browser://history/2026-09-15"})
         monkeypatch.setattr(src.ingest, "ingest_batch", lambda items, st: {"processed": 0, "skipped": 0, "failed": 0})
-        sent = []
+        sent, timeouts = [], []
         fake_sb = type("SB", (), {"load_indexed_urls": staticmethod(lambda: set()),
-                                  "scrape_with_crawlee": staticmethod(lambda urls: sent.extend(urls) or {"processed": len(urls), "failed": 0})})
+                                  "scrape_with_crawlee": staticmethod(lambda urls, **kw: sent.extend(urls) or timeouts.append(kw.get("timeout")) or {"processed": len(urls), "failed": 0})})
         monkeypatch.setitem(__import__("sys").modules, "scripts.scrape_bookmarks", fake_sb)
         monkeypatch.setattr(b, "completed_days", lambda n: [date(2026, 9, 15)])
         stats = b.capture(days_back=1, history_path=history_db)
@@ -173,3 +174,73 @@ class TestCapture:
         assert stats["processed"] == 0 and stats["failed"] == 1
         from src.capture.common import exit_code
         assert exit_code(stats) == 1
+
+
+class TestSnapshot:
+    """Regression for 2026-10-10: Chrome holds History locked; the snapshot must never block."""
+
+    @staticmethod
+    def _snapshot_bounded(path, limit=10.0):
+        import threading
+        result = {}
+
+        def run():
+            try:
+                result["snap"] = b.snapshot_history(path)
+            except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+                result["error"] = exc
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(limit)
+        assert not t.is_alive(), f"snapshot_history blocked for more than {limit}s on a locked source"
+        if "error" in result:
+            raise result["error"]
+        return result["snap"]
+
+    def test_snapshot_of_exclusively_locked_history_completes_quickly(self, history_db):
+        import time as _time
+        holder = sqlite3.connect(history_db, isolation_level=None, check_same_thread=False)
+        holder.execute("BEGIN EXCLUSIVE")
+        holder.execute("UPDATE urls SET title = 'uncommitted' WHERE id = 1")
+        try:
+            started = _time.monotonic()
+            snap = self._snapshot_bounded(history_db)
+            assert _time.monotonic() - started < 5
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+        try:
+            assert snap != history_db and os.path.dirname(snap) != os.path.dirname(history_db)
+            visits = b.load_visits(snap, date(2026, 9, 15))
+            assert len(visits) == 12                                   # committed data is all there
+            assert all(v["title"] != "uncommitted" for v in visits)    # the open transaction is not
+        finally:
+            b.discard_snapshot(snap)
+        assert not os.path.exists(os.path.dirname(snap))
+
+    def test_snapshot_copies_wal_sidecar(self, tmp_path):
+        path = str(tmp_path / "History")
+        writer = sqlite3.connect(path, isolation_level=None)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE t (x)")
+        writer.execute("INSERT INTO t VALUES (42)")
+        assert os.path.getsize(path + "-wal") > 0                     # row lives only in the WAL
+        try:
+            snap = self._snapshot_bounded(path)
+        finally:
+            writer.close()
+        try:
+            conn = sqlite3.connect(f"file:{snap}?mode=ro", uri=True)
+            assert conn.execute("SELECT x FROM t").fetchall() == [(42,)]
+            conn.close()
+        finally:
+            b.discard_snapshot(snap)
+
+    def test_missing_source_raises_and_leaves_no_temp_dir(self, tmp_path):
+        import glob, tempfile
+        before = set(glob.glob(os.path.join(tempfile.gettempdir(), "sb-history-*")))
+        with pytest.raises(OSError):
+            b.snapshot_history(str(tmp_path / "nope"))
+        assert set(glob.glob(os.path.join(tempfile.gettempdir(), "sb-history-*"))) == before

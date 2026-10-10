@@ -27,6 +27,7 @@ import collections
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -51,6 +52,9 @@ READ_SECS = int(os.environ.get("BROWSER_READ_SECS", "60"))             # full te
 # anything past this per visit is not attention.
 MAX_VISIT_DWELL_SECS = int(os.environ.get("BROWSER_MAX_VISIT_DWELL_SECS", "1200"))
 MAX_READ_URLS_PER_RUN = int(os.environ.get("BROWSER_MAX_READ_URLS", "60"))
+# The capture-browser job deadline is 3600 s; the reading scrape must end well
+# before it so the day logs are still ingested and the run reports honestly.
+CRAWLEE_TIMEOUT_S = int(os.environ.get("BROWSER_CRAWLEE_TIMEOUT_S", "1800"))
 MAX_LOG_ENTRIES = 400
 
 # Chrome stores microseconds since 1601-01-01 UTC.
@@ -160,18 +164,46 @@ def day_source_url(day: date) -> str:
     return f"browser://history/{day.isoformat()}"
 
 
+#: Bounded busy timeout for the one sqlite call made on the *private* copy.
+SNAPSHOT_SQLITE_TIMEOUT_S = 5.0
+_HISTORY_SIDECARS = ("-journal", "-wal")
+
+
 def snapshot_history(path: str = CHROME_HISTORY) -> str:
-    """Copy the (locked) History DB to a temp file; caller removes it."""
-    fd, tmp = tempfile.mkstemp(prefix="sb-history-", suffix=".db")
-    os.close(fd)
+    """Copy the (locked) History DB into a private temp dir; caller calls ``discard_snapshot``.
+
+    Chrome holds History locked while it runs. Never open the live file with
+    sqlite: ``Connection.backup`` retries SQLITE_BUSY/LOCKED forever, which hung
+    the nightly job until its deadline (2026-10-10). A plain file copy never
+    takes a SQLite lock. The ``-journal``/``-wal`` sidecars are copied under the
+    same basename so SQLite reconciles them when the copy is first opened.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="sb-history-")
+    copy = os.path.join(tmpdir, "History")
     try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as source:
-            with sqlite3.connect(tmp) as target:
-                source.backup(target)
-        return tmp
+        shutil.copyfile(path, copy)
+        for suffix in _HISTORY_SIDECARS:
+            if os.path.exists(path + suffix):
+                try:
+                    shutil.copyfile(path + suffix, copy + suffix)
+                except FileNotFoundError:   # Chrome removed it between exists() and copy
+                    pass
+        # Fold any copied journal/WAL into the copy so later read-only opens are
+        # self-contained. The copy is private, so the busy timeout is never hit.
+        conn = sqlite3.connect(copy, timeout=SNAPSHOT_SQLITE_TIMEOUT_S)
+        try:
+            conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+        finally:
+            conn.close()
+        return copy
     except (OSError, sqlite3.Error):
-        os.unlink(tmp)
+        shutil.rmtree(tmpdir, ignore_errors=True)
         raise
+
+
+def discard_snapshot(snapshot: str) -> None:
+    """Remove a snapshot made by ``snapshot_history`` (its whole private dir)."""
+    shutil.rmtree(os.path.dirname(snapshot), ignore_errors=True)
 
 
 def load_visits(db_path: str, day: date) -> list[dict]:
@@ -306,7 +338,7 @@ def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
             logger.info("%s: %d raw visits -> %d attended pages, %d searches, %d read",
                         day, summary["raw_visits"], len(summary["pages"]), len(summary["searches"]), len(reads))
     finally:
-        os.remove(snap)
+        discard_snapshot(snap)
 
     # Full text of read pages via the bookmark pipeline (dedup against Crawlee's index).
     reading_sent = 0
@@ -326,7 +358,7 @@ def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
             for _, url in fresh:
                 logger.info("[DRY] read -> crawlee: %s", url)
         elif fresh:
-            scrape_stats = scrape_with_crawlee(fresh)
+            scrape_stats = scrape_with_crawlee(fresh, timeout=CRAWLEE_TIMEOUT_S)
             reading_failed = scrape_stats["failed"]
             reading_sent = scrape_stats["processed"]
 

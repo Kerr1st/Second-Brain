@@ -73,7 +73,7 @@ def scrape_with_cookies(name, url):
         return False
 
 
-def scrape_with_crawlee(urls):
+def scrape_with_crawlee(urls, timeout=3600):
     """Report only verified index additions as successful public scrapes."""
     if not urls:
         return {"processed": 0, "failed": 0, "skipped": 0}
@@ -85,7 +85,7 @@ def scrape_with_crawlee(urls):
                 handle.write(url + "\n")
         result = subprocess.run(
             ["node", "batch-scrape.js", url_file], cwd=CRAWLEE_DIR,
-            timeout=3600, capture_output=True, text=True,
+            timeout=timeout, capture_output=True, text=True,
         )
         after = load_indexed_urls()
         requested = {url for _, url in urls}
