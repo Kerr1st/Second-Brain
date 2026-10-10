@@ -61,3 +61,30 @@ def test_cli_returns_failure_when_any_task_fails(capsys):
             "task_id": "real-task-id",
         }
     ]
+
+
+def test_cli_exits_zero_when_only_semantic_contract_abandonments_failed(capsys):
+    def capture(now, **kwargs):
+        return CaptureReport(
+            failed=2,
+            semantic_abandoned=2,
+            semantic_contract_failed=2,
+            failures=tuple(
+                TaskFailure(task_id=f"t{i}", stage="semantic", error_type="SemanticResultError")
+                for i in range(2)
+            ),
+        )
+
+    assert main([], now=NOW, capture=capture) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["failed"] == 2                       # backward-compatible total
+    assert report["semantic_contract_failed"] == 2
+    assert "infrastructure_failed" not in report       # derived, not a new serialized field
+
+
+def test_cli_exits_non_zero_when_infrastructure_failures_accompany_abandonments(capsys):
+    def capture(now, **kwargs):
+        return CaptureReport(failed=3, semantic_contract_failed=2)
+
+    assert main([], now=NOW, capture=capture) == 1
+    assert json.loads(capsys.readouterr().out)["semantic_contract_failed"] == 2

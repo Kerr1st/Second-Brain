@@ -56,7 +56,10 @@ def main(argv=None, *, now=None, capture=run_codex_capture) -> int:
         dry_run=args.dry_run,
     )
     print(json.dumps(asdict(report), sort_keys=True))
-    return 1 if report.failed else 0
+    # A semantic-contract failure that abandoned its task is already recorded
+    # (verbatim task kept, no further model calls); only infrastructure
+    # failures make the run non-zero.
+    return 1 if report.infrastructure_failed else 0
 
 
 if __name__ == "__main__":

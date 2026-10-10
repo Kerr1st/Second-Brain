@@ -142,6 +142,10 @@ class CaptureReport:
     semantic_processed: int = 0
     semantic_retried: int = 0
     semantic_abandoned: int = 0
+    #: Subset of ``failed``: invalid model results that abandoned the task's
+    #: semantic batch this run (attempt recorded, verbatim task kept). Not an
+    #: infrastructure failure, so it does not make the command exit non-zero.
+    semantic_contract_failed: int = 0
     semantic_skipped_budget: int = 0
     semantic_cost_usd: float = 0.0
     semantic_metered_calls: int = 0
@@ -149,6 +153,11 @@ class CaptureReport:
     failed: int = 0
     dry_run: bool = False
     failures: tuple[TaskFailure, ...] = ()
+
+    @property
+    def infrastructure_failed(self) -> int:
+        """Failures that should make the run exit non-zero."""
+        return max(0, self.failed - self.semantic_contract_failed)
 
 
 @dataclass(slots=True)
@@ -300,6 +309,7 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         "semantic_processed": 0,
         "semantic_retried": 0,
         "semantic_abandoned": 0,
+        "semantic_contract_failed": 0,
         "semantic_skipped_budget": 0,
         "failed": 0,
     }
@@ -399,6 +409,7 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
                     services.connect,
                 )
                 counts["semantic_abandoned"] += 1
+                counts["semantic_contract_failed"] += 1
                 logger.warning(
                     "Codex task %s abandoned semantically after %d attempt(s): "
                     "%s (%s). The verbatim Captured Task is kept; no further "

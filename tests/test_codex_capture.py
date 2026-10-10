@@ -1235,6 +1235,14 @@ def test_permanently_failing_semantic_pass_is_bounded_then_never_retried(
         1
     ] * 4
     assert all(report.semantic_processed == 0 for report in reports)
+    # Only the abandoning attempt is a semantic-contract failure; earlier
+    # (still retrying) contract failures keep failing the run.
+    assert [report.semantic_contract_failed for report in reports] == (
+        [0] * (bound - 1) + [1] + [0, 0, 0]
+    )
+    assert [report.infrastructure_failed for report in reports] == (
+        [1] * (bound - 1) + [0] + [0, 0, 0]
+    )
     assert reports[-1].failures == ()
     # The verbatim Captured Task survives untouched and stays unprocessed.
     assert len(metadata["turns"]) == 3
@@ -1346,15 +1354,20 @@ def test_run_summary_json_reports_semantic_abandonment(
     )
     monkeypatch.setenv(codex_capture.SEMANTIC_MAX_ATTEMPTS_ENV, "1")
 
-    assert main(["--backfill"], now=NOW) == 1
+    # The abandoning run is recorded, the verbatim task kept: a semantic-contract
+    # failure, not an infrastructure failure, so the command exits 0.
+    assert main(["--backfill"], now=NOW) == 0
     abandoning_run = json.loads(capsys.readouterr().out)
     assert main(["--backfill"], now=NOW) == 0
     later_run = json.loads(capsys.readouterr().out)
 
     assert abandoning_run["semantic_abandoned"] == 1
-    assert abandoning_run["failed"] == 1
+    assert abandoning_run["failed"] == 1                      # backward compatible total
+    assert abandoning_run["semantic_contract_failed"] == 1
+    assert abandoning_run["failures"][0]["stage"] == "semantic"
     assert later_run["semantic_abandoned"] == 1
     assert later_run["failed"] == 0
+    assert later_run["semantic_contract_failed"] == 0
 
 
 def test_semantic_contract_identity_includes_prompt_version_and_model():
