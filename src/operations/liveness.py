@@ -30,6 +30,9 @@ SEVERITIES = ("required", "advisory", "retired")
 NEVER = 99999
 #: Job-written backlog sidecars (src.operations.backlog) are not wrapper status records.
 BACKLOG_SUFFIX = ".backlog.json"
+#: Every job-written sidecar in logs/jobs/ that is not a wrapper status record:
+#: backlog streaks and the bookmarks unreachable ledger (src.capture.unreachable).
+SIDECAR_SUFFIXES = (BACKLOG_SUFFIX, ".unreachable.json")
 
 #: Rows that are evidence of a capture. Index-only chunk rows are not: the Codex
 #: writer's ``*_chunk`` children of Topic Segments / task memories, and any chunk
@@ -228,7 +231,7 @@ def inspect_statuses(directory, *, now=None, failure_days=1, expected_interval_h
     results = []
     seen = set()
     for path in sorted(Path(directory).glob("*.json")):
-        if path.name == "liveness-report.json" or path.name.endswith(BACKLOG_SUFFIX):
+        if path.name == "liveness-report.json" or path.name.endswith(SIDECAR_SUFFIXES):
             continue
         try:
             value = json.loads(path.read_text())

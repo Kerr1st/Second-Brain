@@ -321,6 +321,8 @@ def test_persistent_backlog_is_advisory_only_at_the_threshold_and_never_fails(tm
     assert finding["first_deferred_at"] == (NOW + timedelta(days=7)).isoformat()
     # the sidecar is not mistaken for a wrapper status record
     assert inspect_statuses(tmp_path, now=NOW) == []
+    (tmp_path / "bookmarks.unreachable.json").write_text('{"version": 1, "entries": {}}')
+    assert inspect_statuses(tmp_path, now=NOW) == []
     report = liveness.write_report(tmp_path / "liveness-report.json", liveness.run(policy, tmp_path, now=NOW, skip_db=True), NOW)
     assert report["healthy"] is True and "bookmarks" in report["advisories"]
     # a run that drains the queue resets the streak
