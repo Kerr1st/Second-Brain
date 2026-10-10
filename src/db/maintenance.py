@@ -105,15 +105,23 @@ def remap_json(value, mapping):
     return value
 
 
+#: Every typed column that holds a memory id. ``_remap_references`` rewrites
+#: each of them; ``_referenced_chunks`` treats a hit in any of them as a citation.
+#: Untyped references are covered separately by both: express_feedback item keys
+#: (``FEEDBACK_ITEM_KEY_SEPARATOR``-joined ids), every jsonb column and every
+#: text[]/uuid[] column.
+MEMORY_ID_COLUMNS = (('memories', 'parent_id'), ('memory_relationships', 'source_id'),
+                     ('memory_relationships', 'target_id'), ('dream_cycle_candidates', 'created_memory_id'),
+                     ('dream_cycle_candidates', 'target_memory_id'), ('memory_skim', 'memory_id'))
+FEEDBACK_ITEM_KEY_SEPARATOR = ':'
+
+
 def _check_reference_layout(cur):
     cur.execute("""SELECT c.conrelid::regclass::text, a.attname
         FROM pg_constraint c JOIN unnest(c.conkey) AS k(attnum) ON true
         JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum
         WHERE c.contype='f' AND c.confrelid='memories'::regclass""")
-    allowed = {('memories', 'parent_id'), ('memory_relationships', 'source_id'),
-               ('memory_relationships', 'target_id'), ('dream_cycle_candidates', 'created_memory_id'),
-               ('memory_skim', 'memory_id')}
-    unknown = set(cur.fetchall()) - allowed
+    unknown = set(cur.fetchall()) - set(MEMORY_ID_COLUMNS)
     if unknown:
         raise ValueError(f"Unrecognized references require a migration policy: {sorted(unknown)}")
 
@@ -152,7 +160,7 @@ def _remap_references(conn, old, new):
         # Express feedback has untyped UUID / UUID:UUID item keys, not FKs.
         cur.execute("SELECT id::text,target_key,signal,weight,updated_at FROM express_feedback WHERE target_type='item' AND target_key LIKE %s FOR UPDATE", ('%'+old+'%',))
         for fid, target, signal, weight, updated in cur.fetchall():
-            mapped=':'.join(new if part==old else part for part in target.split(':'))
+            mapped=FEEDBACK_ITEM_KEY_SEPARATOR.join(new if part==old else part for part in target.split(FEEDBACK_ITEM_KEY_SEPARATOR))
             if mapped==target: continue
             cur.execute("SELECT id::text,signal,weight,updated_at FROM express_feedback WHERE target_type='item' AND target_key=%s FOR UPDATE", (mapped,))
             conflict=cur.fetchone()
@@ -305,10 +313,11 @@ def _active_children(cur, parent_id):
 
 
 def oversize_vector_rows(max_chunk_chars=4000, *, conn=None):
-    """Corpus invariant probe (read-only): active, embedded, childless rows over the bound.
+    """Corpus invariant probe (read-only): active, embedded rows over the bound.
 
     Every vector should describe at most ``max_chunk_chars`` characters, whatever
-    the source type or nesting depth; the list should be empty after a rechunk.
+    the source type, nesting depth or chunk children (a parent's own whole-row
+    vector beside its chunks counts); the list should be empty after a rechunk.
     Returns ``[{id, source_type, record_kind, parent_id, chars}]`` without text.
     """
     from .pool import connection_scope
@@ -317,7 +326,6 @@ def oversize_vector_rows(max_chunk_chars=4000, *, conn=None):
                               m.parent_id::text, length(m.content) AS chars
                        FROM memories m
                        WHERE m.status = 'active' AND m.embedding IS NOT NULL AND length(m.content) > %s
-                         AND NOT EXISTS (SELECT 1 FROM memories c WHERE c.parent_id = m.id AND c.status = 'active')
                        ORDER BY chars DESC, m.id""", (max_chunk_chars,))
         return [dict(r) for r in cur.fetchall()]
 
@@ -336,7 +344,11 @@ def plan_rechunk(max_chunk_chars=4000, *, strip_known_ide_context=False):
       it is NOT given a redundant child copy of itself (74ba02d would have added
       ~35,100 such children on the live corpus);
     * a childless row that is unembedded, or longer than the bound, gets a single
-      leaf vector or a chunk set respectively.
+      leaf vector or a chunk set respectively;
+    * a parent whose chunk set is valid but which still carries its own vector of
+      more than ``max_chunk_chars`` characters gets a ``clear_vector`` operation
+      (no embedding call): search reaches it through its chunks, as it does every
+      ingested parent, whose vector is NULL.
 
     Scope is :data:`RECHUNK_SCOPE`: Codex Topic Segments (child rows, parents of
     their own chunks) and derived ``distilled_agent_task`` memories are planned
@@ -383,6 +395,14 @@ def plan_rechunk(max_chunk_chars=4000, *, strip_known_ide_context=False):
                             complete=False
                         actual[index]=child['content_sha256']
                     needs=not complete or actual!=expected or any(not child['embedded'] for child in existing)
+                    if not needs and row['embedded'] and row['content_length'] > max_chunk_chars:
+                        # Valid chunk set, but the parent still carries a whole-row vector
+                        # over the bound (written before ingest cleared it): drop that
+                        # vector only. The chunks already represent the text; 0 calls.
+                        plan['operations'].append({'memory_id':rid,'content_sha256':row['content_sha256'],'identity':identity(row),
+                            'status':row['status'],'mode':'clear_vector','chunk_hashes':chunk_hashes,
+                            'active_children':[str(r['id']) for r in existing]})
+                        continue
                 elif not row['embedded'] or len(repair_text)>max_chunk_chars or len(chunks)>1:
                     needs=True
                 else:
@@ -428,12 +448,12 @@ def apply_rechunk(plan, expected_sha256, *, embed, cache_dir):
                 if not row or body_hash(row)!=op['content_sha256'] or identity(row)!=op['identity'] or row['status']!=op.get('status'):
                     raise ValueError('Memory changed since manifest creation')
         repair_text=_repair_text(row, plan.get('strip_known_ide_context',False))
-        chunks=chunk_by_section(repair_text,plan['max_chunk_chars']) if op['mode']=='chunks' else [repair_text]
+        chunks=chunk_by_section(repair_text,plan['max_chunk_chars']) if op['mode'] in ('chunks','clear_vector') else [repair_text]
         chunks=[c for c in chunks if c.strip()]
         if [hashlib.sha256(c.encode()).hexdigest() for c in chunks]!=op['chunk_hashes']:
             raise ValueError('Chunk algorithm changed since manifest creation')
         vectors=[]
-        for text, hashed in zip(chunks,op['chunk_hashes']):
+        for text, hashed in ([] if op['mode']=='clear_vector' else zip(chunks,op['chunk_hashes'])):
             path=cache/(expected_sha256+'-'+hashed+'.json')
             cached=path.exists()
             vector=json.loads(path.read_text()) if cached else embed(text)
@@ -463,7 +483,12 @@ def apply_rechunk(plan, expected_sha256, *, embed, cache_dir):
                     raise ValueError('Active chunk set changed since planning')
                 row=current  # Preserve current metadata/title after paid preparation.
                 purge={'deleted':0,'retained_referenced':0}
-                if op['mode']=='leaf': update_fields(rid,{'embedding':vectors[0], 'mem_class':row['mem_class'] or classify_memory(row['type'],row['content'])},conn=conn)
+                if op['mode']=='clear_vector':
+                    # The kept chunk set must still be the one the plan validated.
+                    if [c['content_sha256'] for c in sorted(_active_children(cur, rid), key=lambda c: int(c['chunk_index']))]!=op['chunk_hashes']:
+                        raise ValueError('Active chunk content changed since planning')
+                    cur.execute('UPDATE memories SET embedding=NULL WHERE id=%s',(rid,))
+                elif op['mode']=='leaf': update_fields(rid,{'embedding':vectors[0], 'mem_class':row['mem_class'] or classify_memory(row['type'],row['content'])},conn=conn)
                 else:
                     # Old chunks are replaced, not accumulated (review B N4): a chunk that
                     # nothing references is deleted (its text lives on in the parent and
@@ -496,12 +521,15 @@ def _referenced_chunks(cur, chunk_ids):
     if not chunk_ids:
         return set()
     _check_reference_layout(cur)
-    cur.execute("""SELECT c::text FROM unnest(%s::uuid[]) AS c
-                   WHERE EXISTS(SELECT 1 FROM memory_relationships WHERE source_id=c OR target_id=c)
-                      OR EXISTS(SELECT 1 FROM dream_cycle_candidates WHERE created_memory_id=c OR target_memory_id=c)
-                      OR EXISTS(SELECT 1 FROM memory_skim WHERE memory_id=c)
-                      OR EXISTS(SELECT 1 FROM memories WHERE parent_id=c)""", (chunk_ids,))
+    cited = sql.SQL(' OR ').join(
+        sql.SQL('EXISTS(SELECT 1 FROM {} WHERE {}=c)').format(sql.Identifier(table), sql.Identifier(column))
+        for table, column in MEMORY_ID_COLUMNS)
+    cur.execute(sql.SQL('SELECT c::text FROM unnest(%s::uuid[]) AS c WHERE {}').format(cited), (chunk_ids,))
     referenced = {r[0] for r in cur.fetchall()}
+    # Express feedback item keys are untyped id / id:id strings (as _remap_references reads them).
+    cur.execute("""SELECT DISTINCT lower(p) FROM express_feedback f, unnest(string_to_array(f.target_key, %s)) AS p
+                   WHERE f.target_type='item' AND lower(p) = ANY(%s::text[])""", (FEEDBACK_ITEM_KEY_SEPARATOR, chunk_ids))
+    referenced.update(r[0] for r in cur.fetchall())
     cur.execute("SELECT table_name,column_name,udt_name FROM information_schema.columns WHERE table_schema='public' AND (data_type='jsonb' OR udt_name IN ('_text','_uuid')) ORDER BY 1,2")
     for table, column, typ in cur.fetchall():
         if typ == 'jsonb':

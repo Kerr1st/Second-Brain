@@ -444,9 +444,10 @@ def test_referenced_chunks_is_one_pass_and_finds_json_array_and_fk_citations(tes
         columns=cur.fetchone()[0]
         counting=Counting(cur)
         assert _referenced_chunks(counting,chunks)=={json_cited,array_cited,fk_cited,slice_cited}
-        # Cost shape: layout check + FK query + column inventory + one scan per jsonb/array column,
-        # whatever the number of chunks (the per-chunk LIKE scans of memories.metadata are gone).
-        assert counting.n==columns+3
+        # Cost shape: layout check + FK query + express_feedback item keys + column inventory +
+        # one scan per jsonb/array column, whatever the number of chunks (the per-chunk LIKE
+        # scans of memories.metadata are gone).
+        assert counting.n==columns+4
         counting.n=0
-        assert _referenced_chunks(counting,chunks*4)=={json_cited,array_cited,fk_cited,slice_cited} and counting.n==columns+3
+        assert _referenced_chunks(counting,chunks*4)=={json_cited,array_cited,fk_cited,slice_cited} and counting.n==columns+4
         assert _referenced_chunks(counting,[])==set()
