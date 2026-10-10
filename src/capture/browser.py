@@ -31,6 +31,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time as _time
 from datetime import date, datetime, time, timedelta, timezone
 from urllib.parse import urlsplit, parse_qs, urlencode
 
@@ -166,6 +167,12 @@ def day_source_url(day: date) -> str:
 
 #: Bounded busy timeout for the one sqlite call made on the *private* copy.
 SNAPSHOT_SQLITE_TIMEOUT_S = 5.0
+#: A torn copy (Chrome mid-write) is retried this many times in total, with
+#: backoff 0.5 s, 1 s (capped at 2 s), before the error is raised.
+SNAPSHOT_ATTEMPTS = 3
+SNAPSHOT_BACKOFF_S = 0.5
+SNAPSHOT_BACKOFF_MAX_S = 2.0
+_sleep = _time.sleep
 _HISTORY_SIDECARS = ("-journal", "-wal")
 
 
@@ -177,7 +184,27 @@ def snapshot_history(path: str = CHROME_HISTORY) -> str:
     the nightly job until its deadline (2026-10-10). A plain file copy never
     takes a SQLite lock. The ``-journal``/``-wal`` sidecars are copied under the
     same basename so SQLite reconciles them when the copy is first opened.
+
+    A copy taken while Chrome is mid-write can be torn ("database disk image is
+    malformed").  Each copy is probed (``PRAGMA quick_check(1)``) and the whole
+    copy is retried up to ``SNAPSHOT_ATTEMPTS`` times with a short backoff before
+    the last error is raised.  A missing/unreadable source (OSError) is not retried.
     """
+    for attempt in range(1, SNAPSHOT_ATTEMPTS + 1):
+        try:
+            return _snapshot_once(path)
+        except sqlite3.DatabaseError as exc:
+            if attempt == SNAPSHOT_ATTEMPTS:
+                logger.error("History snapshot failed its integrity probe %d times: %s", attempt, exc)
+                raise
+            delay = min(SNAPSHOT_BACKOFF_MAX_S, SNAPSHOT_BACKOFF_S * 2 ** (attempt - 1))
+            logger.warning("History snapshot attempt %d/%d torn (%s); retrying in %.1fs",
+                           attempt, SNAPSHOT_ATTEMPTS, exc, delay)
+            _sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _snapshot_once(path: str) -> str:
     tmpdir = tempfile.mkdtemp(prefix="sb-history-")
     copy = os.path.join(tmpdir, "History")
     try:
@@ -193,8 +220,11 @@ def snapshot_history(path: str = CHROME_HISTORY) -> str:
         conn = sqlite3.connect(copy, timeout=SNAPSHOT_SQLITE_TIMEOUT_S)
         try:
             conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+            verdict = conn.execute("PRAGMA quick_check(1)").fetchone()
         finally:
             conn.close()
+        if not verdict or verdict[0] != "ok":
+            raise sqlite3.DatabaseError("History snapshot failed PRAGMA quick_check")
         return copy
     except (OSError, sqlite3.Error):
         shutil.rmtree(tmpdir, ignore_errors=True)

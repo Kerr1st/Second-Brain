@@ -244,3 +244,70 @@ class TestSnapshot:
         with pytest.raises(OSError):
             b.snapshot_history(str(tmp_path / "nope"))
         assert set(glob.glob(os.path.join(tempfile.gettempdir(), "sb-history-*"))) == before
+
+    @staticmethod
+    def _torn_copies(monkeypatch, torn):
+        """The first ``torn`` copies of the main file land half-written (Chrome mid-write)."""
+        real = b.shutil.copyfile
+        calls = {"main": 0}
+
+        def copyfile(src, dst, *a, **kw):
+            result = real(src, dst, *a, **kw)
+            if os.path.basename(dst) == "History":
+                calls["main"] += 1
+                if calls["main"] <= torn:
+                    with open(dst, "r+b") as handle:
+                        handle.truncate(os.path.getsize(dst) // 2)
+            return result
+        monkeypatch.setattr(b.shutil, "copyfile", copyfile)
+        sleeps = []
+        monkeypatch.setattr(b, "_sleep", sleeps.append)
+        return calls, sleeps
+
+    def test_torn_copy_is_retried_and_the_good_copy_is_used(self, history_db, monkeypatch):
+        import glob, tempfile
+        before = set(glob.glob(os.path.join(tempfile.gettempdir(), "sb-history-*")))
+        calls, sleeps = self._torn_copies(monkeypatch, torn=1)
+        snap = b.snapshot_history(history_db)
+        try:
+            assert calls["main"] == 2 and sleeps == [0.5]
+            assert len(b.load_visits(snap, date(2026, 9, 15))) == 12
+            # the torn attempt's private dir is gone; only the good snapshot remains
+            assert set(glob.glob(os.path.join(tempfile.gettempdir(), "sb-history-*"))) - before == {os.path.dirname(snap)}
+        finally:
+            b.discard_snapshot(snap)
+
+    def test_persistently_torn_copy_raises_after_three_attempts(self, history_db, monkeypatch):
+        import glob, tempfile
+        before = set(glob.glob(os.path.join(tempfile.gettempdir(), "sb-history-*")))
+        calls, sleeps = self._torn_copies(monkeypatch, torn=99)
+        with pytest.raises(sqlite3.DatabaseError):
+            b.snapshot_history(history_db)
+        assert calls["main"] == b.SNAPSHOT_ATTEMPTS == 3
+        assert sleeps == [0.5, 1.0] and all(0.5 <= s <= 2.0 for s in sleeps)
+        assert set(glob.glob(os.path.join(tempfile.gettempdir(), "sb-history-*"))) == before
+
+    def test_quick_check_failure_without_an_open_error_is_also_retried(self, history_db, monkeypatch):
+        real_connect = b.sqlite3.connect
+        state = {"n": 0}
+
+        class Probe:
+            def __init__(self, conn):
+                self.conn = conn
+
+            def execute(self, sql, *a):
+                if sql.startswith("PRAGMA quick_check"):
+                    state["n"] += 1
+                    if state["n"] == 1:
+                        return self.conn.execute("SELECT '*** in database main ***'")
+                return self.conn.execute(sql, *a)
+
+            def close(self):
+                self.conn.close()
+        monkeypatch.setattr(b.sqlite3, "connect", lambda *a, **kw: Probe(real_connect(*a, **kw)))
+        monkeypatch.setattr(b, "_sleep", lambda s: None)
+        snap = b.snapshot_history(history_db)
+        try:
+            assert state["n"] == 2
+        finally:
+            b.discard_snapshot(snap)
