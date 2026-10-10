@@ -11,7 +11,7 @@ The plan below was authorized on 2026-09-26 and implemented on the refactor bran
 | R3 `e1cff5c` | 1b ingestion integrity, 1c relationships (016 backfill), 1d data layer and migration 016, 1e run integrity, 1.15 MCP, 4a/4e, 5 decomposition, 7 guardrails for those classes, 3 (dead helpers) | deployed 2026-10-09 16:58 (migration 016) |
 | R4 `d063543` | 4b capture framework, 3 (staging hop, migrators, canary script), D5 native Kiro IDE capture | deployed 2026-10-09 18:08 |
 | R5 `0302f0f` | 2 truthful operation, 1.20 encrypted bundles and verified restore, 3 (`codex-canary`) | deployed 2026-10-09 18:52 |
-| R6 | D2 paid corpus repair (items 1.9–1.11 **application**) | applied 2026-10-09 (metadata 2,832 ops, dedup 70 ops; rechunk applied 2026-10-09, 8,240 ops / 96,331 Titan calls) |
+| R6 | D2 paid corpus repair (items 1.9–1.11 **application**) | applied 2026-10-09 (metadata 2,832 ops, dedup 70 ops, rechunk 8,240 ops / 96,331 Titan calls; re-plan 0/0/0; HNSW rebuilt, recall@10 0.99) |
 | R7 | 1.14 runtime role separation (017, F-138), D4 graph writer and table retirement (018), 6 documentation and specs, 7 documentation guardrails | deployed 2026-10-09 19:30 (017, 018, app role demoted) |
 
 Phase 0 is done (2026-09-24). Phase 4d's 20,000-test-line target was dropped as a goal; integrity and isolation regressions were kept (the isolated suite stood at 2,228 tests at the R7 database head). Phases 4c (shared backend base) and the routing-lane items below are partially carried: `src/mcp_readonly.py` exists but the Explorer still attaches the full MCP server; there is no dedicated `grounding_auditor` role (the audit runs through the skeptic seat's backend); the `latency_s` metrics rename was not done.
@@ -19,10 +19,10 @@ Phase 0 is done (2026-09-24). Phase 4d's 20,000-test-line target was dropped as 
 **What remains after R7 and R6** (none of it is closed by a passing suite):
 
 1. **Human evaluation trial** — re-prepare a frozen record/provider/cost manifest against the deployed release and obtain human grounding, novelty, uptake and outcome judgments ([VALIDATION.md](VALIDATION.md)); the refactor branch's trial runner was not ported.
-2. **Static IAM key replacement** — provision and verify an unattended credential provider for `second-brain-jobs`, then revoke the identified old key with a receipt; `~/.aws` residue is 0600 but still present.
+2. **Static IAM key replacement** — provision and verify an unattended credential provider for `second-brain-jobs`, then revoke the identified old key with a receipt; `~/.aws` residue is 0600 but still present. *2026-10-09: the static key was **rotated** (new key verified by STS, a Titan probe and the credentials job; old key deactivated, re-verified, deleted; one key remains). Replacing the static key with an unattended non-static provider is still open.*
 3. **OneDrive recovery-key verification** — confirm the key copy is retrievable from a second device or session ([DISASTER-RECOVERY.md](DISASTER-RECOVERY.md)).
-4. **Historical Drive plaintext purge** — the listing-first CONFIRM-REQUIRED step in the R5 runbook, after the first verified bundle.
-5. **Graph archive off-site** — copy `backups/graph-export/*.dump.gpg` to Drive after the R7 window; the archive is local-only until then.
+4. ~~**Historical Drive plaintext purge**~~ — done 2026-10-09 after the listing (`kb-sources/` 1,372 files, `config/` 433 files) and with three verified bundles on Drive; only `graph-export/` and encrypted files remain.
+5. ~~**Graph archive off-site**~~ — done 2026-10-09 during the R7 window (`gdrive:memory-bank-backups/graph-export/`).
 6. **Routing lane** — Explorer on `src.mcp_readonly` with exact tool grants, a dedicated `grounding_auditor` role, served-model metadata check for Claude Code, `latency_s` rename (F-145, F-061 residue).
 7. **Documented-open capture findings** — F-086 (legacy Codex turn identity wins), F-090 (Quick Desktop rows that fell out of the selection stay active), F-094 (private/incognito QD chats filtered only by count and deletion), and the remaining open rows of the [findings register](audit-2026-09-24/00-FINDINGS-REGISTER.md).
 8. **Operational residue** — stale databases `memory_bank_test` / `second_brain_codex_test` on the installed cluster (optional `DROP DATABASE` after R7), the one-off cleanup of test-polluted metrics rows, `distill` re-enablement and e-mail delivery (product decisions).
