@@ -1,8 +1,12 @@
 """Queries for capture identity, arrival counts and temporal context."""
+import logging
+
 from psycopg2.extras import RealDictCursor
 from .pool import get_connection, connection_scope, transaction
 from .columns import iso
 from src.operations.liveness import CAPTURE_ROWS
+
+logger = logging.getLogger(__name__)
 
 def get_arrivals_summary(since, samples_per_source=5):
     """What arrived since ``since``: per source, document/memory counts and the newest
@@ -146,25 +150,72 @@ def lock_source_identity(source_type, source_url, project=None, *, conn):
         cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
 
 
+
 RETIRED_KEY = "capture_retired"
-RETIRED_REASON = "absent_from_source_selection"
+# Why a parent left the source selection; stored per row in metadata.capture_retired.
+DELETED_UPSTREAM, BELOW_THRESHOLD, RELABELLED = "deleted_upstream", "below_threshold", "relabelled"
+RETIRE_REASONS = (DELETED_UPSTREAM, BELOW_THRESHOLD, RELABELLED)
+# Present identities the refresh must not touch, by why they stay out.
+HELD_KINDS = ("below_threshold_band", "retired_below_threshold_band", "superseded_by", "superseded_elsewhere",
+              "reactivation_skipped")
+# Mass-retire guard: a namespace may lose at most max(MIN, PERCENT% of its active
+# parents) in one run unless an operator explicitly allows more.
+MASS_RETIRE_MIN = 25
+MASS_RETIRE_PERCENT = 10
+
+# A live superseded_by edge from the parent or one of its chunks: another writer
+# (e.g. the dream cycle) has replaced this memory, so it must stay history.
+_SUPERSEDED_BY = """EXISTS (SELECT 1 FROM memory_relationships r WHERE r.relation_type = 'superseded_by'
+    AND r.expired_at IS NULL AND (r.source_id = {m}.id
+        OR r.source_id IN (SELECT c.id FROM memories c WHERE c.parent_id = {m}.id)))"""
 
 
-def reconcile_source_selection(url_prefixes, present, *, dry_run=False, now=None):
+class SelectionResult(dict):
+    """JSON-safe reconcile counts, plus ``withheld``: selected identities whose stored
+    parent stays superseded, which the caller's refresh must therefore skip (a refresh
+    would otherwise write active chunks under a superseded parent)."""
+
+    def __init__(self, *args, withheld=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.withheld = frozenset(withheld)
+
+
+def mass_retire_cap(active):
+    """Most parents one run may retire from a namespace holding ``active`` active parents."""
+    return max(MASS_RETIRE_MIN, active * MASS_RETIRE_PERCENT // 100)
+
+
+def reconcile_source_selection(url_prefixes, present, *, upstream_confidence=None, retire_below=None,
+                               reactivate_at=None, skip_retirement=None, reactivate=True,
+                               allow_mass_retire=False, dry_run=False, now=None):
     """Retire captured parents a snapshot source no longer selects; restore returners.
 
     ``present`` is the complete set of ``(source_type, source_url)`` identities the
     source selects this run; ``url_prefixes`` bounds which captured parents that
-    selection is authoritative for. A parent under a prefix that is not in
-    ``present`` (deleted upstream, now below the source's own threshold, or
-    re-labelled under another source type) is set ``status='superseded'``
-    together with its active chunks, and both carry ``metadata.capture_retired``
-    so the change is attributable and reversible: nothing is deleted, and only
-    rows this function retired are ever reactivated (when their identity is
-    selected again). Parents another writer superseded are left alone.
+    selection is authoritative for. An active parent under a prefix that is not in
+    ``present`` is classified (``relabelled`` when its URL is selected under another
+    source type; ``below_threshold`` when ``upstream_confidence`` -- every URL the
+    source still holds, selected or not, with its confidence -- still has it;
+    otherwise ``deleted_upstream``) and set ``status='superseded'`` together with its
+    active chunks. Both carry ``metadata.capture_retired = {reason, at, confidence}``,
+    so the change is attributable and reversible: nothing is deleted.
 
-    A prefix under which ``present`` holds no identity is refused and reported
-    in ``refused_prefixes``. Returns counts only.
+    Hysteresis: a ``below_threshold`` parent is retired only when its confidence is
+    below ``retire_below``, and a parent retired ``below_threshold`` is reactivated
+    only once its confidence reaches ``reactivate_at``; in between it is held.
+
+    Only rows this function retired are ever reactivated, and never one another
+    writer has since superseded (a live ``superseded_by`` edge). Rows superseded by
+    other writers are left alone. Selected identities that stay superseded are
+    returned in ``.withheld``.
+
+    Guards: a prefix under which ``present`` holds no identity is refused
+    (``refused_prefixes``); a prefix that would lose more than
+    :func:`mass_retire_cap` parents retires none (``guard[prefix]["refuse"]``)
+    unless ``allow_mass_retire``; ``skip_retirement`` (a reason string) disables
+    retirement altogether. Reactivation still runs in each case unless
+    ``reactivate`` is false (an untrusted source), when returners are held as
+    ``reactivation_skipped``. Returns counts only.
     """
     import json
     from datetime import datetime, timezone
@@ -172,47 +223,112 @@ def reconcile_source_selection(url_prefixes, present, *, dry_run=False, now=None
     if not prefixes:
         raise ValueError("url_prefixes must name at least one non-empty prefix")
     present = {(st, url) for st, url in present}
+    present_urls = {url for _, url in present}
+    upstream = dict(upstream_confidence or {})
     # A prefix with no selected identity is refused, not emptied: an unreadable,
     # truncated or newly created source must never retire a whole namespace.
-    refused = [p for p in prefixes if not any(url.startswith(p) for _, url in present)]
+    refused = [p for p in prefixes if not any(url.startswith(p) for url in present_urls)]
     prefixes = tuple(p for p in prefixes if p not in refused)
-    extra = {**({"refused_prefixes": refused} if refused else {}), **({"dry_run": True} if dry_run else {})}
+    by_reason = dict.fromkeys(RETIRE_REASONS, 0)
+    held = dict.fromkeys(HELD_KINDS, 0)
+    summary = {"retire": 0, "reactivate": 0, "by_reason": by_reason, "held": held, "guard": {},
+               **({"refused_prefixes": refused} if refused else {}),
+               **({"retirement_skipped": skip_retirement} if skip_retirement else {}),
+               **({"dry_run": True} if dry_run else {})}
     if not prefixes:
-        return {"retire": 0, "reactivate": 0, **extra}
+        return SelectionResult(summary)
     with get_connection() as conn, conn.cursor() as cur:
-        cur.execute("""SELECT id::text, source_type, source_url, status, metadata ? %s AS retired FROM memories
-            WHERE parent_id IS NULL AND source_url IS NOT NULL
-              AND EXISTS (SELECT 1 FROM unnest(%s::text[]) AS p WHERE left(source_url, length(p)) = p)
-              AND (type = 'source' OR metadata->>'capture_identity' = 'true' OR source_type LIKE 'quick_desktop%%')
-              AND COALESCE(metadata->>'record_kind', '') NOT IN ('task_memory', 'topic_segment')""",
-                    (RETIRED_KEY, list(prefixes)))
+        cur.execute(f"""SELECT m.id::text, m.source_type, m.source_url, m.status, m.metadata ? %s AS retired,
+                m.metadata->%s->>'reason' AS reason, {_SUPERSEDED_BY.format(m='m')} AS superseded_by
+            FROM memories m
+            WHERE m.parent_id IS NULL AND m.source_url IS NOT NULL
+              AND EXISTS (SELECT 1 FROM unnest(%s::text[]) AS p WHERE left(m.source_url, length(p)) = p)
+              AND (m.type = 'source' OR m.metadata->>'capture_identity' = 'true' OR m.source_type LIKE 'quick_desktop%%')
+              AND COALESCE(m.metadata->>'record_kind', '') NOT IN ('task_memory', 'topic_segment')""",
+                    (RETIRED_KEY, RETIRED_KEY, list(prefixes)))
         rows = cur.fetchall()
-    retire = [(i, st, url) for i, st, url, status, _ in rows if status == "active" and (st, url) not in present]
-    restore = [(i, st, url) for i, st, url, status, marked in rows
-               if status == "superseded" and marked and (st, url) in present]
-    if dry_run:
-        return {"retire": len(retire), "reactivate": len(restore), **extra}
-    if not retire and not restore:
-        return {"retire": 0, "reactivate": 0, **extra}
-    stamp = json.dumps({RETIRED_KEY: {"reason": RETIRED_REASON,
-                        "at": (now or datetime.now(timezone.utc)).isoformat()}})
-    retired = reactivated = 0
+    candidates = {p: [] for p in prefixes}
+    active = dict.fromkeys(prefixes, 0)
+    restore, withheld = [], set()
+    for pid, st, url, status, retired, reason, superseded_by in rows:
+        prefix = next(p for p in prefixes if url.startswith(p))
+        identity = (st, url)
+        if status == "active":
+            active[prefix] += 1
+            if identity in present:
+                continue
+            if url in present_urls:
+                why, confidence = RELABELLED, upstream.get(url)
+            elif url in upstream:
+                why, confidence = BELOW_THRESHOLD, upstream[url]
+                if retire_below is not None and confidence is not None and confidence >= retire_below:
+                    held["below_threshold_band"] += 1
+                    continue
+            else:
+                why, confidence = DELETED_UPSTREAM, None
+            by_reason[why] += 1
+            candidates[prefix].append((pid, st, url, why, confidence))
+        elif status == "superseded" and identity in present:
+            confidence = upstream.get(url)
+            if not retired:
+                kind = "superseded_elsewhere"
+            elif superseded_by:
+                kind = "superseded_by"
+            elif reason == BELOW_THRESHOLD and reactivate_at is not None and (
+                    confidence is None or confidence < reactivate_at):
+                kind = "retired_below_threshold_band"
+            elif not reactivate:
+                kind = "reactivation_skipped"
+            else:
+                restore.append((pid, st, url))
+                continue
+            held[kind] += 1
+            withheld.add(identity)
+    retire = []
+    for prefix in prefixes:
+        count, cap = len(candidates[prefix]), mass_retire_cap(active[prefix])
+        over = count > cap
+        summary["guard"][prefix] = {"candidates": count, "active": active[prefix], "cap": cap,
+                                    "refuse": over and not allow_mass_retire,
+                                    **({"allowed_by_operator": True} if over and allow_mass_retire else {})}
+        if over and not allow_mass_retire:
+            logger.warning("Selection reconcile REFUSED for %s: %d parents to retire exceeds the cap of %d "
+                           "(%d active); refresh continues. Re-run with the mass-retire override after review.",
+                           prefix, count, cap, active[prefix])
+        elif not skip_retirement:
+            retire.extend(candidates[prefix])
+    if skip_retirement and any(candidates.values()):
+        logger.info("Selection reconcile: retirement skipped (%s)", skip_retirement)
+    if dry_run or (not retire and not restore):
+        summary.update(retire=len(retire), reactivate=len(restore))
+        return SelectionResult(summary, withheld=withheld)
+    at = (now or datetime.now(timezone.utc)).isoformat()
+    retired = 0
     with transaction() as conn:
-        for _, st, url in sorted(retire + restore, key=lambda r: (r[1], r[2])):
+        for _, st, url in sorted([r[:3] for r in retire] + restore, key=lambda r: (r[1], r[2])):
             lock_source_identity(st, url, conn=conn)
         with conn.cursor() as cur:
-            if retire:
-                ids = [r[0] for r in retire]
+            for pid, _st, _url, why, confidence in retire:
+                stamp = json.dumps({RETIRED_KEY: {"reason": why, "at": at, "confidence": confidence}})
                 cur.execute("""UPDATE memories SET status='superseded', updated_at=now(), metadata=COALESCE(metadata,'{}'::jsonb) || %s::jsonb
-                    WHERE id = ANY(%s::uuid[]) AND status='active'""", (stamp, ids))
-                retired = cur.rowcount
-                cur.execute("""UPDATE memories SET status='superseded', updated_at=now(), metadata=COALESCE(metadata,'{}'::jsonb) || %s::jsonb
-                    WHERE parent_id = ANY(%s::uuid[]) AND status='active'""", (stamp, ids))
+                    WHERE id = %s::uuid AND status='active'""", (stamp, pid))
+                if cur.rowcount:
+                    retired += 1
+                    cur.execute("""UPDATE memories SET status='superseded', updated_at=now(), metadata=COALESCE(metadata,'{}'::jsonb) || %s::jsonb
+                        WHERE parent_id = %s::uuid AND status='active'""", (stamp, pid))
+            restored = []
             if restore:
-                ids = [r[0] for r in restore]
-                cur.execute("""UPDATE memories SET status='active', updated_at=now(), metadata=metadata - %s
-                    WHERE id = ANY(%s::uuid[]) AND status='superseded' AND metadata ? %s""", (RETIRED_KEY, ids, RETIRED_KEY))
-                reactivated = cur.rowcount
-                cur.execute("""UPDATE memories SET status='active', updated_at=now(), metadata=metadata - %s
-                    WHERE parent_id = ANY(%s::uuid[]) AND status='superseded' AND metadata ? %s""", (RETIRED_KEY, ids, RETIRED_KEY))
-    return {"retire": retired, "reactivate": reactivated, **extra}
+                cur.execute(f"""UPDATE memories m SET status='active', updated_at=now(), metadata=m.metadata - %s
+                    WHERE m.id = ANY(%s::uuid[]) AND m.status='superseded' AND m.metadata ? %s
+                      AND NOT {_SUPERSEDED_BY.format(m='m')} RETURNING m.id::text""",
+                            (RETIRED_KEY, [r[0] for r in restore], RETIRED_KEY))
+                restored = [row[0] for row in cur.fetchall()]
+                if restored:
+                    cur.execute("""UPDATE memories SET status='active', updated_at=now(), metadata=metadata - %s
+                        WHERE parent_id = ANY(%s::uuid[]) AND status='superseded' AND metadata ? %s""",
+                                (RETIRED_KEY, restored, RETIRED_KEY))
+            # A returner that lost a race to another writer stays history; never refresh it.
+            done = set(restored)
+            withheld.update((st, url) for pid, st, url in restore if pid not in done)
+    summary.update(retire=retired, reactivate=len(restored))
+    return SelectionResult(summary, withheld=withheld)
