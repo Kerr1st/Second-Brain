@@ -343,9 +343,17 @@ def create_bundle(repo, output, key, kb=None, remote=None, *, local_retention_da
 
 # ----------------------------------------------------------------- verify
 
-def verify_bundle(archive, key, restore=False, *, socket_dir=None):
+def _verify_temp_root(temp_root=None):
+    """Parent for verify's plaintext scratch dir: ``temp_root`` when given (tests pass
+    their own tmp_path), else /private/tmp when present, else the platform default."""
+    if temp_root is not None:
+        return str(temp_root)
+    return '/private/tmp' if Path('/private/tmp').exists() else None
+
+
+def verify_bundle(archive, key, restore=False, *, socket_dir=None, temp_root=None):
     key = check_key(key)
-    with tempfile.TemporaryDirectory(prefix='sb-verify-', dir='/private/tmp' if Path('/private/tmp').exists() else None) as temp:
+    with tempfile.TemporaryDirectory(prefix='sb-verify-', dir=_verify_temp_root(temp_root)) as temp:
         root, manifest = extract_bundle(Path(archive).resolve(), key, temp)
         result = {'archive': str(archive), 'format': 'bundle', 'payload_verified': True, 'files': len(manifest['files']),
                   'file_modes_verified': manifest['version'] >= 2, 'restore_verified': False,
@@ -356,10 +364,10 @@ def verify_bundle(archive, key, restore=False, *, socket_dir=None):
         return result
 
 
-def verify_legacy_dump(archive, key):
+def verify_legacy_dump(archive, key, *, temp_root=None):
     """Pre-R5 format (memory_bank_<ts>.dump.gpg): decrypt and list the custom dump."""
     key = check_key(key)
-    with tempfile.TemporaryDirectory(prefix='sb-verify-legacy-', dir='/private/tmp' if Path('/private/tmp').exists() else None) as temp:
+    with tempfile.TemporaryDirectory(prefix='sb-verify-legacy-', dir=_verify_temp_root(temp_root)) as temp:
         dump = Path(temp) / 'legacy.dump'
         gpg(['--output', dump, '--decrypt', Path(archive).resolve()], key, temp)
         listing = command(['pg_restore', '--list', dump]).stdout.decode(errors='replace')

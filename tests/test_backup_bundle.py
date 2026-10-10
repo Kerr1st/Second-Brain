@@ -92,6 +92,33 @@ def test_encrypted_roundtrip_preserves_sources_and_cleans_plaintext(tmp_path):
     assert 'repository/.env' in {m for m in _members(result['archive'], key)}  # .env rides inside, encrypted
 
 
+def test_verify_scratch_dir_lives_under_temp_root_and_is_removed(tmp_path):
+    """``temp_root`` places verify's plaintext scratch dir (decrypted tar + payload)
+    under the caller's directory and it is gone afterwards; without it the default
+    parent stays /private/tmp (when present), unchanged for production callers."""
+    key, repo = _key(tmp_path), _repo(tmp_path)
+    verify_root = tmp_path / 'verify-root'
+    verify_root.mkdir()
+    seen = []
+    real_extract = backup.extract_bundle
+
+    def spy(archive, key, area):
+        seen.append(Path(area))
+        assert (Path(area) / 'decrypted.tar').exists() is False
+        root, manifest = real_extract(archive, key, area)
+        assert (Path(area) / 'decrypted.tar').exists()   # plaintext really lands here
+        return root, manifest
+    with patch.object(backup, 'command', side_effect=fake_dump):
+        result = backup.create_bundle(repo, tmp_path / 'backups', key)
+        with patch.object(backup, 'extract_bundle', side_effect=spy):
+            assert backup.verify_bundle(result['archive'], key, temp_root=verify_root)['payload_verified']
+    assert len(seen) == 1 and seen[0].parent == verify_root and seen[0].name.startswith('sb-verify-')
+    assert not seen[0].exists() and not list(verify_root.iterdir())
+    expected_default = '/private/tmp' if Path('/private/tmp').exists() else None
+    assert backup._verify_temp_root() == expected_default
+    assert backup._verify_temp_root(verify_root) == str(verify_root)
+
+
 def _members(archive, key):
     with patch.object(backup, 'command', side_effect=fake_dump):
         import tempfile
@@ -499,9 +526,11 @@ def test_bundle_from_a_disposable_database_restores_into_another_with_identical_
     result = backup.create_bundle(repo, output, key)        # real pg_dump against DB_HOST/DB_NAME from the runner
     assert Path(result['archive']).exists() and result['payload_verified']
 
-    check = backup.verify_bundle(result['archive'], key, restore=True, socket_dir=socket_dir)
+    verify_root = tmp_path / 'verify-root'       # this call's own scratch parent — other processes'
+    verify_root.mkdir(mode=0o700)                # sb-verify-* dirs in /private/tmp are not ours to judge
+    check = backup.verify_bundle(result['archive'], key, restore=True, socket_dir=socket_dir, temp_root=verify_root)
     assert check['restore_verified'] is True
     assert check['restore']['public_tables'] == len(tables)
     assert check['restore']['row_counts'] == expected
     print('\nrestore roundtrip row_counts (source == restored):', json.dumps(expected, sort_keys=True))
-    assert not list(Path('/private/tmp').glob('sb-verify-*')), 'temporary plaintext must be removed'
+    assert not list(verify_root.iterdir()), 'temporary plaintext must be removed'
