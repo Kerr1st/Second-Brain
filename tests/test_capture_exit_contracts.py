@@ -382,6 +382,7 @@ class TestMainExitCodes:
             {"type": "url", "name": "Public", "url": "https://example.org/public"},
             {"type": "url", "name": "Internal", "url": "https://w.amazon.com/bin/view/Thing"}]}}}))
         monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
+        monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))   # backlog sidecar stays in tmp
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: False)
         monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls, **kw: {"processed": 1, "skipped": 0, "failed": 0})

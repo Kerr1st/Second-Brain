@@ -221,7 +221,7 @@ def main():
 
     print(f"\nInternal: {ok} scraped, {skipped_auth} skipped_auth, {fail} failed")
     print(f"Public: {public_stats}")
-    report_backlog(public_stats["deferred"])
+    report_backlog(public_stats.get("deferred", 0))
     return int(bool(fail or public_stats["failed"]))
 
 
