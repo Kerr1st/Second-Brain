@@ -48,4 +48,4 @@ Documentation half (this tree): the September-26 documentation layout replaces t
 
 ## What remains after R7
 
-Tracked in [PLAN-refactor.md](PLAN-refactor.md) under "Status": the human evaluation trial, static IAM key replacement (the key was rotated 2026-10-09; a non-static provider is still open), OneDrive recovery-key verification from a second device, and the documented-open capture findings (F-086, F-090, F-094 and the rest of the register).
+Tracked in [PLAN-refactor.md](PLAN-refactor.md) under "Status": the human evaluation trial, OneDrive recovery-key verification from a second device, and the documented-open capture findings (F-086, F-090, F-094 and the rest of the register).

@@ -96,12 +96,20 @@ check() {
 
 hints() {  # label list
   case "$1" in *sso-default*) log "   fix: aws sso login --sso-session kiro-admin-session";; esac
-  case "$1" in *second-brain-jobs*) log "   fix: check the second-brain-jobs profile in ~/.aws/credentials (IAM user, no session to refresh)";; esac
+  case "$1" in *second-brain-jobs*) log "   fix: IAM Roles Anywhere profile — run the credential_process line from ~/.aws/config by hand to see the error (cert expired? see docs/OPERATIONS.md 'Credentials')";; esac
+  case "$1" in *roles-anywhere*) log "   fix: re-issue ~/.aws/rolesanywhere/jobs.pem from the CA before it expires (docs/OPERATIONS.md 'Credentials')";; esac
   case "$1" in *grasp*|*slack*) log "   fix: open Kiro and use the Outlook/Slack tools once to re-authenticate";; esac
   case "$1" in *tool-missing*) log "   fix: launchd runs this job with PATH=/usr/bin:/bin:/usr/sbin:/sbin — add the tool's directory to the PATH line at the top of this script";; esac
 }
 
 check required "aws:second-brain-jobs" "$AWS_BIN" sts get-caller-identity --profile second-brain-jobs
+# second-brain-jobs authenticates with IAM Roles Anywhere (2026-10-10): a client
+# certificate signed by a local CA. Warn 30 days before the certificate expires;
+# once expired the sts check above fails too.
+RA_CERT="${SECOND_BRAIN_RA_CERT:-$HOME/.aws/rolesanywhere/jobs.pem}"
+if [ -f "$RA_CERT" ]; then
+  check advisory "cert:roles-anywhere(30d)" /usr/bin/openssl x509 -checkend 2592000 -noout -in "$RA_CERT"
+fi
 check advisory "aws:sso-default"       "$AWS_BIN" sts get-caller-identity --profile default
 check required "graph:grasp-mcp" "$PYTHON_BIN" - <<'EOF'
 import asyncio
