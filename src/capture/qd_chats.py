@@ -35,6 +35,25 @@ def open_db():
     return conn
 
 
+# F-094: Quick Desktop marks private and incognito conversations with these
+# authoritative per-session flags. Such a session is never captured. A store
+# whose schema predates a flag cannot hold a session carrying it.
+PRIVACY_FLAGS = ("private", "incognito")
+
+
+def eligible_sessions(conn, min_messages=2):
+    """Sessions eligible for capture: enough messages, not deleted, not private/incognito.
+
+    ``archived`` and non-``main`` ``session_type`` sessions are not excluded
+    (user-archived conversations remain the user's own record; see F-094).
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    privacy = "".join(f" AND COALESCE({flag}, 0) = 0" for flag in PRIVACY_FLAGS if flag in columns)
+    return conn.execute(f"""SELECT id,title,created_at,updated_at,message_count,agent_mode
+        FROM sessions WHERE message_count >= ? AND deleted_at IS NULL{privacy}
+        ORDER BY updated_at DESC""", (min_messages,)).fetchall()
+
+
 def format_session_as_markdown(session, messages):
     """Format a QD session + messages as markdown with metadata header."""
     created = datetime.fromtimestamp(session["created_at"], tz=timezone.utc)
@@ -67,8 +86,7 @@ def capture(*, dry_run=False, limit=0, min_messages=2):
     conn = open_db()
     items = CaptureBatch()
     try:
-        sessions = conn.execute("""SELECT id,title,created_at,updated_at,message_count,agent_mode
-            FROM sessions WHERE message_count >= ? AND deleted_at IS NULL ORDER BY updated_at DESC""", (min_messages,)).fetchall()
+        sessions = eligible_sessions(conn, min_messages)
         for session in sessions[:limit] if limit else sessions:
             messages = conn.execute("""SELECT role,content,timestamp,tool_names FROM session_messages
                 WHERE session_id = ? ORDER BY timestamp""", (session["id"],)).fetchall()
