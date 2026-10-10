@@ -38,8 +38,9 @@ echo "$(date '+%H:%M:%S') building idx_memories_embedding_v2 (m=32, ef_construct
 # maintenance_work_mem must be large enough to hold the whole graph in RAM. If the
 # build logs "hnsw graph no longer fits into maintenance_work_mem", the newest vectors
 # are built in a degraded on-disk phase that measurably hurts recall — raise this value.
-# 1GB fits ~120k vectors; bump it as the corpus grows.
-PGOPTIONS="-c max_parallel_maintenance_workers=0 -c maintenance_work_mem=1GB" \
+# 1GB fits ~120k vectors; bump it as the corpus grows. 2026-10-09: 156k embedded rows
+# built a 533 MB index under 1GB; raised to 2GB for headroom (host has 18 GB RAM).
+PGOPTIONS="-c max_parallel_maintenance_workers=0 -c maintenance_work_mem=2GB" \
   "${PSQL[@]}" \
   -c "DROP INDEX IF EXISTS idx_memories_embedding_v2;" \
   -c "CREATE INDEX CONCURRENTLY idx_memories_embedding_v2 ON memories USING hnsw (embedding vector_cosine_ops) WITH (m = 32, ef_construction = 200);"
@@ -47,5 +48,10 @@ PGOPTIONS="-c max_parallel_maintenance_workers=0 -c maintenance_work_mem=1GB" \
 echo "$(date '+%H:%M:%S') swapping new index in..."
 "${PSQL[@]}" -c "DROP INDEX CONCURRENTLY IF EXISTS idx_memories_embedding;"
 "${PSQL[@]}" -c "ALTER INDEX idx_memories_embedding_v2 RENAME TO idx_memories_embedding;"
-"${PSQL[@]}" -c "DO \$\$ BEGIN EXECUTE format('ALTER DATABASE %I SET hnsw.ef_search = 200', current_database()); END \$\$;"
+# hnsw.ef_search is a pgvector GUC: until the library is loaded in THIS session,
+# PostgreSQL treats it as an unknown placeholder, and only a superuser may attach an
+# unknown setting to a database ("permission denied to set parameter"). The owner
+# role is not a superuser after 017, so load pgvector first via a vector cast.
+"${PSQL[@]}" -c "SELECT NULL::vector;" \
+  -c "DO \$\$ BEGIN EXECUTE format('ALTER DATABASE %I SET hnsw.ef_search = 200', current_database()); END \$\$;"
 echo "$(date '+%H:%M:%S') done. Verify with: .venv/bin/python scripts/eval/recall_check.py --verbose"
