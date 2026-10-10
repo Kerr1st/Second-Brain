@@ -1576,9 +1576,9 @@ class TestToollessThinkerPacketAndSpendGuard:
     def _fake_memories(self):
         return [
             {"id": self.MEM_A, "title": "Focus block", "type": "notes", "content": "7am focus block, phone off.",
-             "created_at": "2026-03-01T07:00:00+00:00", "tags": ["focus"], "project": "self"},
+             "created_at": "2026-03-01T07:00:00+00:00", "tags": ["focus"], "project": "self", "status": "active"},
             {"id": self.MEM_B, "title": "Calendar note", "type": "notes", "content": "Blocked 7-9am for deep work.",
-             "created_at": "2026-03-08T07:00:00+00:00", "tags": [], "project": None},
+             "created_at": "2026-03-08T07:00:00+00:00", "tags": [], "project": None, "status": "active"},
         ]
 
     def test_toolless_thinker_gets_slice_contents_and_no_tools(self):
@@ -1629,6 +1629,41 @@ class TestToollessThinkerPacketAndSpendGuard:
         assert "do not re-read them with memory_read" in payload["note"]
         assert "not available" not in payload["note"].lower()
         assert orch._slice_memory_cache[self.MEM_A]["title"] == "Focus block"
+
+    def test_non_active_slice_memories_are_excluded_from_the_packet(self, caplog):
+        """Run 9bf4ade8: a superseded memory in an Explorer slice reached the Thinker
+        and an accepted candidate related to it could never be stored. Non-active
+        memories are dropped from the packet, the listed ids/titles and the cache
+        (so they cannot be cited); the slice object itself is untouched."""
+        orch = _make_orchestrator()
+        orch.resolver = self._bedrock_resolver()
+        mem_c, mem_d = "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"
+        memories = self._fake_memories() + [
+            {"id": mem_c, "title": "Old view", "type": "insight", "content": "replaced", "status": "superseded"},
+            {"id": mem_d, "title": "Expired", "type": "notes", "content": "stale", "status": "expired"},
+        ]
+        slice_ = MemorySlice(name="Morning focus", strategy="pattern_emergence",
+                             memory_ids=[self.MEM_A, mem_c.upper(), self.MEM_B, mem_d],
+                             memory_titles=["Focus block", "Old view", "Calendar note", "Expired"])
+        captured = {}
+
+        def mock_invoke(system_prompt, user_message, tools=False, **kwargs):
+            captured["user_message"] = user_message
+            return {"output": [], "raw": "[]", "usage": {"inputTokens": 0, "outputTokens": 0}}
+
+        with patch("src.dream_cycle.agents.thinker.load_memories_by_ids", return_value=memories), \
+             caplog.at_level("INFO", logger="src.dream_cycle.agents.thinker"):
+            orch._invoker_for = lambda role: MagicMock(invoke=mock_invoke)
+            orch.invoke_thinker(slice_)
+
+        payload = json.loads(captured["user_message"])["memory_slice"]
+        assert [m["id"] for m in payload["memories"]] == [self.MEM_A, self.MEM_B]
+        assert payload["memory_ids"] == [self.MEM_A, self.MEM_B]
+        assert payload["memory_titles"] == ["Focus block", "Calendar note"]
+        assert set(orch._slice_memory_cache) == {self.MEM_A, self.MEM_B}
+        assert slice_.memory_ids == [self.MEM_A, mem_c.upper(), self.MEM_B, mem_d]
+        assert any("excluded 2 non-active memories" in r.getMessage() for r in caplog.records)
+        assert not any("loaded" in r.getMessage() for r in caplog.records)  # nothing was missing
 
     def test_evaluator_prompt_includes_cached_source_contents(self):
         orch = _make_orchestrator()

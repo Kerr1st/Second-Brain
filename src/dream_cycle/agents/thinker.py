@@ -5,6 +5,7 @@ import logging
 from src.models import CandidateInsight, MemorySlice
 from src.prompts import get_thinker_prompt
 from src.dream_cycle.packet import TOOLED_NOTE, TOOLLESS_NOTE, build_packet, load_memories_by_ids
+from src.dream_cycle.storage import canonical_uuid, is_active_memory
 from src.dream_cycle.budget import *
 logger = logging.getLogger(__name__)
 
@@ -41,15 +42,30 @@ def invoke_thinker(
     # keeps its tools for CLS-interleaving searches only. A tool-less one
     # (Direct-API / Bedrock) reasons from the packet alone.
     thinker_has_tools = self._role_has_tools("thinker")
-    memories = load_memories_by_ids(slice.memory_ids)
+    loaded = load_memories_by_ids(slice.memory_ids)
+    # Only active memories may be cited, targeted or related to (the rule
+    # authorize_candidate and store_accepted enforce), so a superseded, expired
+    # or archived memory the Explorer picked is never shown to the Thinker: a
+    # candidate built on it can only be blocked. The slice itself and its
+    # attention-ledger row are unchanged.
+    memories = [m for m in loaded if is_active_memory(m)]
+    excluded = {canonical_uuid(m.get("id")) for m in loaded} - {canonical_uuid(m.get("id")) for m in memories}
+    if excluded:
+        logger.info("Thinker packet: excluded %d non-active memor%s from slice %s",
+                    len(excluded), "y" if len(excluded) == 1 else "ies", slice.name)
+        logger.debug("Thinker packet: non-active ids excluded: %s", sorted(excluded))
+        keep = [canonical_uuid(mid) not in excluded for mid in slice.memory_ids]
+        payload["memory_slice"]["memory_ids"] = [mid for mid, k in zip(slice.memory_ids, keep) if k]
+        if len(slice.memory_titles) == len(slice.memory_ids):
+            payload["memory_slice"]["memory_titles"] = [t for t, k in zip(slice.memory_titles, keep) if k]
     for memory in memories:
         self._slice_memory_cache[str(memory.get("id"))] = memory
     payload["memory_slice"]["memories"] = build_packet(memories)
     payload["note"] = TOOLED_NOTE if thinker_has_tools else TOOLLESS_NOTE
-    if len(memories) < len(slice.memory_ids):
+    if len(loaded) < len(slice.memory_ids):
         logger.warning(
             "Thinker packet: loaded %d of %d slice memories for %s",
-            len(memories), len(slice.memory_ids), slice.name,
+            len(loaded), len(slice.memory_ids), slice.name,
         )
 
     user_message = json.dumps(payload, default=str)
