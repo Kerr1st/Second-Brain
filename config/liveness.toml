@@ -194,7 +194,10 @@ reason = "scrape_bookmarks.py: the Crawlee time budget could not start every new
 # scheduled run's `semantic_contract_failed` as the "deferred" count in
 # logs/jobs/codex-capture.backlog.json. 2 consecutive runs with misses (~12 h)
 # → ⚠. A single miss that the next run's retry clears is not reported here
-# (it is still a WARNING in logs/codex-capture.log).
+# (it is still a WARNING in logs/codex-capture.log). The streak resets only on
+# a run with semantic_processed > 0 and no misses; runs with no model call,
+# outages and budget/spend-incomplete runs leave the file untouched, so the ⚠
+# persists until the daily sweep sees it (capture_codex.streak_update).
 [backlog.codex-capture]
 consecutive_runs = 2
 reason = "capture_codex.py: Bedrock answers failed the Codex semantic evidence contract (semantic_contract_failed > 0) in 2+ consecutive runs; the rule broken is in failures[].message of the JSON summary in logs/codex-capture.log — a prompt/model change may have broken the contract"
