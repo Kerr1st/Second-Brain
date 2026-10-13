@@ -962,7 +962,8 @@ def main():
             elif outcome == "auth":
                 skipped_auth += 1
                 outcomes[url] = "auth"
-                browser_auth_urls.append(url)
+                if browser_midway_login(res):
+                    browser_auth_urls.append(url)   # Midway's own sign-in: the systemic check's evidence
             elif outcome == "unsupported_auth":
                 unsupported_auth += 1      # no strike; [backlog.bookmarks-unsupported] sees it
                 unsupported_hosts[_host(url)] += 1
@@ -983,11 +984,12 @@ def main():
                 outcome = "error"
             browser[outcome] += 1
         # Browser-only systemic check, independent of cookie-path results: every
-        # browser page hit sign-in (e.g. the Midway mint failing) -> a session
-        # problem, deferred_auth with no strikes.
+        # browser page hit Midway's own sign-in (e.g. the Midway mint failing) -> a
+        # session problem, deferred_auth with no strikes. HTTP 401/403 permission
+        # pages and foreign logins are per-URL refusals and keep their strikes.
         attempts = sum(browser[k] for k in ("ok", "auth", "too_short", "error", "unsupported_auth"))
-        if attempts >= SYSTEMIC_MIN_ATTEMPTS and browser["auth"] == attempts and not browser["ok"]:
-            print(f"WARNING: all {attempts} browser fetch(es) hit sign-in and none reached a page — "
+        if attempts >= SYSTEMIC_MIN_ATTEMPTS and len(browser_auth_urls) == attempts and not browser["ok"]:
+            print(f"WARNING: all {attempts} browser fetch(es) hit Midway sign-in and none reached a page — "
                   f"deferred_auth, no ledger strike; {MIDWAY_CAUSE_BROWSER}")
             for url in browser_auth_urls:
                 outcomes.pop(url, None)

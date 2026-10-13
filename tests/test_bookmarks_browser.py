@@ -682,6 +682,21 @@ class TestReviewRouting:
         self._main(sb, tmp_path, monkeypatch, [A, B, W], lambda u: "ok", browser_result=browser)
         assert len(self._ledger(tmp_path)) == 2
 
+    def test_three_browser_403s_are_strikes_not_a_midway_problem(self, sb, tmp_path, monkeypatch, capsys):
+        # Permission-gated pages (HTTP 403, no Midway sign-in) are per-URL refusals.
+        browser = lambda u: bf.PageResult(u, "auth", final_url=u, status=403, detail="http_403", requested_url=u)
+        rc, t = self._main(sb, tmp_path, monkeypatch, [A, B, C, W], lambda u: "ok", browser_result=browser)
+        out = capsys.readouterr().out
+        assert rc == 0 and t.browser_calls == [[A, B, C]]
+        assert "deferred_auth=0" in out and "browser_auth=3" in out
+        assert "hit Midway sign-in" not in out
+        from src.capture.unreachable import url_key
+        ledger = self._ledger(tmp_path)
+        assert {url_key(u) for u in (A, B, C)} <= set(ledger)
+        assert all(ledger[url_key(u)]["status"] == "auth" for u in (A, B, C))
+        assert not (tmp_path / "jobs" / "bookmarks-midway.backlog.json").exists() or \
+            json.loads((tmp_path / "jobs" / "bookmarks-midway.backlog.json").read_text())["deferred"] == 0
+
     @pytest.mark.parametrize("detail", ["launch", "server_down", "budget", "max_pages"])
     def test_browser_deferrals_get_their_own_backlog_with_a_cause_per_detail(self, sb, tmp_path, monkeypatch,
                                                                             capsys, detail):
