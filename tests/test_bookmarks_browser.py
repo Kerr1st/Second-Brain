@@ -580,7 +580,8 @@ class TestInvalidUrl:
     def test_canonical_url_keeps_ordinary_urls(self):
         from src.capture.filters import canonical_url
         for url in (A, B, C, "https://sage.amazon.dev/tags/AmazonQ?t=7&autoRedirectedFromLegacyUI=1",
-                    "https://docs.hub.amazon.dev/kiro/user-guide/howto-mcp/#buildermcp-read-internal-websites"):
+                    "https://docs.hub.amazon.dev/kiro/user-guide/howto-mcp/#buildermcp-read-internal-websites",
+                    "https://host.amazon.dev/p/@u?x=a@b"):                # '@' in path and query, not userinfo
             assert canonical_url(url) == url
 
 
@@ -914,4 +915,17 @@ class TestTeardownSignals:
         clock = FakeClock()
         bf.fetch_pages_sync([B], client_factory=b.factory, log=lambda *a: None, clock=clock, sleep=clock.sleep)
         assert seen and seen[-1] is not before and callable(seen[-1])    # still the pass's handler
+        assert signal.getsignal(signal.SIGTERM) is before
+
+    @pytest.mark.parametrize("fails", [False, True])
+    def test_fetch_pages_sync_restores_the_sigterm_handler(self, fails):
+        import signal
+        before = signal.getsignal(signal.SIGTERM)
+        b = FakeBrowser({B: page(B, [LONG])})
+        if fails:
+            async def aenter():
+                raise RuntimeError("launch failed")
+            b.__aenter__ = aenter
+        clock = FakeClock()
+        bf.fetch_pages_sync([B], client_factory=b.factory, log=lambda *a: None, clock=clock, sleep=clock.sleep)
         assert signal.getsignal(signal.SIGTERM) is before
