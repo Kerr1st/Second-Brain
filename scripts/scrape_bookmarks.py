@@ -620,6 +620,7 @@ def main():
     print(f"Public: {public_stats}")
     record_unreachable(ledger, outcomes, len(unreachable), killed_deferred=killed_deferred)
     report_backlog(public_stats.get("deferred", 0))
+    report_backlog(deferred_auth, job=MIDWAY_BACKLOG_JOB)
     internal_counts = {"ok": ok, "auth": skipped_auth, "too_short": too_short, "failed": fail,
                        "deferred_auth": deferred_auth}
     internal_auth = {u for u, c in outcomes.items() if c == "auth" and needs_cookies(u)}
@@ -742,22 +743,32 @@ def record_unreachable(ledger, outcomes, skipped_unreachable, killed_deferred=()
     return counts
 
 
-def report_backlog(deferred):
+#: Separate backlog streak for internal URLs deferred because the Midway cookie was
+#: missing/expired (``deferred_auth``): ``<status-dir>/bookmarks-midway.backlog.json``,
+#: ``[backlog.bookmarks-midway]`` in config/liveness.toml.
+MIDWAY_BACKLOG_JOB = "bookmarks-midway"
+
+
+def report_backlog(deferred, job="bookmarks"):
     """Track consecutive runs that deferred URLs; warn once the backlog persists.
 
     A single deferral is normal (the rest is retried next run) and never fails
-    the job; the liveness sweep turns a persistent streak into an advisory."""
+    the job; the liveness sweep turns a persistent streak into an advisory.
+    ``job="bookmarks"`` is the public Crawlee-budget backlog; ``MIDWAY_BACKLOG_JOB``
+    is the internal path deferred on an expired Midway cookie."""
     try:
         from src.operations import backlog
-        state = backlog.record_run("bookmarks", deferred)
-        limit = backlog.threshold("bookmarks")
+        state = backlog.record_run(job, deferred)
+        limit = backlog.threshold(job)
     except Exception as exc:  # noqa: BLE001 - backlog bookkeeping must not change the job's outcome
-        print(f"WARNING: could not record the bookmarks backlog state: {type(exc).__name__}")
+        print(f"WARNING: could not record the {job} backlog state: {type(exc).__name__}")
         return None
     streak = state["consecutive_deferred_runs"]
     if streak >= limit:
-        print(f"WARNING: bookmarks backlog persists — {deferred} URL(s) deferred, {streak} consecutive "
-              f"run(s) with deferrals (threshold {limit}); the Crawlee budget is not draining the queue")
+        cause = ("the Midway cookie is missing/expired at run time — run mwinit"
+                 if job == MIDWAY_BACKLOG_JOB else "the Crawlee budget is not draining the queue")
+        print(f"WARNING: {job} backlog persists — {deferred} URL(s) deferred, {streak} consecutive "
+              f"run(s) with deferrals (threshold {limit}); {cause}")
     return state
 
 

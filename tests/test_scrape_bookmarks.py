@@ -565,6 +565,20 @@ class TestMidwayExpiry:
         assert rc == 0 and len(calls) == 3 and "Midway cookie missing" not in out
         assert "deferred_auth=0" in out
 
+    def test_expired_runs_build_a_separate_midway_streak_and_a_valid_run_resets_it(
+            self, sb, tmp_path, monkeypatch, capsys):
+        state = tmp_path / "jobs" / "bookmarks-midway.backlog.json"
+        for run in (1, 2, 3):
+            rc, _ = self._main(sb, tmp_path, monkeypatch, _midway_file(tmp_path / "midway", expires=PAST))
+            out = capsys.readouterr().out
+            assert rc == 0 and json.loads(state.read_text())["consecutive_deferred_runs"] == run
+            assert json.loads(state.read_text())["deferred"] == 3
+            assert ("WARNING: bookmarks-midway backlog persists" in out) is (run == 3)
+        assert json.loads((tmp_path / "jobs" / "bookmarks.backlog.json").read_text())["consecutive_deferred_runs"] == 0
+        rc, _ = self._main(sb, tmp_path, monkeypatch, _midway_file(tmp_path / "midway"))
+        assert rc == 0 and "bookmarks-midway backlog persists" not in capsys.readouterr().out
+        assert json.loads(state.read_text())["consecutive_deferred_runs"] == 0
+
     def test_session_check_reads_no_value(self, sb, tmp_path, capsys):
         path = tmp_path / "midway"
         path.write_text(f"#HttpOnly_midway-auth.amazon.com\tFALSE\t/\tTRUE\t{FUTURE}\tsession\tSECRETVALUE\n")

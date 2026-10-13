@@ -186,3 +186,12 @@ weekly-digest = "network preflight pending verification; remove after two consec
 [backlog.bookmarks]
 consecutive_runs = 3
 reason = "scrape_bookmarks.py: the Crawlee time budget could not start every new public bookmark for 3+ runs in a row (deferred, retried next run); prune bookmarks, extend SECOND_BRAIN_JOB_TIMEOUT_BOOKMARKS or tune CRAWLEE_BATCH_*"
+
+# Midway-expiry deferrals (scrape_bookmarks.py `deferred_auth`): with no unexpired
+# Midway session cookie the internal path is skipped and its URLs are retried next
+# run without limit — a streak of its own in logs/jobs/bookmarks-midway.backlog.json,
+# separate from the public Crawlee-budget backlog above. A run with a valid cookie
+# (deferred_auth == 0) resets it.
+[backlog.bookmarks-midway]
+consecutive_runs = 3
+reason = "Midway cookie expired at bookmarks run time — run mwinit before Saturday 01:00 or run the job manually"

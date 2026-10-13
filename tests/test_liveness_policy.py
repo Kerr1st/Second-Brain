@@ -300,20 +300,26 @@ def test_policy_rejects_a_backlog_entry_without_a_reason_or_threshold(tmp_path):
             load_policy(bad)
 
 
+def _backlog(directory, policy, job):
+    """The one backlog finding for ``job`` (every ``[backlog.<job>]`` entry yields one)."""
+    (finding,) = [f for f in liveness.backlog_findings(directory, policy) if f["subject"] == job]
+    return finding
+
+
 def test_malformed_backlog_state_never_crashes_the_sweep(tmp_path, policy):
     from src.operations import backlog
     backlog.state_path("bookmarks", tmp_path).write_text('{"consecutive_deferred_runs": "x", "deferred": [1]}')
-    (finding,) = liveness.backlog_findings(tmp_path, policy)
+    finding = _backlog(tmp_path, policy, "bookmarks")
     assert finding["healthy"] and finding["consecutive_deferred_runs"] == 0 and finding["deferred"] == 0
 
 
 def test_persistent_backlog_is_advisory_only_at_the_threshold_and_never_fails(tmp_path, policy):
     from src.operations import backlog
-    (finding,) = liveness.backlog_findings(tmp_path, policy)
+    finding = _backlog(tmp_path, policy, "bookmarks")
     assert finding["healthy"] and finding["state"] == "no_state"
     for run in range(1, 4):
         backlog.record_run("bookmarks", 40, tmp_path, now=NOW + timedelta(days=7 * run))
-        (finding,) = liveness.backlog_findings(tmp_path, policy)
+        finding = _backlog(tmp_path, policy, "bookmarks")
         assert finding["consecutive_deferred_runs"] == run and not required_failure(finding)
         assert finding["healthy"] is (run < 3)
     assert finding["state"] == "persistent_backlog" and finding["severity"] == "advisory"
@@ -327,9 +333,38 @@ def test_persistent_backlog_is_advisory_only_at_the_threshold_and_never_fails(tm
     assert report["healthy"] is True and "bookmarks" in report["advisories"]
     # a run that drains the queue resets the streak
     backlog.record_run("bookmarks", 0, tmp_path, now=NOW + timedelta(days=28))
-    (finding,) = liveness.backlog_findings(tmp_path, policy)
+    finding = _backlog(tmp_path, policy, "bookmarks")
     assert finding["healthy"] and finding["consecutive_deferred_runs"] == 0
     assert backlog.read_state("bookmarks", tmp_path)["first_deferred_at"] is None
+
+
+def test_midway_expiry_is_its_own_advisory_backlog_streak(tmp_path, policy):
+    """deferred_auth (internal URLs skipped on a missing/expired Midway cookie) has its own
+    streak in bookmarks-midway.backlog.json: 3 runs in a row → advisory, never required;
+    a valid-cookie run (deferred_auth == 0) clears it; the sweep skips the sidecar."""
+    from src.operations import backlog
+    entry = policy["backlog"]["bookmarks-midway"]
+    assert entry["consecutive_runs"] == 3
+    assert entry["reason"] == ("Midway cookie expired at bookmarks run time — run mwinit before "
+                               "Saturday 01:00 or run the job manually")
+    for run in range(1, 4):
+        backlog.record_run("bookmarks-midway", 5, tmp_path, now=NOW + timedelta(days=7 * run))
+        finding = _backlog(tmp_path, policy, "bookmarks-midway")
+        assert finding["healthy"] is (run < 3) and not required_failure(finding)
+    assert finding["state"] == "persistent_backlog" and finding["severity"] == "advisory"
+    assert entry["reason"] in finding["message"]
+    assert _backlog(tmp_path, policy, "bookmarks")["state"] == "no_state"     # separate streak
+    assert (tmp_path / "bookmarks-midway.backlog.json").is_file()
+    assert inspect_statuses(tmp_path, now=NOW) == []                          # a sidecar, not a job
+    report = liveness.write_report(tmp_path / "liveness-report.json",
+                                   liveness.run(policy, tmp_path, now=NOW, skip_db=True), NOW)
+    assert report["healthy"] is True and "bookmarks-midway" in report["advisories"]
+    backlog.record_run("bookmarks-midway", 0, tmp_path, now=NOW + timedelta(days=28))
+    finding = _backlog(tmp_path, policy, "bookmarks-midway")
+    assert finding["healthy"] and finding["state"] == "healthy" and finding["consecutive_deferred_runs"] == 0
+    report = liveness.write_report(tmp_path / "liveness-report.json",
+                                   liveness.run(policy, tmp_path, now=NOW, skip_db=True), NOW)
+    assert "bookmarks-midway" not in report["advisories"]
 
 
 # ------------------------------------------------------- end to end (database)
