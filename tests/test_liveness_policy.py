@@ -283,6 +283,12 @@ def test_the_advisory_list_is_config_not_a_hard_coded_exclusion(tmp_path):
 
 # ------------------------------------------------------- persistent backlog
 
+def _backlog_finding(directory, policy, job):
+    """The one [backlog.<job>] finding (the policy also configures codex-capture)."""
+    (finding,) = [f for f in liveness.backlog_findings(directory, policy) if f["subject"] == job]
+    return finding
+
+
 def test_bookmarks_backlog_is_an_advisory_by_explicit_config_with_a_reason(policy):
     entry = policy["backlog"]["bookmarks"]
     assert entry["consecutive_runs"] == 3 and "deferred" in entry["reason"]
@@ -303,17 +309,17 @@ def test_policy_rejects_a_backlog_entry_without_a_reason_or_threshold(tmp_path):
 def test_malformed_backlog_state_never_crashes_the_sweep(tmp_path, policy):
     from src.operations import backlog
     backlog.state_path("bookmarks", tmp_path).write_text('{"consecutive_deferred_runs": "x", "deferred": [1]}')
-    (finding,) = liveness.backlog_findings(tmp_path, policy)
+    finding = _backlog_finding(tmp_path, policy, "bookmarks")
     assert finding["healthy"] and finding["consecutive_deferred_runs"] == 0 and finding["deferred"] == 0
 
 
 def test_persistent_backlog_is_advisory_only_at_the_threshold_and_never_fails(tmp_path, policy):
     from src.operations import backlog
-    (finding,) = liveness.backlog_findings(tmp_path, policy)
+    finding = _backlog_finding(tmp_path, policy, "bookmarks")
     assert finding["healthy"] and finding["state"] == "no_state"
     for run in range(1, 4):
         backlog.record_run("bookmarks", 40, tmp_path, now=NOW + timedelta(days=7 * run))
-        (finding,) = liveness.backlog_findings(tmp_path, policy)
+        finding = _backlog_finding(tmp_path, policy, "bookmarks")
         assert finding["consecutive_deferred_runs"] == run and not required_failure(finding)
         assert finding["healthy"] is (run < 3)
     assert finding["state"] == "persistent_backlog" and finding["severity"] == "advisory"
@@ -327,7 +333,7 @@ def test_persistent_backlog_is_advisory_only_at_the_threshold_and_never_fails(tm
     assert report["healthy"] is True and "bookmarks" in report["advisories"]
     # a run that drains the queue resets the streak
     backlog.record_run("bookmarks", 0, tmp_path, now=NOW + timedelta(days=28))
-    (finding,) = liveness.backlog_findings(tmp_path, policy)
+    finding = _backlog_finding(tmp_path, policy, "bookmarks")
     assert finding["healthy"] and finding["consecutive_deferred_runs"] == 0
     assert backlog.read_state("bookmarks", tmp_path)["first_deferred_at"] is None
 
