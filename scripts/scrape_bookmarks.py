@@ -73,24 +73,93 @@ def _is_auth_response(resp):
     return any(_AUTH_URL_RE.search(u) for u in [*redirects, resp.url or ""])
 
 
+MIDWAY_COOKIE_PATH = os.path.expanduser("~/.midway/cookie")
+
+
+def load_midway_cookies(path=None):
+    """Read the Netscape-format Midway cookie file into a CookieJar.
+
+    ``http.cookiejar.MozillaCookieJar`` drops curl-style ``#HttpOnly_<domain>``
+    lines, which is how mwinit writes the session cookies, so the file is parsed
+    here. Expired cookies are skipped. Values never leave the jar (no logging);
+    a missing/unreadable file is an empty jar."""
+    import http.cookiejar
+    jar = http.cookiejar.CookieJar()
+    try:
+        lines = Path(path or MIDWAY_COOKIE_PATH).read_text(errors="replace").splitlines()
+    except OSError:
+        return jar
+    now = time.time()
+    for line in lines:
+        http_only = line.startswith("#HttpOnly_")
+        if http_only:
+            line = line[len("#HttpOnly_"):]
+        elif not line.strip() or line.startswith("#"):
+            continue
+        fields = line.rstrip("\r\n").split("\t")
+        if len(fields) != 7:
+            continue
+        domain, subdomains, cpath, secure, expires, name, value = fields
+        if subdomains.upper() == "TRUE" and not domain.startswith("."):
+            domain = "." + domain
+        try:
+            expires = int(expires) or None
+        except ValueError:
+            expires = None
+        if expires is not None and expires < now:
+            continue
+        jar.set_cookie(http.cookiejar.Cookie(
+            version=0, name=name, value=value, port=None, port_specified=False,
+            domain=domain, domain_specified=domain.startswith("."), domain_initial_dot=domain.startswith("."),
+            path=cpath or "/", path_specified=True, secure=secure.upper() == "TRUE", expires=expires,
+            discard=expires is None, comment=None, comment_url=None,
+            rest={"HttpOnly": None} if http_only else {}, rfc2109=False))
+    return jar
+
+
+def internal_cookie_jar(url, midway_path=None):
+    """Chrome's cookies for the target host merged with the Midway jar, so the
+    idp.federate.amazon.com -> midway-auth.amazon.com redirect chain carries
+    the Midway session. Midway cookies win on (domain, path, name) clashes."""
+    import http.cookiejar
+    import browser_cookie3
+    jar = http.cookiejar.CookieJar()
+    try:
+        chrome = browser_cookie3.chrome(domain_name=urlparse(url).netloc)
+    except Exception as exc:  # noqa: BLE001 - no Chrome cookies still leaves the Midway jar
+        print(f"    ! Chrome cookies unavailable: {type(exc).__name__}")
+        chrome = None
+    for cookie in chrome or ():
+        jar.set_cookie(cookie)
+    for cookie in load_midway_cookies(midway_path):
+        jar.set_cookie(cookie)
+    return jar
+
+
+def fetch_internal(url):
+    """GET an internal page with the merged cookie jar. Returns (outcome, resp);
+    outcome is "ok" (200, not judged as auth), "auth" or "failed". Writes nothing."""
+    import requests
+    resp = requests.get(url, cookies=internal_cookie_jar(url), timeout=30,
+                        headers={"User-Agent": "Mozilla/5.0"})
+    if _is_auth_response(resp):
+        return "auth", resp
+    if resp.status_code != 200:
+        return "failed", resp
+    return "ok", resp
+
+
 def scrape_with_cookies(name, url):
-    """Fetch an internal page using Chrome cookies, save as markdown.
+    """Fetch an internal page using Chrome + Midway cookies, save as markdown.
 
     Returns "ok", "auth" (redirected to sign-in / refused for auth: counted as
-    skipped_auth), "too_short" (reached, but too little text to index),
-    "timeout" or "failed" (genuine fetch error)."""
+    skipped_auth — also when the Midway cookie has expired), "too_short"
+    (reached, but too little text to index), "timeout" or "failed" (genuine
+    fetch error)."""
     try:
-        import browser_cookie3, requests
-        from html.parser import HTMLParser
-
-        cj = browser_cookie3.chrome(domain_name=urlparse(url).netloc)
-        resp = requests.get(url, cookies=cj, timeout=30,
-                           headers={"User-Agent": "Mozilla/5.0"})
-
-        if _is_auth_response(resp):
-            return "auth"
-        if resp.status_code != 200:
-            return "failed"
+        outcome, resp = fetch_internal(url)
+        if outcome != "ok":
+            return outcome
 
         text = html_to_text(resp.text)
 

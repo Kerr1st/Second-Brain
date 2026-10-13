@@ -180,6 +180,7 @@ class TestInternalAuth:
     @pytest.fixture
     def fetch(self, sb, monkeypatch, tmp_path):
         monkeypatch.setattr(sb, "KNOWLEDGE_DIR", str(tmp_path / "sources"))
+        monkeypatch.setattr(sb, "MIDWAY_COOKIE_PATH", str(tmp_path / "no-midway-cookie"))   # never the real one
         holder = {}
         fake_requests = types.SimpleNamespace(get=lambda *a, **k: holder["resp"])
         fake_cookie = types.SimpleNamespace(chrome=lambda domain_name=None: None)
@@ -228,6 +229,85 @@ class TestInternalAuth:
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "failed")
         assert sb.main() == 0
         assert "error=1" in capsys.readouterr().out
+
+
+class TestMidwayCookies:
+    """~/.midway/cookie (Netscape format, curl-style #HttpOnly_ lines) joins the jar."""
+
+    SECRET = "s3cr3t-value-never-logged"
+
+    @pytest.fixture
+    def cookie_file(self, tmp_path):
+        future, past = 4102444800, 946684800      # 2100-01-01, 2000-01-01
+        path = tmp_path / "cookie"
+        path.write_text("\n".join([
+            "# Netscape HTTP Cookie File",
+            "",
+            f"#HttpOnly_midway-auth.amazon.com\tFALSE\t/\tTRUE\t{future}\tsession\t{self.SECRET}",
+            f".amazon.com\tTRUE\t/\tTRUE\t{future}\tamazon_enterprise_access\tv2",
+            f"#HttpOnly_idp.federate.amazon.com\tFALSE\t/\tTRUE\t{past}\texpired\tgone",
+            "malformed line without tabs",
+            f"amazon.com\tTRUE\t/\tTRUE\t0\tsess_only\tv3",
+        ]) + "\n")
+        return path
+
+    def test_httponly_lines_are_kept_comments_expired_and_malformed_dropped(self, sb, cookie_file):
+        import http.cookiejar
+        jar = sb.load_midway_cookies(str(cookie_file))
+        got = {(c.domain, c.name) for c in jar}
+        assert got == {("midway-auth.amazon.com", "session"), (".amazon.com", "amazon_enterprise_access"),
+                       (".amazon.com", "sess_only")}
+        # (MozillaCookieJar drops #HttpOnly_ lines on older Pythons and raises on a single
+        # malformed line; the own parser keeps them, skips bad lines and expired cookies.)
+
+    def test_cookies_match_the_midway_redirect_chain(self, sb, cookie_file):
+        import urllib.request
+        jar = sb.load_midway_cookies(str(cookie_file))
+        def sent(url):
+            req = urllib.request.Request(url)
+            jar.add_cookie_header(req)
+            return req.get_header("Cookie") or ""
+        assert "session=" in sent("https://midway-auth.amazon.com/SSO/redirect")
+        assert "amazon_enterprise_access=" in sent("https://idp.federate.amazon.com/api/oauth2/v1/authorize")
+        assert "session=" not in sent("https://w.amazon.com/bin/view/X")     # host-only cookie stays on its host
+        assert sent("https://example.org/") == ""
+
+    def test_missing_file_is_an_empty_jar(self, sb, tmp_path):
+        assert list(sb.load_midway_cookies(str(tmp_path / "absent"))) == []
+
+    def test_merged_jar_goes_to_requests_and_no_value_is_printed(self, sb, cookie_file, monkeypatch, capsys, tmp_path):
+        import http.cookiejar
+        monkeypatch.setattr(sb, "MIDWAY_COOKIE_PATH", str(cookie_file))
+        monkeypatch.setattr(sb, "KNOWLEDGE_DIR", str(tmp_path / "sources"))
+        chrome = http.cookiejar.CookieJar()
+        chrome.set_cookie(http.cookiejar.Cookie(0, "chrome_c", "cv", None, False, "w.amazon.com", False, False,
+                                                "/", True, True, None, True, None, None, {}, False))
+        seen = {}
+
+        def get(url, cookies=None, **kw):
+            seen["names"] = {c.name for c in cookies}
+            return _resp()
+        monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(get=get))
+        monkeypatch.setitem(sys.modules, "browser_cookie3", types.SimpleNamespace(chrome=lambda domain_name=None: chrome))
+        assert sb.scrape_with_cookies("Page", "https://w.amazon.com/bin/view/X") == "ok"
+        assert seen["names"] == {"chrome_c", "session", "amazon_enterprise_access", "sess_only"}
+        out = capsys.readouterr()
+        assert self.SECRET not in out.out + out.err
+
+    def test_expired_midway_session_still_counts_as_auth(self, sb, monkeypatch, tmp_path):
+        monkeypatch.setattr(sb, "MIDWAY_COOKIE_PATH", str(tmp_path / "absent"))
+        monkeypatch.setitem(sys.modules, "browser_cookie3", types.SimpleNamespace(chrome=lambda domain_name=None: None))
+        resp = _resp(url="https://midway-auth.amazon.com/login?next=x",
+                     history=["https://w.amazon.com/bin/view/X", "https://idp.federate.amazon.com/api/oauth2/v1/authorize"])
+        monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(get=lambda *a, **k: resp))
+        assert sb.scrape_with_cookies("Page", "https://w.amazon.com/bin/view/X") == "auth"
+
+    def test_chrome_cookie_failure_falls_back_to_midway_only(self, sb, cookie_file, monkeypatch):
+        def broken(domain_name=None):
+            raise RuntimeError("keychain")
+        monkeypatch.setitem(sys.modules, "browser_cookie3", types.SimpleNamespace(chrome=broken))
+        jar = sb.internal_cookie_jar("https://w.amazon.com/", midway_path=str(cookie_file))
+        assert {c.name for c in jar} == {"session", "amazon_enterprise_access", "sess_only"}
 
 
 class TestBacklogAlarm:
