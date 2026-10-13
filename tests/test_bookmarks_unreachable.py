@@ -360,17 +360,23 @@ class TestInternalDomainAnchoring:
         assert browser.classify("https://w.amazon.com/bin/view/x") == "internal"
 
 
+def _load_revert():
+    """The revert script, located relative to this file (never the cwd)."""
+    import importlib.util
+    import pathlib
+    script = pathlib.Path(__file__).resolve().parents[1] / "scripts/maintenance/revert_bookmarks_auth_strikes_20261013.py"
+    spec = importlib.util.spec_from_file_location("revert_bookmarks_auth_strikes_20261013", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def test_revert_20261013_auth_strikes_is_scoped_and_idempotent(tmp_path, capsys):
     """scripts/maintenance/revert_bookmarks_auth_strikes_20261013.py: one strike off
     internal auth entries last attempted in the 10-13 run window; nothing else."""
-    import importlib.util
-    import pathlib
     from datetime import datetime, timezone
     from src.capture.unreachable import Ledger, url_key
-    spec = importlib.util.spec_from_file_location(
-        "revert", pathlib.Path("scripts/maintenance/revert_bookmarks_auth_strikes_20261013.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    mod = _load_revert()
     path = tmp_path / "bookmarks.unreachable.json"
     ledger = Ledger(path)
     d1010 = datetime(2026, 10, 10, 19, 58, tzinfo=timezone.utc)
@@ -400,3 +406,95 @@ def test_revert_20261013_auth_strikes_is_scoped_and_idempotent(tmp_path, capsys)
     assert mod.main(["--ledger", str(path), "--apply"]) == 0
     assert path.read_text() == before                           # idempotent
     assert "matched 0: {}" in capsys.readouterr().out.splitlines()[-1]
+
+
+def _revert_ledger(tmp_path, records):
+    """A ledger at tmp_path with ``records`` = [(url, [(class, time), ...])]."""
+    from src.capture.unreachable import Ledger
+    path = tmp_path / "bookmarks.unreachable.json"
+    ledger = Ledger(path)
+    for url, attempts in records:
+        for cls, when in attempts:
+            ledger.record(url, cls, now=when)
+    ledger.save()
+    return path
+
+
+def _utc(text):
+    from datetime import datetime
+    return datetime.fromisoformat(text)
+
+
+def test_revert_refuses_to_run_while_the_bookmarks_job_holds_its_lock(tmp_path, capsys):
+    """The job's flock(<status-dir>/bookmarks.lock) (jobs.run_job) is held: exit non-zero,
+    nothing written, no backup; the same path the job locks is the one the script locks."""
+    import fcntl
+    mod = _load_revert()
+    url = "https://w.amazon.com/bin/view/A"
+    path = _revert_ledger(tmp_path, [(url, [("auth", _utc("2026-10-10T19:58:00+00:00")),
+                                            ("auth", _utc("2026-10-13T15:22:30.704+00:00"))])])
+    before = path.read_bytes()
+    assert mod.LOCK_NAME == "bookmarks.lock"
+    with (tmp_path / "bookmarks.lock").open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert mod.main(["--ledger", str(path), "--apply"]) == mod.EXIT_LOCKED != 0
+        assert "is held" in capsys.readouterr().err
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("*.pre-revert-*"))
+    assert mod.main(["--ledger", str(path), "--apply"]) == 0     # released: applies
+    assert path.read_bytes() != before
+
+
+def test_revert_lock_matches_the_job_wrappers_lock_path(tmp_path, monkeypatch):
+    """jobs.run_job locks <SECOND_BRAIN_STATUS_DIR>/bookmarks.lock, the ledger's directory."""
+    from src.capture.unreachable import default_path
+    mod = _load_revert()
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path))
+    assert default_path().parent / mod.LOCK_NAME == tmp_path / "bookmarks.lock"
+    source = (__import__("pathlib").Path(__file__).resolve().parents[1] / "src/operations/jobs.py").read_text()
+    assert '(status_dir / f"{name}.lock")' in source
+
+
+def test_revert_never_overwrites_an_existing_backup(tmp_path):
+    mod = _load_revert()
+    url = "https://w.amazon.com/bin/view/A"
+    path = _revert_ledger(tmp_path, [(url, [("auth", _utc("2026-10-10T19:58:00+00:00")),
+                                            ("auth", _utc("2026-10-13T15:22:30.704+00:00"))])])
+    original = path.read_bytes()
+    existing = tmp_path / "bookmarks.unreachable.json.pre-revert-20261013"
+    existing.write_text("an earlier backup")
+    assert mod.main(["--ledger", str(path), "--apply"]) == 0
+    assert existing.read_text() == "an earlier backup"
+    fresh = tmp_path / "bookmarks.unreachable.json.pre-revert-20261013.1"
+    assert fresh.read_bytes() == original and (fresh.stat().st_mode & 0o777) == 0o600
+
+
+def test_revert_skips_entries_with_more_than_two_attempts(tmp_path, capsys):
+    from src.capture.unreachable import Ledger, url_key
+    mod = _load_revert()
+    url = "https://w.amazon.com/bin/view/A"
+    path = _revert_ledger(tmp_path, [(url, [("auth", _utc("2026-10-03T19:58:00+00:00")),
+                                            ("auth", _utc("2026-10-10T19:58:00+00:00")),
+                                            ("auth", _utc("2026-10-13T15:22:30.704+00:00"))])])
+    before = path.read_bytes()
+    assert mod.plan(Ledger.load(path)) == [(url_key(url), "skip")]
+    assert mod.main(["--ledger", str(path), "--apply"]) == 0
+    assert "matched 1: {'skip': 1}" in capsys.readouterr().out
+    assert path.read_bytes() == before                           # only skips: nothing written
+    assert not list(tmp_path.glob("*.pre-revert-*"))
+
+
+def test_revert_window_edges(tmp_path):
+    """15:11:12Z (run start) and 15:23:00Z (widened end: records are written at the end of
+    the run) are inside; a second before / after is outside."""
+    from src.capture.unreachable import Ledger, url_key
+    mod = _load_revert()
+    times = {"start": "2026-10-13T15:11:12+00:00", "before": "2026-10-13T15:11:11+00:00",
+             "written": "2026-10-13T15:22:30.705+00:00", "end": "2026-10-13T15:23:00+00:00",
+             "after": "2026-10-13T15:23:01+00:00"}
+    records = [(f"https://w.amazon.com/bin/view/{name}",
+                [("auth", _utc("2026-10-10T19:58:00+00:00")), ("auth", _utc(when))]) for name, when in times.items()]
+    path = _revert_ledger(tmp_path, records)
+    matched = {key for key, _ in mod.plan(Ledger.load(path))}
+    expected = {url_key(f"https://w.amazon.com/bin/view/{n}") for n in ("start", "written", "end")}
+    assert matched == expected
