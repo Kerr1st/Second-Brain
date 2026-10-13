@@ -246,7 +246,9 @@ def crawlee_broken(rc, output):
 #: Options for batch-scrape.js (read from env by the patched script; harmless
 #: before the patch is applied). Fail fast on blocked/unreachable pages instead
 #: of Crawlee's default 10 session rotations + 3 retries per URL, which let a
-#: few 403s use up a whole batch budget (triage 2026-10-13).
+#: few 403s use up a whole batch budget (triage 2026-10-13). batch-scrape.js
+#: reads them once second-brain-triage/2026-10-13/crawlee-batch-scrape.patch is
+#: applied in ~/Work/Tools/Crawlee; its defaults keep other callers unchanged.
 BATCH_SCRAPE_ENV = {
     "BATCH_SCRAPE_MAX_REQUEST_RETRIES": "1",
     "BATCH_SCRAPE_MAX_SESSION_ROTATIONS": "0",
