@@ -331,10 +331,14 @@ def backlog_findings(directory, policy: dict) -> list[dict]:
         deferred = _count("deferred")
         extra = {"consecutive_deferred_runs": streak, "deferred": deferred, "consecutive_runs": limit,
                  "first_deferred_at": state.get("first_deferred_at")}
+        cause = state.get("cause") if isinstance(state.get("cause"), str) else None
+        if cause:
+            extra["cause"] = cause
         if streak >= limit:
             findings.append(_finding("backlog", job, "persistent_backlog", healthy=False, severity="advisory",
                                      message=f"{job}: {deferred} item(s) deferred, {streak} consecutive run(s) with "
-                                             f"deferrals (threshold {limit}) — advisory: {entry['reason']}",
+                                             f"deferrals (threshold {limit}) — advisory: {entry['reason']}"
+                                             f"{f' (last run: {cause})' if cause else ''}",
                                      advisory_reason=entry["reason"], **extra))
         else:
             findings.append(_finding("backlog", job, "healthy", healthy=True, severity="advisory",

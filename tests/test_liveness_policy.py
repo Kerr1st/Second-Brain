@@ -351,8 +351,8 @@ def test_midway_expiry_is_its_own_advisory_backlog_streak(tmp_path, policy):
     from src.operations import backlog
     entry = policy["backlog"]["bookmarks-midway"]
     assert entry["consecutive_runs"] == 3
-    assert entry["reason"] == ("Midway cookie expired at bookmarks run time — run mwinit before "
-                               "Saturday 01:00 or run the job manually")
+    assert entry["reason"] == ("Midway sign-in failed at bookmarks run time (cookie missing/expired, or session "
+                               "rejected: see 'last run') — run mwinit before Saturday 01:00 or run the job manually")
     for run in range(1, 4):
         backlog.record_run("bookmarks-midway", 5, tmp_path, now=NOW + timedelta(days=7 * run))
         finding = _backlog(tmp_path, policy, "bookmarks-midway")
@@ -372,6 +372,18 @@ def test_midway_expiry_is_its_own_advisory_backlog_streak(tmp_path, policy):
                                    liveness.run(policy, tmp_path, now=NOW, skip_db=True), NOW)
     assert "bookmarks-midway" not in report["advisories"]
 
+
+
+def test_midway_advisory_names_the_last_runs_cause(tmp_path, policy):
+    from src.operations import backlog
+    cause = "Midway session rejected at run time (canary page hit sign-in) — run mwinit"
+    for run in range(1, 4):
+        backlog.record_run("bookmarks-midway", 4, tmp_path, now=NOW + timedelta(days=7 * run), cause=cause)
+    finding = _backlog(tmp_path, policy, "bookmarks-midway")
+    assert finding["state"] == "persistent_backlog" and finding["cause"] == cause
+    assert finding["message"].endswith(f"(last run: {cause})")
+    backlog.record_run("bookmarks-midway", 0, tmp_path, now=NOW + timedelta(days=28), cause=cause)
+    assert "cause" not in backlog.read_state("bookmarks-midway", tmp_path)        # only deferring runs
 
 # ------------------------------------------------------- end to end (database)
 

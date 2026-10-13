@@ -42,8 +42,11 @@ def read_state(job: str, directory=None) -> dict:
         return {}
 
 
-def record_run(job: str, deferred: int, directory=None, *, now=None) -> dict:
-    """Update the streak after one completed run and return the new state."""
+def record_run(job: str, deferred: int, directory=None, *, now=None, cause=None) -> dict:
+    """Update the streak after one completed run and return the new state.
+
+    ``cause`` (optional, deferring runs only) says why this run deferred; the
+    liveness finding shows it next to the configured reason."""
     now = now or datetime.now(timezone.utc)
     previous = read_state(job, directory)
     try:
@@ -55,6 +58,8 @@ def record_run(job: str, deferred: int, directory=None, *, now=None) -> dict:
              "consecutive_deferred_runs": streak + 1 if deferred else 0,
              "first_deferred_at": (previous.get("first_deferred_at") or now.isoformat()) if deferred else None,
              "updated_at": now.isoformat()}
+    if deferred and cause:
+        state["cause"] = str(cause)
     path = state_path(job, directory)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(prefix=".backlog-", dir=path.parent)

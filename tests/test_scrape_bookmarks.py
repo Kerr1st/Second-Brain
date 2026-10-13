@@ -797,7 +797,7 @@ class TestInternalAuthRouting:
     def test_unsupported_hosts(self, sb, url, unsupported):
         assert sb.midway_unsupported(url) is unsupported
 
-    def _main(self, sb, tmp_path, monkeypatch, urls, outcome_for):
+    def _main(self, sb, tmp_path, monkeypatch, urls, outcome_for, canary="auth"):
         bookmarks = tmp_path / "Bookmarks"
         bookmarks.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
             {"type": "url", "name": f"B{i}", "url": u} for i, u in enumerate(urls)]}}}))
@@ -806,6 +806,10 @@ class TestInternalAuthRouting:
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
         calls = []
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: calls.append(url) or outcome_for(url))
+        self.canary_calls = []
+        # fetch_internal is only reached by the canary here (scrape_with_cookies is faked).
+        monkeypatch.setattr(sb, "fetch_internal",
+                            lambda url: self.canary_calls.append(url) or (canary, None))
         return sb.main(), calls
 
     def _ledger(self, tmp_path):
@@ -855,6 +859,84 @@ class TestInternalAuthRouting:
         assert rc == 0 and "1 scraped, 3 skipped_auth" in out
         entries = self._ledger(tmp_path).entries
         assert [entries[url_key(u)]["status"] for u in urls[1:]] == ["auth"] * 3
+
+    # ------------------------------------------------ safety-net canary (review §3)
+
+    def test_canary_reached_lets_the_strikes_through(self, sb, tmp_path, monkeypatch, capsys):
+        """Only restricted pages left and the session works: per-URL refusals strike."""
+        from src.capture.unreachable import url_key
+        urls = [f"https://w.amazon.com/bin/view/P{i}" for i in range(4)]
+        rc, _ = self._main(sb, tmp_path, monkeypatch, urls, lambda u: "auth", canary="ok")
+        out = capsys.readouterr().out
+        assert rc == 0 and self.canary_calls == [sb.CANARY_URL] == ["https://w.amazon.com/bin/view/Main/"]
+        assert "canary page was reached" in out and "4 skipped_auth" in out and "deferred_auth=0" in out
+        entries = self._ledger(tmp_path).entries
+        assert [entries[url_key(u)]["status"] for u in urls] == ["auth"] * 4
+        state = tmp_path / "jobs" / "bookmarks-midway.backlog.json"
+        assert json.loads(state.read_text())["consecutive_deferred_runs"] == 0
+
+    def test_canary_hitting_sign_in_defers_with_its_own_cause(self, sb, tmp_path, monkeypatch, capsys):
+        urls = [f"https://w.amazon.com/bin/view/P{i}" for i in range(4)]
+        rc, _ = self._main(sb, tmp_path, monkeypatch, urls, lambda u: "auth", canary="auth")
+        out = capsys.readouterr().out
+        assert rc == 0 and self.canary_calls == [sb.CANARY_URL]
+        assert sb.MIDWAY_CAUSE_CANARY == "Midway session rejected at run time (canary page hit sign-in) — run mwinit"
+        assert sb.MIDWAY_CAUSE_CANARY in out and "deferred_auth=4" in out
+        assert "Midway cookie missing/expired" not in out                 # a separate WARNING text
+        assert self._ledger(tmp_path).entries == {}
+        state = json.loads((tmp_path / "jobs" / "bookmarks-midway.backlog.json").read_text())
+        assert state["consecutive_deferred_runs"] == 1 and state["cause"] == sb.MIDWAY_CAUSE_CANARY
+        for _ in range(2):
+            self._main(sb, tmp_path, monkeypatch, urls, lambda u: "auth", canary="auth")
+        out = capsys.readouterr().out
+        assert f"bookmarks-midway backlog persists" in out and sb.MIDWAY_CAUSE_CANARY in out.split("backlog persists")[-1]
+
+    def test_cookie_expiry_keeps_its_own_cause(self, sb, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(sb, "midway_session_valid", lambda path=None: False)
+        rc, calls = self._main(sb, tmp_path, monkeypatch, ["https://w.amazon.com/bin/view/P"], lambda u: "ok")
+        out = capsys.readouterr().out
+        assert rc == 0 and calls == [] and self.canary_calls == []
+        assert "WARNING: Midway cookie missing/expired — run mwinit" in out and "canary" not in out
+        state = json.loads((tmp_path / "jobs" / "bookmarks-midway.backlog.json").read_text())
+        assert state["cause"] == sb.MIDWAY_CAUSE_COOKIE
+
+    def test_canary_uses_fetch_internal_and_an_exception_is_inconclusive(self, sb):
+        seen = []
+        assert sb.canary_outcome(lambda url: seen.append(url) or ("ok", None)) == "ok" and seen == [sb.CANARY_URL]
+
+        def boom(url):
+            raise RuntimeError("no network")
+        assert sb.canary_outcome(boom) == "failed"
+
+    # ------------------------------------------------ safety-net boundary (review §6)
+
+    def test_two_auth_with_no_page_reached_still_strike(self, sb, tmp_path, monkeypatch, capsys):
+        from src.capture.unreachable import url_key
+        urls = [f"https://w.amazon.com/bin/view/P{i}" for i in range(2)]
+        rc, _ = self._main(sb, tmp_path, monkeypatch, urls, lambda u: "auth")
+        out = capsys.readouterr().out
+        assert rc == 0 and self.canary_calls == [] and "2 skipped_auth" in out and "deferred_auth=0" in out
+        entries = self._ledger(tmp_path).entries
+        assert [entries[url_key(u)]["status"] for u in urls] == ["auth"] * 2
+
+    def test_safety_net_with_failures_present_defers_auth_and_keeps_failures(self, sb, tmp_path, monkeypatch, capsys):
+        from src.capture.unreachable import url_key
+        urls = [f"https://w.amazon.com/bin/view/P{i}" for i in range(4)]
+        rc, _ = self._main(sb, tmp_path, monkeypatch, urls, lambda u: "failed" if u.endswith("P3") else "auth")
+        out = capsys.readouterr().out
+        assert rc == 0 and self.canary_calls == [sb.CANARY_URL]
+        assert "0 skipped_auth, 1 failed" in out and "deferred_auth=3" in out
+        assert {k: e["status"] for k, e in self._ledger(tmp_path).entries.items()} == {url_key(urls[3]): "error"}
+
+    def test_eligible_excludes_skipped_unsupported(self, sb, tmp_path, monkeypatch, capsys):
+        """Only pre-routed non-Midway bookmarks pending: nothing eligible, so nothing
+        'eligible but not attempted' (exit 0)."""
+        urls = ["https://amazon.sharepoint.com/sites/A", "https://atoz.amazon.work/home",
+                "https://docs.hub.amazon.dev/kiro/"]
+        rc, calls = self._main(sb, tmp_path, monkeypatch, urls, lambda u: "ok")
+        out = capsys.readouterr().out
+        assert rc == 0 and calls == []
+        assert "eligible=0 attempted=0" in out and "-> exit 0" in out
 
 class TestAuthJudging:
     """Review 2026-10-13 §1: path false positives, chains on unknown hosts, a 200 after a Midway hop."""

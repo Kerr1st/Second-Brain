@@ -636,6 +636,22 @@ def scrape_with_crawlee(urls, timeout=None, batch_size=None, batch_timeout=None,
     return stats
 
 
+#: Known-good internal page fetched once (through ``fetch_internal``) when the
+#: safety net would fire, to tell a rejected session from restricted pages.
+CANARY_URL = "https://w.amazon.com/bin/view/Main/"
+MIDWAY_CAUSE_COOKIE = "the Midway cookie is missing/expired at run time — run mwinit"
+MIDWAY_CAUSE_CANARY = "Midway session rejected at run time (canary page hit sign-in) — run mwinit"
+
+
+def canary_outcome(fetch=None):
+    """``fetch_internal(CANARY_URL)``'s outcome ("ok", "auth", ...); writes nothing.
+    An exception is "failed" (inconclusive)."""
+    try:
+        return (fetch or fetch_internal)(CANARY_URL)[0]
+    except Exception as exc:  # noqa: BLE001 - the canary must never abort the run
+        return "timeout" if "Timeout" in type(exc).__name__ else "failed"
+
+
 def main():
     started = time.monotonic()
     with open(BOOKMARKS_PATH) as f:
@@ -674,10 +690,12 @@ def main():
     skipped_unsupported = sum(1 for _, u in internal if midway_unsupported(u))
     internal = [(n, u) for n, u in internal if not midway_unsupported(u)]
 
+    midway_cause = None
     if internal and not midway_session_valid():
         # Every internal fetch would be an auth strike for a session problem:
         # skip the path, no ledger strike, retried next run (still unindexed).
         deferred_auth = len(internal)
+        midway_cause = MIDWAY_CAUSE_COOKIE
         print(f"WARNING: Midway cookie missing/expired — run mwinit; {deferred_auth} internal URLs deferred")
         internal = []
 
@@ -702,13 +720,22 @@ def main():
                 fail += 1
                 outcomes[url] = "timeout" if outcome == "timeout" else "error"
         if skipped_auth >= SYSTEMIC_MIN_ATTEMPTS and not ok and not too_short:
-            # A valid session that reached no internal page at all is a session or
-            # routing problem, not that many broken bookmarks: defer, no strikes.
-            print(f"WARNING: Midway session valid but all {skipped_auth} Midway-path fetch(es) hit "
-                  f"sign-in and none reached a page — deferred_auth, no ledger strike")
-            for url in [u for u, c in outcomes.items() if c == "auth"]:
-                del outcomes[url]
-            deferred_auth, skipped_auth = skipped_auth, 0
+            # A valid session that reached no internal page at all is either a session
+            # problem (defer, no strikes) or only restricted pages are left (strike).
+            # One known-good page through the same path tells them apart.
+            canary = canary_outcome()
+            if canary == "ok":
+                print(f"WARNING: all {skipped_auth} Midway-path fetch(es) hit sign-in but the canary page "
+                      f"was reached — the session works; per-URL refusals, ledger strikes recorded")
+            else:
+                midway_cause = MIDWAY_CAUSE_CANARY if canary == "auth" else \
+                    f"Midway-path fetches hit sign-in and the canary page was inconclusive ({canary})"
+                print(f"WARNING: Midway session valid but all {skipped_auth} Midway-path fetch(es) hit "
+                      f"sign-in and none reached a page (canary: {canary}) — deferred_auth, no ledger strike; "
+                      f"{midway_cause}")
+                for url in [u for u, c in outcomes.items() if c == "auth"]:
+                    del outcomes[url]
+                deferred_auth, skipped_auth = skipped_auth, 0
 
     # Public links with Crawlee: bounded batches, total kept under the job deadline.
     budget = job_deadline_s() - (time.monotonic() - started) - DEADLINE_MARGIN_S
@@ -726,7 +753,7 @@ def main():
     print(f"Public: {public_stats}")
     record_unreachable(ledger, outcomes, len(unreachable), killed_deferred=killed_deferred)
     report_backlog(public_stats.get("deferred", 0))
-    report_backlog(deferred_auth, job=MIDWAY_BACKLOG_JOB)
+    report_backlog(deferred_auth, job=MIDWAY_BACKLOG_JOB, cause=midway_cause)
     internal_counts = {"ok": ok, "auth": skipped_auth, "too_short": too_short, "failed": fail,
                        "deferred_auth": deferred_auth, "unsupported_auth": unsupported_auth}
     internal_auth = {u for u, c in outcomes.items() if c == "auth" and needs_cookies(u)}
@@ -856,24 +883,25 @@ def record_unreachable(ledger, outcomes, skipped_unreachable, killed_deferred=()
 MIDWAY_BACKLOG_JOB = "bookmarks-midway"
 
 
-def report_backlog(deferred, job="bookmarks"):
+def report_backlog(deferred, job="bookmarks", cause=None):
     """Track consecutive runs that deferred URLs; warn once the backlog persists.
 
     A single deferral is normal (the rest is retried next run) and never fails
     the job; the liveness sweep turns a persistent streak into an advisory.
     ``job="bookmarks"`` is the public Crawlee-budget backlog; ``MIDWAY_BACKLOG_JOB``
-    is the internal path deferred on an expired Midway cookie."""
+    is the internal path deferred on a Midway problem, ``cause`` saying which
+    (stored in the sidecar for the liveness finding)."""
     try:
         from src.operations import backlog
-        state = backlog.record_run(job, deferred)
+        state = backlog.record_run(job, deferred, cause=cause)
         limit = backlog.threshold(job)
     except Exception as exc:  # noqa: BLE001 - backlog bookkeeping must not change the job's outcome
         print(f"WARNING: could not record the {job} backlog state: {type(exc).__name__}")
         return None
     streak = state["consecutive_deferred_runs"]
     if streak >= limit:
-        cause = ("the Midway cookie is missing/expired at run time — run mwinit"
-                 if job == MIDWAY_BACKLOG_JOB else "the Crawlee budget is not draining the queue")
+        defaults = {MIDWAY_BACKLOG_JOB: MIDWAY_CAUSE_COOKIE}
+        cause = cause or defaults.get(job, "the Crawlee budget is not draining the queue")
         print(f"WARNING: {job} backlog persists — {deferred} URL(s) deferred, {streak} consecutive "
               f"run(s) with deferrals (threshold {limit}); {cause}")
     return state
