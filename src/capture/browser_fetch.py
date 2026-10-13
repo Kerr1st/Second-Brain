@@ -12,8 +12,10 @@ maps those onto its existing outcome / ledger / backlog machinery.
   into ``<cwd>/.playwright-mcp/``, so it runs in a private ``mkdtemp`` that is
   removed afterwards.
 * Per page: ``browser_navigate``, then ``browser_evaluate`` polled until the
-  ``main``/``article``/``body`` innerText is > 200 chars, unchanged for 2 s and
-  free of "Loading" (30 s cap). One retry on "Execution context was destroyed"
+  ``main``/``article``/``body`` innerText is > 200 chars, unchanged for 2 s (5 s
+  after a redirect: the navigate reply's URL differs from the requested one, a
+  destroyed context or a route change) and free of "Loading" (30 s cap). One
+  retry on "Execution context was destroyed"
   (Sage redirects client-side after load). Short innerText on a page with
   iframes (awsinsights: cross-origin QuickSight frames) falls back to the
   ``browser_snapshot`` text.
@@ -204,11 +206,17 @@ def snapshot_text(markdown: str) -> str:
     return "\n".join(out)
 
 
-async def _hydrate(client, clock, sleep) -> dict:
-    """Poll ``EVAL_FN`` until the text is settled (see module docstring); the last state at the cap."""
+async def _hydrate(client, clock, sleep, nav_url: str = "", requested: str = "") -> dict:
+    """Poll ``EVAL_FN`` until the text is settled (see module docstring); the last state at the cap.
+
+    ``nav_url`` is the navigate reply's final URL: when it differs from ``requested``
+    the page already redirected (server 3xx, or a client-side redirect that finished
+    before the first evaluate), so the longer post-redirect window applies."""
     deadline = clock() + HYDRATE_CAP_S
     retried = redirected = False
     last, last_url, since, state = None, None, clock(), {}
+    if nav_url and requested and nav_url != requested:
+        last_url, redirected = nav_url, True
     while True:
         try:
             state = evaluate_result(await client.call_text("browser_evaluate", {"function": EVAL_FN}))
@@ -244,7 +252,7 @@ async def _fetch_one(client, url, clock, sleep, target=None) -> PageResult:
     final_url, title = page_state(nav)
     if is_auth_host(final_url):
         return PageResult(url, "auth", final_url=final_url, title=title, requested_url=target)
-    state = await _hydrate(client, clock, sleep)
+    state = await _hydrate(client, clock, sleep, nav_url=final_url, requested=target)
     final_url = str(state.get("u") or final_url)
     title = str(state.get("t") or title)
     status = _status(state)

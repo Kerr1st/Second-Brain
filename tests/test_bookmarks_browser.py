@@ -188,6 +188,27 @@ class TestContextDestroyed:
         res = run([A], FakeBrowser({A: page(A, [LONG])}), clock=clock)[A]
         assert res.outcome == "ok" and res.seconds < bf.STABLE_AFTER_REDIRECT_S
 
+    def test_redirect_finished_before_the_first_evaluate_uses_the_long_window(self):
+        # The navigate reply already shows the new URL (3xx, or a client-side redirect
+        # that finished before the first evaluate): no URL change between evaluates.
+        shell = "Sage navigation shell " * 13
+        moved = "https://sage.amazon.dev/new/tags/AmazonQ?autoRedirectedFromLegacyUI=1"
+        res = run([C], FakeBrowser({C: page(C, [shell] * 7 + [LONG], nav_url=moved, final=moved)}))[C]
+        assert res.outcome == "ok" and res.text == LONG and res.final_url == moved
+
+    @pytest.mark.parametrize("how", ["nav_url", "destroyed"])
+    def test_redirect_then_text_that_never_settles_still_returns_at_the_cap(self, how):
+        clock = FakeClock()
+        moved = "https://sage.amazon.dev/new/tags/AmazonQ"
+        states = [f"Counter {i} " + LONG for i in range(500)]     # a live counter: never stable
+        if how == "nav_url":
+            p = page(C, states, nav_url=moved, final=moved)
+        else:
+            p = page(C, [self.DESTROYED] + states)
+        res = run([C], FakeBrowser({C: p}), clock=clock)[C]
+        assert res.outcome == "ok"
+        assert bf.HYDRATE_CAP_S <= res.seconds <= bf.HYDRATE_CAP_S + bf.POLL_S
+
 
 class TestIframeFallback:
     def test_short_inner_text_with_iframes_uses_the_snapshot_text(self):
