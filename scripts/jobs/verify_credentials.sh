@@ -132,10 +132,14 @@ sanitize() {
       $last = $l;
     }
     $last = "(no output)" if $last eq "";
-    my $run = q{A-Za-z0-9+/_=-};
+    my $run = q{A-Za-z0-9+/_=%.!*-};              # incl. URL-encoding and token punctuation
     $last =~ s/\b(bearer|basic)\s+\S+/$1 [REDACTED]/gi;
     $last =~ s/\b((?:set-)?cookie\s*[:=]\s*).*/$1\[REDACTED]/gi;
-    $last =~ s/\b((?:[a-z0-9]+[_-])*(?:token|secret|password|passwd|pwd|apikey|api[_-]key|signature|sig|session|cookie|credentials?)s?"?\s*[:=]\s*"?)[^\s"&;,]+/$1\[REDACTED]/gi;
+    $last =~ s/\bxox[a-z]-\S+/[REDACTED]/gi;       # Slack tokens/cookies (xoxb/xoxp/xoxc/xoxd, URL-encoded too)
+    $last =~ s/eyJ[\w-]+\.[\w-]+\.[\w-]*/[REDACTED]/g;   # JWTs, whatever their segment lengths
+    # key=value, key: "value" and Python-repr key: 'value' (\x27 is a single quote:
+    # this program sits inside a single-quoted shell string).
+    $last =~ s/\b((?:[a-z0-9]+[_-])*(?:token|secret|password|passwd|pwd|apikey|api[_-]key|signature|sig|session|cookie|credentials?)s?["\x27]?\s*[:=]\s*["\x27]?)[^\s"&;,]+/$1\[REDACTED]/gi;
     $last =~ s/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/[REDACTED]/g;
     $last =~ s{(?<![$run])(?=[$run]*[0-9])[$run]{21,}}{[REDACTED]}g;   # base64/hex runs
     $last = substr($last, 0, 160);

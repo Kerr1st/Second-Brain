@@ -388,6 +388,33 @@ def test_an_email_address_and_ordinary_words_survive_redaction(tmp_path: Path):
     assert _reason_after(result.stdout, "❌ aws:second-brain-jobs") == f"auth: {output}"
 
 
+# Holes reproduced in the 2026-10-13 review against the real sanitize: each of these
+# passed through unredacted before the xox/JWT rules, the ' quote and %.!* in $run.
+@pytest.mark.parametrize(
+    ("secret", "leaks"),
+    [
+        ("d=xoxd-abc%2Fdef%2Bghi%3D%3Djkl", ("xoxd", "abc%2F", "def%2B", "jkl")),
+        ("{'refresh_token': 'M.C107_BAY.0.U.-Cnabc!def*ghi'}", ("M.C107", "BAY", "Cnabc", "def*ghi")),
+        ("eyJhbGciOiJub25lIn0.eyJzdWIiOjF9.", ("eyJ", "hbGciOiJub25lIn0", "zdWIiOjF9")),
+        ("xoxc-123-456-abc", ("xoxc", "123-456", "abc")),
+    ],
+    ids=["url-encoded-xoxd-cookie", "python-repr-refresh-token", "short-jwt", "short-xoxc"],
+)
+def test_review_redaction_holes_are_closed_and_an_email_still_survives(tmp_path: Path, secret, leaks):
+    output = f"RuntimeError: rejected {secret} for someone.else@example.com"
+    result = _run_credentials(
+        tmp_path, FAKE_AWS_FAIL_PROFILES="second-brain-jobs",
+        FAKE_AWS_RC="1", FAKE_AWS_OUTPUT=output,
+    )
+
+    reason = _reason_after(result.stdout, "❌ aws:second-brain-jobs")
+    assert "[REDACTED]" in reason, reason
+    for fragment in leaks:
+        assert fragment not in result.stdout, (fragment, reason)
+    assert reason.split(": ", 1)[1].startswith("RuntimeError: rejected "), reason
+    assert reason.endswith(" for someone.else@example.com"), reason
+
+
 def test_an_advisory_failure_also_explains_itself(tmp_path: Path):
     result = _run_credentials(
         tmp_path, FAKE_AWS_FAIL_PROFILES="default", FAKE_AWS_RC="255",
