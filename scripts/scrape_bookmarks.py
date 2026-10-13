@@ -9,7 +9,7 @@ Internal Amazon links use Chrome cookies for authentication.
 import json, os, subprocess, re, sys, tempfile, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.capture.filters import SKIP_PATTERNS, needs_cookies, load_indexed_urls as _load_indexed_urls
+from src.capture.filters import SKIP_PATTERNS, is_private_host, needs_cookies, load_indexed_urls as _load_indexed_urls
 from src.capture.render import html_to_text, render_document
 from urllib.parse import urlparse
 from datetime import datetime
@@ -353,7 +353,7 @@ def main():
         if isinstance(data["roots"][key], dict):
             all_urls.extend(extract_urls(data["roots"][key]))
 
-    scrapable = [(n, u) for n, u in all_urls if not SKIP_PATTERNS.search(u)]
+    scrapable = [(n, u) for n, u in all_urls if not SKIP_PATTERNS.search(u) and not is_private_host(u)]
     indexed = load_indexed_urls()
     new = [(n, u) for n, u in scrapable if u not in indexed]
 

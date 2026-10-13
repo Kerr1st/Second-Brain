@@ -31,6 +31,10 @@ AUTH_REQUIRED = re.compile(
     r"^https?://([^/?#]*\.)?("
     r"sharepoint\.com|"                      # Microsoft 365 SSO
     r"aws\.dev|"                             # internal AWS apps (awsinsights, awsentral, ...)
+    r"amazon\.dev|"                          # internal apps (hyperbadge, sage, my.day1, agentspaces, ...)
+    r"a2z\.com|"                             # internal (gather, ...)
+    r"([a-z0-9-]+-)?corp\.amazon\.com|"      # corp.amazon.com, collaborate-corp.amazon.com
+    r"coupahost\.com|"                       # Coupa procurement (SSO)
     r"studio\.[a-z0-9-]+\.prod\.workshops\.aws"  # Workshop Studio (authoring) - catalog is public
     r")(:\d+)?([/?#]|$)", re.I)
 
@@ -38,6 +42,27 @@ AUTH_REQUIRED = re.compile(
 def needs_cookies(url: str) -> bool:
     """Internal or SSO-only: fetched with Chrome cookies, never handed to Crawlee."""
     return bool(INTERNAL_DOMAINS.search(url) or AUTH_REQUIRED.search(url))
+
+
+def is_private_host(url: str) -> bool:
+    """Bookmarks only: LAN / loopback hosts (192.168.x, 10.x, 172.16-31.x, 127.x,
+    link-local, localhost, *.local) are skipped entirely — nothing to index, and
+    an unreachable LAN IP burns a 30 s navigation timeout per attempt. Kept out
+    of the shared SKIP_PATTERNS, which browser history also uses (it has its own
+    private-host rule)."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if host == "localhost" or host.endswith((".localhost", ".local")):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
 
 
 

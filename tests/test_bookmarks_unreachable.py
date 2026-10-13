@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.capture import unreachable
-from src.capture.filters import AUTH_REQUIRED, needs_cookies
+from src.capture.filters import AUTH_REQUIRED, is_private_host, needs_cookies
 from src.capture.unreachable import COOL_OFF, THRESHOLD, Ledger, url_key
 
 T0 = datetime(2026, 10, 10, 18, 0, tzinfo=timezone.utc)
@@ -223,12 +223,42 @@ class TestClassification:
         "https://help.awsentral.aws.dev/",
         "https://studio.us-east-1.prod.workshops.aws/workshops/abc",
         "https://w.amazon.com/bin/view/X",            # existing internal list still applies
+        "https://hyperbadge.amazon.dev/",
+        "https://my.day1.amazon.dev/x",
+        "https://gather.a2z.com/events",
+        "https://collaborate-corp.amazon.com/x",
+        "https://corp.amazon.com/",
+        "https://amazon.coupahost.com/requisition",
     ])
     def test_auth_only_sites_take_the_cookie_path(self, url):
         assert needs_cookies(url)
 
     @pytest.mark.parametrize("url", [
+        "http://192.168.1.133/", "http://192.168.1.225:18789/ui", "http://10.0.0.5/x",
+        "http://172.16.0.1/", "http://172.31.255.1/", "http://localhost:3000/", "http://127.0.0.1/",
+        "http://printer.local/", "http://[::1]:8080/",
+    ])
+    def test_private_lan_hosts_are_skipped(self, url):
+        assert is_private_host(url)
+
+    @pytest.mark.parametrize("url", [
+        "http://172.32.0.1/", "https://8.8.8.8/", "https://example.org/10.0.0.1",
+        "https://local.example.com/", "https://www.ebay.com/itm/1", "not a url",
+    ])
+    def test_public_hosts_are_not_private(self, url):
+        assert not is_private_host(url)
+
+    def test_shared_lists_used_by_browser_history_are_unchanged(self):
+        """browser.py imports SKIP_PATTERNS and INTERNAL_DOMAINS; the bookmark routing
+        changes live in AUTH_REQUIRED / is_private_host, which only bookmarks use."""
+        from src.capture import filters
+        assert not filters.SKIP_PATTERNS.search("http://192.168.1.249/")
+        assert not filters.INTERNAL_DOMAINS.search("https://hyperbadge.amazon.dev/")
+
+    @pytest.mark.parametrize("url", [
         "https://catalog.us-east-1.prod.workshops.aws/workshops/abc",   # public catalog
+        "https://notcorp.amazon.com.example.org/",
+        "https://evilamazon.dev/",
         "https://catalog.workshops.aws/x",
         "https://d3abc.cloudfront.net/page",                             # generic CDN: ledger decides
         "https://prod.d1234abcd.amplifyapp.com/",                         # generic host: ledger decides
