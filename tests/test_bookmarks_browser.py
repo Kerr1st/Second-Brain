@@ -563,10 +563,19 @@ class TestInvalidUrl:
     @pytest.mark.parametrize("url", [EVIL_BACKSLASH, "https://user@docs.hub.amazon.dev/",
                                      "https://docs.hub.amazon.dev%2eevil.io/", "https://docs.hub.amazon.dev./",
                                      "https://0x7f000001/", "https://d\u00f6cs.amazon.dev/", "javascript:alert(1)",
-                                     "https://docs.hub.amazon.dev/\tx", "https://docs.hub.amazon.dev:99999/"])
+                                     "https://docs.hub.amazon.dev/\tx", "https://docs.hub.amazon.dev:99999/",
+                                     "https://docs.hub.amazon.dev/a\\b?q=1", "https://docs.hub.amazon.dev\\x#y"])
     def test_canonical_url_rejects_parser_differentials(self, url):
         from src.capture.filters import canonical_url
         assert canonical_url(url) is None
+
+    @pytest.mark.parametrize("url", ["https://logs.aws.dev/insights?query=filter%20msg%20like%20/a\\d+/",
+                                     "https://splunk.corp.amazon.com/search?q=index=x%20rex%20\\s*",
+                                     "https://docs.hub.amazon.dev/p#re=a\\.b",
+                                     "https://docs.hub.amazon.dev/p?x=1#a\\b"])
+    def test_backslash_in_the_query_or_fragment_is_kept(self, url):
+        from src.capture.filters import canonical_url
+        assert canonical_url(url) == url
 
     def test_canonical_url_keeps_ordinary_urls(self):
         from src.capture.filters import canonical_url

@@ -60,9 +60,12 @@ def needs_cookies(url: str) -> bool:
 
 #: Characters a WHATWG parser (Chromium) treats differently from urllib: ``\`` is a
 #: path separator there (``https://evil.io\@docs.hub.amazon.dev/`` goes to evil.io
-#: in Chromium, to docs.hub.amazon.dev in Python), and tab/LF/CR/space/C0 are
-#: stripped or rejected.
-_URL_AMBIGUOUS_RE = re.compile(r"[\\\x00-\x20\x7f]")
+#: in Chromium, to docs.hub.amazon.dev in Python) — but only in the scheme,
+#: authority and path: in the query or fragment it is plain data in both (a
+#: CloudWatch / Splunk regex), so it is checked only before the first ``?``/``#``.
+#: Tab/LF/CR/space/C0 are stripped or rejected anywhere.
+_URL_CONTROL_RE = re.compile(r"[\x00-\x20\x7f]")
+_URL_HEAD_RE = re.compile(r"^[^?#]*")
 #: ``host[:port]`` that both parsers read the same way: ASCII LDH labels, no
 #: userinfo, no percent-escapes, no IDNA, no trailing dot.
 _NETLOC_RE = re.compile(
@@ -75,12 +78,13 @@ _NUMERIC_LABEL_RE = re.compile(r"^(\d+|0x[0-9a-f]*)$", re.I)
 def canonical_url(url: str) -> str | None:
     """``url`` re-serialized by urllib from its parsed parts, or None when Python
     and a WHATWG parser (the browser) could disagree on where it goes: a
-    backslash, whitespace/control characters, userinfo (``@`` in the netloc), a
+    backslash before the query/fragment, whitespace/control characters, userinfo (``@`` in the netloc), a
     non-http(s) scheme, or a host that is not plain ASCII LDH (percent-escapes,
     IDNA, a numeric last label, a trailing dot). Callers fetch only the returned
     string; None is ``skipped_invalid_url`` (never fetched, no ledger strike)."""
     from urllib.parse import urlsplit, urlunsplit
-    if not isinstance(url, str) or not url or _URL_AMBIGUOUS_RE.search(url):
+    if not isinstance(url, str) or not url or _URL_CONTROL_RE.search(url) \
+            or "\\" in _URL_HEAD_RE.match(url).group(0):
         return None
     try:
         parts = urlsplit(url)
