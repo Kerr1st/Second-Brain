@@ -339,6 +339,23 @@ def test_a_failed_mcp_probe_logs_its_class_from_the_capture_exit_codes(
         assert _reason_after(result.stdout, f"❌ {label}") == f"{cls}: {output}"
 
 
+@pytest.mark.parametrize(("rc", "not_cls"), [(3, "auth"), (4, "transport")])
+def test_aws_exit_codes_3_and_4_are_not_read_as_the_mcp_probes_auth_or_transport(
+    tmp_path: Path, rc, not_cls,
+):
+    """3/4 are EXIT_AUTH/EXIT_TRANSPORT only for the MCP probes; for aws they mean
+    nothing special, so an uninformative message stays 'other'."""
+    result = _run_credentials(
+        tmp_path, FAKE_AWS_FAIL_PROFILES="second-brain-jobs",
+        FAKE_AWS_RC=str(rc), FAKE_AWS_OUTPUT="something unexpected happened",
+    )
+
+    assert f"❌ aws:second-brain-jobs EXPIRED/BROKEN (exit {rc})" in result.stdout
+    reason = _reason_after(result.stdout, "❌ aws:second-brain-jobs")
+    assert not reason.startswith(f"{not_cls}: "), reason
+    assert reason == "other: something unexpected happened"
+
+
 def test_the_reason_is_the_last_meaningful_line_capped_at_160_characters(tmp_path: Path):
     output = "\n".join([
         "Traceback (most recent call last):",

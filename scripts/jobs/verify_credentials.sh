@@ -90,15 +90,22 @@ else
   log "⚠ mktemp failed — probe output will not be captured (reasons unavailable)"
 fi
 
-# classify <rc> <output-file> → auth | timeout | transport | tool-missing | other
+# classify <rc> <output-file> <label> → auth | timeout | transport | tool-missing | other
 # Exit code first; keywords only for a generic failure. Auth wins over transport,
 # as in src.capture.mcp_client.classify_error (a stale token often *looks* hung).
 classify() {
   case "$1" in
     124|137) echo timeout; return ;;   # coreutils timeout: TERM sent / KILL sent
     127) echo tool-missing; return ;;
-    3) echo auth; return ;;            # EXIT_AUTH from the MCP probes
-    4) echo transport; return ;;       # EXIT_TRANSPORT from the MCP probes
+  esac
+  # Exit codes 3/4 are the capture jobs' EXIT_AUTH/EXIT_TRANSPORT, so they mean that
+  # only for the MCP probes; aws/openssl exiting 3 or 4 falls through to keywords.
+  case "${3:-}" in
+    graph:*|slack:*)
+      case "$1" in
+        3) echo auth; return ;;
+        4) echo transport; return ;;
+      esac ;;
   esac
   local f="$2"
   [ -n "$f" ] && [ -s "$f" ] || { echo other; return; }
@@ -147,8 +154,8 @@ sanitize() {
   ' <"$f" 2>/dev/null || echo "(message unavailable)"
 }
 
-reason() {  # rc
-  log "   reason: $(classify "$1" "$PROBE_OUT"): $(sanitize "$PROBE_OUT")"
+reason() {  # rc label
+  log "   reason: $(classify "$1" "$PROBE_OUT" "$2"): $(sanitize "$PROBE_OUT")"
 }
 
 # check <required|advisory> <label> <command...>
@@ -173,15 +180,15 @@ check() {
     log "✅ $label"
   elif [ "$rc" -eq 127 ]; then
     log "⚠ $label tool not found (exit 127) — check NOT RUN (not an expired credential)"
-    reason "$rc"
+    reason "$rc" "$label"
     ADVISORY="$ADVISORY ${label}[tool-missing]"
   elif [ "$sev" = required ]; then
     log "❌ $label EXPIRED/BROKEN (exit $rc)"
-    reason "$rc"
+    reason "$rc" "$label"
     REQUIRED_FAILED="$REQUIRED_FAILED $label"
   else
     log "⚠ $label expired (exit $rc) — advisory: interactive session, no job uses it"
-    reason "$rc"
+    reason "$rc" "$label"
     ADVISORY="$ADVISORY ${label}[expired]"
   fi
   [ -n "$PROBE_OUT" ] && : >"$PROBE_OUT"   # do not keep probe output around between checks
