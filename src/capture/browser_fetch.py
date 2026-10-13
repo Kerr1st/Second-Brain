@@ -67,6 +67,9 @@ LAUNCH_TIMEOUT_S = 60.0     # server start + initialize
 CLOSE_TIMEOUT_S = 15.0
 HYDRATE_CAP_S = 30.0
 STABLE_S = 2.0
+#: After a client-side redirect (context destroyed or a route change) the text must be
+#: unchanged this long: Sage's new UI renders a ~300-char shell for ~2 s first (2026-10-13).
+STABLE_AFTER_REDIRECT_S = 5.0
 POLL_S = 0.5
 MIN_CHARS = 200
 #: Text containing "Loading" counts as still hydrating only when it is this short
@@ -204,23 +207,31 @@ def snapshot_text(markdown: str) -> str:
 async def _hydrate(client, clock, sleep) -> dict:
     """Poll ``EVAL_FN`` until the text is settled (see module docstring); the last state at the cap."""
     deadline = clock() + HYDRATE_CAP_S
-    retried = False
-    last, since, state = None, clock(), {}
+    retried = redirected = False
+    last, last_url, since, state = None, None, clock(), {}
     while True:
         try:
             state = evaluate_result(await client.call_text("browser_evaluate", {"function": EVAL_FN}))
         except McpToolError as e:
             if CONTEXT_DESTROYED in str(e).lower() and not retried:
-                retried = True                          # client-side redirect: evaluate the new page
+                retried = redirected = True             # client-side redirect: evaluate the new page
+                last, since = None, clock()             # the old page's stability does not count
                 await sleep(POLL_S)
                 continue
             raise
-        text, now = str(state.get("x") or ""), clock()
-        if is_auth_host(str(state.get("u") or "")) or (_status(state) or 0) >= 400:
+        text, now, url = str(state.get("x") or ""), clock(), str(state.get("u") or "")
+        if is_auth_host(url) or (_status(state) or 0) >= 400:
             return state                                # sign-in / error page: nothing to wait for
+        if last_url is not None and url != last_url:
+            redirected = True                           # SPA route change (pushState): restart the window
+            last = None
+        last_url = url
+        # A redirecting SPA (Sage's legacy -> new UI) shows a short shell for ~2 s before
+        # the content renders; after a redirect the text must hold still for longer.
+        stable_for = STABLE_AFTER_REDIRECT_S if redirected else STABLE_S
         if text != last:
             last, since = text, now
-        elif now - since >= STABLE_S and not still_loading(text) and (len(text) > MIN_CHARS or state.get("f")):
+        elif now - since >= stable_for and not still_loading(text) and (len(text) > MIN_CHARS or state.get("f")):
             return state
         if now >= deadline:
             return state

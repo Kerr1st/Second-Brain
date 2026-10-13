@@ -159,6 +159,35 @@ class TestContextDestroyed:
         res = run([C], FakeBrowser({C: page(C, [self.DESTROYED, self.DESTROYED, LONG])}))[C]
         assert res.outcome == "error" and res.detail == "tool"
 
+    def test_short_shell_after_a_redirect_is_not_taken_as_the_page(self):
+        # Live Sage 2026-10-13: after the redirect a ~289-char shell held still for ~2 s,
+        # then the 2035-char page rendered. A 2 s window stored the shell.
+        shell = "Sage navigation shell " * 13                     # 286 chars, over MIN_CHARS
+        res = run([C], FakeBrowser({C: page(C, [self.DESTROYED] + [shell] * 7 + [LONG])}))[C]
+        assert res.outcome == "ok" and res.text == LONG
+
+    def test_route_change_restarts_the_stability_window(self):
+        shell = "Sage navigation shell " * 13
+        b = FakeBrowser({C: page(C, [shell] * 7 + [LONG])})
+        urls = iter([C] * 2 + [C + "&t=7"] * 100)                # pushState after the 2nd poll
+
+        real = b.call_text
+
+        async def call_text(tool, args):
+            reply = await real(tool, args)
+            if tool == "browser_evaluate":
+                state = bf.evaluate_result(reply)
+                return eval_md(next(urls), state["x"])
+            return reply
+        b.call_text = call_text
+        res = run([C], b)[C]
+        assert res.outcome == "ok" and res.text == LONG
+
+    def test_no_redirect_keeps_the_short_window(self):
+        clock = FakeClock()
+        res = run([A], FakeBrowser({A: page(A, [LONG])}), clock=clock)[A]
+        assert res.outcome == "ok" and res.seconds < bf.STABLE_AFTER_REDIRECT_S
+
 
 class TestIframeFallback:
     def test_short_inner_text_with_iframes_uses_the_snapshot_text(self):
