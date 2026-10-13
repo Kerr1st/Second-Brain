@@ -27,8 +27,9 @@ def nav_md(url, title="Page"):
             f"- Page URL: {url}\n- Page Title: {title}\n### Snapshot\n- [Snapshot](.playwright-mcp/page.yml)")
 
 
-def eval_md(u, x, t="Page", f=0):
-    return ("### Result\n" + json.dumps(json.dumps({"u": u, "t": t, "x": x, "f": f}))
+def eval_md(u, x, t="Page", f=0, s=None):
+    state = {"u": u, "t": t, "x": x, "f": f} if s is None else {"u": u, "t": t, "x": x, "f": f, "s": s}
+    return ("### Result\n" + json.dumps(json.dumps(state))
             + "\n### Ran Playwright code\n```js\nawait page.evaluate('...');\n```")
 
 
@@ -79,6 +80,7 @@ class FakeBrowser:
         self.calls.append(tool)
         if tool == "browser_navigate":
             url = args["url"]
+            self.navigated = [*getattr(self, "navigated", []), url]
             if url in self.hang:
                 await asyncio.sleep(30)                             # real time: only the page cap stops it
             if self.clock is not None:
@@ -96,7 +98,8 @@ class FakeBrowser:
             page["i"] += 1
             if isinstance(item, BaseException):
                 raise item
-            return eval_md(page.get("final", page.get("nav_url")), item, page.get("title", "Page"), page.get("f", 0))
+            return eval_md(page.get("final", page.get("nav_url")), item, page.get("title", "Page"), page.get("f", 0),
+                           page.get("status"))
         if tool == "browser_snapshot":
             return snap_md(self.current.get("snapshot", []))
         if tool == "browser_close":
@@ -244,7 +247,12 @@ class TestScratchCwd:
         assert pathlib.Path(b.cwd).name.startswith("sb-browser-")
         assert not os.path.exists(b.cwd)                                  # .playwright-mcp dumps gone with it
         assert not pathlib.Path(b.cwd).is_relative_to(pathlib.Path.cwd())
-        assert b.env == dict(os.environ)                                   # the job's own env
+        # A minimal env, not the job's (probe: HOME + PATH suffice for node/aim/curl).
+        assert set(b.env) <= {"HOME", "PATH", "USER", "LOGNAME", "TMPDIR", "LANG", "SHELL"}
+        assert b.env["HOME"] == os.environ["HOME"] and b.env["PATH"] == os.environ["PATH"]
+        assert b.env == bf.server_env(os.environ)
+        assert bf.server_env({"HOME": "/h", "PATH": "/p", "AWS_PROFILE": "x", "SECOND_BRAIN_DB": "y",
+                              "LANG": "C"}) == {"HOME": "/h", "PATH": "/p", "LANG": "C"}
 
     def test_default_client_is_the_midway_playwright_server(self, tmp_path):
         client = bf._default_client(str(tmp_path), {"PATH": "/usr/bin"})
@@ -288,12 +296,13 @@ class TestRouting:
             {"type": "url", "name": f"B{i}", "url": u} for i, u in enumerate(urls)]}}}))
         monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
         monkeypatch.setattr(sb, "MIDWAY_COOKIE_PATH", str(_cookie(tmp_path / "midway", expires)))
-        self.cookie_calls, self.browser_calls = [], []
+        self.cookie_calls, self.browser_calls, self.budgets = [], [], []
         monkeypatch.setattr(sb, "scrape_with_cookies",
                             lambda name, url: self.cookie_calls.append(url) or cookie_outcome(url))
 
         def fake_browser(urls, budget_s):
             self.browser_calls.append(list(urls))
+            self.budgets.append(budget_s)
             return {u: (browser_result or (lambda u: bf.PageResult(u, "ok", text=LONG, final_url=u,
                                                                    title="T", via="innerText")))(u) for u in urls}
         monkeypatch.setattr(sb, "browser_fetch_pages", fake_browser)
@@ -346,8 +355,10 @@ class TestRouting:
         entries = Ledger.load(tmp_path / "jobs" / "bookmarks.unreachable.json").entries
         assert entries[url_key(A)]["status"] == "auth" and entries[url_key(B)]["status"] == "timeout"
         assert url_key(C) not in entries                                    # deferred: no strike
-        backlog = json.loads((tmp_path / "jobs" / "bookmarks.backlog.json").read_text())
-        assert backlog["deferred"] == 1 and "browser" in backlog["cause"]
+        browser_backlog = json.loads((tmp_path / "jobs" / "bookmarks-browser.backlog.json").read_text())
+        assert browser_backlog["deferred"] == 1 and browser_backlog["cause"].startswith("1 max_pages: ")
+        public = json.loads((tmp_path / "jobs" / "bookmarks.backlog.json").read_text())
+        assert public["deferred"] == 0 and "cause" not in public        # browser deferrals stay out of it
 
     def test_sign_in_title_or_host_from_the_cookie_markers_is_auth(self, sb):
         ok = dict(outcome="ok", text=LONG, title="Docs")
@@ -419,3 +430,309 @@ class TestTlsClassification:
             raise ValueError("x")
         monkeypatch.setattr(sb, "fetch_internal", other)
         assert sb.scrape_with_cookies("P", A) == "failed"
+
+
+# --------------------------------------------------------------------------- #
+# 2026-10-13 review fixes                                                     #
+# --------------------------------------------------------------------------- #
+EVIL_BACKSLASH = "https://evil.io\\@docs.hub.amazon.dev/"
+
+
+class TestLaunchTeardown:
+    def test_hanging_launch_is_torn_down_with_a_bounded_aexit(self, monkeypatch):
+        monkeypatch.setattr(bf, "LAUNCH_TIMEOUT_S", 0.2)
+
+        class Hangs(FakeBrowser):
+            async def __aenter__(self):
+                self.entered = True
+                await asyncio.sleep(30)
+
+        b = Hangs({})
+        started = time.monotonic()
+        out = asyncio.run(bf.fetch_pages([A, B], client_factory=b.factory, log=lambda *a: None))
+        assert time.monotonic() - started < 5
+        assert b.entered and b.exited                                      # teardown was called
+        assert {r.outcome for r in out.values()} == {"deferred"} and out[A].detail == "launch"
+        assert not os.path.exists(b.cwd)
+
+    def test_failing_launch_is_torn_down(self):
+        class Broken(FakeBrowser):
+            async def __aenter__(self):
+                raise McpTransportError("Connection closed")
+        b = Broken({})
+        out = run([A], b)
+        assert b.exited and out[A].detail == "launch"
+
+
+class TestHttpStatus:
+    @pytest.mark.parametrize("status,outcome", [(404, "error"), (500, "error"), (403, "auth"), (401, "auth"),
+                                                (407, "auth"), (200, "ok")])
+    def test_status_classification(self, status, outcome):
+        res = run([B], FakeBrowser({B: page(B, [LONG], status=status)}))[B]
+        assert res.outcome == outcome and res.status == status
+        assert res.detail == (f"http_{status}" if status >= 400 else "")
+
+    def test_error_page_does_not_wait_for_hydration(self):
+        res = run([B], FakeBrowser({B: page(B, ["Not found"], status=404)}))[B]
+        assert res.outcome == "error" and res.seconds < 1
+
+    def test_unknown_status_is_judged_on_text(self):
+        res = run([B], FakeBrowser({B: page(B, [LONG], status=0)}))[B]
+        assert res.outcome == "ok" and res.status is None
+
+    def test_eval_fn_reads_the_navigation_status(self):
+        assert "performance.getEntriesByType('navigation')[0]?.responseStatus" in bf.EVAL_FN
+
+
+class TestLoading:
+    def test_long_text_that_mentions_loading_is_content(self):
+        text = LONG + " Loading docks and loading bays are covered in chapter 3."
+        clock = FakeClock()
+        res = run([A], FakeBrowser({A: page(A, [text])}), clock=clock)[A]
+        assert res.outcome == "ok" and res.seconds < 5                     # not the 30 s cap
+
+    @pytest.mark.parametrize("text,loading", [("Loading…", True), ("Loading " + LONG, True),
+                                              (LONG + " Loading", False), ("x" * 250 + " Loading", True)])
+    def test_still_loading(self, text, loading):
+        assert bf.still_loading(text) is loading
+
+
+class TestInvalidUrl:
+    def test_backslash_url_is_never_navigated(self):
+        b = FakeBrowser({B: page(B, [LONG])})
+        out = run([EVIL_BACKSLASH, B], b)
+        assert out[EVIL_BACKSLASH].outcome == "invalid_url" and out[B].outcome == "ok"
+        assert b.navigated == [B]
+
+    def test_navigates_the_reserialized_url(self):
+        mixed = "https://DOCS.hub.amazon.dev/getting-started/"
+        b = FakeBrowser({B: page(B, [LONG])})
+        out = run([mixed], b)
+        assert b.navigated == [B] and out[mixed].outcome == "ok" and out[mixed].requested_url == B
+
+    @pytest.mark.parametrize("url", [EVIL_BACKSLASH, "https://user@docs.hub.amazon.dev/",
+                                     "https://docs.hub.amazon.dev%2eevil.io/", "https://docs.hub.amazon.dev./",
+                                     "https://0x7f000001/", "https://d\u00f6cs.amazon.dev/", "javascript:alert(1)",
+                                     "https://docs.hub.amazon.dev/\tx", "https://docs.hub.amazon.dev:99999/"])
+    def test_canonical_url_rejects_parser_differentials(self, url):
+        from src.capture.filters import canonical_url
+        assert canonical_url(url) is None
+
+    def test_canonical_url_keeps_ordinary_urls(self):
+        from src.capture.filters import canonical_url
+        for url in (A, B, C, "https://sage.amazon.dev/tags/AmazonQ?t=7&autoRedirectedFromLegacyUI=1",
+                    "https://docs.hub.amazon.dev/kiro/user-guide/howto-mcp/#buildermcp-read-internal-websites"):
+            assert canonical_url(url) == url
+
+
+class TestReviewRouting:
+    """scrape_bookmarks.main with the cookie and browser paths faked (TestRouting._main)."""
+
+    def _main(self, sb, tmp_path, monkeypatch, urls, cookie_outcome, browser_result=None, budgets=None,
+              session_left=None):
+        t = TestRouting()
+        if session_left is not None:
+            values, last = iter(session_left), [None]
+
+            def left(path=None):
+                last[0] = next(values, last[0])
+                return last[0]
+            monkeypatch.setattr(sb, "midway_session_seconds_left", left)
+        rc = t._main(sb, tmp_path, monkeypatch, urls, cookie_outcome, browser_result=browser_result)
+        if budgets is not None:
+            budgets.extend(t.budgets)
+        return rc, t
+
+    @staticmethod
+    def _ledger(tmp_path):
+        return json.loads((tmp_path / "jobs" / "bookmarks.unreachable.json").read_text())["urls"]
+
+    def test_backslash_bookmark_is_skipped_invalid_url_without_fetch_or_strike(self, sb, tmp_path, monkeypatch,
+                                                                              capsys):
+        rc, t = self._main(sb, tmp_path, monkeypatch, [EVIL_BACKSLASH, W], lambda u: "ok")
+        out = capsys.readouterr().out
+        assert rc == 0 and t.cookie_calls == [W] and t.browser_calls == []
+        assert "skipped_invalid_url=1" in out and "eligible=1" in out
+        assert self._ledger(tmp_path) == {}
+
+    @pytest.mark.parametrize("url", ["https://aws.highspot.com/items/1", "https://w.amazon.com.evil.io/x",
+                                     "https://quip-amazon.com/abc", "https://amazon-mentoring.chronus.com/p"])
+    def test_fallback_only_for_amazon_owned_suffixes(self, sb, tmp_path, monkeypatch, capsys, url):
+        assert not sb.browser_fallback_allowed(url)
+        rc, t = self._main(sb, tmp_path, monkeypatch, [url], lambda u: "unsupported_auth")
+        out = capsys.readouterr().out
+        assert t.cookie_calls == [url] and t.browser_calls == []           # never reaches the Midway browser
+        assert "unsupported_auth=1" in out
+
+    def test_fallback_allowlist(self, sb):
+        for url in (UNSUP, TLS, "https://gather.a2z.com/x", "https://command-center.support.aws.a2z.com/",
+                    "https://inside.hr.amazon.dev/", "https://studio.us-east-1.prod.workshops.aws/w"):
+            assert sb.browser_fallback_allowed(url), url
+        for url in ("https://evilamazon.com/", "https://amazon.com.evil.io/", "https://amazon.awsapps.com/start",
+                    SHAREPOINT, "https://aws.highspot.com/"):
+            assert not sb.browser_fallback_allowed(url), url
+        from src.capture.filters import INTERNAL_DOMAINS
+        assert INTERNAL_DOMAINS.search("https://w.amazon.com.evil.io/")    # shared pattern left unchanged
+
+    @pytest.mark.parametrize("final,status", [("https://login.example-idp.com/authorize?x=1", None),
+                                              (None, 403)])
+    def test_fallback_that_ends_on_a_non_midway_login_is_unsupported_auth(self, sb, tmp_path, monkeypatch,
+                                                                          capsys, final, status):
+        def browser(u):
+            if status:
+                return bf.PageResult(u, "auth", final_url=u, status=status, detail=f"http_{status}")
+            return bf.PageResult(u, "ok", text=LONG, final_url=final, title="Welcome")
+        rc, t = self._main(sb, tmp_path, monkeypatch, [UNSUP], lambda u: "unsupported_auth", browser_result=browser)
+        out = capsys.readouterr().out
+        assert t.browser_calls == [[UNSUP]]
+        assert "unsupported_auth=1" in out and "browser_auth=0" in out
+        assert self._ledger(tmp_path) == {}                                 # no strike
+        state = json.loads((tmp_path / "jobs" / "bookmarks-unsupported.backlog.json").read_text())
+        assert state["deferred"] == 1 and "foo.corp.amazon.com" in state["cause"]
+
+    def test_fallback_that_ends_on_midway_sign_in_is_auth(self, sb, tmp_path, monkeypatch, capsys):
+        browser = lambda u: bf.PageResult(u, "auth", final_url="https://midway-auth.amazon.com/login")
+        self._main(sb, tmp_path, monkeypatch, [UNSUP, W], lambda u: "unsupported_auth" if u == UNSUP else "ok",
+                   browser_result=browser)
+        from src.capture.unreachable import url_key
+        assert self._ledger(tmp_path)[url_key(UNSUP)]["status"] == "auth"
+
+    def test_same_host_login_path_is_auth(self, sb):
+        res = bf.PageResult(B, "ok", text=LONG, final_url="https://docs.hub.amazon.dev/login?next=/x",
+                            title="Docs", requested_url=B)
+        assert sb.browser_outcome(B, res) == "auth"
+        same = bf.PageResult(B, "ok", text=LONG, final_url=B + "#top", title="Docs", requested_url=B)
+        assert sb.browser_outcome(B, same) == "ok"
+        moved = bf.PageResult(C, "ok", text=LONG, final_url="https://sage.amazon.dev/new/tags/AmazonQ",
+                              title="Sage", requested_url=C)
+        assert sb.browser_outcome(C, moved) == "ok"                       # moved, but not a sign-in URL
+
+    def test_http_statuses_reach_the_ledger(self, sb, tmp_path, monkeypatch):
+        results = {A: bf.PageResult(A, "error", status=404, detail="http_404", final_url=A),
+                   B: bf.PageResult(B, "auth", status=403, detail="http_403", final_url=B)}
+        self._main(sb, tmp_path, monkeypatch, [A, B, W], lambda u: "ok", browser_result=results.get)
+        from src.capture.unreachable import url_key
+        ledger = self._ledger(tmp_path)
+        assert ledger[url_key(A)]["status"] == "error" and ledger[url_key(B)]["status"] == "auth"
+
+    def test_browser_only_systemic_auth_is_deferred_auth_despite_a_cookie_ok(self, sb, tmp_path, monkeypatch,
+                                                                            capsys):
+        browser = lambda u: bf.PageResult(u, "auth", final_url="https://midway-auth.amazon.com/login")
+        rc, t = self._main(sb, tmp_path, monkeypatch, [A, B, C, W], lambda u: "ok", browser_result=browser)
+        out = capsys.readouterr().out
+        assert rc == 0 and t.cookie_calls == [W]
+        assert "deferred_auth=3" in out and "browser_auth=0" in out and "auth=0" in out
+        assert self._ledger(tmp_path) == {}                                 # no strikes
+        midway = json.loads((tmp_path / "jobs" / "bookmarks-midway.backlog.json").read_text())
+        assert midway["deferred"] == 3 and midway["cause"] == sb.MIDWAY_CAUSE_BROWSER
+        assert midway["cause"] == "browser sign-in failed for every page (Midway mint) — run mwinit"
+
+    def test_two_browser_auths_are_per_url_strikes(self, sb, tmp_path, monkeypatch):
+        browser = lambda u: bf.PageResult(u, "auth", final_url="https://midway-auth.amazon.com/login")
+        self._main(sb, tmp_path, monkeypatch, [A, B, W], lambda u: "ok", browser_result=browser)
+        assert len(self._ledger(tmp_path)) == 2
+
+    @pytest.mark.parametrize("detail", ["launch", "server_down", "budget", "max_pages"])
+    def test_browser_deferrals_get_their_own_backlog_with_a_cause_per_detail(self, sb, tmp_path, monkeypatch,
+                                                                            capsys, detail):
+        browser = lambda u: bf.PageResult(u, "deferred", detail=detail)
+        rc, _ = self._main(sb, tmp_path, monkeypatch, [A, B, W], lambda u: "ok", browser_result=browser)
+        out = capsys.readouterr().out
+        state = json.loads((tmp_path / "jobs" / "bookmarks-browser.backlog.json").read_text())
+        assert state["deferred"] == 2 and state["consecutive_deferred_runs"] == 1
+        assert state["cause"] == f"2 {detail}: {sb.BROWSER_DEFER_CAUSES[detail]}"
+        assert "WARNING: bookmarks-browser backlog persists" in out         # threshold 1
+        public = json.loads((tmp_path / "jobs" / "bookmarks.backlog.json").read_text())
+        assert public["deferred"] == 0 and "cause" not in public
+        assert self._ledger(tmp_path) == {}
+
+    def test_a_clean_browser_run_resets_the_browser_backlog(self, sb, tmp_path, monkeypatch):
+        from src.operations import backlog
+        backlog.record_run("bookmarks-browser", 4, tmp_path / "jobs", cause="4 launch: x")
+        self._main(sb, tmp_path, monkeypatch, [A, W], lambda u: "ok")
+        assert backlog.read_state("bookmarks-browser", tmp_path / "jobs")["consecutive_deferred_runs"] == 0
+
+    def test_browser_budget_is_capped_by_the_session_left(self, sb, tmp_path, monkeypatch):
+        budgets = []
+        self._main(sb, tmp_path, monkeypatch, [A, W], lambda u: "ok", budgets=budgets, session_left=[2000.0, 2000.0])
+        assert budgets == [pytest.approx(2000.0 - 600.0)]
+
+    def test_session_running_out_before_the_browser_pass_defers_it(self, sb, tmp_path, monkeypatch, capsys):
+        # Preflight sees 40 min; by the browser pass (after the cookie path) only 10.5 min are left.
+        rc, t = self._main(sb, tmp_path, monkeypatch, [A, B, UNSUP, W],
+                           lambda u: "unsupported_auth" if u == UNSUP else "ok", session_left=[2400.0, 630.0])
+        out = capsys.readouterr().out
+        assert rc == 0 and t.browser_calls == [] and t.cookie_calls == [UNSUP, W]
+        assert "deferred_auth=3" in out                                       # A, B and the UNSUP fallback
+        assert self._ledger(tmp_path) == {}
+        midway = json.loads((tmp_path / "jobs" / "bookmarks-midway.backlog.json").read_text())
+        assert midway["deferred"] == 3 and midway["cause"] == sb.MIDWAY_CAUSE_LATE
+        assert not (tmp_path / "jobs" / "bookmarks-browser.backlog.json").exists()
+
+
+# --------------------------------------------------------------------------- #
+# A real stdio MCP server (tests/_stub_browser_mcp.py): no orphans             #
+# --------------------------------------------------------------------------- #
+from tests import _stub_browser_mcp as stub  # noqa: E402
+
+
+def _stub_factory(script, mode, directory):
+    from src.capture.mcp_client import McpClient
+
+    def factory(cwd, env):
+        return McpClient(stub.PYTHON, [str(script), mode], call_timeout=20, env={**env, **stub.stub_env(directory)},
+                         cwd=cwd)
+    return factory
+
+
+class TestRealStdioServer:
+    def test_normal_exit_leaves_no_process(self, tmp_path):
+        script = stub.write_stub(tmp_path)
+        missing = "https://docs.hub.amazon.dev/missing"
+        out = asyncio.run(bf.fetch_pages([B, missing], client_factory=_stub_factory(script, "ok", tmp_path),
+                                         log=lambda *a: None))
+        assert out[B].outcome == "ok" and out[B].status == 200 and out[B].chars > 200
+        assert out[missing].outcome == "error" and out[missing].status == 404
+        pids = stub.stub_pids(tmp_path)
+        assert stub.wait_gone(pids) == []                  # server and its /bin/sleep "Chromium" both gone
+
+    def test_launch_timeout_leaves_no_process(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bf, "LAUNCH_TIMEOUT_S", 3.0)
+        script = stub.write_stub(tmp_path)
+        started = time.monotonic()
+        out = asyncio.run(bf.fetch_pages([B], client_factory=_stub_factory(script, "hang", tmp_path),
+                                         log=lambda *a: None))
+        assert out[B].outcome == "deferred" and out[B].detail == "launch"
+        assert time.monotonic() - started < 3.0 + 15
+        assert stub.wait_gone(stub.stub_pids(tmp_path)) == []
+
+    def test_sigterm_during_the_pass_leaves_no_process(self, tmp_path):
+        import signal
+        import subprocess
+        import sys
+        script = stub.write_stub(tmp_path)
+        runner = tmp_path / "run_pass.py"
+        runner.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {str(pathlib.Path.cwd())!r})\n"
+            "from src.capture import browser_fetch as bf\n"
+            "from src.capture.mcp_client import McpClient\n"
+            f"script, d = {str(script)!r}, {str(tmp_path)!r}\n"
+            "env = {'STUB_DIR': d}\n"
+            "f = lambda cwd, e: McpClient(sys.executable, [script, 'slow'], call_timeout=600, env={**e, **env}, cwd=cwd)\n"
+            "bf.fetch_pages_sync(['https://docs.hub.amazon.dev/x'], client_factory=f, page_timeout=600)\n"
+            "print('pass returned')\n")
+        proc = subprocess.Popen([sys.executable, str(runner)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True)
+        try:
+            stub.wait_for_file(tmp_path / "navigating", timeout=30)
+            pids = stub.stub_pids(tmp_path)
+            assert all(stub.alive(p) for p in pids)
+            proc.send_signal(signal.SIGTERM)                   # the job only: the server is in its own session
+            stdout, _ = proc.communicate(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=10)
+        assert proc.returncode == 143 and "pass returned" not in stdout
+        assert stub.wait_gone(pids) == []

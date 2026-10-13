@@ -27,16 +27,48 @@ a closed connection is retried exactly once per session (see
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import re
 import subprocess
 from typing import Any
 
+import mcp.client.stdio as _sdk_stdio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------- #
+# Server process recording                                                     #
+# --------------------------------------------------------------------------- #
+# The SDK starts the server with ``start_new_session=True`` (its own process
+# group, pgid == pid) and does not expose the process. A job killed by SIGTERM
+# (the wrapper's killpg reaches only the job's own group) therefore cannot reach
+# the server unless it knows the pid. The SDK looks up
+# ``_create_platform_compatible_process`` in its module globals at call time, so
+# a thin wrapper records each spawned pid into the McpClient that is connecting
+# (a ContextVar: concurrent clients in other tasks are not mixed up). If a future
+# SDK drops the hook, nothing is recorded and test_mcp_client_resilience says so.
+_spawn_recorder: contextvars.ContextVar[list | None] = contextvars.ContextVar("mcp_spawn_recorder", default=None)
+_sdk_create_process = getattr(_sdk_stdio, "_create_platform_compatible_process", None)
+
+
+async def _recording_create_process(*args, **kwargs):
+    process = await _sdk_create_process(*args, **kwargs)
+    recorder = _spawn_recorder.get()
+    if recorder is not None and getattr(process, "pid", None):
+        recorder.append(int(process.pid))
+    return process
+
+
+if _sdk_create_process is not None and not getattr(_sdk_create_process, "_sb_recording", False):
+    _recording_create_process._sb_recording = True
+    _sdk_stdio._create_platform_compatible_process = _recording_create_process
+
+#: Bound on tearing down a half-connected client (SDK: 2 s stdin wait + 2 s SIGTERM→SIGKILL).
+CONNECT_TEARDOWN_TIMEOUT = 10.0
 
 DEFAULT_CALL_TIMEOUT = 120  # seconds per tool call
 DEFAULT_MAX_RECONNECTS = 1  # reconnect budget for the whole session, not per call
@@ -330,24 +362,46 @@ class McpClient:
         self.rate_limit_hits = 0       # throttled replies seen (retried or not)
         self._stack: list = []
         self._session: ClientSession | None = None
+        #: pid (== pgid: the SDK starts it in its own session) of every server
+        #: process this client spawned, reconnects included; see _spawn_recorder.
+        self.server_pids: list[int] = []
 
     async def _connect(self) -> None:
-        transport = stdio_client(self._params)
-        read, write = await transport.__aenter__()
-        self._stack.append(transport)
-        session = ClientSession(read, write)
-        await session.__aenter__()
-        self._stack.append(session)
-        await session.initialize()
-        self._session = session
+        """Start the server and initialize the session.
+
+        On *any* failure — including a cancellation (``asyncio.timeout`` around a
+        hanging ``initialize``) — the partially entered transport/session is torn
+        down (bounded by ``CONNECT_TEARDOWN_TIMEOUT``) before the error
+        propagates, so no caller is left with a half-started server process."""
+        token = _spawn_recorder.set(self.server_pids)
+        try:
+            transport = stdio_client(self._params)
+            read, write = await transport.__aenter__()
+            self._stack.append(transport)
+            session = ClientSession(read, write)
+            await session.__aenter__()
+            self._stack.append(session)
+            await session.initialize()
+            self._session = session
+        except BaseException:
+            try:
+                await asyncio.wait_for(self._teardown(), timeout=CONNECT_TEARDOWN_TIMEOUT)
+            except BaseException as e:  # noqa: BLE001 - the original failure is what matters
+                logger.debug("MCP partial-connect teardown: %s", e)
+                self._stack.clear()
+                self._session = None
+            raise
+        finally:
+            _spawn_recorder.reset(token)
 
     async def _teardown(self, exc_type=None, exc=None, tb=None) -> None:
-        # Unwind in reverse order; swallow shutdown noise from the server process.
+        # Unwind in reverse order; swallow shutdown noise from the server process
+        # (a cancellation inside one layer must not skip the transport below it).
         while self._stack:
             cm = self._stack.pop()
             try:
                 await cm.__aexit__(exc_type, exc, tb)
-            except Exception as e:  # noqa: BLE001 - best-effort teardown
+            except (Exception, asyncio.CancelledError) as e:  # noqa: BLE001 - best-effort teardown
                 logger.debug("MCP teardown: %s", e)
         self._session = None
 

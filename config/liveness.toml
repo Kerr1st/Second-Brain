@@ -225,3 +225,17 @@ reason = "Midway sign-in failed at bookmarks run time (cookie missing/expired, o
 [backlog.bookmarks-unsupported]
 consecutive_runs = 3
 reason = "scrape_bookmarks.py: internal host(s) without a Midway sign-in answered a bare 403/sign-in in 3+ consecutive runs (unsupported_auth, no strike, never scraped); the hosts are in 'last run' and in the job log WARNING — pre-route them in NON_MIDWAY_AUTH_HOSTS or add them to MIDWAY_HOSTS"
+
+# Browser path unavailable or short (scrape_bookmarks.py, 2026-10-13 review): browser
+# URLs (BROWSER_HOSTS + same-run fallbacks) that the midway-playwright pass deferred —
+# detail launch (the server never started: node >= 20 / aim missing from the job PATH),
+# server_down (it died mid-pass), budget (BROWSER_RUN_BUDGET_S / job deadline / Midway
+# session left) or max_pages (BROWSER_MAX_PAGES). Deferred URLs take no ledger strike and
+# are retried without limit, so a browser that never launches would otherwise be silent.
+# Its own streak in logs/jobs/bookmarks-browser.backlog.json, recorded on every run whose
+# browser pass was allowed (a Midway-session deferral is [backlog.bookmarks-midway]);
+# "cause" (shown as "last run") gives the count per detail. The backlog mechanism has
+# no per-cause thresholds, so one run with any browser deferral is reported.
+[backlog.bookmarks-browser]
+consecutive_runs = 1
+reason = "scrape_bookmarks.py: the midway-playwright browser pass deferred URLs (launch / server_down / budget / max_pages: see 'last run'); for launch check node >= 20 and aim on the job PATH, for budget/max_pages raise BROWSER_RUN_BUDGET_S / BROWSER_MAX_PAGES"

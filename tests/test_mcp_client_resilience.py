@@ -335,3 +335,57 @@ class TestCallText:
         client = McpClient("/bin/true", ["--caps", "core"], env={"PATH": "/usr/bin"}, cwd=str(tmp_path))
         assert client._params.env == {"PATH": "/usr/bin"} and str(client._params.cwd) == str(tmp_path)
         assert McpClient("/bin/true")._params.env is None
+
+
+# --------------------------------------------------------------------------- #
+# _connect: no half-started server survives a failed/hung connect              #
+# --------------------------------------------------------------------------- #
+class TestPartialConnectCleanup:
+    def test_sdk_spawn_hook_is_installed(self):
+        import mcp.client.stdio as sdk_stdio
+        assert getattr(sdk_stdio._create_platform_compatible_process, "_sb_recording", False)
+
+    def test_hung_initialize_is_torn_down_and_the_server_pid_recorded(self, tmp_path):
+        from tests import _stub_browser_mcp as stub
+        script = stub.write_stub(tmp_path)
+        client = McpClient(stub.PYTHON, [str(script), "hang"], env=stub.stub_env(tmp_path), cwd=str(tmp_path))
+
+        async def connect():
+            async with asyncio.timeout(3):
+                await client.__aenter__()
+        with pytest.raises(TimeoutError):
+            asyncio.run(connect())
+        server, child = stub.stub_pids(tmp_path)
+        assert client.server_pids == [server] and client._stack == [] and client._session is None
+        # The SDK teardown (stdin close, 2 s, killpg) ran: the server's whole group is gone.
+        assert stub.wait_gone([server, child]) == []
+
+    def test_failing_initialize_tears_down_the_partial_stack(self, monkeypatch):
+        exited = []
+
+        class Transport:
+            async def __aenter__(self):
+                return "r", "w"
+
+            async def __aexit__(self, *exc):
+                exited.append("transport")
+
+        class Session:
+            def __init__(self, read, write):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                exited.append("session")
+
+            async def initialize(self):
+                raise McpError(ErrorData(code=0, message="Connection closed"))
+
+        monkeypatch.setattr(mc, "stdio_client", lambda params: Transport())
+        monkeypatch.setattr(mc, "ClientSession", Session)
+        client = McpClient("x")
+        with pytest.raises(McpError):
+            asyncio.run(client.__aenter__())
+        assert exited == ["session", "transport"] and client._stack == []

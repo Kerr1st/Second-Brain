@@ -407,9 +407,33 @@ def test_unknown_host_unsupported_auth_is_its_own_advisory_streak(tmp_path, poli
     assert _backlog(tmp_path, policy, "bookmarks-unsupported")["state"] == "healthy"
 
 
-def test_unsupported_backlog_is_the_last_table_in_the_policy_file():
+def test_browser_backlog_is_the_last_table_in_the_policy_file():
     text = (REPO / "config/liveness.toml").read_text()
-    assert text.rstrip().splitlines()[-3] == "[backlog.bookmarks-unsupported]"
+    assert text.rstrip().splitlines()[-3] == "[backlog.bookmarks-browser]"
+    assert text.index("[backlog.bookmarks-unsupported]") < text.index("[backlog.bookmarks-browser]")
+
+
+def test_browser_unavailable_is_its_own_advisory_after_one_run(tmp_path, policy):
+    """bookmarks-browser.backlog.json (browser pass deferred: launch / server_down / budget /
+    max_pages): one run → advisory with the per-detail cause, never required; the
+    job-status sweep ignores the sidecar; a clean run clears it."""
+    from src.operations import backlog
+    entry = policy["backlog"]["bookmarks-browser"]
+    assert entry["consecutive_runs"] == 1
+    assert all(word in entry["reason"] for word in ("launch", "server_down", "budget", "max_pages"))
+    cause = "12 launch: the browser (midway-playwright) did not start — check node >= 20 and aim on the job PATH"
+    backlog.record_run("bookmarks-browser", 12, tmp_path, now=NOW, cause=cause)
+    finding = _backlog(tmp_path, policy, "bookmarks-browser")
+    assert finding["state"] == "persistent_backlog" and finding["severity"] == "advisory"
+    assert not required_failure(finding) and finding["message"].endswith(f"(last run: {cause})")
+    assert _backlog(tmp_path, policy, "bookmarks")["state"] == "no_state"     # not the public backlog
+    assert (tmp_path / "bookmarks-browser.backlog.json").is_file()
+    assert inspect_statuses(tmp_path, now=NOW) == []                          # a sidecar, not a job
+    report = liveness.write_report(tmp_path / "liveness-report.json",
+                                   liveness.run(policy, tmp_path, now=NOW, skip_db=True), NOW)
+    assert report["healthy"] is True and "bookmarks-browser" in report["advisories"]
+    backlog.record_run("bookmarks-browser", 0, tmp_path, now=NOW + timedelta(days=7))
+    assert _backlog(tmp_path, policy, "bookmarks-browser")["state"] == "healthy"
 
 # ------------------------------------------------------- end to end (database)
 

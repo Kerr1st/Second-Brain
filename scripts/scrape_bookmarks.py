@@ -9,7 +9,8 @@ Internal Amazon links use Chrome cookies for authentication.
 import json, os, subprocess, re, sys, tempfile, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.capture.filters import SKIP_PATTERNS, is_private_host, needs_cookies, load_indexed_urls as _load_indexed_urls
+from src.capture.filters import SKIP_PATTERNS, canonical_url, is_private_host, needs_cookies, \
+    load_indexed_urls as _load_indexed_urls
 from src.capture.render import html_to_text, render_document
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime
@@ -152,6 +153,19 @@ BROWSER_HOSTS = re.compile(
     re.I)
 #: The browser needs this much Midway session left (seconds); less is deferred_auth.
 BROWSER_MIN_SESSION_S = 30 * 60
+#: Recomputed just before the browser pass: its budget is at most the session left
+#: minus this margin, so late pages never meet an expired session (auth strikes).
+BROWSER_SESSION_MARGIN_S = 10 * 60
+#: A browser budget shorter than this is not worth a launch: every browser URL is deferred_auth.
+BROWSER_MIN_BUDGET_S = 60.0
+#: Registrable suffixes Amazon owns (host-anchored, label boundary). Only these
+#: may take the same-run browser *fallback* (a cookie-path unsupported_auth /
+#: tls_error retried in the Midway-cookie browser): needs_cookies() also matches
+#: third-party SaaS (highspot, quip-amazon, chronus, awsapps tenants, sharepoint,
+#: coupahost), which must never see the Midway-injected browser. Chosen from the
+#: internal hosts in the 2026-10-13 bookmarks and unreachable ledger. Bookmarks
+#: only: filters.INTERNAL_DOMAINS (shared with browser.py) is unchanged.
+BROWSER_FALLBACK_SUFFIXES = ("amazon.com", "amazon.dev", "aws.dev", "a2z.com", "amazon.work", "workshops.aws")
 
 #: Pages that are mostly the user's own records (their cases, requests, account
 #: views), not knowledge worth indexing: skipped as ``skipped_personal`` — never
@@ -172,6 +186,13 @@ def _host(url):
 def browser_host(url):
     """True when the URL's host is fetched through the browser (``BROWSER_HOSTS``)."""
     return bool(BROWSER_HOSTS.match(_host(url)))
+
+
+def browser_fallback_allowed(url):
+    """True when a cookie-path unsupported_auth/tls_error may be retried in the browser:
+    the host is, or is a subdomain of, a ``BROWSER_FALLBACK_SUFFIXES`` entry."""
+    host = _host(url)
+    return bool(host) and any(host == s or host.endswith("." + s) for s in BROWSER_FALLBACK_SUFFIXES)
 
 
 def personal_page(url):
@@ -390,18 +411,40 @@ def save_page(name, url, text, fetched_via=None):
 _SIGN_IN_TITLE_RE = re.compile(r"\b(sign[ -]?in|redirecting)\b", re.I)
 
 
+def _path(url):
+    try:
+        return urlparse(url or "").path or "/"
+    except ValueError:
+        return ""
+
+
 def browser_outcome(url, res):
-    """The bookmarks outcome of a ``browser_fetch.PageResult``: its own class, with
-    the cookie path's sign-in markers applied to the final URL and title (a
-    ``SIGN_IN_HOSTS`` host, a cross-host sign-in URL, a "Sign in" title) -> auth."""
+    """The bookmarks outcome of a ``browser_fetch.PageResult``: its own class
+    (HTTP 401/403/407 is already auth there, other >= 400 error), with the cookie
+    path's sign-in markers applied to the final URL and title -> auth: a
+    ``SIGN_IN_HOSTS`` host; ``_AUTH_URL_RE`` on a final URL on another host *or*
+    on the same host with another path than requested (a same-host /login); a
+    "Sign in" title."""
     if res.outcome not in ("ok", "too_short"):
         return res.outcome
-    final = res.final_url or url
+    requested = getattr(res, "requested_url", "") or url
+    final = res.final_url or requested
     final_host = _host(final)
-    if SIGN_IN_HOSTS.match(final_host) or (final_host != _host(url) and _AUTH_URL_RE.search(final)) \
+    moved = final_host != _host(requested) or _path(final) != _path(requested)
+    if SIGN_IN_HOSTS.match(final_host) or (moved and _AUTH_URL_RE.search(final)) \
             or _SIGN_IN_TITLE_RE.search(res.title or ""):
         return "auth"
     return res.outcome
+
+
+def browser_midway_login(res):
+    """True when a browser ``auth`` was Midway's own sign-in (final host
+    midway-auth / sentry / idp.federate, or the server's "run mwinit" error);
+    anything else (a foreign login page, a bare 401/403) is a non-Midway login."""
+    from src.capture import browser_fetch
+    final = getattr(res, "final_url", "") or ""
+    return getattr(res, "detail", "") == "server" or browser_fetch.is_auth_host(final) \
+        or bool(_MIDWAY_HOP_RE.match(final))
 
 
 def browser_fetch_pages(urls, budget_s):
@@ -745,6 +788,23 @@ CANARY_URL = "https://w.amazon.com/bin/view/Main/"
 MIDWAY_CAUSE_COOKIE = "the Midway cookie is missing/expired at run time — run mwinit"
 MIDWAY_CAUSE_SHORT = "the Midway session expires within 30 min at run time (browser path) — run mwinit"
 MIDWAY_CAUSE_CANARY = "Midway session rejected at run time (canary page hit sign-in) — run mwinit"
+MIDWAY_CAUSE_BROWSER = "browser sign-in failed for every page (Midway mint) — run mwinit"
+MIDWAY_CAUSE_LATE = ("the Midway session ends before the browser pass could run "
+                     "(< 10 min margin + 60 s budget left) — run mwinit")
+#: ``[backlog.bookmarks-browser]`` cause text per browser deferral ``detail``.
+BROWSER_DEFER_CAUSES = {
+    "launch": "the browser (midway-playwright) did not start — check node >= 20 and aim on the job PATH",
+    "server_down": "the browser server died mid-pass",
+    "budget": "the browser time budget ran out (BROWSER_RUN_BUDGET_S / job deadline / Midway session left)",
+    "max_pages": "more browser URLs than BROWSER_MAX_PAGES",
+}
+
+
+def browser_defer_cause(details):
+    """One cause string from a Counter of deferral details, e.g.
+    ``"3 launch: the browser ... did not start ...; 1 budget: ..."``."""
+    return "; ".join(f"{n} {d}: {BROWSER_DEFER_CAUSES.get(d, 'deferred')}"
+                     for d, n in sorted(details.items())) or None
 
 
 def canary_outcome(fetch=None):
@@ -789,6 +849,7 @@ def main():
     print(f"  Public (Crawlee): {len(public)}")
 
     ok = fail = skipped_auth = too_short = deferred_auth = unsupported_auth = skipped_unsupported = 0
+    skipped_invalid_url = 0
     outcomes = {}
     browser = Counter()
 
@@ -798,6 +859,10 @@ def main():
     # The user's own records (PERSONAL_PAGES): not fetched, no ledger strike.
     skipped_personal = sum(1 for _, u in internal if personal_page(u))
     internal = [(n, u) for n, u in internal if not personal_page(u)]
+    # URLs Python and the browser could route differently (backslash, userinfo,
+    # odd host): never fetched on either path, no ledger strike.
+    skipped_invalid_url = sum(1 for _, u in internal if canonical_url(u) is None)
+    internal = [(n, u) for n, u in internal if canonical_url(u) is not None]
 
     midway_cause = None
     internal_ran = bool(internal)
@@ -822,6 +887,9 @@ def main():
                   f"{deferred_auth} browser URL(s) deferred")
             internal = [(n, u) for n, u in internal if not browser_host(u)]
     unsupported_hosts = Counter()
+    fallback_urls = set()
+    browser_details = Counter()
+    browser_ran = False
     browser_queue = [(n, u) for n, u in internal if browser_host(u)]
     internal = [(n, u) for n, u in internal if not browser_host(u)]
 
@@ -831,8 +899,9 @@ def main():
         for i, (name, url) in enumerate(internal):
             print(f"  [{i+1}/{len(internal)}] {name[:50]}")
             outcome = scrape_with_cookies(name, url)
-            if browser_allowed and outcome in ("unsupported_auth", "tls_error"):
+            if browser_allowed and outcome in ("unsupported_auth", "tls_error") and browser_fallback_allowed(url):
                 browser_queue.append((name, url))   # same-run fallback: the browser decides
+                fallback_urls.add(url)
                 browser["fallback"] += 1
             elif outcome is True or outcome == "ok":
                 ok += 1
@@ -850,14 +919,31 @@ def main():
                 fail += 1
                 outcomes[url] = "timeout" if outcome == "timeout" else "error"
 
-    # Internal links through the midway-playwright browser (one session).
+    # Internal links through the midway-playwright browser (one session). The
+    # budget is recomputed now (the cookie path ran first): never past the
+    # Midway session minus a margin, so late pages do not meet an expired session.
+    browser_budget = 0.0
+    if browser_queue:
+        session_left = midway_session_seconds_left() or 0.0
+        browser_budget = min(browser_budget_s(started), session_left - BROWSER_SESSION_MARGIN_S)
+        if browser_budget < BROWSER_MIN_BUDGET_S:
+            browser_allowed = False
+            deferred_auth += len(browser_queue)
+            midway_cause = MIDWAY_CAUSE_LATE
+            print(f"WARNING: only {max(0.0, session_left) / 60:.0f} min of Midway session left before the browser "
+                  f"pass — run mwinit; {len(browser_queue)} browser URL(s) deferred_auth (no launch, no strike)")
+            browser_queue = []
     if browser_queue:
         print(f"\n--- Internal links via browser ({len(browser_queue)}, "
-              f"{browser['fallback']} cookie-path fallback(s)) ---")
-        results = browser_fetch_pages([u for _, u in browser_queue], browser_budget_s(started))
+              f"{browser['fallback']} cookie-path fallback(s), budget {browser_budget:.0f}s) ---")
+        browser_ran = True
+        results = browser_fetch_pages([u for _, u in browser_queue], browser_budget)
+        browser_auth_urls = []
         for name, url in browser_queue:
             res = results.get(url)
             outcome = browser_outcome(url, res) if res is not None else "deferred"
+            if outcome == "auth" and url in fallback_urls and not browser_midway_login(res):
+                outcome = "unsupported_auth"   # the cookie path's verdict stands: a login Midway can't satisfy
             if outcome == "ok":
                 try:
                     save_page(name, url, res.text, fetched_via="browser")
@@ -870,17 +956,39 @@ def main():
             elif outcome == "auth":
                 skipped_auth += 1
                 outcomes[url] = "auth"
+                browser_auth_urls.append(url)
+            elif outcome == "unsupported_auth":
+                unsupported_auth += 1      # no strike; [backlog.bookmarks-unsupported] sees it
+                unsupported_hosts[_host(url)] += 1
             elif outcome == "too_short":
                 too_short += 1
                 outcomes[url] = "too_short"
+            elif outcome == "invalid_url":
+                skipped_invalid_url += 1   # never navigated: no strike
+                browser["invalid_url"] += 1
+                continue
             elif outcome == "deferred":
                 browser["deferred"] += 1   # not attempted: no strike, retried next run
+                browser_details[getattr(res, "detail", "") or "budget"] += 1
                 continue
             else:
                 fail += 1
                 outcomes[url] = "timeout" if getattr(res, "detail", "") == "timeout" else "error"
                 outcome = "error"
             browser[outcome] += 1
+        # Browser-only systemic check, independent of cookie-path results: every
+        # browser page hit sign-in (e.g. the Midway mint failing) -> a session
+        # problem, deferred_auth with no strikes.
+        attempts = sum(browser[k] for k in ("ok", "auth", "too_short", "error", "unsupported_auth"))
+        if attempts >= SYSTEMIC_MIN_ATTEMPTS and browser["auth"] == attempts and not browser["ok"]:
+            print(f"WARNING: all {attempts} browser fetch(es) hit sign-in and none reached a page — "
+                  f"deferred_auth, no ledger strike; {MIDWAY_CAUSE_BROWSER}")
+            for url in browser_auth_urls:
+                outcomes.pop(url, None)
+            skipped_auth -= len(browser_auth_urls)
+            deferred_auth += len(browser_auth_urls)
+            browser["deferred_auth"], browser["auth"] = len(browser_auth_urls), 0
+            midway_cause = MIDWAY_CAUSE_BROWSER
 
     if internal or browser_queue:
         if skipped_auth >= SYSTEMIC_MIN_ATTEMPTS and not ok and not too_short:
@@ -917,16 +1025,21 @@ def main():
 
     print(f"\nInternal: {ok} scraped, {skipped_auth} skipped_auth, {fail} failed, {too_short} too_short, "
           f"{deferred_auth} deferred_auth, {unsupported_auth + skipped_unsupported} unsupported_auth "
-          f"({skipped_unsupported} not fetched: non-Midway sign-in), {skipped_personal} skipped_personal")
-    if browser_queue:
+          f"({skipped_unsupported} not fetched: non-Midway sign-in), {skipped_personal} skipped_personal, "
+          f"{skipped_invalid_url} skipped_invalid_url")
+    if browser_ran:
         print(f"Browser: {browser['ok']} ok, {browser['auth']} auth, {browser['too_short']} too_short, "
-              f"{browser['error']} error, {browser['deferred']} deferred, {browser['fallback']} fallback(s)")
+              f"{browser['error']} error, {browser['unsupported_auth']} unsupported_auth, "
+              f"{browser['deferred']} deferred ({dict(sorted(browser_details.items()))}), "
+              f"{browser['deferred_auth']} deferred_auth, {browser['fallback']} fallback(s)")
     print(f"Public: {public_stats}")
     record_unreachable(ledger, outcomes, len(unreachable), killed_deferred=killed_deferred)
-    report_backlog(public_stats.get("deferred", 0) + browser["deferred"],
-                   cause=(f"{browser['deferred']} browser URL(s) over BROWSER_MAX_PAGES / the browser budget"
-                          if browser["deferred"] else None))
+    report_backlog(public_stats.get("deferred", 0))
     report_backlog(deferred_auth, job=MIDWAY_BACKLOG_JOB, cause=midway_cause)
+    if internal_ran and browser_allowed:
+        # Every run whose browser pass was allowed (also with nothing queued: that
+        # resets the streak); a Midway-session deferral is the midway backlog's.
+        report_backlog(browser["deferred"], job=BROWSER_BACKLOG_JOB, cause=browser_defer_cause(browser_details))
     if internal_ran:
         # Only runs whose internal path ran say anything about unknown hosts; the
         # pre-routed known non-Midway hosts (skipped_unsupported) are expected, not counted.
@@ -936,10 +1049,11 @@ def main():
                        "deferred_auth": deferred_auth, "unsupported_auth": unsupported_auth,
                        "browser_ok": browser["ok"], "browser_auth": browser["auth"],
                        "browser_error": browser["error"], "browser_deferred": browser["deferred"],
-                       "skipped_personal": skipped_personal}
+                       "skipped_personal": skipped_personal, "skipped_invalid_url": skipped_invalid_url}
     internal_auth = {u for u, c in outcomes.items() if c == "auth" and needs_cookies(u)}
     return run_exit_code(internal_counts, public_stats, outcomes, ledger,
-                         eligible=len(pending) - deferred_auth - skipped_unsupported - skipped_personal,
+                         eligible=len(pending) - deferred_auth - skipped_unsupported - skipped_personal
+                         - skipped_invalid_url,
                          public_eligible=len(public),
                          skipped_unreachable=len(unreachable), internal_auth=internal_auth)
 
@@ -1014,7 +1128,8 @@ def run_exit_code(internal, public_stats, outcomes, ledger, *, eligible, public_
           f"crawlee_broken={broken} browser_ok={internal.get('browser_ok', 0)} "
           f"browser_auth={internal.get('browser_auth', 0)} browser_error={internal.get('browser_error', 0)} "
           f"browser_deferred={internal.get('browser_deferred', 0)} "
-          f"skipped_personal={internal.get('skipped_personal', 0)} -> exit {1 if reason else 0}"
+          f"skipped_personal={internal.get('skipped_personal', 0)} "
+          f"skipped_invalid_url={internal.get('skipped_invalid_url', 0)} -> exit {1 if reason else 0}"
           f"{f' ({reason})' if reason else ' (per-URL outcomes are left to the unreachable ledger)'}")
     return 1 if reason else 0
 
@@ -1070,6 +1185,10 @@ MIDWAY_BACKLOG_JOB = "bookmarks-midway"
 #: 403/sign-in with no Midway hop): ``<status-dir>/bookmarks-unsupported.backlog.json``,
 #: ``[backlog.bookmarks-unsupported]``. Pre-routed ``NON_MIDWAY_AUTH_HOSTS`` are not counted.
 UNSUPPORTED_BACKLOG_JOB = "bookmarks-unsupported"
+#: Browser URLs the midway-playwright pass deferred (detail launch / server_down /
+#: budget / max_pages): ``<status-dir>/bookmarks-browser.backlog.json``,
+#: ``[backlog.bookmarks-browser]`` (threshold 1; ``cause`` per detail).
+BROWSER_BACKLOG_JOB = "bookmarks-browser"
 
 
 def report_backlog(deferred, job="bookmarks", cause=None):
@@ -1077,7 +1196,8 @@ def report_backlog(deferred, job="bookmarks", cause=None):
 
     A single deferral is normal (the rest is retried next run) and never fails
     the job; the liveness sweep turns a persistent streak into an advisory.
-    ``job="bookmarks"`` is the public Crawlee-budget backlog; ``MIDWAY_BACKLOG_JOB``
+    ``job="bookmarks"`` is the public Crawlee-budget backlog (browser deferrals are
+    ``BROWSER_BACKLOG_JOB``'s, never counted there); ``MIDWAY_BACKLOG_JOB``
     is the internal path deferred on a Midway problem, ``cause`` saying which
     (stored in the sidecar for the liveness finding); ``UNSUPPORTED_BACKLOG_JOB``
     counts unknown hosts answering a bare 403/sign-in (``cause`` names them)."""
@@ -1091,7 +1211,8 @@ def report_backlog(deferred, job="bookmarks", cause=None):
     streak = state["consecutive_deferred_runs"]
     if streak >= limit:
         defaults = {MIDWAY_BACKLOG_JOB: MIDWAY_CAUSE_COOKIE,
-                    UNSUPPORTED_BACKLOG_JOB: "unknown internal hosts answer a bare 403/sign-in"}
+                    UNSUPPORTED_BACKLOG_JOB: "unknown internal hosts answer a bare 403/sign-in",
+                    BROWSER_BACKLOG_JOB: "the browser pass deferred URLs"}
         cause = cause or defaults.get(job, "the Crawlee budget is not draining the queue")
         print(f"WARNING: {job} backlog persists — {deferred} URL(s) deferred, {streak} consecutive "
               f"run(s) with deferrals (threshold {limit}); {cause}")

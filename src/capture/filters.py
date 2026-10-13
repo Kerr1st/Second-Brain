@@ -58,6 +58,47 @@ def needs_cookies(url: str) -> bool:
     return bool(internal_host(url) or AUTH_REQUIRED.search(url))
 
 
+#: Characters a WHATWG parser (Chromium) treats differently from urllib: ``\`` is a
+#: path separator there (``https://evil.io\@docs.hub.amazon.dev/`` goes to evil.io
+#: in Chromium, to docs.hub.amazon.dev in Python), and tab/LF/CR/space/C0 are
+#: stripped or rejected.
+_URL_AMBIGUOUS_RE = re.compile(r"[\\\x00-\x20\x7f]")
+#: ``host[:port]`` that both parsers read the same way: ASCII LDH labels, no
+#: userinfo, no percent-escapes, no IDNA, no trailing dot.
+_NETLOC_RE = re.compile(
+    r"^(?P<host>[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)(?::(?P<port>\d{1,5}))?$",
+    re.I)
+#: A last label WHATWG would parse as an IPv4 number (``1.2.3.4``, ``0x7f``, ``evil.0x7f000001``).
+_NUMERIC_LABEL_RE = re.compile(r"^(\d+|0x[0-9a-f]*)$", re.I)
+
+
+def canonical_url(url: str) -> str | None:
+    """``url`` re-serialized by urllib from its parsed parts, or None when Python
+    and a WHATWG parser (the browser) could disagree on where it goes: a
+    backslash, whitespace/control characters, userinfo (``@`` in the netloc), a
+    non-http(s) scheme, or a host that is not plain ASCII LDH (percent-escapes,
+    IDNA, a numeric last label, a trailing dot). Callers fetch only the returned
+    string; None is ``skipped_invalid_url`` (never fetched, no ledger strike)."""
+    from urllib.parse import urlsplit, urlunsplit
+    if not isinstance(url, str) or not url or _URL_AMBIGUOUS_RE.search(url):
+        return None
+    try:
+        parts = urlsplit(url)
+        parts.port                                    # noqa: B018 - raises ValueError on a bad port
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https"):
+        return None
+    m = _NETLOC_RE.match(parts.netloc or "")
+    if not m or _NUMERIC_LABEL_RE.match(m.group("host").rsplit(".", 1)[-1]):
+        return None
+    port = m.group("port")
+    if port is not None and not 0 < int(port) < 65536:
+        return None
+    netloc = m.group("host").lower() + (f":{int(port)}" if port is not None else "")
+    return urlunsplit((parts.scheme.lower(), netloc, parts.path, parts.query, parts.fragment))
+
+
 _PRIVATE_SUFFIXES = (".localhost", ".local", ".lan", ".home.arpa", ".internal")
 
 
