@@ -10,7 +10,7 @@ import sqlite3
 import tempfile
 import pytest
 from unittest.mock import patch, MagicMock
-from hypothesis import given, strategies as st, assume
+from hypothesis import given, settings, strategies as st, assume
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -192,6 +192,8 @@ class TestMergeTagsProperties:
         existing=st.lists(st.text(min_size=1, max_size=30, alphabet=st.characters(whitelist_categories=("L", "N", "P"))), max_size=10),
         new_tags=st.lists(st.text(min_size=1, max_size=30, alphabet=st.characters(whitelist_categories=("L", "N", "P"))), max_size=20),
     )
+    # No deadline: under full-suite load one example took 545 ms against the 200 ms default (FlakyFailure; 0.02 ms on replay).
+    @settings(deadline=None)
     def test_merge_result_has_no_duplicates(self, existing, new_tags):
         from src.capture.qd_tags import merge_tags
         result = merge_tags(existing, new_tags)
