@@ -501,12 +501,148 @@ def test_manifest_rejects_lost_executable_permission(tmp_path):
         backup.validate_payload(tmp_path)
 
 
+# ------------------------------------------------- restore-check locale + diagnostics
+
+def _drop_locale(monkeypatch):
+    """Mimic launchd: no LANG and no LC_* in the environment at all."""
+    for var in [v for v in os.environ if v == 'LANG' or v.startswith('LC_')]:
+        monkeypatch.delenv(var, raising=False)
+
+
+def _fake_cluster(calls, *, start_fails=False, fail_at=None):
+    def run(args, **kwargs):
+        argv = [str(a) for a in args]
+        calls.append((argv, dict(kwargs.get('env') or {}), kwargs.get('diagnostics', True)))
+        if argv[0] == fail_at:
+            log = next(Path(c[0][c[0].index('-l') + 1]) for c in calls if c[0][0] == 'pg_ctl' and '-l' in c[0])
+            with log.open('a') as f:
+                f.write('ERROR:  duplicate key value\nCONTEXT:  COPY memories, line 1: "private row value"\n')
+            raise RuntimeError(f'{fail_at} failed (exit 1)')
+        if argv[0] == 'initdb':
+            data = Path(argv[argv.index('-D') + 1])
+            data.mkdir(parents=True)
+            (data / 'postgresql.conf').write_text('')
+        elif argv[0] == 'pg_ctl' and argv[-1] == 'start':
+            Path(argv[argv.index('-l') + 1]).write_text(
+                'LOG:  starting PostgreSQL 17\n'
+                'FATAL:  postmaster became multithreaded during startup\n'
+                'HINT:  Set the LC_ALL environment variable to a valid locale.\n')
+            if start_fails:
+                raise RuntimeError('pg_ctl failed (exit 1)')
+        elif argv[0] == 'psql':
+            return subprocess.CompletedProcess(args, 0, b'memories\n' if 'pg_tables' in argv[-1] else b'3\n', b'')
+        return subprocess.CompletedProcess(args, 0, b'', b'')
+    return run
+
+
+@pytest.mark.parametrize('caller_locale', [None, 'en_US.UTF-8'])
+def test_restore_check_pins_lc_all_c_regardless_of_the_callers_locale(tmp_path, monkeypatch, caller_locale):
+    """Regression (verify 2026-10-11/13): launchd gives no LANG/LC_ALL, and PostgreSQL 17
+    on macOS then aborts the restore cluster ("postmaster became multithreaded during
+    startup"). Every cluster command — initdb, pg_ctl (and the postgres it forks),
+    pg_restore, psql — must run with LC_ALL=C whatever the caller's environment holds."""
+    _drop_locale(monkeypatch)
+    if caller_locale:
+        monkeypatch.setenv('LC_ALL', caller_locale)
+        monkeypatch.setenv('LANG', caller_locale)
+    calls = []
+    with patch.object(backup, 'command', side_effect=_fake_cluster(calls)):
+        result = backup.restore_check(tmp_path / 'db.dump', tmp_path, socket_dir=tmp_path / 'sock')
+    assert result == {'restored': True, 'public_tables': 1, 'row_counts': {'memories': 3}}
+    programs = [argv[0] for argv, _, _ in calls]
+    assert {'initdb', 'pg_ctl', 'pg_restore', 'psql'} <= set(programs)
+    for argv, env, _ in calls:
+        assert env.get('LC_ALL') == 'C', argv
+        assert not any(k.startswith('PG') and k not in ('PGHOST', 'PGPORT', 'PGUSER', 'PGDATABASE', 'PGPASSFILE') for k in env)
+    restore = [d for argv, _, d in calls if argv[0] == 'pg_restore']
+    assert restore == [False], 'pg_restore into the cluster can quote row values: stderr must be withheld'
+
+
+def test_failed_pg_ctl_start_carries_the_cluster_log_tail(tmp_path, monkeypatch):
+    """restore.log lives in verify's TemporaryDirectory and is deleted with it, so the
+    server's FATAL/HINT must ride in the error itself."""
+    _drop_locale(monkeypatch)
+    calls = []
+    with patch.object(backup, 'command', side_effect=_fake_cluster(calls, start_fails=True)):
+        with pytest.raises(RuntimeError) as err:
+            backup.restore_check(tmp_path / 'db.dump', tmp_path, socket_dir=tmp_path / 'sock')
+    message = str(err.value)
+    assert message.startswith('pg_ctl failed (exit 1)')
+    assert 'restore.log tail:' in message and 'postmaster became multithreaded during startup' in message
+    assert 'HINT:  Set the LC_ALL' in message
+    assert not any(argv[0] in ('createdb', 'pg_restore') for argv, _, _ in calls)
+
+
+@pytest.mark.parametrize('fail_at', ['createdb', 'pg_restore'])
+def test_restore_log_is_tailed_only_when_pg_ctl_start_fails(tmp_path, monkeypatch, fail_at):
+    """Once the cluster is up, restore.log can carry COPY CONTEXT lines quoting restored
+    rows, so a failure in createdb or pg_restore must never echo any of it."""
+    _drop_locale(monkeypatch)
+    calls = []
+    with patch.object(backup, 'command', side_effect=_fake_cluster(calls, fail_at=fail_at)):
+        with pytest.raises(RuntimeError) as err:
+            backup.restore_check(tmp_path / 'db.dump', tmp_path, socket_dir=tmp_path / 'sock')
+    message = str(err.value)
+    assert message == f'{fail_at} failed (exit 1)'
+    assert (tmp_path / 'restore.log').read_text().count('private row value') == 1, 'fake must have written the log'
+    for leaked in ('restore.log', 'private row value', 'CONTEXT', 'postmaster became multithreaded', 'HINT'):
+        assert leaked not in message
+    assert calls[-1][0][:2] == ['pg_ctl', '-D'] and calls[-1][0][-1] == 'stop'
+
+
+def test_failing_command_error_carries_a_bounded_redacted_stderr_tail():
+    code = textwrap.dedent('''
+        import sys
+        for i in range(50):
+            print(f'diagnostic line {i:02d}', file=sys.stderr)
+        print('gpg: passphrase hunter2 rejected', file=sys.stderr)
+        print('final line', file=sys.stderr)
+        sys.exit(3)
+    ''')
+    with pytest.raises(RuntimeError) as err:
+        backup.command([sys.executable, '-c', code])
+    message = str(err.value)
+    assert message.startswith(Path(sys.executable).name + ' failed (exit 3); stderr tail:\n')
+    tail = message.split('stderr tail:\n', 1)[1].splitlines()
+    assert len(tail) == backup.STDERR_TAIL_LINES
+    assert tail[-1] == 'final line' and tail[-2] == '[redacted line]' and tail[0] == 'diagnostic line 32'
+    assert 'hunter2' not in message and 'diagnostic line 31' not in message
+
+    flood = "import sys; sys.stderr.write('x' * 9000 + '\\n'); sys.exit(1)"
+    with pytest.raises(RuntimeError) as err:
+        backup.command([sys.executable, '-c', flood])
+    assert len(str(err.value).encode()) < backup.STDERR_TAIL_BYTES + 200
+
+    with pytest.raises(RuntimeError) as err:
+        backup.command([sys.executable, '-c', "import sys; print('row value: private text', file=sys.stderr); sys.exit(2)"],
+                       diagnostics=False)
+    assert 'private text' not in str(err.value) and 'exit 2' in str(err.value)
+
+
+@pytest.mark.parametrize('line', [
+    'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.def',
+    'bearer abc123def456',
+    'Cookie: session=abc123',
+    'Set-Cookie: sid=abc123; HttpOnly',
+    'failed to load credentials from ~/.aws',
+    'X-Amz-Security-Token: IQoJb3JpZ2luX2VjEPr',
+    'x-amz-date: 20261013T000000Z',
+])
+def test_diagnostic_tail_redacts_http_auth_cookie_credential_and_aws_header_lines(line):
+    """rclone and pg_dump stderr reach the log via the default diagnostics=True, so
+    HTTP auth headers, cookies, credential errors and signed AWS headers are withheld."""
+    tail = backup.diagnostic_tail(f'harmless before\n{line}\nharmless after\n')
+    assert tail.splitlines() == ['harmless before', '[redacted line]', 'harmless after']
+
+
 # ------------------------------------------------- the real thing: dump → bundle → restore
 
-def test_bundle_from_a_disposable_database_restores_into_another_with_identical_row_counts(test_conn, tmp_path, sample_memory_factory):
+def test_bundle_from_a_disposable_database_restores_into_another_with_identical_row_counts(test_conn, tmp_path, sample_memory_factory, monkeypatch):
     """Real pg_dump of the suite's disposable database, real gpg, real initdb +
     pg_restore into a second disposable cluster (socket inside the sandbox's permitted
-    directory), then row counts compared table by table."""
+    directory), then row counts compared table by table.  Runs with LANG/LC_* removed,
+    as under launchd, where the cluster used to abort at startup."""
+    _drop_locale(monkeypatch)
     for i in range(7):
         sample_memory_factory(title=f'restore roundtrip {i}', content=f'synthetic content {i}')
     with test_conn.cursor() as cur:

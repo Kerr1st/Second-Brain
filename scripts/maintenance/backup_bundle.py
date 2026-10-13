@@ -101,8 +101,35 @@ def digest(path):
     return h.hexdigest()
 
 
-def command(args, **kwargs):
-    """Keep subprocess diagnostics private; never print a DSN or decrypted data."""
+STDERR_TAIL_LINES = 20
+STDERR_TAIL_BYTES = 2048
+# Defence in depth for failure messages: a diagnostic line that so much as mentions a
+# credential is replaced, never echoed (the commands here get passphrases and
+# passwords via files/env, so such lines are not expected in the first place).
+_SENSITIVE_LINE = re.compile(
+    r'(?i)passw|passphrase|secret|token|api[_-]?key|bearer|authorization|cookie|credential|x-amz-|://[^\s/]*@')
+
+
+def diagnostic_tail(data, *, lines=STDERR_TAIL_LINES, limit=STDERR_TAIL_BYTES) -> str:
+    """Last ``lines`` non-blank lines of ``data`` (bytes or str), at most ``limit``
+    bytes, with any credential-looking line redacted.  For failure messages only."""
+    text = data.decode('utf-8', errors='replace') if isinstance(data, (bytes, bytearray)) else str(data or '')
+    kept = ['[redacted line]' if _SENSITIVE_LINE.search(line) else line.rstrip()
+            for line in text.splitlines() if line.strip()][-lines:]
+    out = '\n'.join(kept)
+    raw = out.encode('utf-8')
+    if len(raw) > limit:
+        out = '…' + raw[-limit:].decode('utf-8', errors='ignore')
+    return out
+
+
+def command(args, *, diagnostics=True, **kwargs):
+    """Keep subprocess diagnostics private; never print a DSN or decrypted data.
+
+    On failure the RuntimeError carries a short, redacted stderr tail
+    (``diagnostic_tail``) so a scheduled run's log says *why*.  Pass
+    ``diagnostics=False`` for commands whose stderr can echo decrypted content
+    (``pg_restore`` into a database quotes offending row values)."""
     child = subprocess.Popen([str(a) for a in args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              start_new_session=True, **kwargs)
     try:
@@ -126,7 +153,14 @@ def command(args, **kwargs):
         child.wait(timeout=5)
         raise
     if child.returncode:
-        raise RuntimeError(f'{Path(str(args[0])).name} failed (exit {child.returncode})')
+        message = f'{Path(str(args[0])).name} failed (exit {child.returncode})'
+        if not diagnostics:
+            message += ' [stderr withheld: may echo decrypted content]'
+        else:
+            tail = diagnostic_tail(stderr)
+            if tail:
+                message += f'; stderr tail:\n{tail}'
+        raise RuntimeError(message)
     return subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
 
 
@@ -211,8 +245,12 @@ def restore_check(dump, area, *, socket_dir=None, port='5432'):
     for key in tuple(pg_env):
         if key.startswith('PG') or key.startswith('DB_'):
             pg_env.pop(key)
+    # LC_ALL=C matches ``initdb --no-locale`` and must not depend on the caller: under
+    # launchd there is no LANG/LC_ALL, and PostgreSQL 17 on macOS then aborts startup
+    # with "postmaster became multithreaded during startup" (pg_ctl exit 1).
     pg_env.update(PGHOST=str(sockets), PGPORT=str(port), PGUSER='sb_restore', PGDATABASE='postgres',
-                  PGPASSFILE=str(area / 'absent-pgpass'))
+                  PGPASSFILE=str(area / 'absent-pgpass'), LC_ALL='C')
+    log = area / 'restore.log'
     started = False
 
     def interrupted(signum, frame):
@@ -222,10 +260,27 @@ def restore_check(dump, area, *, socket_dir=None, port='5432'):
         command(['initdb', '-D', data, '-U', 'sb_restore', '--auth-local=trust', '--auth-host=reject', '--no-locale', '-E', 'UTF8'], env=pg_env)
         with (data / 'postgresql.conf').open('a') as f:
             f.write(f"\nlisten_addresses = ''\nport = {port}\nunix_socket_directories = '{sockets}'\nmaintenance_work_mem = '512MB'\n")
-        command(['pg_ctl', '-D', data, '-l', area / 'restore.log', '-w', 'start'], env=pg_env)
+        # restore.log is tailed ONLY here, when ``pg_ctl start`` fails: the cluster is
+        # fresh and nothing has been restored, so the log holds startup FATAL/HINT lines
+        # and no row data.  Never read it after createdb: once pg_restore has run, the
+        # server log can carry COPY CONTEXT lines quoting restored values.  Pinned by
+        # test_restore_log_is_tailed_only_when_pg_ctl_start_fails.
+        try:
+            command(['pg_ctl', '-D', data, '-l', log, '-w', 'start'], env=pg_env)
+        except RuntimeError as exc:
+            # The server's own FATAL/HINT lines go to restore.log, which lives in the
+            # caller's temporary directory and is gone once it unwinds: keep its tail.
+            try:
+                server_tail = diagnostic_tail(log.read_bytes())
+            except OSError:
+                server_tail = ''
+            if server_tail:
+                raise RuntimeError(f'{exc}\nrestore.log tail:\n{server_tail}') from exc
+            raise
         started = True
         command(['createdb', 'sb_restore_check'], env=pg_env)
-        command(['pg_restore', '--exit-on-error', '--no-owner', '--no-acl', '-d', 'sb_restore_check', dump], env=pg_env)
+        command(['pg_restore', '--exit-on-error', '--no-owner', '--no-acl', '-d', 'sb_restore_check', dump],
+                env=pg_env, diagnostics=False)
         psql = ['psql', '-X', '-v', 'ON_ERROR_STOP=1', '-d', 'sb_restore_check', '-Atc']
         tables = command(psql + ["SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY 1"], env=pg_env).stdout.decode().split()
         counts = {}
