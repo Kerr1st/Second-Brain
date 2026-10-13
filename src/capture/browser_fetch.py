@@ -338,6 +338,8 @@ async def _bounded_aexit(client_cm) -> None:
     try:
         async with asyncio.timeout(CLOSE_TIMEOUT_S):
             await client_cm.__aexit__(None, None, None)
+    except SystemExit:
+        raise    # SIGTERM (_SigtermExit) ends the job; the callers' finally blocks clean up and reap
     except BaseException:  # noqa: BLE001 - teardown noise must not lose the results; reap_groups follows
         pass
 
@@ -374,69 +376,75 @@ async def fetch_pages(urls, *, page_timeout: float | None = None, max_pages: int
 
     try:
         try:
-            async with asyncio.timeout(LAUNCH_TIMEOUT_S):
-                client = await client_cm.__aenter__()
-        except Exception as e:  # noqa: BLE001 - a browser that will not start defers, never crashes the job
-            # A half-entered client (process + task groups) must not outlive the job.
-            _track(getattr(client_cm, "server_pids", None))
-            await _bounded_aexit(client_cm)
-            log(f"WARNING: browser path unavailable ({type(e).__name__}: {classify_error(e)}); "
-                f"{len(urls)} URL(s) deferred")
-            defer(urls, "launch")
-            return results
-        _track(getattr(client_cm, "server_pids", None))
-        try:
-            for i, url in enumerate(urls):
-                remaining = budget_s - (clock() - start)
-                if i >= max_pages or remaining < MIN_PAGE_START_S:
-                    reason = "max_pages" if i >= max_pages else "budget"
-                    log(f"Browser: {reason} reached ({i} page(s), {clock() - start:.0f}s of {budget_s:.0f}s); "
-                        f"{len(urls) - i} URL(s) deferred to the next run")
-                    defer(urls[i:], reason)
-                    break
-                target = canonical_url(url)
-                if target is None:
-                    results[url] = PageResult(url, "invalid_url")      # never navigated
-                    log(f"  [browser {i + 1}/{len(urls)}] {_host(url) or '?'}: invalid_url")
-                    continue
-                t0 = clock()
-                dead = False
-                try:
-                    async with asyncio.timeout(min(page_timeout, remaining)):
-                        res = await _fetch_one(client, url, clock, sleep, target)
-                except TimeoutError:
-                    res = PageResult(url, "error", detail="timeout")
-                except McpAuthError:
-                    res = PageResult(url, "auth", detail="server")     # e.g. "Missing ~/.midway/cookie"
-                except McpTransportError:
-                    res, dead = PageResult(url, "error", detail="transport"), True
-                except Exception as e:  # noqa: BLE001 - one page never aborts the run
-                    kind = classify_error(e)
-                    res = PageResult(url, "error", detail="timeout" if kind == "transport" else "tool")
-                res.seconds = clock() - t0
-                results[url] = res
-                _track(getattr(client_cm, "server_pids", None))           # a reconnect spawns a new group
-                log(f"  [browser {i + 1}/{len(urls)}] {_host(url)}: {res.outcome}"
-                    f"{f' ({res.detail})' if res.detail else ''} status={res.status or '-'} "
-                    f"chars={res.chars} s={res.seconds:.1f}")
-                if dead:
-                    log(f"WARNING: browser server died; {len(urls) - i - 1} URL(s) deferred")
-                    defer(urls[i + 1:], "server_down")
-                    break
             try:
-                async with asyncio.timeout(CLOSE_TIMEOUT_S):
-                    await client.call_text("browser_close", {})
-            except Exception:  # noqa: BLE001 - best-effort close; teardown kills the server anyway
-                pass
+                async with asyncio.timeout(LAUNCH_TIMEOUT_S):
+                    client = await client_cm.__aenter__()
+            except Exception as e:  # noqa: BLE001 - a browser that will not start defers, never crashes the job
+                # A half-entered client (process + task groups) must not outlive the job.
+                _track(getattr(client_cm, "server_pids", None))
+                await _bounded_aexit(client_cm)
+                log(f"WARNING: browser path unavailable ({type(e).__name__}: {classify_error(e)}); "
+                    f"{len(urls)} URL(s) deferred")
+                defer(urls, "launch")
+                return results
+            _track(getattr(client_cm, "server_pids", None))
+            try:
+                for i, url in enumerate(urls):
+                    remaining = budget_s - (clock() - start)
+                    if i >= max_pages or remaining < MIN_PAGE_START_S:
+                        reason = "max_pages" if i >= max_pages else "budget"
+                        log(f"Browser: {reason} reached ({i} page(s), {clock() - start:.0f}s of {budget_s:.0f}s); "
+                            f"{len(urls) - i} URL(s) deferred to the next run")
+                        defer(urls[i:], reason)
+                        break
+                    target = canonical_url(url)
+                    if target is None:
+                        results[url] = PageResult(url, "invalid_url")      # never navigated
+                        log(f"  [browser {i + 1}/{len(urls)}] {_host(url) or '?'}: invalid_url")
+                        continue
+                    t0 = clock()
+                    dead = False
+                    try:
+                        async with asyncio.timeout(min(page_timeout, remaining)):
+                            res = await _fetch_one(client, url, clock, sleep, target)
+                    except TimeoutError:
+                        res = PageResult(url, "error", detail="timeout")
+                    except McpAuthError:
+                        res = PageResult(url, "auth", detail="server")     # e.g. "Missing ~/.midway/cookie"
+                    except McpTransportError:
+                        res, dead = PageResult(url, "error", detail="transport"), True
+                    except Exception as e:  # noqa: BLE001 - one page never aborts the run
+                        kind = classify_error(e)
+                        res = PageResult(url, "error", detail="timeout" if kind == "transport" else "tool")
+                    res.seconds = clock() - t0
+                    results[url] = res
+                    _track(getattr(client_cm, "server_pids", None))           # a reconnect spawns a new group
+                    log(f"  [browser {i + 1}/{len(urls)}] {_host(url)}: {res.outcome}"
+                        f"{f' ({res.detail})' if res.detail else ''} status={res.status or '-'} "
+                        f"chars={res.chars} s={res.seconds:.1f}")
+                    if dead:
+                        log(f"WARNING: browser server died; {len(urls) - i - 1} URL(s) deferred")
+                        defer(urls[i + 1:], "server_down")
+                        break
+                try:
+                    async with asyncio.timeout(CLOSE_TIMEOUT_S):
+                        await client.call_text("browser_close", {})
+                except Exception:  # noqa: BLE001 - best-effort close; teardown kills the server anyway
+                    pass
+            finally:
+                await _bounded_aexit(client_cm)
         finally:
-            await _bounded_aexit(client_cm)
+            # Its own finally, ahead of the reap: a SIGTERM during the reap (or a
+            # teardown that re-raised one) still removes the .playwright-mcp dumps.
+            shutil.rmtree(scratch, ignore_errors=True)
     finally:
-        pids = getattr(client_cm, "server_pids", None)
-        if pids:
-            _track(pids)
-            reap_groups(pids)        # Chromium etc. left in the server's group after a clean exit
-        shutil.rmtree(scratch, ignore_errors=True)
-        defer(urls, "budget")       # never reached (cannot happen normally): still accounted for
+        try:
+            pids = getattr(client_cm, "server_pids", None)
+            if pids:
+                _track(pids)
+                reap_groups(pids)        # Chromium etc. left in the server's group after a clean exit
+        finally:
+            defer(urls, "budget")       # never reached (cannot happen normally): still accounted for
     return results
 
 

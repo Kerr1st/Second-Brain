@@ -823,3 +823,75 @@ class TestRealStdioServer:
                 proc.communicate(timeout=10)
         assert proc.returncode == 143 and "pass returned" not in stdout
         assert stub.wait_gone(pids) == []
+
+    def test_sigterm_during_teardown_exits_143_removes_scratch_and_leaves_no_process(self, tmp_path):
+        import signal
+        import subprocess
+        import sys
+        script = stub.write_stub(tmp_path)
+        scratch_root = tmp_path / "tmp"
+        scratch_root.mkdir()
+        runner = tmp_path / "run_pass.py"
+        runner.write_text(
+            "import sys, time\n"
+            f"sys.path.insert(0, {str(pathlib.Path.cwd())!r})\n"
+            "from src.capture import browser_fetch as bf\n"
+            "from src.capture.mcp_client import McpClient\n"
+            f"script, d = {str(script)!r}, {str(tmp_path)!r}\n"
+            "env = {'STUB_DIR': d}\n"
+            "class SlowExit(McpClient):\n"
+            "    async def __aexit__(self, *a):\n"
+            "        open(d + '/teardown', 'w').write('1')\n"
+            "        time.sleep(60)    # blocking: the SIGTERM lands inside the task, not in select\n"
+            "        return await super().__aexit__(*a)\n"
+            "f = lambda cwd, e: SlowExit(sys.executable, [script, 'ok'], call_timeout=20, env={**e, **env}, cwd=cwd)\n"
+            "bf.fetch_pages_sync(['https://docs.hub.amazon.dev/x'], client_factory=f)\n"
+            "print('pass returned')\n")
+        proc = subprocess.Popen([sys.executable, str(runner)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env={**os.environ, "TMPDIR": str(scratch_root)})
+        try:
+            stub.wait_for_file(tmp_path / "teardown", timeout=30)
+            pids = stub.stub_pids(tmp_path)
+            assert list(scratch_root.glob("sb-browser-*"))              # the pass's scratch cwd exists
+            proc.send_signal(signal.SIGTERM)
+            stdout, _ = proc.communicate(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate(timeout=10)
+        assert proc.returncode == 143 and "pass returned" not in stdout
+        assert list(scratch_root.glob("sb-browser-*")) == []
+        assert stub.wait_gone(pids) == []
+
+
+class TestTeardownSignals:
+    def test_bounded_aexit_re_raises_sigterm_and_the_scratch_dir_is_still_removed(self):
+        b = FakeBrowser({B: page(B, [LONG])})
+
+        async def aexit(*exc):
+            raise bf._SigtermExit(143)
+        b.__aexit__ = aexit
+        with pytest.raises(bf._SigtermExit):
+            run([B], b)
+        assert not os.path.exists(b.cwd)
+
+    def test_sigterm_during_the_reap_still_removes_the_scratch_dir(self, monkeypatch):
+        b = FakeBrowser({B: page(B, [LONG])})
+        b.server_pids = [999999]
+        monkeypatch.setattr(bf, "_track", lambda pids: None)
+
+        def reap(pids=None, grace_s=bf.REAP_GRACE_S):
+            assert not os.path.exists(b.cwd)                              # removed before the reap
+            raise bf._SigtermExit(143)
+        monkeypatch.setattr(bf, "reap_groups", reap)
+        with pytest.raises(bf._SigtermExit):
+            run([B], b)
+        assert not os.path.exists(b.cwd)
+
+    def test_other_teardown_errors_are_still_swallowed(self):
+        b = FakeBrowser({B: page(B, [LONG])})
+
+        async def aexit(*exc):
+            raise RuntimeError("anyio scope noise")
+        b.__aexit__ = aexit
+        assert run([B], b)[B].outcome == "ok" and not os.path.exists(b.cwd)
