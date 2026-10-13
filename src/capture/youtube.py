@@ -51,10 +51,19 @@ BROWSER = "chrome"
 
 STDERR_TAIL_CHARS = 300
 # yt-dlp errors that mean "this video will never have a fetchable transcript".
-# Network errors, HTTP 429/5xx, timeouts, the "not a bot" sign-in check (an
-# IP/rate block) and anything unknown are NOT here: they stay failures so the
-# video is retried.
+# Network errors, HTTP 5xx, timeouts, the "not a bot" sign-in check (an IP/rate
+# block) and anything unknown are NOT here: they stay failures so the video is
+# retried.
+# HTTP 429 is split by WHERE it happens. A 429 on the webpage, player/API or
+# playlist request is a real IP rate limit and stays a failure, so the job exits
+# non-zero. A 429 on the subtitle track itself ("Unable to download video
+# subtitles for 'en': HTTP Error 429") is per-track: the same few videos get it
+# every night, at any hour, while fetches seconds before and after succeed, and
+# a newer yt-dlp (nightly 2026.10.10) gets the same 429 (probed 2026-10-13).
+# It is treated as no_transcript. Nothing is persisted, so the video is still
+# retried each night and is picked up if YouTube starts serving the track.
 _PERMANENT_NO_TRANSCRIPT_RE = re.compile(
+    r"unable to download video subtitles for '[^']*': http error 429|"
     r"video unavailable|this video is unavailable|private video|video is private|"
     r"(has been|was) removed|video has been terminated|account associated with this video|"
     r"age[- ]restricted|confirm your age|inappropriate for some users|"

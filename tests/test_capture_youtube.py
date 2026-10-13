@@ -96,10 +96,53 @@ def test_fetch_transcript_clean_exit_without_vtt_is_no_transcript():
     "ERROR: [youtube] vidX: Sign in to confirm your age. This video may be inappropriate for some users.",
     "ERROR: [youtube] vidX: Join this channel to get access to members-only content like this video",
     "WARNING: There are no subtitles for the requested languages",
+    "ERROR: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests",
 ])
 def test_fetch_transcript_permanent_errors_are_no_transcript(stderr, caplog):
     with patch.object(youtube, "_ytdlp", _fake_ytdlp(1, "noise\n" * 200 + stderr)):
         assert youtube.fetch_transcript(_URL) is None
+
+
+def test_fetch_transcript_subtitle_track_429_is_no_transcript_real_stderr():
+    # Verbatim tail of a nightly failure (szDmH_8yQdk): metadata extracts fine,
+    # only the subtitle track request gets the 429.
+    stderr = (
+        "[youtube] szDmH_8yQdk: Downloading m3u8 information\n"
+        "[info] szDmH_8yQdk: Downloading subtitles: en\n"
+        "[info] szDmH_8yQdk: Downloading 1 format(s): 137+251\n"
+        "[info] Writing video subtitles to: /tmp/x/szDmH_8yQdk.en.vtt\n"
+        "ERROR: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests\n"
+    )
+    with patch.object(youtube, "_ytdlp", _fake_ytdlp(1, stderr)):
+        assert youtube.fetch_transcript(_URL) is None
+
+
+@pytest.mark.parametrize("stderr", [
+    "ERROR: [youtube] vidX: Unable to download webpage: HTTP Error 429: Too Many Requests",
+    "ERROR: [youtube] vidX: Unable to download player API JSON: HTTP Error 429: Too Many Requests",
+    "ERROR: [youtube:tab] LL: Unable to download API page: HTTP Error 429: Too Many Requests",
+    "ERROR: unable to download video data: HTTP Error 429: Too Many Requests",
+    "HTTP Error 429: Too Many Requests",
+])
+def test_fetch_transcript_non_subtitle_429_still_raises(stderr):
+    with patch.object(youtube, "_ytdlp", _fake_ytdlp(1, stderr)):
+        with pytest.raises(RuntimeError):
+            youtube.fetch_transcript(_URL)
+
+
+def test_capture_counts_subtitle_429_as_no_transcript_but_page_429_as_failed(monkeypatch):
+    monkeypatch.setattr(youtube, "is_reachable", lambda: True)
+    monkeypatch.setattr(youtube, "get_processed_source_urls", lambda st: set())
+    monkeypatch.setattr(youtube, "list_playlist", lambda pid: [
+        {"id": "vidX", "title": "T", "url": _URL, "duration": 900, "channel": "C"}])
+    monkeypatch.setattr(youtube, "_ytdlp", _fake_ytdlp(
+        1, "ERROR: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests"))
+    stats = youtube.capture(playlists=["LL"])
+    assert stats["failed"] == 0 and stats["no_transcript"] == 1
+    monkeypatch.setattr(youtube, "_ytdlp", _fake_ytdlp(
+        1, "ERROR: [youtube] vidX: Unable to download webpage: HTTP Error 429: Too Many Requests"))
+    stats = youtube.capture(playlists=["LL"])
+    assert stats["failed"] == 1 and stats["no_transcript"] == 0
 
 
 @pytest.mark.parametrize("stderr", [
