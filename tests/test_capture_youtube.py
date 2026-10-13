@@ -102,6 +102,50 @@ def test_fetch_transcript_permanent_errors_are_no_transcript(stderr, caplog):
         assert youtube.fetch_transcript(_URL) is None
 
 
+def test_fetch_transcript_subtitle_track_429_raises_subtitle_rate_limited_real_stderr():
+    # Verbatim tail of a nightly failure (szDmH_8yQdk): metadata extracts fine,
+    # only the subtitle track request gets the 429.
+    stderr = (
+        "[youtube] szDmH_8yQdk: Downloading m3u8 information\n"
+        "[info] szDmH_8yQdk: Downloading subtitles: en\n"
+        "[info] szDmH_8yQdk: Downloading 1 format(s): 137+251\n"
+        "[info] Writing video subtitles to: /tmp/x/szDmH_8yQdk.en.vtt\n"
+        "ERROR: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests\n"
+    )
+    with patch.object(youtube, "_ytdlp", _fake_ytdlp(1, "noise\n" * 200 + stderr)):
+        with pytest.raises(youtube.SubtitleRateLimited):
+            youtube.fetch_transcript(_URL)
+    assert not issubclass(youtube.SubtitleRateLimited, (OSError, RuntimeError, ValueError))
+
+
+@pytest.mark.parametrize("stderr", [
+    "ERROR: [youtube] vidX: Unable to download webpage: HTTP Error 429: Too Many Requests",
+    "ERROR: [youtube] vidX: Unable to download player API JSON: HTTP Error 429: Too Many Requests",
+    "ERROR: [youtube:tab] LL: Unable to download API page: HTTP Error 429: Too Many Requests",
+    "ERROR: unable to download video data: HTTP Error 429: Too Many Requests",
+    "HTTP Error 429: Too Many Requests",
+])
+def test_fetch_transcript_non_subtitle_429_still_raises(stderr):
+    with patch.object(youtube, "_ytdlp", _fake_ytdlp(1, stderr)):
+        with pytest.raises(RuntimeError):
+            youtube.fetch_transcript(_URL)
+
+
+def test_capture_counts_subtitle_429_as_no_transcript_but_page_429_as_failed(monkeypatch):
+    monkeypatch.setattr(youtube, "is_reachable", lambda: True)
+    monkeypatch.setattr(youtube, "get_processed_source_urls", lambda st: set())
+    monkeypatch.setattr(youtube, "list_playlist", lambda pid: [
+        {"id": "vidX", "title": "T", "url": _URL, "duration": 900, "channel": "C"}])
+    monkeypatch.setattr(youtube, "_ytdlp", _fake_ytdlp(
+        1, "ERROR: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests"))
+    stats = youtube.capture(playlists=["LL"])
+    assert stats["failed"] == 0 and stats["no_transcript"] == 1
+    monkeypatch.setattr(youtube, "_ytdlp", _fake_ytdlp(
+        1, "ERROR: [youtube] vidX: Unable to download webpage: HTTP Error 429: Too Many Requests"))
+    stats = youtube.capture(playlists=["LL"])
+    assert stats["failed"] == 1 and stats["no_transcript"] == 0
+
+
 @pytest.mark.parametrize("stderr", [
     "ERROR: [youtube] vidX: Unable to download webpage: HTTP Error 429: Too Many Requests",
     "ERROR: [youtube] vidX: HTTP Error 503: Service Unavailable",
@@ -133,3 +177,99 @@ def test_capture_counts_permanent_errors_as_no_transcript_not_failed(monkeypatch
     monkeypatch.setattr(youtube, "_ytdlp", _fake_ytdlp(1, "HTTP Error 429: Too Many Requests"))
     stats = youtube.capture(playlists=["LL"])
     assert stats["failed"] == 1 and stats["no_transcript"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Silent-zero guard: an IP-wide timedtext block gives every video a subtitle   #
+# 429. That must fail the run, while the chronic few must not (review B1).     #
+# --------------------------------------------------------------------------- #
+_SUB_429 = "ERROR: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests"
+
+
+def _vid(n):
+    return {"id": f"v{n}", "title": f"T{n}", "url": f"https://www.youtube.com/watch?v=v{n}",
+            "duration": 900, "channel": "C"}
+
+
+def _run_capture(monkeypatch, outcomes, already=(), extra_entries=()):
+    """outcomes: {video_index: "429" | "none" | "ok" | "fail"} in enumeration order."""
+    entries = [_vid(n) for n in outcomes] + list(extra_entries)
+    monkeypatch.setattr(youtube, "is_reachable", lambda: True)
+    monkeypatch.setattr(youtube, "get_processed_source_urls", lambda st: set(already))
+    monkeypatch.setattr(youtube, "list_playlist", lambda pid: entries)
+    monkeypatch.setattr(youtube, "run_channel",
+                        lambda name, items, ingest: {"processed": len(items), "skipped": 0, "failed": 0})
+    by_url = {_vid(n)["url"]: kind for n, kind in outcomes.items()}
+    stderr_for = {"429": _SUB_429, "none": "ERROR: [youtube] vX: Private video",
+                  "fail": "ERROR: [youtube] vX: HTTP Error 503: Service Unavailable"}
+
+    def ytdlp(args, timeout=180):
+        # Real fetch_transcript runs; only the yt-dlp subprocess is faked per URL.
+        kind = by_url[args[-1]]
+        if kind == "ok":
+            return _fake_ytdlp(0, write_vtt=True)(args, timeout)
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr=stderr_for[kind])
+
+    monkeypatch.setattr(youtube, "_ytdlp", ytdlp)
+    return youtube.capture(playlists=["LL"])
+
+
+def test_subtitle_429_on_two_fetched_videos_only_is_below_threshold(monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING, logger=youtube.logger.name):
+        stats = _run_capture(monkeypatch, {1: "429", 2: "429"})
+    assert stats["subtitle_429"] == 2 and stats["no_transcript"] == 2
+    assert stats["failed"] == 0 and youtube.exit_code(stats) == 0
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "429" in r.getMessage()]
+    assert len(warnings) == 2
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_subtitle_429_on_every_one_of_three_fetched_videos_fails(monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING, logger=youtube.logger.name):
+        stats = _run_capture(monkeypatch, {1: "429", 2: "429", 3: "429"})
+    assert stats["subtitle_429"] == 3 and stats["no_transcript"] == 3
+    assert stats["processed"] == 0 and stats["failed"] == 1 and youtube.exit_code(stats) == 1
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("rate-limited for every candidate" in m for m in errors)
+
+
+def test_skipped_videos_do_not_count_as_attempted(monkeypatch):
+    # 3 fetched, all subtitle 429; 2 already processed and 1 short video are
+    # skipped and must not dilute "every candidate" -> still failed.
+    old = [_vid(10), _vid(11)]
+    short = dict(_vid(12), duration=30)
+    stats = _run_capture(monkeypatch, {1: "429", 2: "429", 3: "429"},
+                         already={v["url"] for v in old}, extra_entries=old + [short])
+    assert stats["skipped"] == 3 and stats["failed"] == 1
+
+
+def test_subtitle_429s_plus_one_success_exits_zero(monkeypatch):
+    stats = _run_capture(monkeypatch, {1: "429", 2: "429", 3: "429", 4: "429", 5: "ok"})
+    assert stats["subtitle_429"] == 4 and stats["processed"] == 1
+    assert stats["failed"] == 0 and youtube.exit_code(stats) == 0
+
+
+def test_subtitle_429s_plus_one_permanent_no_transcript_exits_zero(monkeypatch):
+    # Not every fetched video got the 429 -> not an endpoint-wide block.
+    stats = _run_capture(monkeypatch, {1: "429", 2: "429", 3: "429", 4: "none"})
+    assert stats["subtitle_429"] == 3 and stats["no_transcript"] == 4
+    assert stats["failed"] == 0 and youtube.exit_code(stats) == 0
+
+
+def test_todays_nightly_five_chronic_429s_among_57_attempted_exits_zero(monkeypatch):
+    # 2026-10-13 production shape: ~57 fetched, the same 5 chronic videos get
+    # the subtitle 429, the other 52 are permanent no_transcript (private,
+    # removed, no captions ...), nothing new processed. Must still exit 0.
+    outcomes = {n: ("429" if n < 5 else "none") for n in range(57)}
+    stats = _run_capture(monkeypatch, outcomes)
+    assert stats["subtitle_429"] == 5 and stats["no_transcript"] == 57
+    assert stats["processed"] == 0 and stats["failed"] == 0
+    assert youtube.exit_code(stats) == 0
+
+
+def test_dry_run_never_trips_the_subtitle_429_guard(monkeypatch):
+    monkeypatch.setattr(youtube, "is_reachable", lambda: True)
+    monkeypatch.setattr(youtube, "get_processed_source_urls", lambda st: set())
+    monkeypatch.setattr(youtube, "list_playlist", lambda pid: [_vid(n) for n in range(5)])
+    stats = youtube.capture(playlists=["LL"], dry_run=True)
+    assert stats["planned"] == 5 and stats["failed"] == 0
