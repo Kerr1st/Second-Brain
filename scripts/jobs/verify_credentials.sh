@@ -229,7 +229,7 @@ try:
 except Exception as e:  # one classified line on stderr + the capture jobs' exit code
     leaf = _leaf(e)
     kind = classify_error(e) if "classify_error" in globals() else "error"
-    print(f"{type(leaf).__name__}: {' '.join(str(leaf).split())[:300]}", file=sys.stderr)
+    print(f"{type(leaf).__name__}: {' '.join(str(leaf).split())}", file=sys.stderr)  # sanitize redacts, then caps
     sys.exit(KIND_EXIT.get(kind, 1) if "KIND_EXIT" in globals() else 1)
 EOF
 check required "slack:slack-mcp" "$PYTHON_BIN" - <<'EOF'
@@ -254,7 +254,7 @@ try:
 except Exception as e:  # one classified line on stderr + the capture jobs' exit code
     leaf = _leaf(e)
     kind = classify_error(e) if "classify_error" in globals() else "error"
-    print(f"{type(leaf).__name__}: {' '.join(str(leaf).split())[:300]}", file=sys.stderr)
+    print(f"{type(leaf).__name__}: {' '.join(str(leaf).split())}", file=sys.stderr)  # sanitize redacts, then caps
     sys.exit(KIND_EXIT.get(kind, 1) if "KIND_EXIT" in globals() else 1)
 EOF
 
