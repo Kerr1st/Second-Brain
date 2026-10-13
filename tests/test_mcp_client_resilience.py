@@ -274,3 +274,64 @@ class TestReconnect:
         asyncio.run(_connect())
         assert asyncio.run(client.call_json("x")) == {"ok": 1}
         assert slept == [2.5]
+
+
+# --------------------------------------------------------------------------- #
+# McpClient.call_text: raw markdown replies (midway-playwright)                #
+# --------------------------------------------------------------------------- #
+PLAYWRIGHT_EVAL = '### Result\n"{\\"x\\":\\"hello\\"}"\n### Ran Playwright code\n```js\nawait page.evaluate(...)\n```'
+
+
+class TestCallText:
+    def test_returns_concatenated_text_unparsed(self):
+        reply = SimpleNamespace(content=[SimpleNamespace(text="### Page\n"), SimpleNamespace(type="image"),
+                                         SimpleNamespace(text="- Page URL: https://x/")], isError=False)
+        client = _client(FakeSession(reply))
+        assert asyncio.run(client.call_text("browser_navigate", {"url": "https://x/"})) == \
+            "### Page\n- Page URL: https://x/"
+
+    def test_markdown_that_call_json_rejects_is_fine_for_call_text(self):
+        client = _client(FakeSession(_reply(PLAYWRIGHT_EVAL), _reply(PLAYWRIGHT_EVAL)))
+        assert asyncio.run(client.call_text("browser_evaluate")) == PLAYWRIGHT_EVAL
+        with pytest.raises(McpToolError, match="no JSON"):
+            asyncio.run(client.call_json("browser_evaluate"))
+
+    def test_page_text_mentioning_auth_words_is_not_an_auth_error(self):
+        # A successful reply is page content; only isError replies are judged.
+        client = _client(FakeSession(_reply('{"error": "AUTH_ERROR", "message": "unauthorized"}')))
+        assert "AUTH_ERROR" in asyncio.run(client.call_text("browser_evaluate"))
+
+    def test_tool_error_is_a_tool_error(self):
+        client = _client(FakeSession(_reply("### Error\nExecution context was destroyed", is_error=True)))
+        with pytest.raises(McpToolError, match="Execution context was destroyed"):
+            asyncio.run(client.call_text("browser_evaluate"))
+        assert client.reconnects_used == 0
+
+    def test_auth_tool_error_is_auth(self):
+        client = _client(FakeSession(_reply("Missing ~/.midway/cookie — run mwinit first", is_error=True)))
+        with pytest.raises(McpAuthError):
+            asyncio.run(client.call_text("browser_navigate"))
+
+    def test_reconnects_once_like_call_json(self):
+        dead, fresh = FakeSession(closed()), FakeSession(_reply("### Page\nok"))
+        client = _client(dead, fresh)
+        assert asyncio.run(client.call_text("browser_navigate")) == "### Page\nok"
+        assert client.reconnects_used == 1 and len(client.connects) == 2
+        client2 = _client(FakeSession(closed()), FakeSession(closed()))
+        with pytest.raises(McpTransportError):
+            asyncio.run(client2.call_text("browser_navigate"))
+
+    def test_timeout_is_classified_like_call_json(self):
+        class Hung(FakeSession):
+            async def call_tool(self, tool, params):
+                await asyncio.sleep(5)
+
+        client = _client(Hung(), call_timeout=0.01)
+        with pytest.raises(McpToolError, match="timed out after") as info:
+            asyncio.run(client.call_text("browser_evaluate"))
+        assert classify_error(info.value) == "transport" and client.reconnects_used == 0
+
+    def test_env_and_cwd_reach_the_server_parameters(self, tmp_path):
+        client = McpClient("/bin/true", ["--caps", "core"], env={"PATH": "/usr/bin"}, cwd=str(tmp_path))
+        assert client._params.env == {"PATH": "/usr/bin"} and str(client._params.cwd) == str(tmp_path)
+        assert McpClient("/bin/true")._params.env is None

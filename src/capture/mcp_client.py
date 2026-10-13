@@ -312,8 +312,13 @@ class McpClient:
                  reconnect_backoff: float = DEFAULT_RECONNECT_BACKOFF,
                  rate_limit_retries: int = DEFAULT_RATE_LIMIT_RETRIES,
                  rate_limit_max_wait: float = DEFAULT_RATE_LIMIT_MAX_WAIT,
-                 rate_limit_wait_budget: float = DEFAULT_RATE_LIMIT_WAIT_BUDGET):
-        self._params = StdioServerParameters(command=command, args=list(args or []))
+                 rate_limit_wait_budget: float = DEFAULT_RATE_LIMIT_WAIT_BUDGET,
+                 env: dict[str, str] | None = None, cwd: str | None = None):
+        # ``env``/``cwd`` default to the SDK's (a minimal env, our cwd). The
+        # browser fetcher passes the job env and a private scratch cwd, because
+        # midway-playwright writes page dumps into ``<cwd>/.playwright-mcp/``.
+        self._params = StdioServerParameters(command=command, args=list(args or []),
+                                             env=dict(env) if env is not None else None, cwd=cwd)
         self._timeout = call_timeout
         self._max_reconnects = max(0, int(max_reconnects))
         self._reconnect_backoff = reconnect_backoff
@@ -353,7 +358,7 @@ class McpClient:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self._teardown(exc_type, exc, tb)
 
-    async def _call_once(self, tool: str, params: dict | None = None) -> Any:
+    async def _call_once(self, tool: str, params: dict | None = None, *, raw: bool = False) -> Any:
         assert self._session is not None, "McpClient used outside 'async with'"
         try:
             result = await asyncio.wait_for(
@@ -369,13 +374,17 @@ class McpClient:
             if is_rate_limited(text):
                 raise McpRateLimited(f"{tool}: {_one_line(text)}", rate_limit_retry_after(text))
             raise McpToolError(f"{tool}: {text[:300]}")
+        if raw:
+            # Raw replies (playwright markdown) are page content: never judged for
+            # auth markers here — a page *about* "unauthorized" is still a page.
+            return text
         payload = parse_payload(text)
         auth = auth_error_in_payload(payload)
         if auth:
             raise McpAuthError(f"{tool}: {auth}")
         return payload
 
-    async def _call_rate_limited(self, tool: str, params: dict | None = None) -> Any:
+    async def _call_rate_limited(self, tool: str, params: dict | None = None, *, raw: bool = False) -> Any:
         """``_call_once`` plus a bounded Retry-After loop for throttled replies.
 
         Every throttled reply is counted in ``rate_limit_hits``. A retry waits
@@ -387,7 +396,7 @@ class McpClient:
         attempt = 0
         while True:
             try:
-                return await self._call_once(tool, params)
+                return await self._call_once(tool, params, raw=raw)
             except McpRateLimited as e:
                 self.rate_limit_hits += 1
                 wait = e.retry_after if e.retry_after is not None else DEFAULT_RATE_LIMIT_FALLBACK_WAIT
@@ -412,8 +421,21 @@ class McpClient:
         :meth:`_call_rate_limited`). Anything else — including auth errors —
         propagates untouched.
         """
+        return await self._call_reconnecting(tool, params, raw=False)
+
+    async def call_text(self, tool: str, params: dict | None = None) -> str:
+        """Call ``tool`` and return the concatenated text content of its reply.
+
+        For servers that answer markdown rather than JSON (midway-playwright).
+        Same per-call timeout, error classification (tool error / auth /
+        rate limit) and once-per-session reconnect as :meth:`call_json`; only
+        the JSON parsing (and the in-payload auth sniff) is skipped.
+        """
+        return await self._call_reconnecting(tool, params, raw=True)
+
+    async def _call_reconnecting(self, tool: str, params: dict | None, *, raw: bool) -> Any:
         try:
-            return await self._call_rate_limited(tool, params)
+            return await self._call_rate_limited(tool, params, raw=raw)
         except Exception as e:
             if not is_connection_closed(e):
                 raise
@@ -428,7 +450,7 @@ class McpClient:
             await asyncio.sleep(self._reconnect_backoff)
             try:
                 await self._connect()
-                return await self._call_rate_limited(tool, params)
+                return await self._call_rate_limited(tool, params, raw=raw)
             except Exception as retry_exc:
                 if is_auth_error(retry_exc):
                     raise  # the server came back and told us the token is stale
