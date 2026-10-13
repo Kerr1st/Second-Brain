@@ -1515,9 +1515,21 @@ def test_every_semantic_contract_raise_site_uses_a_fixed_sentence():
     ]
     assert len(raised) >= 10
 
+    def _cause_type_name(node):
+        # Exactly ``type(<name>).__name__`` -- a class name, never a message.
+        return (isinstance(node, ast.FormattedValue) and node.format_spec is None
+                and isinstance(node.value, ast.Attribute) and node.value.attr == "__name__"
+                and isinstance(node.value.value, ast.Call)
+                and getattr(node.value.value.func, "id", None) == "type")
+
     for call in raised:
-        assert [type(arg) for arg in call.args] == [ast.Constant], ast.unparse(call)
-        assert not call.keywords
+        assert not call.keywords and len(call.args) == 1, ast.unparse(call)
+        (arg,) = call.args
+        if isinstance(arg, ast.JoinedStr):
+            # Only the backend-wrapped miss appends its cause's type name.
+            assert all(isinstance(v, ast.Constant) or _cause_type_name(v) for v in arg.values), ast.unparse(call)
+        else:
+            assert isinstance(arg, ast.Constant), ast.unparse(call)
 
 def test_task_failure_message_is_empty_for_every_non_contract_failure():
     """Review E2: DB (psycopg DETAIL: Key (...)=(...)), embedding and CLI stderr
@@ -1543,6 +1555,48 @@ def test_task_failure_message_is_empty_for_every_non_contract_failure():
     assert [f.error_type for f in failures[:-1]] == [
         "UniqueViolation", "RuntimeError", "RuntimeError", "SemanticBatchTooLarge", "OSError"]
     assert failures[-1].message == "memory fields have invalid types"
+
+
+def _backend_pass_raising(monkeypatch, error):
+    monkeypatch.setattr(codex_capture, "resolve_stage",
+                        lambda role: (object(), SimpleNamespace(effort=None, model="m")))
+
+    def invoke(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(codex_capture, "invoke_metered", invoke)
+    return codex_capture._BackendSemanticPass()
+
+
+def test_backend_wrapped_contract_miss_names_only_the_cause_type(monkeypatch):
+    """Review E3: a response-bearing backend error (bad JSON, refusal, truncation)
+    says which kind it was, never what the model wrote."""
+    raw = '{"segments": [ PRIVATE MODEL OUTPUT turn text'
+    cause = json.JSONDecodeError("Expecting value", raw, 15)
+    cause.model_response_received = True
+    semantic = _backend_pass_raising(monkeypatch, cause)
+    with pytest.raises(codex_capture.SemanticResultError) as raised:
+        semantic.run(previous_segment=None, turns=())
+    assert raised.value.__cause__ is cause
+    message = codex_capture._failure_message(raised.value)
+    assert message == "model response failed the semantic contract; cause=JSONDecodeError"
+    assert "PRIVATE" not in message and "Expecting value" not in message
+
+    class ModelRefusalError(RuntimeError):
+        pass
+
+    refusal = ModelRefusalError("I can't help with: private turn text")
+    refusal.model_response_received = True
+    with pytest.raises(codex_capture.SemanticResultError) as raised:
+        _backend_pass_raising(monkeypatch, refusal).run(previous_segment=None, turns=())
+    assert str(raised.value).endswith("; cause=ModelRefusalError")
+    assert "private" not in str(raised.value)
+
+
+def test_backend_error_without_a_model_response_is_not_wrapped(monkeypatch):
+    outage = ConnectionError("endpoint unreachable")
+    with pytest.raises(ConnectionError):
+        _backend_pass_raising(monkeypatch, outage).run(previous_segment=None, turns=())
 
 
 def test_semantic_contract_identity_includes_prompt_version_and_model():

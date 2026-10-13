@@ -257,7 +257,14 @@ class _BackendSemanticPass:
             raise
         except Exception as exc:
             if getattr(exc, "model_response_received", False):
-                raise SemanticResultError("model response failed the semantic contract") from exc
+                # Only the cause's type name (JSONDecodeError, ModelRefusalError,
+                # ...) is appended, never its message: that may carry model output.
+                # (``from exc`` makes exc the __cause__, so this is
+                # type(error.__cause__).__name__.)
+                raise SemanticResultError(
+                    "model response failed the semantic contract; "
+                    f"cause={type(exc).__name__}"
+                ) from exc
             raise
         return _parse_semantic_output(result["output"])
 
