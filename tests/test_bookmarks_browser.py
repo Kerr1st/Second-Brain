@@ -669,6 +669,16 @@ class TestReviewRouting:
         assert midway["deferred"] == 3 and midway["cause"] == sb.MIDWAY_CAUSE_LATE
         assert not (tmp_path / "jobs" / "bookmarks-browser.backlog.json").exists()
 
+    def test_job_deadline_too_short_for_the_browser_pass_defers_it_with_its_own_cause(self, sb, tmp_path,
+                                                                                     monkeypatch, capsys):
+        monkeypatch.setattr(sb, "browser_budget_s", lambda started: 30.0)
+        rc, t = self._main(sb, tmp_path, monkeypatch, [A, B, W], lambda u: "ok", session_left=[7200.0, 7200.0])
+        out = capsys.readouterr().out
+        assert t.browser_calls == [] and "deferred_auth=2" in out and "job deadline" in out
+        assert self._ledger(tmp_path) == {}
+        midway = json.loads((tmp_path / "jobs" / "bookmarks-midway.backlog.json").read_text())
+        assert midway["deferred"] == 2 and midway["cause"] == sb.MIDWAY_CAUSE_DEADLINE
+
 
 # --------------------------------------------------------------------------- #
 # A real stdio MCP server (tests/_stub_browser_mcp.py): no orphans             #

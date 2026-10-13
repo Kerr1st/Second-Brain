@@ -791,6 +791,8 @@ MIDWAY_CAUSE_CANARY = "Midway session rejected at run time (canary page hit sign
 MIDWAY_CAUSE_BROWSER = "browser sign-in failed for every page (Midway mint) — run mwinit"
 MIDWAY_CAUSE_LATE = ("the Midway session ends before the browser pass could run "
                      "(< 10 min margin + 60 s budget left) — run mwinit")
+MIDWAY_CAUSE_DEADLINE = ("the job deadline left < 60 s for the browser pass (the cookie path took the time); "
+                         "browser URLs deferred to the next run")
 #: ``[backlog.bookmarks-browser]`` cause text per browser deferral ``detail``.
 BROWSER_DEFER_CAUSES = {
     "launch": "the browser (midway-playwright) did not start — check node >= 20 and aim on the job PATH",
@@ -925,13 +927,17 @@ def main():
     browser_budget = 0.0
     if browser_queue:
         session_left = midway_session_seconds_left() or 0.0
-        browser_budget = min(browser_budget_s(started), session_left - BROWSER_SESSION_MARGIN_S)
+        deadline_budget = browser_budget_s(started)
+        browser_budget = min(deadline_budget, session_left - BROWSER_SESSION_MARGIN_S)
         if browser_budget < BROWSER_MIN_BUDGET_S:
             browser_allowed = False
             deferred_auth += len(browser_queue)
-            midway_cause = MIDWAY_CAUSE_LATE
-            print(f"WARNING: only {max(0.0, session_left) / 60:.0f} min of Midway session left before the browser "
-                  f"pass — run mwinit; {len(browser_queue)} browser URL(s) deferred_auth (no launch, no strike)")
+            session_short = session_left - BROWSER_SESSION_MARGIN_S <= deadline_budget
+            midway_cause = MIDWAY_CAUSE_LATE if session_short else MIDWAY_CAUSE_DEADLINE
+            why = (f"only {max(0.0, session_left) / 60:.0f} min of Midway session left — run mwinit" if session_short
+                   else f"only {max(0.0, deadline_budget):.0f} s of the job deadline left")
+            print(f"WARNING: {why} before the browser pass; {len(browser_queue)} browser URL(s) "
+                  f"deferred_auth (no launch, no strike)")
             browser_queue = []
     if browser_queue:
         print(f"\n--- Internal links via browser ({len(browser_queue)}, "
