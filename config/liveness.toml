@@ -212,3 +212,16 @@ reason = "capture_codex.py: Bedrock answers failed the Codex semantic evidence c
 [backlog.bookmarks-midway]
 consecutive_runs = 3
 reason = "Midway sign-in failed at bookmarks run time (cookie missing/expired, or session rejected: see 'last run') — run mwinit before Saturday 01:00 or run the job manually"
+
+# Dynamic unsupported_auth (scrape_bookmarks.py, 2026-10-13 review): an internal host
+# that is neither a verified Midway host nor pre-routed as non-Midway answered a
+# bare 401/403 or a sign-in page with no idp.federate/midway-auth hop. No ledger
+# strike (it is not the bookmark's fault), so without this it would stay unscraped
+# with exit 0 forever. Each run whose internal path ran records the count in
+# logs/jobs/bookmarks-unsupported.backlog.json ("cause" lists the hosts). Pre-routed
+# hosts (sharepoint/atoz/coupa/docs.hub, skipped_unsupported) are expected and do
+# not count. A run with none resets the streak; a run whose internal path was
+# skipped (Midway cookie missing/expired) leaves it untouched.
+[backlog.bookmarks-unsupported]
+consecutive_runs = 3
+reason = "scrape_bookmarks.py: internal host(s) without a Midway sign-in answered a bare 403/sign-in in 3+ consecutive runs (unsupported_auth, no strike, never scraped); the hosts are in 'last run' and in the job log WARNING — pre-route them in NON_MIDWAY_AUTH_HOSTS or add them to MIDWAY_HOSTS"

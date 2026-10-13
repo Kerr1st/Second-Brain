@@ -938,6 +938,42 @@ class TestInternalAuthRouting:
         assert rc == 0 and calls == []
         assert "eligible=0 attempted=0" in out and "-> exit 0" in out
 
+    # ------------------------------------------------ unsupported_auth visibility (review §2)
+
+    def test_dynamic_unsupported_auth_builds_its_own_streak_naming_the_hosts(self, sb, tmp_path, monkeypatch, capsys):
+        state = tmp_path / "jobs" / "bookmarks-unsupported.backlog.json"
+        urls = ["https://awsinsights.aws.dev/a", "https://hyperbadge.amazon.dev/b", "https://awsinsights.aws.dev/c",
+                "https://w.amazon.com/bin/view/Ok"]
+        outcome = lambda u: "ok" if "w.amazon" in u else "unsupported_auth"
+        for run in (1, 2, 3):
+            rc, _ = self._main(sb, tmp_path, monkeypatch, urls, outcome)
+            out = capsys.readouterr().out
+            value = json.loads(state.read_text())
+            assert rc == 0 and value["consecutive_deferred_runs"] == run and value["deferred"] == 3
+            assert value["cause"] == "hosts: awsinsights.aws.dev, hyperbadge.amazon.dev"
+            assert "awsinsights.aws.dev (2), hyperbadge.amazon.dev (1)" in out           # job log WARNING
+            assert ("WARNING: bookmarks-unsupported backlog persists" in out) is (run == 3)
+        assert "/a" not in value["cause"]                                                # hosts only
+        self._main(sb, tmp_path, monkeypatch, urls[-1:], lambda u: "ok")
+        assert json.loads(state.read_text())["consecutive_deferred_runs"] == 0
+
+    def test_pre_routed_non_midway_hosts_do_not_count_toward_the_unsupported_streak(
+            self, sb, tmp_path, monkeypatch, capsys):
+        urls = ["https://amazon.sharepoint.com/sites/A", "https://atoz.amazon.work/home",
+                "https://amazon.coupahost.com/x", "https://docs.hub.amazon.dev/kiro/", "https://w.amazon.com/bin/view/Ok"]
+        rc, _ = self._main(sb, tmp_path, monkeypatch, urls, lambda u: "ok")
+        assert rc == 0 and "4 not fetched" in capsys.readouterr().out
+        value = json.loads((tmp_path / "jobs" / "bookmarks-unsupported.backlog.json").read_text())
+        assert value["consecutive_deferred_runs"] == 0 and value["deferred"] == 0 and "cause" not in value
+
+    def test_unsupported_streak_is_untouched_when_the_internal_path_did_not_run(self, sb, tmp_path, monkeypatch):
+        from src.operations import backlog
+        backlog.record_run("bookmarks-unsupported", 2, tmp_path / "jobs")
+        monkeypatch.setattr(sb, "midway_session_valid", lambda path=None: False)
+        self._main(sb, tmp_path, monkeypatch, ["https://awsinsights.aws.dev/a"], lambda u: "unsupported_auth")
+        assert backlog.read_state("bookmarks-unsupported", tmp_path / "jobs")["consecutive_deferred_runs"] == 1
+
+
 class TestAuthJudging:
     """Review 2026-10-13 §1: path false positives, chains on unknown hosts, a 200 after a Midway hop."""
 

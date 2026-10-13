@@ -385,6 +385,32 @@ def test_midway_advisory_names_the_last_runs_cause(tmp_path, policy):
     backlog.record_run("bookmarks-midway", 0, tmp_path, now=NOW + timedelta(days=28), cause=cause)
     assert "cause" not in backlog.read_state("bookmarks-midway", tmp_path)        # only deferring runs
 
+
+def test_unknown_host_unsupported_auth_is_its_own_advisory_streak(tmp_path, policy):
+    """bookmarks-unsupported.backlog.json: 3 runs in a row with dynamic unsupported_auth →
+    advisory naming the hosts, never required; the job-status sweep ignores the sidecar."""
+    from src.operations import backlog
+    entry = policy["backlog"]["bookmarks-unsupported"]
+    assert entry["consecutive_runs"] == 3
+    assert "job log WARNING" in entry["reason"] and "host" in entry["reason"]
+    hosts = "hosts: awsinsights.aws.dev, inside.amazon.com"
+    for run in range(1, 4):
+        backlog.record_run("bookmarks-unsupported", 3, tmp_path, now=NOW + timedelta(days=7 * run), cause=hosts)
+        finding = _backlog(tmp_path, policy, "bookmarks-unsupported")
+        assert finding["healthy"] is (run < 3) and not required_failure(finding)
+    assert finding["severity"] == "advisory" and hosts in finding["message"]
+    assert inspect_statuses(tmp_path, now=NOW) == []                              # a sidecar, not a job
+    report = liveness.write_report(tmp_path / "liveness-report.json",
+                                   liveness.run(policy, tmp_path, now=NOW, skip_db=True), NOW)
+    assert report["healthy"] is True and "bookmarks-unsupported" in report["advisories"]
+    backlog.record_run("bookmarks-unsupported", 0, tmp_path, now=NOW + timedelta(days=28))
+    assert _backlog(tmp_path, policy, "bookmarks-unsupported")["state"] == "healthy"
+
+
+def test_unsupported_backlog_is_the_last_table_in_the_policy_file():
+    text = (REPO / "config/liveness.toml").read_text()
+    assert text.rstrip().splitlines()[-3] == "[backlog.bookmarks-unsupported]"
+
 # ------------------------------------------------------- end to end (database)
 
 def _seed(conn, source_type, days_ago, count=1):

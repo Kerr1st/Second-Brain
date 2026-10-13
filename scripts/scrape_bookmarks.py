@@ -653,6 +653,7 @@ def canary_outcome(fetch=None):
 
 
 def main():
+    from collections import Counter
     started = time.monotonic()
     with open(BOOKMARKS_PATH) as f:
         data = json.load(f)
@@ -691,6 +692,7 @@ def main():
     internal = [(n, u) for n, u in internal if not midway_unsupported(u)]
 
     midway_cause = None
+    internal_ran = bool(internal)
     if internal and not midway_session_valid():
         # Every internal fetch would be an auth strike for a session problem:
         # skip the path, no ledger strike, retried next run (still unindexed).
@@ -698,6 +700,8 @@ def main():
         midway_cause = MIDWAY_CAUSE_COOKIE
         print(f"WARNING: Midway cookie missing/expired — run mwinit; {deferred_auth} internal URLs deferred")
         internal = []
+        internal_ran = False
+    unsupported_hosts = Counter()
 
     # Internal links with cookies
     if internal:
@@ -713,6 +717,7 @@ def main():
                 outcomes[url] = "auth"
             elif outcome == "unsupported_auth":
                 unsupported_auth += 1      # attempted; not a ledger outcome (no strike)
+                unsupported_hosts[_host(url)] += 1
             elif outcome == "too_short":
                 too_short += 1
                 outcomes[url] = "too_short"
@@ -736,6 +741,10 @@ def main():
                 for url in [u for u, c in outcomes.items() if c == "auth"]:
                     del outcomes[url]
                 deferred_auth, skipped_auth = skipped_auth, 0
+    if unsupported_hosts:
+        print(f"WARNING: {unsupported_auth} internal URL(s) on host(s) without a Midway sign-in answered a bare "
+              f"403/sign-in (unsupported_auth, no strike): "
+              + ", ".join(f"{h} ({n})" for h, n in sorted(unsupported_hosts.items())))
 
     # Public links with Crawlee: bounded batches, total kept under the job deadline.
     budget = job_deadline_s() - (time.monotonic() - started) - DEADLINE_MARGIN_S
@@ -754,6 +763,11 @@ def main():
     record_unreachable(ledger, outcomes, len(unreachable), killed_deferred=killed_deferred)
     report_backlog(public_stats.get("deferred", 0))
     report_backlog(deferred_auth, job=MIDWAY_BACKLOG_JOB, cause=midway_cause)
+    if internal_ran:
+        # Only runs whose internal path ran say anything about unknown hosts; the
+        # pre-routed known non-Midway hosts (skipped_unsupported) are expected, not counted.
+        report_backlog(unsupported_auth, job=UNSUPPORTED_BACKLOG_JOB,
+                       cause=("hosts: " + ", ".join(sorted(unsupported_hosts))) if unsupported_hosts else None)
     internal_counts = {"ok": ok, "auth": skipped_auth, "too_short": too_short, "failed": fail,
                        "deferred_auth": deferred_auth, "unsupported_auth": unsupported_auth}
     internal_auth = {u for u, c in outcomes.items() if c == "auth" and needs_cookies(u)}
@@ -881,6 +895,10 @@ def record_unreachable(ledger, outcomes, skipped_unreachable, killed_deferred=()
 #: missing/expired (``deferred_auth``): ``<status-dir>/bookmarks-midway.backlog.json``,
 #: ``[backlog.bookmarks-midway]`` in config/liveness.toml.
 MIDWAY_BACKLOG_JOB = "bookmarks-midway"
+#: Per-run count of dynamic ``unsupported_auth`` (an unknown host answered a bare
+#: 403/sign-in with no Midway hop): ``<status-dir>/bookmarks-unsupported.backlog.json``,
+#: ``[backlog.bookmarks-unsupported]``. Pre-routed ``NON_MIDWAY_AUTH_HOSTS`` are not counted.
+UNSUPPORTED_BACKLOG_JOB = "bookmarks-unsupported"
 
 
 def report_backlog(deferred, job="bookmarks", cause=None):
@@ -890,7 +908,8 @@ def report_backlog(deferred, job="bookmarks", cause=None):
     the job; the liveness sweep turns a persistent streak into an advisory.
     ``job="bookmarks"`` is the public Crawlee-budget backlog; ``MIDWAY_BACKLOG_JOB``
     is the internal path deferred on a Midway problem, ``cause`` saying which
-    (stored in the sidecar for the liveness finding)."""
+    (stored in the sidecar for the liveness finding); ``UNSUPPORTED_BACKLOG_JOB``
+    counts unknown hosts answering a bare 403/sign-in (``cause`` names them)."""
     try:
         from src.operations import backlog
         state = backlog.record_run(job, deferred, cause=cause)
@@ -900,7 +919,8 @@ def report_backlog(deferred, job="bookmarks", cause=None):
         return None
     streak = state["consecutive_deferred_runs"]
     if streak >= limit:
-        defaults = {MIDWAY_BACKLOG_JOB: MIDWAY_CAUSE_COOKIE}
+        defaults = {MIDWAY_BACKLOG_JOB: MIDWAY_CAUSE_COOKIE,
+                    UNSUPPORTED_BACKLOG_JOB: "unknown internal hosts answer a bare 403/sign-in"}
         cause = cause or defaults.get(job, "the Crawlee budget is not draining the queue")
         print(f"WARNING: {job} backlog persists — {deferred} URL(s) deferred, {streak} consecutive "
               f"run(s) with deferrals (threshold {limit}); {cause}")
