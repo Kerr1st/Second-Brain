@@ -201,3 +201,12 @@ reason = "scrape_bookmarks.py: the Crawlee time budget could not start every new
 [backlog.codex-capture]
 consecutive_runs = 2
 reason = "capture_codex.py: Bedrock answers failed the Codex semantic evidence contract (semantic_contract_failed > 0) in 2+ consecutive runs; the rule broken is in failures[].message of the JSON summary in logs/codex-capture.log — a prompt/model change may have broken the contract"
+
+# Midway-expiry deferrals (scrape_bookmarks.py `deferred_auth`): with no unexpired
+# Midway session cookie the internal path is skipped and its URLs are retried next
+# run without limit — a streak of its own in logs/jobs/bookmarks-midway.backlog.json,
+# separate from the public Crawlee-budget backlog above. A run with a valid cookie
+# (deferred_auth == 0) resets it.
+[backlog.bookmarks-midway]
+consecutive_runs = 3
+reason = "Midway cookie expired at bookmarks run time — run mwinit before Saturday 01:00 or run the job manually"

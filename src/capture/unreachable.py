@@ -12,6 +12,10 @@ records each failed attempt's class and decides when a URL is worth retrying:
 * ``too_short``: the page was reached but is empty for our purposes; it is not
   re-scraped for ``COOL_OFF``.
 * a success removes the entry.
+* ``deferred_runs`` (optional, absent in older ledgers): consecutive runs in
+  which the URL sat in a killed Crawlee batch and was never shown attempted.
+  It is not a strike; at ``DEFERRAL_LIMIT`` it becomes one ``timeout`` strike.
+  Any attempt clears it. Deferral-only entries have no ``status``/``skip_until``.
 
 Entries are keyed by a URL hash and hold only the domain: bookmark URLs are not
 otherwise written to the logs, so the ledger does not start doing so. The file
@@ -33,6 +37,9 @@ THRESHOLD = 3
 COOL_OFF = timedelta(days=30)
 FAILURE_CLASSES = ("auth", "timeout", "error")
 CLASSES = (*FAILURE_CLASSES, "too_short")
+#: Consecutive runs a URL may sit unattempted in a killed Crawlee batch
+#: (``deferred_runs``) before that counts as one ``timeout`` strike.
+DEFERRAL_LIMIT = 3
 
 
 def url_key(url: str) -> str:
@@ -76,8 +83,31 @@ class Ledger:
         until = self.skip_until(url)
         return until is not None and until > (now or datetime.now(timezone.utc))
 
+    def deferred_runs(self, url: str) -> int:
+        try:
+            return int((self.entries.get(url_key(url)) or {}).get("deferred_runs") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def record_deferred(self, url: str, now=None) -> dict | None:
+        """Count one run in which ``url`` sat in a killed Crawlee batch and was
+        never shown as attempted (no strike). After ``DEFERRAL_LIMIT``
+        consecutive such runs the URL takes a ``timeout`` strike (and the count
+        restarts), so a URL that keeps hanging its batch is bounded by the
+        normal strike / cool-off rule. Returns the struck entry, else None."""
+        key = url_key(url)
+        entry = dict(self.entries.get(key) or {})
+        runs = self.deferred_runs(url) + 1
+        if runs >= DEFERRAL_LIMIT:
+            return self.record(url, "timeout", now=now)   # also resets deferred_runs
+        entry.setdefault("domain", urlparse(url).netloc.lower())
+        entry["deferred_runs"] = runs
+        self.entries[key] = entry
+        return None
+
     def record(self, url: str, outcome: str, now=None) -> dict | None:
-        """Record one attempt. ``outcome`` is "ok" or one of ``CLASSES``."""
+        """Record one attempt. ``outcome`` is "ok" or one of ``CLASSES``. Any
+        attempt ends a streak of killed-batch deferrals (``deferred_runs``)."""
         key = url_key(url)
         if outcome == "ok":
             self.entries.pop(key, None)
@@ -86,6 +116,7 @@ class Ledger:
             outcome = "error"
         now = now or datetime.now(timezone.utc)
         entry = dict(self.entries.get(key) or {})
+        entry.pop("deferred_runs", None)
         entry["domain"] = urlparse(url).netloc.lower()
         entry["status"] = outcome
         entry["attempts"] = int(entry.get("attempts") or 0) + 1

@@ -31,13 +31,74 @@ AUTH_REQUIRED = re.compile(
     r"^https?://([^/?#]*\.)?("
     r"sharepoint\.com|"                      # Microsoft 365 SSO
     r"aws\.dev|"                             # internal AWS apps (awsinsights, awsentral, ...)
+    r"amazon\.dev|"                          # internal apps (hyperbadge, sage, my.day1, agentspaces, ...)
+    r"a2z\.com|"                             # internal (gather, ...)
+    r"([a-z0-9-]+-)?corp\.amazon\.com|"      # corp.amazon.com, collaborate-corp.amazon.com
+    r"coupahost\.com|"                       # Coupa procurement (SSO)
     r"studio\.[a-z0-9-]+\.prod\.workshops\.aws"  # Workshop Studio (authoring) - catalog is public
     r")(:\d+)?([/?#]|$)", re.I)
 
 
+def internal_host(url: str) -> bool:
+    """Bookmarks: ``INTERNAL_DOMAINS`` judged on the URL's host only, from a
+    label boundary, so ``https://evil.io/?r=w.amazon.com`` or ``aw.amazon.com``
+    is not internal. browser.py keeps the unanchored ``INTERNAL_DOMAINS.search(url)``
+    (its classification is unchanged)."""
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return bool(host) and any(m.start() == 0 or host[m.start() - 1] == "."
+                              for m in INTERNAL_DOMAINS.finditer(host))
+
+
 def needs_cookies(url: str) -> bool:
     """Internal or SSO-only: fetched with Chrome cookies, never handed to Crawlee."""
-    return bool(INTERNAL_DOMAINS.search(url) or AUTH_REQUIRED.search(url))
+    return bool(internal_host(url) or AUTH_REQUIRED.search(url))
+
+
+_PRIVATE_SUFFIXES = (".localhost", ".local", ".lan", ".home.arpa", ".internal")
+
+
+def _numeric_ipv4(host: str):
+    """Integer / hex / octal / short IPv4 forms (``3232235777``, ``0x7f000001``,
+    ``127.1``) as browsers resolve them; None for names like ``10.example.com``."""
+    import ipaddress
+    import socket
+    if not host or not all(part and (part.isdigit() or part.lower().startswith("0x")) for part in host.split(".")):
+        return None
+    try:
+        return ipaddress.IPv4Address(socket.inet_aton(host))
+    except (OSError, ValueError):
+        return None
+
+
+def is_private_host(url: str) -> bool:
+    """Bookmarks only: LAN / loopback hosts (192.168.x, 10.x, 172.16-31.x, 127.x,
+    100.64.0.0/10 CGNAT/Tailscale, link-local, reserved, also in integer/hex
+    form; localhost, *.local, *.lan, *.home.arpa, *.internal) are skipped
+    entirely — nothing to index, and an unreachable LAN IP burns a 30 s
+    navigation timeout per attempt. Kept out of the shared SKIP_PATTERNS, which
+    browser history also uses (it has its own private-host rule)."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if host in ("localhost", "lan", "internal", "home.arpa") or host.endswith(_PRIVATE_SUFFIXES):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = _numeric_ipv4(host)
+        if ip is None:
+            return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+            or ip in ipaddress.ip_network("100.64.0.0/10"))
 
 
 
