@@ -25,16 +25,22 @@ def sb(tmp_path, monkeypatch):
 class FakeCrawlee:
     """Index that grows as batches 'scrape'; a batch can time out after indexing some URLs."""
 
-    def __init__(self, indexed=(), timeout_batches=(), partial_on_timeout=1, rc=0):
+    def __init__(self, indexed=(), timeout_batches=(), partial_on_timeout=1, rc=0, output=""):
         self.index = set(indexed)
         self.timeout_batches = set(timeout_batches)
         self.partial = partial_on_timeout
         self.rc = rc
+        self.output = output
         self.calls = []
+        self.envs = []
 
     def run(self, cmd, cwd=None, timeout=None, **kw):
         urls = pathlib.Path(cmd[-1]).read_text().split()
         self.calls.append((len(urls), timeout))
+        self.envs.append(kw.get("env"))
+        if self.output and kw.get("stdout") is not None:
+            kw["stdout"].write(self.output)
+            kw["stdout"].flush()
         n = len(self.calls)
         if n in self.timeout_batches:
             self.index.update(urls[: self.partial])     # some pages landed before the kill
@@ -64,10 +70,72 @@ class TestCrawleeBatches:
         stats = sb.scrape_with_crawlee(_urls(60), timeout=5000, batch_size=50, batch_timeout=900)
         out = capsys.readouterr().out
         assert "TIMED OUT" in out and "batch 1/2" in out
-        # batch 1: p0 already indexed (skipped), p0..p9 written before the kill -> p1..p9 processed,
-        # p10..p49 failed; batch 2 completes all 10.
-        assert stats == {"processed": 9 + 10, "skipped": 1, "failed": 40, "too_short": 0, "timed_out_batches": 1, "deferred": 0}
+        # batch 1: p0 already indexed (skipped), p0..p9 written before the kill -> p1..p9 processed;
+        # p10..p49 never show up in the output, so they are deferred (retried next run, no
+        # ledger strike) — deliberately no longer "failed" (triage 2026-10-13: the kill, not
+        # the URLs, was the problem). Batch 2 completes all 10.
+        assert stats == {"processed": 9 + 10, "skipped": 1, "failed": 0, "too_short": 0, "timed_out_batches": 1,
+                         "deferred": 40, "crawlee_broken": 0}
+        assert "40 deferred" in out
         assert not list(pathlib.Path(sb.CRAWLEE_DIR).glob(".sb-urls-*"))
+
+    def test_killed_batch_counts_only_urls_the_output_shows_attempted_as_failed(self, sb, monkeypatch):
+        output = ("✗ https://example.org/p1\n"
+                  'WARN PlaywrightCrawler: Reclaiming failed request back to the list or queue. '
+                  'Request blocked - received 403 status code. {"id":"x","url":"https://example.org/p2","retryCount":2}\n'
+                  'ERROR PlaywrightCrawler: navigation timed out {"url":"https://example.org/p3"}\n')
+        fake = FakeCrawlee(timeout_batches={1}, partial_on_timeout=1, output=output)
+        monkeypatch.setattr(sb.subprocess, "run", fake.run)
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set(fake.index))
+        outcomes = {}
+        stats = sb.scrape_with_crawlee(_urls(6), timeout=5000, batch_size=50, outcomes=outcomes)
+        assert stats["processed"] == 1 and stats["failed"] == 3 and stats["deferred"] == 2
+        assert outcomes == {"https://example.org/p0": "ok", "https://example.org/p1": "error",
+                            "https://example.org/p2": "auth", "https://example.org/p3": "timeout"}
+
+    def test_batch_log_is_kept_under_logs_mode_600_and_stale_ones_removed(self, sb, monkeypatch, tmp_path):
+        logs = tmp_path / "logs"
+        monkeypatch.setenv("SECOND_BRAIN_LOG_DIR", str(logs))
+        logs.mkdir()
+        (logs / "bookmarks-crawlee-9.log").write_text("stale")
+        fake = FakeCrawlee(output="Loaded 2 URLs\n✓ T0\n✓ T1\n")
+        monkeypatch.setattr(sb.subprocess, "run", fake.run)
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set(fake.index))
+        sb.scrape_with_crawlee(_urls(2), timeout=5000, log_name="bookmarks-crawlee",
+                               env=sb.BATCH_SCRAPE_ENV)
+        kept = logs / "bookmarks-crawlee-1.log"
+        assert sorted(p.name for p in logs.iterdir()) == ["bookmarks-crawlee-1.log"]
+        assert kept.read_text().startswith("Loaded 2 URLs")
+        assert (kept.stat().st_mode & 0o777) == 0o600
+        assert fake.envs[0]["BATCH_SCRAPE_MAX_REQUEST_RETRIES"] == "1"
+        assert fake.envs[0]["BATCH_SCRAPE_MAX_SESSION_ROTATIONS"] == "0"
+
+    def test_without_log_name_the_temp_log_is_deleted_and_env_untouched(self, sb, monkeypatch, tmp_path):
+        monkeypatch.setenv("SECOND_BRAIN_LOG_DIR", str(tmp_path / "logs"))
+        fake = FakeCrawlee()
+        monkeypatch.setattr(sb.subprocess, "run", fake.run)
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set(fake.index))
+        sb.scrape_with_crawlee(_urls(1), timeout=5000)        # the browser channel's call
+        assert not (tmp_path / "logs").exists() and fake.envs == [None]
+
+    @pytest.mark.parametrize("rc,output,broken", [
+        (1, "node:internal/modules/esm/resolve\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'crawlee'\n", True),
+        (1, "", True),                                        # non-zero, nothing parseable
+        (0, "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'crawlee'\n", True),
+        (1, "✗ https://example.org/p0\n", False),             # a real per-URL failure
+        (None, "", False),                                    # a kill is attribution, not breakage
+        (0, "", False),
+    ])
+    def test_crawlee_broken_detection(self, sb, rc, output, broken):
+        assert sb.crawlee_broken(rc, output) is broken
+
+    def test_missing_node_is_a_broken_batch_not_a_crash(self, sb, monkeypatch):
+        def no_node(*a, **k):
+            raise FileNotFoundError("node")
+        monkeypatch.setattr(sb.subprocess, "run", no_node)
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
+        stats = sb.scrape_with_crawlee(_urls(2), timeout=5000)
+        assert stats["crawlee_broken"] == 1 and stats["deferred"] == 2 and stats["processed"] == 0
 
     def test_total_budget_stays_under_the_deadline_and_defers_the_rest(self, sb, monkeypatch, capsys):
         clock = {"t": 0.0}

@@ -154,10 +154,12 @@ class TestCrawleeOutputParser:
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set(index))
         outcomes = {}
         stats = sb.scrape_with_crawlee(urls, timeout=5000, outcomes=outcomes)
+        # Deliberately changed (triage 2026-10-13): a URL the killed batch never reached is
+        # deferred — no ledger outcome/strike, retried next run — not a "timeout" failure.
         assert outcomes == {"https://ok.example/1": "ok", "https://a.example/short": "too_short",
-                            "https://b.example/blocked": "error", "https://never.example/started": "timeout"}
-        assert stats["processed"] == 1 and stats["too_short"] == 1 and stats["failed"] == 2
-        assert stats["timed_out_batches"] == 1
+                            "https://b.example/blocked": "error"}
+        assert stats["processed"] == 1 and stats["too_short"] == 1 and stats["failed"] == 1
+        assert stats["deferred"] == 1 and stats["timed_out_batches"] == 1
 
     def test_unlisted_url_after_a_normal_exit_is_an_error(self, sb, monkeypatch):
         monkeypatch.setattr(sb.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0))

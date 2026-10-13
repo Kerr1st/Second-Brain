@@ -402,5 +402,6 @@ class TestMainExitCodes:
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: indexed.pop(0))
         monkeypatch.setattr(sb.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
         stats = sb.scrape_with_crawlee([("A", "https://example.org/a"), ("B", "https://example.org/b")])
-        assert stats == {"processed": 1, "skipped": 0, "failed": 1, "too_short": 0, "timed_out_batches": 0, "deferred": 0}
+        assert stats == {"processed": 1, "skipped": 0, "failed": 1, "too_short": 0, "timed_out_batches": 0, "deferred": 0,
+                         "crawlee_broken": 0}
         assert not list(tmp_path.glob(".sb-urls-*"))  # the temp URL file is always removed
