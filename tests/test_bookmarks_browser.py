@@ -613,6 +613,7 @@ class TestReviewRouting:
         out = capsys.readouterr().out
         assert rc == 0 and t.cookie_calls == [W] and t.browser_calls == []
         assert "skipped_invalid_url=1" in out and "eligible=1" in out
+        assert "1 skipped_invalid_url" in out                              # the Internal: summary line
         assert self._ledger(tmp_path) == {}
 
     @pytest.mark.parametrize("url", ["https://aws.highspot.com/items/1", "https://w.amazon.com.evil.io/x",

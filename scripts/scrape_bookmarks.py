@@ -986,10 +986,6 @@ def main():
             elif outcome == "too_short":
                 too_short += 1
                 outcomes[url] = "too_short"
-            elif outcome == "invalid_url":
-                skipped_invalid_url += 1   # never navigated: no strike
-                browser["invalid_url"] += 1
-                continue
             elif outcome == "deferred":
                 browser["deferred"] += 1   # not attempted: no strike, retried next run
                 browser_details[getattr(res, "detail", "") or "budget"] += 1
