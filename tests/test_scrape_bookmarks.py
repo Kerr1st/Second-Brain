@@ -240,7 +240,9 @@ class TestInternalAuth:
         _resp(url="https://midway-auth.amazon.com/login?next=x",
               history=["https://w.amazon.com/bin/view/X", "https://midway-auth.amazon.com/SSO/redirect"]),
         _resp(url="https://idp.federate.amazon.com/api/oauth2/v1/authorize?x=1"),
-        _resp(url="https://w.amazon.com/signin?return=x"),
+        # (Was a bare same-host /signin URL: since the 2026-10-13 review a same-host path is
+        # not judged by the URL pattern; a sign-in page is recognised by its body.)
+        _resp(url="https://w.amazon.com/signin?return=x", text="<html><title>Sign in</title>" + "x " * 200),
     ])
     def test_sign_in_redirects_and_auth_refusals_are_skipped_auth(self, fetch, resp):
         assert fetch(resp) == "auth"
@@ -853,3 +855,86 @@ class TestInternalAuthRouting:
         assert rc == 0 and "1 scraped, 3 skipped_auth" in out
         entries = self._ledger(tmp_path).entries
         assert [entries[url_key(u)]["status"] for u in urls[1:]] == ["auth"] * 3
+
+class TestAuthJudging:
+    """Review 2026-10-13 §1: path false positives, chains on unknown hosts, a 200 after a Midway hop."""
+
+    W = "https://w.amazon.com/bin/view/X"
+    HOPS = ["https://inside.amazon.com/x", "https://idp.federate.amazon.com/api/oauth2/v1/authorize",
+            "https://midway-auth.amazon.com/SSO/redirect"]
+
+    @pytest.fixture
+    def fetch(self, sb, monkeypatch):
+        holder = {}
+        monkeypatch.setitem(sys.modules, "requests", _fake_requests(lambda *a, **k: holder["resp"]))
+        monkeypatch.setitem(sys.modules, "browser_cookie3", types.SimpleNamespace(chrome=lambda domain_name=None: None))
+
+        def run(url, resp):
+            holder["resp"] = resp
+            return sb.fetch_internal(url)[0]
+        return run
+
+    @pytest.mark.parametrize("path", ["/bin/view/Team/SSO/Setup", "/bin/view/Login", "/bin/view/Oncall/signin-help",
+                                      "/bin/view/OAuth2/Guide", "/bin/view/X?authorize=1", "/bin/view/SAML/"])
+    def test_sign_in_words_in_a_non_redirected_wiki_path_are_content(self, fetch, path):
+        url = "https://w.amazon.com" + path
+        assert fetch(url, _resp(url=url)) == "ok"
+
+    def test_same_path_after_a_completed_midway_round_trip_is_content(self, fetch):
+        url = "https://w.amazon.com/bin/view/Team/SSO/Setup"
+        chain = [url, "https://idp.federate.amazon.com/api/oauth2/v1/authorize", "https://midway-auth.amazon.com/SSO/redirect"]
+        assert fetch(url, _resp(url=url, history=chain)) == "ok"
+
+    def test_landing_on_a_sign_in_host_is_still_auth(self, fetch):
+        assert fetch(self.W, _resp(url="https://midway-auth.amazon.com/login?next=x", history=[self.W])) == "auth"
+        assert fetch(self.W, _resp(url="https://w.amazon.com/login", history=[self.W])) == "ok"   # same host
+
+    @pytest.mark.parametrize("url", ["https://idp.federate.amazon.com/api/oauth2/v1/authorize?client_id=x",
+                                     "https://midway-auth.amazon.com/login", "https://login.microsoftonline.com/x",
+                                     "https://atoz-login.amazon.work/"])
+    def test_bookmarks_pointing_at_a_sign_in_host_are_pre_skipped(self, sb, url):
+        assert sb.midway_unsupported(url) is True
+
+    def test_expired_chain_on_an_unknown_host_is_judged_by_its_hops(self, fetch):
+        """inside.amazon.com is not a verified Midway host; the chain through idp.federate /
+        midway-auth ending on the Midway login makes it ``auth`` (a strike), not unsupported."""
+        assert fetch(self.HOPS[0], _resp(url="https://midway-auth.amazon.com/login?next=x", history=self.HOPS)) == "auth"
+
+    def test_bare_403_on_a_chain_capable_unknown_host_is_unsupported(self, fetch):
+        url = "https://meetings.amazon.com/x"
+        assert fetch(url, _resp(status=403, url=url)) == "unsupported_auth"          # no Midway hop: no strike
+        chain = [url, "https://idp.federate.amazon.com/api/oauth2/v1/authorize", "https://midway-auth.amazon.com/SSO/redirect"]
+        assert fetch(url, _resp(status=403, url=url, history=chain)) == "auth"        # refused after Midway: a strike
+
+    @pytest.mark.parametrize("error", ["login_required", "interaction_required", "access_denied"])
+    def test_oidc_error_return_after_a_midway_hop_is_auth(self, fetch, error):
+        url = "https://inside.amazon.com/x"
+        final = f"https://inside.amazon.com/callback?error={error}&state=s"
+        assert fetch(url, _resp(url=final, history=self.HOPS)) == "auth"
+
+    def test_oidc_error_without_a_midway_hop_or_with_another_error_is_not_auth(self, fetch):
+        url = "https://inside.amazon.com/x"
+        assert fetch(url, _resp(url=url + "?error=login_required")) == "ok"
+        assert fetch(url, _resp(url=url + "?error=server_error", history=self.HOPS)) == "ok"
+
+    @pytest.mark.parametrize("head", [
+        '<form method="post" action="https://midway-auth.amazon.com/login">',
+        "<html><head><title>Sign in</title></head>",
+        "<html><head><title>Redirecting…</title></head>",
+    ])
+    def test_sign_in_page_body_on_the_original_host_is_auth(self, fetch, head):
+        assert fetch(self.W, _resp(url=self.W, history=[self.W, *self.HOPS[1:]], text=head + "word " * 100)) == "auth"
+
+    def test_body_markers_are_only_looked_for_in_the_first_20_kb(self, sb, fetch):
+        late = "<p>" + "word " * 5000 + "</p>" + "<title>Sign in</title>"
+        assert len(late) > sb.SIGN_IN_SNIFF_BYTES
+        assert fetch(self.W, _resp(url=self.W, text=late)) == "ok"
+        content = types.SimpleNamespace(status_code=200, url=self.W, history=[], text="(not read)",
+                                        content=b"<title>Redirecting</title>" + b"x" * 100)
+        assert sb._is_auth_response(content, self.W) is True                       # bytes path, sliced
+
+    def test_atoz_hosts_are_narrowed_to_the_observed_ones(self, sb):
+        for url in ("https://atoz.amazon.work/", "https://atoz-login.amazon.work/", "https://atoz.amazon.com/"):
+            assert sb.midway_unsupported(url)
+        for url in ("https://atoz-foo.amazon.com/", "https://atoz-bar.amazon.work/"):
+            assert not sb.midway_unsupported(url)

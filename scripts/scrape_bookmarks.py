@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.capture.filters import SKIP_PATTERNS, is_private_host, needs_cookies, load_indexed_urls as _load_indexed_urls
 from src.capture.render import html_to_text, render_document
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from datetime import datetime
 
 BOOKMARKS_PATH = os.path.expanduser(
@@ -64,16 +64,64 @@ def job_deadline_s():
         return 3 * 3600.0
 
 
-def _is_auth_response(resp):
+#: Hosts that only ever serve sign-in (the final URL's path is judged there even
+#: without a cross-host redirect). Bookmarks pointing at them are not content and
+#: are pre-skipped as unsupported (``midway_unsupported``).
+SIGN_IN_HOSTS = re.compile(
+    r"^(midway-auth\.amazon\.com|idp\.federate\.amazon\.com|login\.microsoftonline\.com|atoz-login\.amazon\.work)$", re.I)
+#: OIDC error returns (``?error=``) that mean "not signed in" after a Midway hop.
+_OIDC_AUTH_ERRORS = {"login_required", "interaction_required", "access_denied"}
+#: Only this much of a 200 body is looked at for sign-in markers.
+SIGN_IN_SNIFF_BYTES = 20 * 1024
+_SIGN_IN_BODY_RE = re.compile(
+    r"""action\s*=\s*["']?https?://midway-auth\.amazon\.com|<title[^>]*>[^<]*\b(sign[ -]?in|redirecting)\b""", re.I)
+
+
+def _body_head(resp):
+    """The first ``SIGN_IN_SNIFF_BYTES`` of the body, decoded (never the whole text)."""
+    content = getattr(resp, "content", None)
+    if isinstance(content, (bytes, bytearray)):
+        return bytes(content[:SIGN_IN_SNIFF_BYTES]).decode("utf-8", errors="replace")
+    return (getattr(resp, "text", "") or "")[:SIGN_IN_SNIFF_BYTES]
+
+
+def _chain_urls(resp):
+    return [getattr(r, "url", "") or "" for r in (getattr(resp, "history", None) or [])] + [resp.url or ""]
+
+
+def _is_auth_response(resp, requested_url=None):
     """Auth when the *final* response is refused for auth or is a sign-in page.
 
     Intermediate hops are not judged: a Midway-authenticated fetch always passes
     through idp.federate.amazon.com and midway-auth.amazon.com and then lands,
     200, back on the requested page (2026-10-13: judging those hops turned every
-    successful w.amazon.com/broadcast fetch into ``auth``)."""
+    successful w.amazon.com/broadcast fetch into ``auth``).
+
+    * 401/403/407 is auth.
+    * The sign-in URL pattern is applied to the final URL only when the fetch
+      ended on another host than requested, or on a ``SIGN_IN_HOSTS`` host: a
+      wiki path containing /SSO/ or /Login that was not redirected is content.
+    * A 200 after a Midway hop whose final URL carries an OIDC ``error=``
+      (login_required / interaction_required / access_denied) is auth.
+    * A 200 whose first 20 KB shows a sign-in page (a midway-auth form action,
+      or a ``<title>`` with "Sign in" / "Redirecting") is auth."""
     if resp.status_code in _AUTH_STATUS:
         return True
-    return bool(_AUTH_URL_RE.search(resp.url or ""))
+    final = resp.url or ""
+    requested = requested_url or next(iter(_chain_urls(resp)), final)
+    final_host = _host(final)
+    if (final_host != _host(requested) or SIGN_IN_HOSTS.match(final_host)) and _AUTH_URL_RE.search(final):
+        return True
+    if resp.status_code != 200:
+        return False
+    if any(_MIDWAY_HOP_RE.match(u) for u in _chain_urls(resp)):
+        try:
+            errors = parse_qs(urlparse(final).query).get("error", [])
+        except ValueError:
+            errors = []
+        if any(e.strip().lower() in _OIDC_AUTH_ERRORS for e in errors):
+            return True
+    return bool(_SIGN_IN_BODY_RE.search(_body_head(resp)))
 
 
 #: Hops of the Midway SSO chain; a chain through them means Midway handles the host.
@@ -86,7 +134,7 @@ MIDWAY_HOSTS = re.compile(r"^(w|broadcast|idp\.federate)\.amazon\.com$", re.I)
 #: Coupa SSO, and docs.hub (CloudFront page whose auth runs in JavaScript).
 #: They are not fetched: ``unsupported_auth``, no ledger strike, no request.
 NON_MIDWAY_AUTH_HOSTS = re.compile(
-    r"^(([a-z0-9-]+\.)*sharepoint\.com|atoz(-[a-z]+)?\.amazon\.(work|com)|"
+    r"^(([a-z0-9-]+\.)*sharepoint\.com|atoz\.amazon\.work|atoz-login\.amazon\.work|atoz\.amazon\.com|"
     r"([a-z0-9-]+\.)*coupahost\.com|docs\.hub\.amazon\.dev)$", re.I)
 
 
@@ -98,8 +146,11 @@ def _host(url):
 
 
 def midway_unsupported(url):
-    """True for hosts whose sign-in Midway cookies cannot satisfy (never fetched)."""
-    return bool(NON_MIDWAY_AUTH_HOSTS.match(_host(url)))
+    """True for hosts whose sign-in Midway cookies cannot satisfy, and for bookmarks
+    pointing straight at a sign-in host (idp.federate, midway-auth, ...: not content).
+    Never fetched."""
+    host = _host(url)
+    return bool(NON_MIDWAY_AUTH_HOSTS.match(host) or SIGN_IN_HOSTS.match(host))
 
 
 def _midway_handled(url, resp):
@@ -222,7 +273,7 @@ def fetch_internal(url):
     with cookie_policy_session(requests) as session:
         resp = session.get(url, cookies=internal_cookie_jar(url), timeout=30,
                            headers={"User-Agent": "Mozilla/5.0"})
-    if _is_auth_response(resp):
+    if _is_auth_response(resp, url):
         return ("auth" if _midway_handled(url, resp) else "unsupported_auth"), resp
     if resp.status_code != 200:
         return "failed", resp
