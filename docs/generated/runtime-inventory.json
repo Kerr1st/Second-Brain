@@ -72,8 +72,8 @@
       "file": "com.second-brain.bookmarks.plist",
       "label": "com.second-brain.bookmarks",
       "calendar": {
-        "Weekday": 6,
-        "Hour": 1,
+        "Weekday": 5,
+        "Hour": 10,
         "Minute": 0
       },
       "interval_seconds": null,

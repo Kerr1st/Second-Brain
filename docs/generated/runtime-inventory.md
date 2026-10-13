@@ -9,7 +9,7 @@ Scheduled dream-cycle spend threshold: $9; library default: $5. Both stop after 
 | Schedule | Calendar (launchd local time) / interval | Program (via job_wrapper.sh) | Deadline s | Network preflight | KeepAlive |
 |---|---|---|---|---|---|
 | `com.second-brain.backup` | {"Hour": 2, "Minute": 0} | `scripts/jobs/backup.sh backup` | 7200 | yes | false |
-| `com.second-brain.bookmarks` | {"Hour": 1, "Minute": 0, "Weekday": 6} | `scripts/scrape_bookmarks.py bookmarks` | 10800 | yes | false |
+| `com.second-brain.bookmarks` | {"Hour": 10, "Minute": 0, "Weekday": 5} | `scripts/scrape_bookmarks.py bookmarks` | 10800 | yes | false |
 | `com.second-brain.capture-api` | on demand / RunAtLoad | `scripts/jobs/capture_api.sh capture-api` | service | no | true |
 | `com.second-brain.capture-browser` | {"Hour": 1, "Minute": 15} | `scripts/jobs/capture_browser.sh capture-browser` | 3600 | no | false |
 | `com.second-brain.capture-outlook` | {"Hour": 0, "Minute": 45} | `scripts/jobs/capture_outlook.sh capture-outlook` | 3600 | yes | false |

@@ -150,7 +150,7 @@ network_failures_required = 2
 
 [jobs.expected_interval_hours]
 backup = 30            # daily 02:00 (+2 h deadline)
-bookmarks = 192        # Sat 01:00 → 8 d
+bookmarks = 192        # Fri 10:00 → 8 d
 capture-browser = 30
 capture-outlook = 30
 capture-slack = 30
@@ -211,7 +211,7 @@ reason = "capture_codex.py: Bedrock answers failed the Codex semantic evidence c
 # hits sign-in too; the sidecar's "cause" (shown as "last run") says which of the two.
 [backlog.bookmarks-midway]
 consecutive_runs = 3
-reason = "Midway sign-in failed at bookmarks run time (cookie missing/expired, or session rejected: see 'last run') — run mwinit before Saturday 01:00 or run the job manually"
+reason = "Midway sign-in failed at bookmarks run time (cookie missing/expired, or session rejected: see 'last run') — run mwinit before Friday 10:00 or run the job manually"
 
 # Dynamic unsupported_auth (scrape_bookmarks.py, 2026-10-13 review): an internal host
 # that is neither a verified Midway host nor pre-routed as non-Midway answered a

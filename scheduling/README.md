@@ -23,7 +23,7 @@ Every job runs through one boundary, `scripts/jobs/job_wrapper.sh` →
 |---|---|---|---|---|---|
 | `com.second-brain.capture-outlook` | Daily 00:45 | `scripts/jobs/capture_outlook.sh` → `capture-outlook` | `3600` (observed ≤ 2 min) | `SECOND_BRAIN_JOB_NEEDS_NETWORK=1` | Outlook mail + calendar via grasp-mcp |
 | `com.second-brain.capture-slack` | Daily 01:00 | `scripts/jobs/capture_slack.sh` → `capture-slack` | `3600` (observed ≤ 2 min + ≤ 15 min Retry-After budget) | `SECOND_BRAIN_JOB_NEEDS_NETWORK=1` | Slack conversation-days via slack-mcp |
-| `com.second-brain.bookmarks` | Sat 01:00 | `scripts/scrape_bookmarks.py` → `bookmarks` | `10800` (observed 39–64 min; floor 3 h) | `SECOND_BRAIN_JOB_NEEDS_NETWORK=1` | Chrome bookmarks scrape (Crawlee) |
+| `com.second-brain.bookmarks` | Fri 10:00 (after the morning mwinit; internal pages need a fresh Midway session) | `scripts/scrape_bookmarks.py` → `bookmarks` | `10800` (observed 39–64 min; floor 3 h) | `SECOND_BRAIN_JOB_NEEDS_NETWORK=1` | Chrome bookmarks scrape (Crawlee) |
 | `com.second-brain.capture-browser` | Daily 01:15 | `scripts/jobs/capture_browser.sh` → `capture-browser` | `3600` (observed ≤ 2 min) | — | Chrome history + reading capture |
 | `com.second-brain.youtube` | Daily 01:30 | `scripts/jobs/youtube_scrape.sh` → `youtube` | `3600` (observed ≤ 5 min) | `SECOND_BRAIN_JOB_NEEDS_NETWORK=1` | Liked / Watch-Later transcripts (yt-dlp) |
 | `com.second-brain.backup` | Daily 02:00 | `scripts/jobs/backup.sh` → `backup` | `7200` (observed 14–31 min; floor 2 h) | `SECOND_BRAIN_JOB_NEEDS_NETWORK=1` | Encrypted bundle → Google Drive (`config/backup.toml`: KB sources included, retention 7 d local / 30 d remote) |

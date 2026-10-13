@@ -352,7 +352,7 @@ def test_midway_expiry_is_its_own_advisory_backlog_streak(tmp_path, policy):
     entry = policy["backlog"]["bookmarks-midway"]
     assert entry["consecutive_runs"] == 3
     assert entry["reason"] == ("Midway sign-in failed at bookmarks run time (cookie missing/expired, or session "
-                               "rejected: see 'last run') — run mwinit before Saturday 01:00 or run the job manually")
+                               "rejected: see 'last run') — run mwinit before Friday 10:00 or run the job manually")
     for run in range(1, 4):
         backlog.record_run("bookmarks-midway", 5, tmp_path, now=NOW + timedelta(days=7 * run))
         finding = _backlog(tmp_path, policy, "bookmarks-midway")
