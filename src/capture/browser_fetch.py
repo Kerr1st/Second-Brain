@@ -472,5 +472,7 @@ def fetch_pages_sync(urls, **kwargs) -> dict[str, PageResult]:
     try:
         return asyncio.run(fetch_pages(urls, **kwargs))
     finally:
-        restore()
-        reap_groups()
+        try:
+            reap_groups()       # still under the SIGTERM->SystemExit handler: a SIGTERM here
+        finally:                # cannot take SIG_DFL and cut the reap short
+            restore()

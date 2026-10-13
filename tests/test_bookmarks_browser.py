@@ -895,3 +895,14 @@ class TestTeardownSignals:
             raise RuntimeError("anyio scope noise")
         b.__aexit__ = aexit
         assert run([B], b)[B].outcome == "ok" and not os.path.exists(b.cwd)
+
+    def test_final_reap_runs_before_the_sigterm_handler_is_restored(self, monkeypatch):
+        import signal
+        before = signal.getsignal(signal.SIGTERM)
+        seen = []
+        monkeypatch.setattr(bf, "reap_groups", lambda *a, **k: seen.append(signal.getsignal(signal.SIGTERM)))
+        b = FakeBrowser({B: page(B, [LONG])})
+        clock = FakeClock()
+        bf.fetch_pages_sync([B], client_factory=b.factory, log=lambda *a: None, clock=clock, sleep=clock.sleep)
+        assert seen and seen[-1] is not before and callable(seen[-1])    # still the pass's handler
+        assert signal.getsignal(signal.SIGTERM) is before
