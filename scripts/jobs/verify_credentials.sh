@@ -33,6 +33,18 @@
 # Silence from a monitor is the thing we are trying to avoid, so it is printed loudly
 # as ⚠ with a fix hint instead of being folded into the failure list.
 #
+# 2026-10-13 — WHY A FAILED CHECK NOW LOGS A REASON. Probes used to run as
+# `>/dev/null 2>&1`, so the 10-11/10-12 Graph + Slack lapses logged only "(exit 1)":
+# an expired token, a hung server and a bug looked identical. Each probe's combined
+# output now goes to a private temp file (mode 600, removed on exit) and a failure
+# adds ONE line under the ✅/❌/⚠ line (whose format is unchanged):
+#     reason: <auth|timeout|transport|tool-missing|other>: <last meaningful line>
+# The class comes from the exit code first (timeout's 124/137; 3/4 from the MCP
+# probes below, which mirror src.capture.mcp_client.classify_error / KIND_EXIT),
+# then from keywords. The message is redacted (Bearer/Basic, key=value secrets,
+# cookies, AWS key ids, 21+ char base64/hex runs) and capped at 160 characters;
+# full probe output is never printed.
+#
 # Debugging aid born from cause (1): `verify_credentials.sh --print-tools` prints the
 # effective PATH and where each binary resolves. Run it the way launchd does
 #   env -i HOME=$HOME PATH=/usr/bin:/bin /bin/bash scripts/jobs/verify_credentials.sh --print-tools
@@ -67,6 +79,85 @@ fi
 REQUIRED_FAILED=""
 ADVISORY=""
 
+# One private scratch file for probe output, reused (truncated) by every check.
+# The TERM/INT/HUP traps turn a signal into an exit so the EXIT trap still cleans up.
+PROBE_OUT="$(umask 077 && mktemp "${TMPDIR:-/tmp}/sb-credentials.XXXXXX" 2>/dev/null)" || PROBE_OUT=""
+if [ -n "$PROBE_OUT" ]; then
+  chmod 600 "$PROBE_OUT"
+  trap 'rm -f "$PROBE_OUT"' EXIT
+  trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
+else
+  log "⚠ mktemp failed — probe output will not be captured (reasons unavailable)"
+fi
+
+# classify <rc> <output-file> <label> → auth | timeout | transport | tool-missing | other
+# Exit code first; keywords only for a generic failure. Auth wins over transport,
+# as in src.capture.mcp_client.classify_error (a stale token often *looks* hung).
+classify() {
+  case "$1" in
+    124|137) echo timeout; return ;;   # coreutils timeout: TERM sent / KILL sent
+    127) echo tool-missing; return ;;
+  esac
+  # Exit codes 3/4 are the capture jobs' EXIT_AUTH/EXIT_TRANSPORT, so they mean that
+  # only for the MCP probes; aws/openssl exiting 3 or 4 falls through to keywords.
+  case "${3:-}" in
+    graph:*|slack:*)
+      case "$1" in
+        3) echo auth; return ;;
+        4) echo transport; return ;;
+      esac ;;
+  esac
+  local f="$2"
+  [ -n "$f" ] && [ -s "$f" ] || { echo other; return; }
+  if grep -qiE 'expired|will expire|authenticat|unauthori[sz]ed|auth_error|invalid_grant|mwinit|re-?auth|not authenticated|(invalid|expired|missing|refresh)[^[:alnum:]]{0,3}[a-z_ ]{0,15}token|token[_ -]?(invalid|expired|refresh)|unable to locate credentials|InvalidClientTokenId|SignatureDoesNotMatch|AccessDenied|credential_process' "$f"; then
+    echo auth
+  elif grep -qiE 'FileNotFoundError|No such file or directory|command not found' "$f"; then
+    echo tool-missing   # e.g. the MCP server binary itself is gone; still ❌, the capture needs it
+  elif grep -qiE 'timed out|timeout' "$f"; then
+    echo timeout
+  elif grep -qiE 'connection (closed|reset|refused)|broken pipe|could not connect|endpoint url|name resolution|nodename nor servname|network is unreachable|EndOfStream|ClosedResource|BrokenResource|process exited' "$f"; then
+    echo transport
+  else
+    echo other
+  fi
+}
+
+# sanitize <output-file> → the last meaningful line, redacted, ≤160 characters.
+# Needs perl (stock on macOS). Without it nothing is printed rather than risk a secret.
+sanitize() {
+  local f="$1"
+  [ -n "$f" ] && [ -s "$f" ] || { echo "(no output)"; return; }
+  command -v perl >/dev/null 2>&1 || { echo "(message withheld: perl not found to redact it)"; return; }
+  perl -CSD -e '
+    my $last = "";
+    while (my $l = <STDIN>) {
+      $l =~ s/\e\[[0-9;?]*[A-Za-z]//g;           # ANSI colour codes
+      $l =~ s/[\x00-\x1f\x7f]+/ /g;               # control chars, incl. CR/LF
+      $l =~ s/^\s+|\s+$//g;
+      next if $l eq "" or $l =~ /^(Traceback \(most recent call last\)|File "|During handling of|The above exception)/;
+      next if $l =~ /^[\^~\s]+$/;                 # traceback caret markers
+      $last = $l;
+    }
+    $last = "(no output)" if $last eq "";
+    my $run = q{A-Za-z0-9+/_=%.!*-};              # incl. URL-encoding and token punctuation
+    $last =~ s/\b(bearer|basic)\s+\S+/$1 [REDACTED]/gi;
+    $last =~ s/\b((?:set-)?cookie\s*[:=]\s*).*/$1\[REDACTED]/gi;
+    $last =~ s/\bxox[a-z]-\S+/[REDACTED]/gi;       # Slack tokens/cookies (xoxb/xoxp/xoxc/xoxd, URL-encoded too)
+    $last =~ s/eyJ[\w-]+\.[\w-]+\.[\w-]*/[REDACTED]/g;   # JWTs, whatever their segment lengths
+    # key=value, key: "value" and Python-repr key: 'value' (\x27 is a single quote:
+    # this program sits inside a single-quoted shell string).
+    $last =~ s/\b((?:[a-z0-9]+[_-])*(?:token|secret|password|passwd|pwd|apikey|api[_-]key|signature|sig|session|cookie|credentials?)s?["\x27]?\s*[:=]\s*["\x27]?)[^\s"&;,]+/$1\[REDACTED]/gi;
+    $last =~ s/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/[REDACTED]/g;
+    $last =~ s{(?<![$run])(?=[$run]*[0-9])[$run]{21,}}{[REDACTED]}g;   # base64/hex runs
+    $last = substr($last, 0, 160);
+    print "$last\n";
+  ' <"$f" 2>/dev/null || echo "(message unavailable)"
+}
+
+reason() {  # rc label
+  log "   reason: $(classify "$1" "$PROBE_OUT" "$2"): $(sanitize "$PROBE_OUT")"
+}
+
 # check <required|advisory> <label> <command...>
 # Three outcomes: OK / EXPIRED-or-BROKEN / TOOL-MISSING. Only a REQUIRED credential
 # that answered and answered badly is a failure.
@@ -79,19 +170,29 @@ check() {
     return 0
   fi
   local rc=0
-  $TIMEOUT "$@" >/dev/null 2>&1 || rc=$?
+  if [ -n "$PROBE_OUT" ]; then
+    : >"$PROBE_OUT"
+    $TIMEOUT "$@" >"$PROBE_OUT" 2>&1 || rc=$?
+  else
+    $TIMEOUT "$@" >/dev/null 2>&1 || rc=$?
+  fi
   if [ "$rc" -eq 0 ]; then
     log "✅ $label"
   elif [ "$rc" -eq 127 ]; then
     log "⚠ $label tool not found (exit 127) — check NOT RUN (not an expired credential)"
+    reason "$rc" "$label"
     ADVISORY="$ADVISORY ${label}[tool-missing]"
   elif [ "$sev" = required ]; then
     log "❌ $label EXPIRED/BROKEN (exit $rc)"
+    reason "$rc" "$label"
     REQUIRED_FAILED="$REQUIRED_FAILED $label"
   else
     log "⚠ $label expired (exit $rc) — advisory: interactive session, no job uses it"
+    reason "$rc" "$label"
     ADVISORY="$ADVISORY ${label}[expired]"
   fi
+  [ -n "$PROBE_OUT" ] && : >"$PROBE_OUT"   # do not keep probe output around between checks
+  return 0
 }
 
 hints() {  # label list
@@ -112,25 +213,59 @@ if [ -f "$RA_CERT" ]; then
 fi
 check advisory "aws:sso-default"       "$AWS_BIN" sts get-caller-identity --profile default
 check required "graph:grasp-mcp" "$PYTHON_BIN" - <<'EOF'
-import asyncio
-from src.capture.mcp_client import McpClient
-from src.capture.outlook import GRASP_CMD, GRASP_ARGS
-async def main():
-    async with McpClient(GRASP_CMD, GRASP_ARGS, call_timeout=60) as c:
-        # A successful mailbox listing proves the Graph token is valid (any format).
-        d = await c.call_json("get_emails", {"folder": "inbox", "maxResults": 1})
-        assert isinstance(d, dict) and "emails" in d, d
-asyncio.run(main())
+import asyncio, sys
+def _leaf(e):
+    # anyio wraps transport failures in ExceptionGroups; report the first real one.
+    while getattr(e, "exceptions", None):
+        e = e.exceptions[0]
+    return e
+try:
+    from src.capture.mcp_client import McpClient, McpAuthError, auth_error_in_payload, classify_error, KIND_EXIT
+    from src.capture.outlook import GRASP_CMD, GRASP_ARGS
+    async def main():
+        async with McpClient(GRASP_CMD, GRASP_ARGS, call_timeout=60) as c:
+            # A successful mailbox listing proves the Graph token is valid (any format).
+            d = await c.call_json("get_emails", {"folder": "inbox", "maxResults": 1})
+            auth = auth_error_in_payload(d)
+            if auth:
+                raise McpAuthError(f"get_emails: {auth}")
+            # Name the keys, never the payload: it is someone's mailbox.
+            # An explicit raise, not assert: PYTHONOPTIMIZE would strip an assert.
+            if not (isinstance(d, dict) and "emails" in d):
+                raise RuntimeError(
+                    f"get_emails: unexpected reply (keys: {sorted(d)[:5] if isinstance(d, dict) else type(d).__name__})")
+    asyncio.run(main())
+except Exception as e:  # one classified line on stderr + the capture jobs' exit code
+    leaf = _leaf(e)
+    kind = classify_error(e) if "classify_error" in globals() else "error"
+    print(f"{type(leaf).__name__}: {' '.join(str(leaf).split())}", file=sys.stderr)  # sanitize redacts, then caps
+    sys.exit(KIND_EXIT.get(kind, 1) if "KIND_EXIT" in globals() else 1)
 EOF
 check required "slack:slack-mcp" "$PYTHON_BIN" - <<'EOF'
-import asyncio
-from src.capture.mcp_client import McpClient
-from src.capture.slack import SLACK_CMD
-async def main():
-    async with McpClient(SLACK_CMD, [], call_timeout=60) as c:
-        d = await c.call_json("list_dms", {"limit": 1})
-        assert isinstance(d, dict) and "dms" in d, d
-asyncio.run(main())
+import asyncio, sys
+def _leaf(e):
+    # anyio wraps transport failures in ExceptionGroups; report the first real one.
+    while getattr(e, "exceptions", None):
+        e = e.exceptions[0]
+    return e
+try:
+    from src.capture.mcp_client import McpClient, McpAuthError, auth_error_in_payload, classify_error, KIND_EXIT
+    from src.capture.slack import SLACK_CMD
+    async def main():
+        async with McpClient(SLACK_CMD, [], call_timeout=60) as c:
+            d = await c.call_json("list_dms", {"limit": 1})
+            auth = auth_error_in_payload(d)
+            if auth:
+                raise McpAuthError(f"list_dms: {auth}")
+            if not (isinstance(d, dict) and "dms" in d):  # not assert: PYTHONOPTIMIZE strips those
+                raise RuntimeError(
+                    f"list_dms: unexpected reply (keys: {sorted(d)[:5] if isinstance(d, dict) else type(d).__name__})")
+    asyncio.run(main())
+except Exception as e:  # one classified line on stderr + the capture jobs' exit code
+    leaf = _leaf(e)
+    kind = classify_error(e) if "classify_error" in globals() else "error"
+    print(f"{type(leaf).__name__}: {' '.join(str(leaf).split())}", file=sys.stderr)  # sanitize redacts, then caps
+    sys.exit(KIND_EXIT.get(kind, 1) if "KIND_EXIT" in globals() else 1)
 EOF
 
 if [ -n "$ADVISORY" ]; then
