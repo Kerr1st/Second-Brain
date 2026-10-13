@@ -95,6 +95,50 @@ class TestLedger:
         loaded = Ledger.load(bad)
         assert list(loaded.entries) == ["j"]
 
+    def test_deferred_runs_count_then_one_timeout_strike_leaving_strikes_untouched(self, ledger):
+        url = "https://example.org/stuck"
+        for run in range(1, unreachable.DEFERRAL_LIMIT):
+            assert ledger.record_deferred(url) is None
+            assert ledger.deferred_runs(url) == run
+            assert "consecutive_failures" not in ledger.entries[url_key(url)]
+            assert not ledger.should_skip(url)
+        entry = ledger.record_deferred(url)
+        assert entry["status"] == "timeout" and entry["consecutive_failures"] == 1
+        assert ledger.deferred_runs(url) == 0
+
+    def test_deferral_keeps_an_existing_entrys_strikes_and_an_attempt_resets_it(self, ledger):
+        url = "https://example.org/x"
+        ledger.record(url, "error")
+        ledger.record(url, "error")
+        before = dict(ledger.entries[url_key(url)])
+        ledger.record_deferred(url)
+        after = ledger.entries[url_key(url)]
+        assert {k: v for k, v in after.items() if k != "deferred_runs"} == before
+        assert after["deferred_runs"] == 1
+        ledger.record(url, "timeout")                       # an attempt ends the deferral streak
+        assert "deferred_runs" not in ledger.entries[url_key(url)]
+        ledger.record_deferred(url)
+        ledger.record(url, "ok")
+        assert url_key(url) not in ledger.entries
+
+    def test_old_ledger_json_without_deferred_runs_loads_unchanged(self, tmp_path):
+        path = tmp_path / unreachable.FILENAME
+        old = {"schema_version": 1, "threshold": 3, "cool_off_days": 30, "urls": {
+            url_key("https://a.example/"): {"domain": "a.example", "status": "auth", "attempts": 2,
+                                            "consecutive_failures": 2, "skip_until": None,
+                                            "first_failed_at": "2026-10-03T01:00:00+00:00",
+                                            "last_attempt_at": "2026-10-10T01:00:00+00:00"}}}
+        path.write_text(json.dumps(old))
+        ledger = Ledger.load(path)
+        assert ledger.deferred_runs("https://a.example/") == 0 and not ledger.should_skip("https://a.example/")
+        ledger.save()
+        assert json.loads(path.read_text())["urls"] == old["urls"]
+        # A deferral-only entry (no status / skip_until) is not a cool-off.
+        ledger.record_deferred("https://b.example/")
+        ledger.save()
+        reloaded = Ledger.load(path)
+        assert reloaded.deferred_runs("https://b.example/") == 1 and not reloaded.should_skip("https://b.example/")
+
     def test_default_path_follows_the_status_dir(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "s"))
         assert unreachable.default_path() == tmp_path / "s" / "bookmarks.unreachable.json"
@@ -107,6 +151,10 @@ def sb(tmp_path, monkeypatch):
     spec.loader.exec_module(mod)
     monkeypatch.setattr(mod, "CRAWLEE_DIR", str(tmp_path))
     monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
+    monkeypatch.setenv("SECOND_BRAIN_LOG_DIR", str(tmp_path / "logs"))
+    cookie = tmp_path / "midway-cookie"     # a valid Midway session (never the real ~/.midway/cookie)
+    cookie.write_text("#HttpOnly_midway-auth.amazon.com\tFALSE\t/\tTRUE\t4102444800\tsession\tv\n")
+    monkeypatch.setattr(mod, "MIDWAY_COOKIE_PATH", str(cookie))
     return mod
 
 
@@ -237,6 +285,12 @@ class TestClassification:
         "http://192.168.1.133/", "http://192.168.1.225:18789/ui", "http://10.0.0.5/x",
         "http://172.16.0.1/", "http://172.31.255.1/", "http://localhost:3000/", "http://127.0.0.1/",
         "http://printer.local/", "http://[::1]:8080/",
+        # review finding 10
+        "http://router.lan/", "http://nas.home.arpa/", "http://grafana.internal:3000/",
+        "http://100.64.0.1/", "http://100.127.255.254/", "http://100.101.102.103/",   # CGNAT / Tailscale
+        "http://240.0.0.1/",                                                       # reserved
+        "http://3232235777/", "http://0x7f000001/", "http://0xC0A80101/", "http://127.1/",
+        "http://2130706433:8080/x", "http://[::ffff:192.168.1.1]/",
     ])
     def test_private_lan_hosts_are_skipped(self, url):
         assert is_private_host(url)
@@ -244,6 +298,10 @@ class TestClassification:
     @pytest.mark.parametrize("url", [
         "http://172.32.0.1/", "https://8.8.8.8/", "https://example.org/10.0.0.1",
         "https://local.example.com/", "https://www.ebay.com/itm/1", "not a url",
+        "http://10.example.com/", "http://172.32.10.1/", "http://100.128.0.1/", "http://100.63.255.255/",
+        "http://134744072/",                      # 8.8.8.8 as an integer: public
+        "https://lan.example.com/", "https://internal.example.org/", "https://example.internal.com/",
+        "http://0xdeadbeef.example.com/", "http://123abc/",
     ])
     def test_public_hosts_are_not_private(self, url):
         assert not is_private_host(url)
@@ -269,3 +327,34 @@ class TestClassification:
     def test_public_and_generic_hosts_stay_on_crawlee(self, url):
         assert not needs_cookies(url)
         assert not AUTH_REQUIRED.search(url)
+
+
+class TestInternalDomainAnchoring:
+    """Review finding 11: bookmarks judge INTERNAL_DOMAINS on the host only (needs_cookies);
+    browser.py keeps the unanchored INTERNAL_DOMAINS.search(url), so its classify() is unchanged."""
+
+    @pytest.mark.parametrize("url", [
+        "https://w.amazon.com/bin/view/X", "https://quip-amazon.com/abc", "https://aws.highspot.com/items/1",
+        "https://broadcast.amazon.com/videos/1", "https://atoz.amazon.work/learn",
+        "https://amazon.awsapps.com/workdocs", "https://docs.hub.amazon.dev/brazil/",
+        "https://talent.a2z.com/x", "https://console.harmony.a2z.com/x", "https://idp.federate.amazon.com/",
+        "https://W.AMAZON.COM/x", "https://w.amazon.com:443/x",
+    ])
+    def test_internal_hosts_still_take_the_cookie_path(self, url):
+        from src.capture.filters import internal_host
+        assert internal_host(url) and needs_cookies(url)
+
+    @pytest.mark.parametrize("url", [
+        "https://evil.io/?r=w.amazon.com", "https://evil.io/w.amazon.com/x", "https://evil.io/#w.amazon.com",
+        "https://aw.amazon.com/", "https://example.org/redirect?to=https://quip-amazon.com/x",
+        "https://user:w.amazon.com@evil.io/",
+    ])
+    def test_internal_names_outside_the_host_do_not(self, url):
+        from src.capture.filters import internal_host
+        assert not internal_host(url) and not needs_cookies(url)
+
+    def test_browser_classification_is_unchanged(self):
+        from src.capture import browser, filters
+        assert browser.INTERNAL_DOMAINS is filters.INTERNAL_DOMAINS
+        assert filters.INTERNAL_DOMAINS.search("https://evil.io/?r=w.amazon.com")   # the shared regex is as before
+        assert browser.classify("https://w.amazon.com/bin/view/x") == "internal"

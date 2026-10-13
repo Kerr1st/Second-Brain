@@ -18,8 +18,38 @@ def sb(tmp_path, monkeypatch):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     monkeypatch.setattr(mod, "CRAWLEE_DIR", str(tmp_path))
+    monkeypatch.setattr(mod, "MIDWAY_COOKIE_PATH", str(tmp_path / "no-midway-cookie"))   # never the real one
     monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
+    monkeypatch.setenv("SECOND_BRAIN_LOG_DIR", str(tmp_path / "logs"))
     return mod
+
+
+FUTURE, PAST = 4102444800, 946684800      # 2100-01-01, 2000-01-01
+FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+
+
+def _midway_file(path, expires=FUTURE, name="session", domain="midway-auth.amazon.com"):
+    path.write_text(f"#HttpOnly_{domain}\tFALSE\t/\tTRUE\t{expires}\t{name}\tv\n")
+    return path
+
+
+class _FakeSession:
+    def __init__(self, get):
+        self.get = get
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def prepare_request(self, request):
+        return request
+
+
+def _fake_requests(get):
+    """Stands in for `requests`: fetch_internal uses `requests.Session()` (cookie policy)."""
+    return types.SimpleNamespace(Session=lambda: _FakeSession(get))
 
 
 class FakeCrawlee:
@@ -75,7 +105,8 @@ class TestCrawleeBatches:
         # ledger strike) — deliberately no longer "failed" (triage 2026-10-13: the kill, not
         # the URLs, was the problem). Batch 2 completes all 10.
         assert stats == {"processed": 9 + 10, "skipped": 1, "failed": 0, "too_short": 0, "timed_out_batches": 1,
-                         "deferred": 40, "crawlee_broken": 0}
+                         "deferred": 40, "crawlee_broken": 0, "batches_run": 2, "batches_with_output": 2,
+                         "failed_batches": 0}
         assert "40 deferred" in out
         assert not list(pathlib.Path(sb.CRAWLEE_DIR).glob(".sb-urls-*"))
 
@@ -83,7 +114,7 @@ class TestCrawleeBatches:
         output = ("✗ https://example.org/p1\n"
                   'WARN PlaywrightCrawler: Reclaiming failed request back to the list or queue. '
                   'Request blocked - received 403 status code. {"id":"x","url":"https://example.org/p2","retryCount":2}\n'
-                  'ERROR PlaywrightCrawler: navigation timed out {"url":"https://example.org/p3"}\n')
+                  'ERROR PlaywrightCrawler: navigation timed out {"id":"y","url":"https://example.org/p3"}\n')
         fake = FakeCrawlee(timeout_batches={1}, partial_on_timeout=1, output=output)
         monkeypatch.setattr(sb.subprocess, "run", fake.run)
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set(fake.index))
@@ -121,7 +152,16 @@ class TestCrawleeBatches:
     @pytest.mark.parametrize("rc,output,broken", [
         (1, "node:internal/modules/esm/resolve\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'crawlee'\n", True),
         (1, "", True),                                        # non-zero, nothing parseable
-        (0, "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'crawlee'\n", True),
+        (1, "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'crawlee'\n", True),
+        (1, "\x1b[31mERROR\x1b[39m Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'crawlee'\n", True),
+        (0, "node: command not found\n", True),               # environment patterns need no exit code
+        # Deliberately changed (review 2026-10-13, finding 3): the module/package patterns need a
+        # non-zero exit, and mark lines (✓/⚠/✗ + a page title or URL) are never matched.
+        (0, "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'crawlee'\n", False),
+        (0, "✓ Error: Cannot find module 'x' - Stack Overflow\n", False),
+        (1, "✓ Error: Cannot find module 'x' - Stack Overflow\n", False),
+        (None, "\x1b[32m✓\x1b[39m Error: Cannot find module 'x' - Stack Overflow\n", False),
+        (1, "⚠ Skip (too short): https://example.org/Cannot find module\n", False),
         (1, "✗ https://example.org/p0\n", False),             # a real per-URL failure
         (None, "", False),                                    # a kill is attribution, not breakage
         (0, "", False),
@@ -159,7 +199,9 @@ class TestCrawleeBatches:
         monkeypatch.setattr(sb.subprocess, "run", fake.run)
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set(fake.index))
         stats = sb.scrape_with_crawlee(_urls(3), timeout=5000)
-        assert stats["processed"] == 3 and stats["failed"] == 1
+        # Deliberately changed (review finding 12): a non-zero exit that names no failed URL is
+        # counted on its own (failed_batches), no longer as max(1, failed) URL failures.
+        assert stats["processed"] == 3 and stats["failed"] == 0 and stats["failed_batches"] == 1
 
     def test_default_budget_is_below_the_bookmarks_job_deadline(self, sb, monkeypatch):
         monkeypatch.setenv("SECOND_BRAIN_JOB_TIMEOUT_BOOKMARKS", "10800")
@@ -182,7 +224,7 @@ class TestInternalAuth:
         monkeypatch.setattr(sb, "KNOWLEDGE_DIR", str(tmp_path / "sources"))
         monkeypatch.setattr(sb, "MIDWAY_COOKIE_PATH", str(tmp_path / "no-midway-cookie"))   # never the real one
         holder = {}
-        fake_requests = types.SimpleNamespace(get=lambda *a, **k: holder["resp"])
+        fake_requests = _fake_requests(lambda *a, **k: holder["resp"])
         fake_cookie = types.SimpleNamespace(chrome=lambda domain_name=None: None)
         monkeypatch.setitem(sys.modules, "requests", fake_requests)
         monkeypatch.setitem(sys.modules, "browser_cookie3", fake_cookie)
@@ -218,6 +260,7 @@ class TestInternalAuth:
         bookmarks.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
             {"type": "url", "name": "Internal", "url": "https://w.amazon.com/bin/view/Thing"}]}}}))
         monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
+        monkeypatch.setattr(sb, "MIDWAY_COOKIE_PATH", str(_midway_file(tmp_path / "midway")))
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "auth")
         assert sb.main() == 0
@@ -287,7 +330,7 @@ class TestMidwayCookies:
         def get(url, cookies=None, **kw):
             seen["names"] = {c.name for c in cookies}
             return _resp()
-        monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(get=get))
+        monkeypatch.setitem(sys.modules, "requests", _fake_requests(get))
         monkeypatch.setitem(sys.modules, "browser_cookie3", types.SimpleNamespace(chrome=lambda domain_name=None: chrome))
         assert sb.scrape_with_cookies("Page", "https://w.amazon.com/bin/view/X") == "ok"
         assert seen["names"] == {"chrome_c", "session", "amazon_enterprise_access", "sess_only"}
@@ -299,7 +342,7 @@ class TestMidwayCookies:
         monkeypatch.setitem(sys.modules, "browser_cookie3", types.SimpleNamespace(chrome=lambda domain_name=None: None))
         resp = _resp(url="https://midway-auth.amazon.com/login?next=x",
                      history=["https://w.amazon.com/bin/view/X", "https://idp.federate.amazon.com/api/oauth2/v1/authorize"])
-        monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(get=lambda *a, **k: resp))
+        monkeypatch.setitem(sys.modules, "requests", _fake_requests(lambda *a, **k: resp))
         assert sb.scrape_with_cookies("Page", "https://w.amazon.com/bin/view/X") == "auth"
 
     def test_chrome_cookie_failure_falls_back_to_midway_only(self, sb, cookie_file, monkeypatch):
@@ -343,3 +386,310 @@ class TestBacklogAlarm:
         (tmp_path / "jobs").write_text("not a directory")
         assert self._main_with_deferrals(sb, tmp_path, monkeypatch, 7) == 0
         assert "could not record the bookmarks backlog state" in capsys.readouterr().out
+
+
+class TestRealCrawleeRecords:
+    """tests/fixtures/crawlee-retry-records.log is real Crawlee 3.15.3 / @apify/log 2.5.28
+    output (ANSI colors, multi-line records), captured offline: a PlaywrightCrawler
+    (maxRequestRetries=1, navigationTimeoutSecs=3) against a 127.0.0.1 server answering 403,
+    starting a download, and never answering; plus a genuine Playwright
+    net::ERR_CONNECTION_REFUSED (closed 127.0.0.1 port) thrown through Crawlee's own
+    retry/failure logging. The {"id":..,"url":..} data of the 403 / download / refused retry
+    WARN records is on a line of its own (basic-crawler.js `[message, userLine].join('\\n')`)."""
+
+    BLOCKED = "http://127.0.0.1:63707/blocked"
+    DOWNLOAD = "http://127.0.0.1:63707/download"
+    HANG = "http://127.0.0.1:63707/hang"
+    REFUSED = "http://127.0.0.1:59998/refused"
+    EXPECTED = {BLOCKED: "auth", DOWNLOAD: "error", HANG: "timeout", REFUSED: "error"}
+
+    @pytest.fixture
+    def text(self):
+        raw = (FIXTURES / "crawlee-retry-records.log").read_text()
+        assert "\x1b[" in raw                                   # really colored
+        return raw
+
+    @staticmethod
+    def _without_marks(text, sb):
+        return "\n".join(l for l in text.splitlines() if not sb.strip_ansi(l).lstrip().startswith("✗"))
+
+    def test_finished_run_maps_every_url_to_its_class(self, sb, text):
+        assert sb.parse_crawlee_output(text) == self.EXPECTED
+
+    def test_killed_mid_retry_records_alone_map_every_url(self, sb, text):
+        # No final ✗ lines (batch killed): the WARN/ERROR records alone must name each URL.
+        assert sb.parse_crawlee_output(self._without_marks(text, sb)) == self.EXPECTED
+
+    def test_the_multi_line_retry_warns_alone(self, sb, text):
+        # Only the first records, as when a batch is killed during the first retries.
+        lines = text.splitlines()
+        cut = next(i for i, l in enumerate(lines) if "/download" in l and '"retryCount"' in l)
+        assert sb.parse_crawlee_output("\n".join(lines[:cut + 1])) == {self.BLOCKED: "auth", self.DOWNLOAD: "error"}
+        refused_warn = [l for l in lines if "Reclaiming" in l and "ERR_CONNECTION_REFUSED" in l]
+        start = lines.index(refused_warn[0])
+        end = next(i for i in range(start, len(lines)) if '"retryCount"' in lines[i])
+        assert end > start                                      # the URL data is on a later line
+        assert sb.parse_crawlee_output("\n".join(lines[start:end + 1])) == {self.REFUSED: "error"}
+
+    def test_the_line_based_parser_would_have_missed_them(self, sb, text):
+        """Regression guard for the review's finding: no record's URL data shares the WARN line."""
+        plain = sb.strip_ansi(text).splitlines()
+        warn_with_url = [l for l in plain if l.startswith("WARN") and '"url"' in l]
+        assert [l for l in warn_with_url if "/hang" not in l] == []
+
+    def test_killed_batch_with_real_records_strikes_instead_of_deferring(self, sb, monkeypatch, text):
+        urls = [("B", self.BLOCKED), ("D", self.DOWNLOAD), ("H", self.HANG), ("R", self.REFUSED),
+                ("N", "http://127.0.0.1:63707/never")]
+        fake = FakeCrawlee(timeout_batches={1}, partial_on_timeout=0, output=self._without_marks(text, sb))
+        monkeypatch.setattr(sb.subprocess, "run", fake.run)
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set(fake.index))
+        outcomes, killed = {}, set()
+        stats = sb.scrape_with_crawlee(urls, timeout=5000, outcomes=outcomes, killed_deferred=killed)
+        assert outcomes == self.EXPECTED
+        assert stats["failed"] == 4 and stats["deferred"] == 1 and killed == {"http://127.0.0.1:63707/never"}
+
+    def test_warn_level_is_recognised_after_the_ansi_strip(self, sb):
+        line = '\x1b[33mWARN\x1b[39m \x1b[33m PlaywrightCrawler:\x1b[39m Reclaiming failed request.\n' \
+               '\x1b[90m {"id":"a","url":"https://example.org/x","retryCount":1}\x1b[39m\n'
+        assert sb.parse_crawlee_output(line) == {"https://example.org/x": "error"}
+
+    def test_info_records_and_data_without_url_map_nothing(self, sb):
+        text = ('\x1b[32mINFO\x1b[39m \x1b[33m PlaywrightCrawler:\x1b[39m Final request statistics:'
+                '\x1b[90m {"requestsFinished":1}\x1b[39m\n✓ Some title\n')
+        assert sb.parse_crawlee_output(text) == {}
+
+
+class TestDeferralBound:
+    """Finding 1c: a URL deferred by killed batches is tried first next run, and after
+    DEFERRAL_LIMIT consecutive killed-batch deferrals takes a `timeout` strike."""
+
+    URL = "https://example.org/stuck"
+
+    def _main(self, sb, tmp_path, monkeypatch, crawlee):
+        bookmarks = tmp_path / "Bookmarks"
+        bookmarks.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
+            {"type": "url", "name": "First", "url": "https://example.org/first"},
+            {"type": "url", "name": "Stuck", "url": self.URL}]}}}))
+        monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
+        monkeypatch.setattr(sb, "scrape_with_crawlee", crawlee)
+        return sb.main()
+
+    def test_three_killed_deferrals_become_one_timeout_strike_and_are_ordered_first(self, sb, tmp_path, monkeypatch):
+        from src.capture.unreachable import DEFERRAL_LIMIT, Ledger, url_key
+        orders = []
+
+        def crawlee(urls, outcomes=None, killed_deferred=None, **kw):
+            orders.append([u for _, u in urls])
+            outcomes["https://example.org/first"] = "ok"
+            killed_deferred.add(self.URL)
+            return {"processed": 1, "skipped": 0, "failed": 0, "deferred": 1, "timed_out_batches": 1,
+                    "batches_run": 1, "batches_with_output": 1}
+        ledger_path = tmp_path / "jobs" / "bookmarks.unreachable.json"
+        for run in range(1, DEFERRAL_LIMIT):
+            assert self._main(sb, tmp_path, monkeypatch, crawlee) == 0
+            entry = Ledger.load(ledger_path).entries[url_key(self.URL)]
+            assert entry["deferred_runs"] == run and "status" not in entry and not entry.get("consecutive_failures")
+        assert orders[0] == ["https://example.org/first", self.URL]
+        assert orders[1] == [self.URL, "https://example.org/first"]      # deferred URL goes first
+        assert self._main(sb, tmp_path, monkeypatch, crawlee) == 0
+        entry = Ledger.load(ledger_path).entries[url_key(self.URL)]
+        assert entry["status"] == "timeout" and entry["consecutive_failures"] == 1
+        assert "deferred_runs" not in entry
+
+    def test_an_attempt_clears_the_count(self, sb, tmp_path, monkeypatch):
+        from src.capture.unreachable import Ledger, url_key
+        ledger_path = tmp_path / "jobs" / "bookmarks.unreachable.json"
+
+        def deferring(urls, outcomes=None, killed_deferred=None, **kw):
+            outcomes["https://example.org/first"] = "ok"
+            killed_deferred.add(self.URL)
+            return {"processed": 1, "skipped": 0, "failed": 0, "deferred": 1, "batches_run": 1, "batches_with_output": 1}
+
+        def succeeding(urls, outcomes=None, killed_deferred=None, **kw):
+            outcomes.update({u: "ok" for _, u in urls})
+            return {"processed": 2, "skipped": 0, "failed": 0, "deferred": 0, "batches_run": 1, "batches_with_output": 1}
+        self._main(sb, tmp_path, monkeypatch, deferring)
+        assert Ledger.load(ledger_path).entries[url_key(self.URL)]["deferred_runs"] == 1
+        self._main(sb, tmp_path, monkeypatch, succeeding)
+        assert url_key(self.URL) not in Ledger.load(ledger_path).entries
+
+
+class TestMidwayExpiry:
+    """Finding 5: no unexpired midway-auth.amazon.com `session` cookie -> the internal path
+    is skipped, its URLs are deferred_auth (no ledger strike), exit 0 for that alone."""
+
+    def _main(self, sb, tmp_path, monkeypatch, cookie_path):
+        bookmarks = tmp_path / "Bookmarks"
+        bookmarks.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
+            {"type": "url", "name": f"I{i}", "url": f"https://w.amazon.com/bin/view/I{i}"} for i in range(3)]}}}))
+        monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
+        monkeypatch.setattr(sb, "MIDWAY_COOKIE_PATH", str(cookie_path))
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
+        calls = []
+        monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: calls.append(url) or "auth")
+        return sb.main(), calls
+
+    @pytest.mark.parametrize("make", [
+        lambda p: _midway_file(p, expires=PAST),                        # expired
+        lambda p: p,                                                    # missing
+        lambda p: _midway_file(p, name="amazon_enterprise_access"),     # no session cookie
+        lambda p: _midway_file(p, domain=".amazon.com"),                # not the Midway host
+    ], ids=["expired", "missing", "no-session", "other-domain"])
+    def test_missing_or_expired_cookie_defers_the_internal_path(self, sb, tmp_path, monkeypatch, capsys, make):
+        rc, calls = self._main(sb, tmp_path, monkeypatch, make(tmp_path / "midway"))
+        out = capsys.readouterr().out
+        assert rc == 0 and calls == []
+        assert "WARNING: Midway cookie missing/expired — run mwinit; 3 internal URLs deferred" in out
+        assert "deferred_auth=3" in out
+        ledger = json.loads((tmp_path / "jobs" / "bookmarks.unreachable.json").read_text())
+        assert ledger["urls"] == {}                                     # no strike
+
+    def test_valid_cookie_runs_the_internal_path(self, sb, tmp_path, monkeypatch, capsys):
+        rc, calls = self._main(sb, tmp_path, monkeypatch, _midway_file(tmp_path / "midway"))
+        out = capsys.readouterr().out
+        assert rc == 0 and len(calls) == 3 and "Midway cookie missing" not in out
+        assert "deferred_auth=0" in out
+
+    def test_session_check_reads_no_value(self, sb, tmp_path, capsys):
+        path = tmp_path / "midway"
+        path.write_text(f"#HttpOnly_midway-auth.amazon.com\tFALSE\t/\tTRUE\t{FUTURE}\tsession\tSECRETVALUE\n")
+        assert sb.midway_session_valid(str(path)) is True
+        assert "SECRETVALUE" not in capsys.readouterr().out
+
+
+class TestCookieScoping:
+    """Findings 7 and 9: which hosts the merged jar sends Midway cookies to, through the real
+    `requests` request preparation (no network) with the strict host-only policy."""
+
+    @pytest.fixture
+    def jar(self, sb, tmp_path):
+        path = tmp_path / "cookie"
+        path.write_text("\n".join([
+            f"#HttpOnly_midway-auth.amazon.com\tFALSE\t/\tTRUE\t{FUTURE}\tsession\tsv",
+            f".amazon.com\tTRUE\t/\tTRUE\t{FUTURE}\tamazon_enterprise_access\tav",
+            f"#HttpOnly_.auth.midway.aws.dev\tTRUE\t/\tTRUE\t{FUTURE}\tmw_dev\tdv",
+        ]) + "\n")
+        return sb.load_midway_cookies(str(path))
+
+    @staticmethod
+    def _sent(sb, jar, url):
+        requests = pytest.importorskip("requests")
+        with sb.cookie_policy_session(requests) as session:
+            prepared = session.prepare_request(requests.Request("GET", url, cookies=jar))
+        return prepared.headers.get("Cookie") or ""
+
+    @pytest.mark.parametrize("url", [
+        "https://contoso.sharepoint.com/sites/x",
+        "https://amazon.coupahost.com/requisition",
+        "https://x.coupahost.com/",
+        "https://awsinsights.aws.dev/",
+        "https://midway-auth.amazon.com.evil.io/",
+        "https://midway-auth.amazon.co/",
+        "https://example.org/?r=midway-auth.amazon.com",
+    ])
+    def test_no_midway_cookie_reaches_other_hosts(self, sb, jar, url):
+        sent = self._sent(sb, jar, url)
+        assert "session=" not in sent and "mw_dev=" not in sent and "amazon_enterprise_access=" not in sent
+
+    def test_look_alike_amazon_host_gets_no_midway_session(self, sb, jar):
+        # (.amazon.com cookies are domain cookies by design; the Midway session is host-only.)
+        sent = self._sent(sb, jar, "https://evilmidway-auth.amazon.com/")
+        assert "session=" not in sent and "mw_dev=" not in sent
+
+    def test_host_only_cookie_is_not_sent_to_subdomains(self, sb, jar):
+        assert "session=sv" in self._sent(sb, jar, "https://midway-auth.amazon.com/SSO/redirect")
+        assert "session=" not in self._sent(sb, jar, "https://x.midway-auth.amazon.com/")
+        # Domain cookies still reach their subdomains (the Midway redirect chain needs them).
+        assert "mw_dev=dv" in self._sent(sb, jar, "https://x.auth.midway.aws.dev/")
+        assert "amazon_enterprise_access=av" in self._sent(sb, jar, "https://idp.federate.amazon.com/")
+
+    def test_plain_jar_policy_also_rejects_subdomains(self, sb, jar):
+        import urllib.request
+        req = urllib.request.Request("https://x.midway-auth.amazon.com/")
+        jar.add_cookie_header(req)
+        assert "session=" not in (req.get_header("Cookie") or "")
+
+    def test_redirect_hops_keep_the_policy(self, sb, jar):
+        requests = pytest.importorskip("requests")
+        from requests.adapters import BaseAdapter
+        seen = []
+
+        class Hops(BaseAdapter):
+            def send(self, request, **kw):
+                seen.append((request.url, request.headers.get("Cookie") or ""))
+                resp = requests.Response()
+                resp.request, resp.url, resp.encoding = request, request.url, "utf-8"
+                resp._content = b"ok"
+                if "w.amazon.com" in request.url:
+                    resp.status_code, resp.headers["Location"] = 302, "https://x.midway-auth.amazon.com/a"
+                elif "x.midway-auth" in request.url:
+                    resp.status_code, resp.headers["Location"] = 302, "https://midway-auth.amazon.com/b"
+                else:
+                    resp.status_code = 200
+                return resp
+
+            def close(self):
+                pass
+        with sb.cookie_policy_session(requests) as session:
+            session.mount("https://", Hops())
+            assert session.get("https://w.amazon.com/x", cookies=jar).status_code == 200
+        hops = dict(seen)
+        assert "session=" not in hops["https://w.amazon.com/x"]
+        assert "session=" not in hops["https://x.midway-auth.amazon.com/a"]
+        assert "session=sv" in hops["https://midway-auth.amazon.com/b"]
+
+
+class TestBatchScrapePatchCheck:
+    def test_warns_when_the_patch_is_not_applied(self, sb, tmp_path, capsys):
+        (tmp_path / "batch-scrape.js").write_text("const crawler = new PlaywrightCrawler({});\n")
+        assert sb.check_batch_scrape_patch() is False
+        out = capsys.readouterr().out
+        assert out.count("WARNING:") == 1 and "crawlee-batch-scrape.patch not applied" in out
+        assert str(tmp_path / "batch-scrape.js") in out                  # derived from CRAWLEE_DIR
+
+    def test_silent_when_applied_and_warns_when_missing(self, sb, tmp_path, capsys):
+        assert sb.check_batch_scrape_patch() is False                   # no file at all
+        assert "WARNING:" in capsys.readouterr().out
+        (tmp_path / "batch-scrape.js").write_text("envInt('BATCH_SCRAPE_MAX_REQUEST_RETRIES', 3)\n")
+        assert sb.check_batch_scrape_patch() is True
+        assert capsys.readouterr().out == ""
+
+    def test_main_warns_once_per_run(self, sb, tmp_path, monkeypatch, capsys):
+        bookmarks = tmp_path / "Bookmarks"
+        bookmarks.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
+            {"type": "url", "name": f"P{i}", "url": f"https://example.org/p{i}"} for i in range(120)]}}}))
+        monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
+        fake = FakeCrawlee()
+        monkeypatch.setattr(sb.subprocess, "run", fake.run)
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set(fake.index))
+        assert sb.main() == 0 and len(fake.calls) == 3
+        assert capsys.readouterr().out.count("does not read BATCH_SCRAPE_") == 1
+
+
+class TestKeptLog:
+    def test_planted_symlink_is_refused_not_truncated(self, sb, tmp_path, monkeypatch):
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        victim = tmp_path / "victim.txt"
+        victim.write_text("keep me")
+        victim.chmod(0o644)
+        (logs / "bookmarks-crawlee-1.log").symlink_to(victim)
+        monkeypatch.setattr(sb, "_clear_kept_logs", lambda name: None)  # the planted link survives clearing
+        with pytest.raises(OSError):
+            sb._open_kept_log("bookmarks-crawlee", 1)
+        assert victim.read_text() == "keep me" and (victim.stat().st_mode & 0o777) == 0o644
+
+    def test_output_is_read_back_through_the_same_fd(self, sb, tmp_path, monkeypatch):
+        logs = tmp_path / "logs"
+
+        def run(cmd, stdout=None, **kw):
+            os_fd = stdout.fileno()
+            import os
+            os.write(os_fd, "✗ https://example.org/p0\n".encode())     # as node writes: straight to the fd
+            (logs / "bookmarks-crawlee-1.log").unlink()                  # path replaced mid-run
+            (logs / "bookmarks-crawlee-1.log").write_text("another run's log\n")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        monkeypatch.setattr(sb.subprocess, "run", run)
+        rc, output = sb._run_crawlee_batch([("P", "https://example.org/p0")], 10, keep_log=("bookmarks-crawlee", 1))
+        assert rc == 0 and output == "✗ https://example.org/p0\n"
