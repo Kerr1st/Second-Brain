@@ -509,10 +509,15 @@ def _drop_locale(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def _fake_cluster(calls, *, start_fails=False):
+def _fake_cluster(calls, *, start_fails=False, fail_at=None):
     def run(args, **kwargs):
         argv = [str(a) for a in args]
         calls.append((argv, dict(kwargs.get('env') or {}), kwargs.get('diagnostics', True)))
+        if argv[0] == fail_at:
+            log = next(Path(c[0][c[0].index('-l') + 1]) for c in calls if c[0][0] == 'pg_ctl' and '-l' in c[0])
+            with log.open('a') as f:
+                f.write('ERROR:  duplicate key value\nCONTEXT:  COPY memories, line 1: "private row value"\n')
+            raise RuntimeError(f'{fail_at} failed (exit 1)')
         if argv[0] == 'initdb':
             data = Path(argv[argv.index('-D') + 1])
             data.mkdir(parents=True)
@@ -566,6 +571,23 @@ def test_failed_pg_ctl_start_carries_the_cluster_log_tail(tmp_path, monkeypatch)
     assert 'restore.log tail:' in message and 'postmaster became multithreaded during startup' in message
     assert 'HINT:  Set the LC_ALL' in message
     assert not any(argv[0] in ('createdb', 'pg_restore') for argv, _, _ in calls)
+
+
+@pytest.mark.parametrize('fail_at', ['createdb', 'pg_restore'])
+def test_restore_log_is_tailed_only_when_pg_ctl_start_fails(tmp_path, monkeypatch, fail_at):
+    """Once the cluster is up, restore.log can carry COPY CONTEXT lines quoting restored
+    rows, so a failure in createdb or pg_restore must never echo any of it."""
+    _drop_locale(monkeypatch)
+    calls = []
+    with patch.object(backup, 'command', side_effect=_fake_cluster(calls, fail_at=fail_at)):
+        with pytest.raises(RuntimeError) as err:
+            backup.restore_check(tmp_path / 'db.dump', tmp_path, socket_dir=tmp_path / 'sock')
+    message = str(err.value)
+    assert message == f'{fail_at} failed (exit 1)'
+    assert (tmp_path / 'restore.log').read_text().count('private row value') == 1, 'fake must have written the log'
+    for leaked in ('restore.log', 'private row value', 'CONTEXT', 'postmaster became multithreaded', 'HINT'):
+        assert leaked not in message
+    assert calls[-1][0][:2] == ['pg_ctl', '-D'] and calls[-1][0][-1] == 'stop'
 
 
 def test_failing_command_error_carries_a_bounded_redacted_stderr_tail():

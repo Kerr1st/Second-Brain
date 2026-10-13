@@ -260,6 +260,11 @@ def restore_check(dump, area, *, socket_dir=None, port='5432'):
         command(['initdb', '-D', data, '-U', 'sb_restore', '--auth-local=trust', '--auth-host=reject', '--no-locale', '-E', 'UTF8'], env=pg_env)
         with (data / 'postgresql.conf').open('a') as f:
             f.write(f"\nlisten_addresses = ''\nport = {port}\nunix_socket_directories = '{sockets}'\nmaintenance_work_mem = '512MB'\n")
+        # restore.log is tailed ONLY here, when ``pg_ctl start`` fails: the cluster is
+        # fresh and nothing has been restored, so the log holds startup FATAL/HINT lines
+        # and no row data.  Never read it after createdb: once pg_restore has run, the
+        # server log can carry COPY CONTEXT lines quoting restored values.  Pinned by
+        # test_restore_log_is_tailed_only_when_pg_ctl_start_fails.
         try:
             command(['pg_ctl', '-D', data, '-l', log, '-w', 'start'], env=pg_env)
         except RuntimeError as exc:
