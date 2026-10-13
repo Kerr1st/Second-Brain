@@ -358,3 +358,45 @@ class TestInternalDomainAnchoring:
         assert browser.INTERNAL_DOMAINS is filters.INTERNAL_DOMAINS
         assert filters.INTERNAL_DOMAINS.search("https://evil.io/?r=w.amazon.com")   # the shared regex is as before
         assert browser.classify("https://w.amazon.com/bin/view/x") == "internal"
+
+
+def test_revert_20261013_auth_strikes_is_scoped_and_idempotent(tmp_path, capsys):
+    """scripts/maintenance/revert_bookmarks_auth_strikes_20261013.py: one strike off
+    internal auth entries last attempted in the 10-13 run window; nothing else."""
+    import importlib.util
+    import pathlib
+    from datetime import datetime, timezone
+    from src.capture.unreachable import Ledger, url_key
+    spec = importlib.util.spec_from_file_location(
+        "revert", pathlib.Path("scripts/maintenance/revert_bookmarks_auth_strikes_20261013.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    path = tmp_path / "bookmarks.unreachable.json"
+    ledger = Ledger(path)
+    d1010 = datetime(2026, 10, 10, 19, 58, tzinfo=timezone.utc)
+    d1013 = datetime(2026, 10, 13, 15, 15, tzinfo=timezone.utc)
+    later = datetime(2026, 10, 17, 8, 0, tzinfo=timezone.utc)
+    wiki, new, public, other = ("https://w.amazon.com/bin/view/A", "https://broadcast.amazon.com/x",
+                                "https://www.crunchbase.com/x", "https://w.amazon.com/bin/view/B")
+    for url in (wiki, public):
+        ledger.record(url, "auth", now=d1010)
+        ledger.record(url, "auth", now=d1013)
+    ledger.record(new, "auth", now=d1013)                       # first failure was in the run
+    ledger.record(other, "auth", now=d1010)
+    ledger.record(other, "auth", now=later)                     # outside the window
+    ledger.save()
+
+    assert mod.main(["--ledger", str(path)]) == 0               # dry run writes nothing
+    assert Ledger.load(path).entries[url_key(wiki)]["attempts"] == 2
+    assert mod.main(["--ledger", str(path), "--apply"]) == 0
+    entries = Ledger.load(path).entries
+    assert entries[url_key(wiki)]["attempts"] == 1 and entries[url_key(wiki)]["consecutive_failures"] == 1
+    assert entries[url_key(wiki)]["last_attempt_at"] == d1010.isoformat()
+    assert url_key(new) not in entries
+    assert entries[url_key(public)]["consecutive_failures"] == 2   # public Crawlee auth is real
+    assert entries[url_key(other)]["consecutive_failures"] == 2
+    assert (tmp_path / "bookmarks.unreachable.json.pre-revert-20261013").exists()
+    before = path.read_text()
+    assert mod.main(["--ledger", str(path), "--apply"]) == 0
+    assert path.read_text() == before                           # idempotent
+    assert "matched 0: {}" in capsys.readouterr().out.splitlines()[-1]
