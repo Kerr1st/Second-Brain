@@ -129,10 +129,12 @@ class TaskFailure:
     task_id: str
     stage: str
     error_type: str
-    #: Sanitized ``str(error)`` (whitespace collapsed, at most
-    #: FAILURE_MESSAGE_CHARS). For a SemanticResultError it names the broken
-    #: contract rule; every raise site uses a fixed sentence, never model
-    #: output or turn text.
+    #: Set only for a SemanticResultError: its sanitized ``str(error)``
+    #: (whitespace collapsed, at most FAILURE_MESSAGE_CHARS), naming the broken
+    #: contract rule. Every raise site uses a fixed sentence (plus at most a
+    #: cause type name), never model output or turn text. "" for every other
+    #: failure: DB errors (psycopg DETAIL: Key (...)=(...)) and CLI stderr can
+    #: carry row values and turn text.
     message: str = ""
 
 
@@ -494,7 +496,7 @@ def _record_failure(counts, failures, task_id, stage, error) -> None:
             task_id=task_id,
             stage=stage,
             error_type=type(error).__name__,
-            message=_failure_message(error),
+            message=_failure_message(error) if isinstance(error, SemanticResultError) else "",
         )
     )
 

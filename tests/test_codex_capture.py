@@ -1461,7 +1461,8 @@ def test_infrastructure_failure_in_the_semantic_pass_still_exits_one(
 
     assert (run["failed"], run["semantic_contract_failed"]) == (1, 0)
     assert run["failures"][0]["error_type"] == "ConnectionError"
-    assert run["failures"][0]["message"] == "endpoint unreachable"
+    # Only a SemanticResultError carries a message (review E2).
+    assert run["failures"][0]["message"] == ""
     # An outage does not consume the contract attempt budget.
     assert "semantic_attempts" not in metadata
 
@@ -1486,7 +1487,8 @@ def test_embedding_failure_after_a_valid_result_still_exits_one(
     assert main(["--backfill"], now=NOW) == 1
     run = json.loads(capsys.readouterr().out)
     assert (run["failed"], run["semantic_contract_failed"]) == (1, 0)
-    assert run["failures"][0]["message"] == "embedding service down"
+    assert run["failures"][0]["error_type"] == "RuntimeError"
+    assert run["failures"][0]["message"] == ""          # review E2: no DB/embedding text
 
 
 def test_failure_message_is_one_line_and_bounded():
@@ -1512,9 +1514,36 @@ def test_every_semantic_contract_raise_site_uses_a_fixed_sentence():
         and getattr(node.exc.func, "id", None) == "SemanticResultError"
     ]
     assert len(raised) >= 10
+
     for call in raised:
         assert [type(arg) for arg in call.args] == [ast.Constant], ast.unparse(call)
         assert not call.keywords
+
+def test_task_failure_message_is_empty_for_every_non_contract_failure():
+    """Review E2: DB (psycopg DETAIL: Key (...)=(...)), embedding and CLI stderr
+    text can carry row values and turn text; only SemanticResultError keeps one."""
+    class UniqueViolation(Exception):
+        pass
+
+    counts, failures = {"failed": 0}, []
+    errors = [
+        ("capture", UniqueViolation('duplicate key value violates unique constraint "memories_source_url_key"\n'
+                                    "DETAIL:  Key (source_url)=(codex://secret-row-value) already exists.")),
+        ("embedding", RuntimeError("embedding failed for: private turn text")),
+        ("semantic", RuntimeError("claude exited 1: stderr quotes the prompt: private turn text")),
+        ("semantic_input", codex_capture.SemanticBatchTooLarge("turn too large")),
+        ("source_read", OSError("cannot read /Users/someone/.codex/sessions/x.jsonl")),
+    ]
+    for stage, error in errors:
+        codex_capture._record_failure(counts, failures, "t", stage, error)
+    codex_capture._record_failure(counts, failures, "t", "semantic",
+                                  codex_capture.SemanticResultError("memory fields have invalid types"))
+    assert counts["failed"] == len(errors) + 1
+    assert [f.message for f in failures[:-1]] == [""] * len(errors)
+    assert [f.error_type for f in failures[:-1]] == [
+        "UniqueViolation", "RuntimeError", "RuntimeError", "SemanticBatchTooLarge", "OSError"]
+    assert failures[-1].message == "memory fields have invalid types"
+
 
 def test_semantic_contract_identity_includes_prompt_version_and_model():
     pass_with_model = codex_capture._BackendSemanticPass()
