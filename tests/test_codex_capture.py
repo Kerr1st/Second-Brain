@@ -1235,14 +1235,26 @@ def test_permanently_failing_semantic_pass_is_bounded_then_never_retried(
         1
     ] * 4
     assert all(report.semantic_processed == 0 for report in reports)
-    # Only the abandoning attempt is a semantic-contract failure; earlier
-    # (still retrying) contract failures keep failing the run.
+    # Policy change 2026-10-13 (triage codex-capture.md, "Alert noise"): every
+    # contract miss is a semantic-contract failure, retrying or abandoning, so
+    # no attempt fails the run (before: [1] * (bound - 1) + [0]). The liveness
+    # advisory [backlog.codex-capture] is the backstop for a systematic break.
     assert [report.semantic_contract_failed for report in reports] == (
-        [0] * (bound - 1) + [1] + [0, 0, 0]
+        [1] * bound + [0, 0, 0]
     )
-    assert [report.infrastructure_failed for report in reports] == (
+    assert [report.semantic_contract_retrying for report in reports] == (
         [1] * (bound - 1) + [0] + [0, 0, 0]
     )
+    assert [report.semantic_contract_abandoned for report in reports] == (
+        [0] * (bound - 1) + [1] + [0, 0, 0]
+    )
+    assert [report.infrastructure_failed for report in reports] == [0] * (bound + 3)
+    # The broken rule survives into the failure record (it used to be lost).
+    rule = "Topic Segments must cover every new Agent Turn exactly once and in order"
+    for report in reports[:bound]:
+        (failure,) = report.failures
+        assert (failure.stage, failure.error_type) == ("semantic", "SemanticResultError")
+        assert failure.message == rule
     assert reports[-1].failures == ()
     # The verbatim Captured Task survives untouched and stays unprocessed.
     assert len(metadata["turns"]) == 3
@@ -1255,8 +1267,13 @@ def test_permanently_failing_semantic_pass_is_bounded_then_never_retried(
     assert metadata["semantic_abandoned"]["reason"] == (
         codex_capture.SEMANTIC_ABANDON_REASON
     )
-    assert len(warnings) == 1
-    assert "abandoned" in warnings[0].getMessage()
+    # One WARNING per contract miss, naming attempt/bound and the broken rule;
+    # only the last one abandons.
+    assert len(warnings) == bound
+    for attempt, warning in enumerate(warnings, start=1):
+        assert f"attempt {attempt}/{bound}" in warning.getMessage()
+        assert rule in warning.getMessage()
+    assert ["abandoned" in w.getMessage() for w in warnings] == [False] * (bound - 1) + [True]
 
 
 @pytest.mark.parametrize(
@@ -1353,6 +1370,7 @@ def test_run_summary_json_reports_semantic_abandonment(
         _services(home, _AlwaysFailingSemanticPass(), tmp_path / "capture.lock"),
     )
     monkeypatch.setenv(codex_capture.SEMANTIC_MAX_ATTEMPTS_ENV, "1")
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
 
     # The abandoning run is recorded, the verbatim task kept: a semantic-contract
     # failure, not an infrastructure failure, so the command exits 0.
@@ -1364,11 +1382,139 @@ def test_run_summary_json_reports_semantic_abandonment(
     assert abandoning_run["semantic_abandoned"] == 1
     assert abandoning_run["failed"] == 1                      # backward compatible total
     assert abandoning_run["semantic_contract_failed"] == 1
+    assert abandoning_run["semantic_contract_abandoned"] == 1
+    assert abandoning_run["semantic_contract_retrying"] == 0
     assert abandoning_run["failures"][0]["stage"] == "semantic"
+    assert abandoning_run["failures"][0]["message"] == (
+        "Topic Segments must cover every new Agent Turn exactly once and in order"
+    )
     assert later_run["semantic_abandoned"] == 1
     assert later_run["failed"] == 0
     assert later_run["semantic_contract_failed"] == 0
 
+
+def test_retryable_contract_miss_exits_zero_with_its_rule_and_feeds_liveness(
+    test_db, clean_tables, tmp_path, monkeypatch, capsys
+):
+    """2026-10-13: a miss with attempts left no longer fails the run, but its
+    rule reaches the summary and the codex-capture backlog sidecar counts it."""
+    from scripts.capture_codex import main
+    from src.operations import backlog
+
+    status_dir = tmp_path / "jobs"
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(status_dir))
+    home = _real_codex_home(tmp_path)
+    cause = ValueError("RAW MODEL OUTPUT {\"segments\": [...]} turn text")
+    miss = codex_capture.SemanticResultError(
+        "a segment referenced\n  an unknown   Agent Turn"
+    )
+    miss.__cause__ = cause
+    semantic = _SemanticScript(
+        miss,
+        codex_capture.SemanticResultError("memory fields have invalid types"),
+        lambda previous, turns: _one_segment(previous, turns),
+    )
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+
+    runs, streaks = [], []
+    for _ in range(3):
+        assert main(["--backfill"], now=NOW) == 0
+        runs.append(json.loads(capsys.readouterr().out))
+        streaks.append(backlog.read_state("codex-capture", status_dir)["consecutive_deferred_runs"])
+    first, second, third = runs
+
+    assert (first["failed"], first["semantic_contract_failed"]) == (1, 1)
+    assert (first["semantic_contract_retrying"], first["semantic_contract_abandoned"]) == (1, 0)
+    assert first["semantic_abandoned"] == 0
+    (failure,) = first["failures"]
+    # Whitespace collapsed; the wrapped cause (model output) never leaks.
+    assert failure == {
+        "error_type": "SemanticResultError",
+        "message": "a segment referenced an unknown Agent Turn",
+        "stage": "semantic",
+        "task_id": TASK_ID,
+    }
+    assert "RAW MODEL OUTPUT" not in json.dumps(runs)
+    assert second["failures"][0]["message"] == "memory fields have invalid types"
+    # The retry and its success are unchanged by the exit policy.
+    assert third["semantic_processed"] == 1 and third["failed"] == 0
+    assert len(semantic.calls) == 3
+    # Sidecar: two runs with misses, then the streak resets on a clean run.
+    assert streaks == [1, 2, 0]
+    state = backlog.read_state("codex-capture", status_dir)
+    assert state["deferred"] == 0 and state["first_deferred_at"] is None
+
+
+def test_infrastructure_failure_in_the_semantic_pass_still_exits_one(
+    test_db, clean_tables, tmp_path, monkeypatch, capsys
+):
+    from scripts.capture_codex import main
+
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(ConnectionError("endpoint unreachable"))
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+
+    assert main(["--backfill"], now=NOW) == 1
+    run = json.loads(capsys.readouterr().out)
+    _, _, metadata, _, _ = _task_row()
+
+    assert (run["failed"], run["semantic_contract_failed"]) == (1, 0)
+    assert run["failures"][0]["error_type"] == "ConnectionError"
+    assert run["failures"][0]["message"] == "endpoint unreachable"
+    # An outage does not consume the contract attempt budget.
+    assert "semantic_attempts" not in metadata
+
+
+def test_embedding_failure_after_a_valid_result_still_exits_one(
+    test_db, clean_tables, tmp_path, monkeypatch, capsys
+):
+    from scripts.capture_codex import main
+
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(lambda previous, turns: _one_segment(previous, turns))
+
+    def broken_embed(text):
+        raise RuntimeError("embedding service down")
+
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock", embed=broken_embed),
+    )
+
+    assert main(["--backfill"], now=NOW) == 1
+    run = json.loads(capsys.readouterr().out)
+    assert (run["failed"], run["semantic_contract_failed"]) == (1, 0)
+    assert run["failures"][0]["message"] == "embedding service down"
+
+
+def test_failure_message_is_one_line_and_bounded():
+    long = codex_capture.SemanticResultError("rule\t\n" + "x" * 500)
+    message = codex_capture._failure_message(long)
+
+    assert "\n" not in message and "\t" not in message
+    assert message.startswith("rule x")
+    assert len(message) == codex_capture.FAILURE_MESSAGE_CHARS
+    assert message.endswith("…")
+    assert codex_capture._failure_message(RuntimeError()) == ""
+
+
+def test_every_semantic_contract_raise_site_uses_a_fixed_sentence():
+    """No contract message may interpolate model output or turn text."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(codex_capture))
+    raised = [
+        node.exc for node in ast.walk(tree)
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+        and getattr(node.exc.func, "id", None) == "SemanticResultError"
+    ]
+    assert len(raised) >= 10
+    for call in raised:
+        assert [type(arg) for arg in call.args] == [ast.Constant], ast.unparse(call)
+        assert not call.keywords
 
 def test_semantic_contract_identity_includes_prompt_version_and_model():
     pass_with_model = codex_capture._BackendSemanticPass()

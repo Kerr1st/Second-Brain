@@ -120,11 +120,20 @@ For a correction episode:
 Do not emit processing telemetry, hashes, or versions."""
 
 
+#: Longest failure message kept in a TaskFailure / log line.
+FAILURE_MESSAGE_CHARS = 200
+
+
 @dataclass(frozen=True, slots=True)
 class TaskFailure:
     task_id: str
     stage: str
     error_type: str
+    #: Sanitized ``str(error)`` (whitespace collapsed, at most
+    #: FAILURE_MESSAGE_CHARS). For a SemanticResultError it names the broken
+    #: contract rule; every raise site uses a fixed sentence, never model
+    #: output or turn text.
+    message: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,10 +151,17 @@ class CaptureReport:
     semantic_processed: int = 0
     semantic_retried: int = 0
     semantic_abandoned: int = 0
-    #: Subset of ``failed``: invalid model results that abandoned the task's
-    #: semantic batch this run (attempt recorded, verbatim task kept). Not an
-    #: infrastructure failure, so it does not make the command exit non-zero.
+    #: Subset of ``failed``: every invalid model result (SemanticResultError)
+    #: this run, whether its batch will be retried or was abandoned. The attempt
+    #: is recorded and the verbatim task kept, so it is not an infrastructure
+    #: failure and does not make the command exit non-zero (since 2026-10-13;
+    #: before, only the abandoning attempt was exempt). Always equals
+    #: ``semantic_contract_retrying + semantic_contract_abandoned``.
     semantic_contract_failed: int = 0
+    #: Contract misses whose batch still has attempts left (retried next run).
+    semantic_contract_retrying: int = 0
+    #: Contract misses that used the last attempt and abandoned the batch.
+    semantic_contract_abandoned: int = 0
     semantic_skipped_budget: int = 0
     semantic_cost_usd: float = 0.0
     semantic_metered_calls: int = 0
@@ -310,6 +326,8 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         "semantic_retried": 0,
         "semantic_abandoned": 0,
         "semantic_contract_failed": 0,
+        "semantic_contract_retrying": 0,
+        "semantic_contract_abandoned": 0,
         "semantic_skipped_budget": 0,
         "failed": 0,
     }
@@ -403,21 +421,39 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
             continue  # Stop inference, but retain every remaining raw task.
         except SemanticResultError as exc:
             _record_attempt(captured, attempt_key, attempt, now, services.connect)
+            # Every contract miss is a recorded, bounded attempt, never an
+            # infrastructure failure: it does not fail the run whether or not
+            # attempts remain. One WARNING per miss names the broken rule.
+            counts["semantic_contract_failed"] += 1
+            rule = _failure_message(exc)
             if attempt >= bound:
                 _record_abandonment(
                     captured, attempt_key, attempt, type(exc).__name__, now,
                     services.connect,
                 )
                 counts["semantic_abandoned"] += 1
-                counts["semantic_contract_failed"] += 1
+                counts["semantic_contract_abandoned"] += 1
                 logger.warning(
-                    "Codex task %s abandoned semantically after %d attempt(s): "
-                    "%s (%s). The verbatim Captured Task is kept; no further "
+                    "Codex task %s abandoned semantically after attempt %d/%d: "
+                    "%s (%s: %s). The verbatim Captured Task is kept; no further "
                     "model calls will be made for these Agent Turns.",
                     ref.native_task_id,
                     attempt,
+                    bound,
                     SEMANTIC_ABANDON_REASON,
                     type(exc).__name__,
+                    rule,
+                )
+            else:
+                counts["semantic_contract_retrying"] += 1
+                logger.warning(
+                    "Codex task %s semantic contract miss on attempt %d/%d, "
+                    "retried next run (%s: %s)",
+                    ref.native_task_id,
+                    attempt,
+                    bound,
+                    type(exc).__name__,
+                    rule,
                 )
             _record_failure(counts, failures, ref.native_task_id, "semantic", exc)
             continue
@@ -439,6 +475,18 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
     )
 
 
+def _failure_message(error: BaseException) -> str:
+    """``str(error)`` on one line, at most FAILURE_MESSAGE_CHARS characters.
+
+    Only the exception's own message is used, never its ``__cause__`` (which
+    for a wrapped backend error may carry raw model output).
+    """
+    text = " ".join(str(error).split())
+    if len(text) > FAILURE_MESSAGE_CHARS:
+        text = text[: FAILURE_MESSAGE_CHARS - 1] + "…"
+    return text
+
+
 def _record_failure(counts, failures, task_id, stage, error) -> None:
     counts["failed"] += 1
     failures.append(
@@ -446,6 +494,7 @@ def _record_failure(counts, failures, task_id, stage, error) -> None:
             task_id=task_id,
             stage=stage,
             error_type=type(error).__name__,
+            message=_failure_message(error),
         )
     )
 

@@ -45,7 +45,38 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv=None, *, now=None, capture=run_codex_capture) -> int:
+#: Liveness backstop for contract misses, which no longer fail the run: the
+#: backlog sidecar <status-dir>/codex-capture.backlog.json (src.operations.backlog)
+#: counts consecutive runs with semantic_contract_failed > 0, and
+#: ``[backlog.codex-capture]`` in config/liveness.toml turns a streak into a
+#: liveness advisory.
+JOB_NAME = "codex-capture"
+
+
+def report_semantic_contract(report, *, status_dir=None) -> None:
+    """Record this run's contract misses; warn once the streak hits the threshold.
+
+    Bookkeeping must never change the run's outcome, so every error is reported
+    on stderr and swallowed. stdout stays the one-line JSON summary.
+    """
+    misses = report.semantic_contract_failed
+    try:
+        from src.operations import backlog
+        state = backlog.record_run(JOB_NAME, misses, status_dir)
+        limit = backlog.threshold(JOB_NAME)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        print(f"WARNING: could not record the codex-capture semantic-contract state: "
+              f"{type(exc).__name__}", file=sys.stderr)
+        return
+    streak = state["consecutive_deferred_runs"]
+    if misses and streak >= limit:
+        print(f"WARNING: codex-capture semantic contract misses persist — {misses} this run "
+              f"({report.semantic_contract_retrying} retrying, {report.semantic_contract_abandoned} "
+              f"abandoned), {streak} consecutive run(s) (threshold {limit}); see failures[].message",
+              file=sys.stderr)
+
+
+def main(argv=None, *, now=None, capture=run_codex_capture, status_dir=None) -> int:
     args = _parser().parse_args(argv)
     if args.codex_home is not None:
         os.environ["CODEX_HOME"] = str(args.codex_home.expanduser())
@@ -56,9 +87,13 @@ def main(argv=None, *, now=None, capture=run_codex_capture) -> int:
         dry_run=args.dry_run,
     )
     print(json.dumps(asdict(report), sort_keys=True))
-    # A semantic-contract failure that abandoned its task is already recorded
-    # (verbatim task kept, no further model calls); only infrastructure
-    # failures make the run non-zero.
+    # Only full scheduled-shape runs update the streak: a dry run makes no model
+    # call and a single --task-id run must not reset a systematic break.
+    if not args.dry_run and args.task_id is None:
+        report_semantic_contract(report, status_dir=status_dir)
+    # Every semantic-contract miss is already recorded (bounded attempt,
+    # verbatim task kept) and, since 2026-10-13, never fails the run whether or
+    # not attempts remain; only infrastructure failures make it non-zero.
     return 1 if report.infrastructure_failed else 0
 
 
