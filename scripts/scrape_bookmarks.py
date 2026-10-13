@@ -791,6 +791,8 @@ MIDWAY_CAUSE_CANARY = "Midway session rejected at run time (canary page hit sign
 MIDWAY_CAUSE_BROWSER = "browser sign-in failed for every page (Midway mint) — run mwinit"
 MIDWAY_CAUSE_LATE = ("the Midway session ends before the browser pass could run "
                      "(< 10 min margin + 60 s budget left) — run mwinit")
+#: Not a Midway cause despite the name: the ``budget`` cause of ``[backlog.bookmarks-browser]``
+#: when the job deadline (not the session) left too little time for the browser pass.
 MIDWAY_CAUSE_DEADLINE = ("the job deadline left < 60 s for the browser pass (the cookie path took the time); "
                          "browser URLs deferred to the next run")
 #: ``[backlog.bookmarks-browser]`` cause text per browser deferral ``detail``.
@@ -802,10 +804,12 @@ BROWSER_DEFER_CAUSES = {
 }
 
 
-def browser_defer_cause(details):
+def browser_defer_cause(details, overrides=None):
     """One cause string from a Counter of deferral details, e.g.
-    ``"3 launch: the browser ... did not start ...; 1 budget: ..."``."""
-    return "; ".join(f"{n} {d}: {BROWSER_DEFER_CAUSES.get(d, 'deferred')}"
+    ``"3 launch: the browser ... did not start ...; 1 budget: ..."``; ``overrides``
+    replaces a detail's text for this run (a job-deadline ``budget``)."""
+    causes = {**BROWSER_DEFER_CAUSES, **(overrides or {})}
+    return "; ".join(f"{n} {d}: {causes.get(d, 'deferred')}"
                      for d, n in sorted(details.items())) or None
 
 
@@ -925,19 +929,31 @@ def main():
     # budget is recomputed now (the cookie path ran first): never past the
     # Midway session minus a margin, so late pages do not meet an expired session.
     browser_budget = 0.0
+    browser_deadline_deferred = 0
+    browser_cause_overrides = {}
     if browser_queue:
         session_left = midway_session_seconds_left() or 0.0
         deadline_budget = browser_budget_s(started)
         browser_budget = min(deadline_budget, session_left - BROWSER_SESSION_MARGIN_S)
         if browser_budget < BROWSER_MIN_BUDGET_S:
-            browser_allowed = False
-            deferred_auth += len(browser_queue)
             session_short = session_left - BROWSER_SESSION_MARGIN_S <= deadline_budget
-            midway_cause = MIDWAY_CAUSE_LATE if session_short else MIDWAY_CAUSE_DEADLINE
-            why = (f"only {max(0.0, session_left) / 60:.0f} min of Midway session left — run mwinit" if session_short
-                   else f"only {max(0.0, deadline_budget):.0f} s of the job deadline left")
-            print(f"WARNING: {why} before the browser pass; {len(browser_queue)} browser URL(s) "
-                  f"deferred_auth (no launch, no strike)")
+            if session_short:
+                # A Midway problem: the midway backlog's (deferred_auth).
+                browser_allowed = False
+                deferred_auth += len(browser_queue)
+                midway_cause = MIDWAY_CAUSE_LATE
+                print(f"WARNING: only {max(0.0, session_left) / 60:.0f} min of Midway session left — run mwinit "
+                      f"before the browser pass; {len(browser_queue)} browser URL(s) deferred_auth "
+                      f"(no launch, no strike)")
+            else:
+                # Out of time, not a Midway problem: a budget deferral of the browser pass,
+                # [backlog.bookmarks-browser] with the deadline cause.
+                browser_deadline_deferred = len(browser_queue)
+                browser["deferred"] += browser_deadline_deferred
+                browser_details["budget"] += browser_deadline_deferred
+                browser_cause_overrides["budget"] = MIDWAY_CAUSE_DEADLINE
+                print(f"WARNING: only {max(0.0, deadline_budget):.0f} s of the job deadline left before the "
+                      f"browser pass; {len(browser_queue)} browser URL(s) deferred (budget; no launch, no strike)")
             browser_queue = []
     if browser_queue:
         print(f"\n--- Internal links via browser ({len(browser_queue)}, "
@@ -1047,7 +1063,8 @@ def main():
     if internal_ran and browser_allowed:
         # Every run whose browser pass was allowed (also with nothing queued: that
         # resets the streak); a Midway-session deferral is the midway backlog's.
-        report_backlog(browser["deferred"], job=BROWSER_BACKLOG_JOB, cause=browser_defer_cause(browser_details))
+        report_backlog(browser["deferred"], job=BROWSER_BACKLOG_JOB,
+                       cause=browser_defer_cause(browser_details, browser_cause_overrides))
     if internal_ran:
         # Only runs whose internal path ran say anything about unknown hosts; the
         # pre-routed known non-Midway hosts (skipped_unsupported) are expected, not counted.
@@ -1061,7 +1078,7 @@ def main():
     internal_auth = {u for u, c in outcomes.items() if c == "auth" and needs_cookies(u)}
     return run_exit_code(internal_counts, public_stats, outcomes, ledger,
                          eligible=len(pending) - deferred_auth - skipped_unsupported - skipped_personal
-                         - skipped_invalid_url,
+                         - skipped_invalid_url - browser_deadline_deferred,
                          public_eligible=len(public),
                          skipped_unreachable=len(unreachable), internal_auth=internal_auth)
 

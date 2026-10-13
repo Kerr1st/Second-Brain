@@ -739,10 +739,22 @@ class TestReviewRouting:
         monkeypatch.setattr(sb, "browser_budget_s", lambda started: 30.0)
         rc, t = self._main(sb, tmp_path, monkeypatch, [A, B, W], lambda u: "ok", session_left=[7200.0, 7200.0])
         out = capsys.readouterr().out
-        assert t.browser_calls == [] and "deferred_auth=2" in out and "job deadline" in out
+        assert rc == 0 and t.browser_calls == [] and "job deadline" in out
+        assert "deferred_auth=0" in out and "browser_deferred=2" in out
         assert self._ledger(tmp_path) == {}
-        midway = json.loads((tmp_path / "jobs" / "bookmarks-midway.backlog.json").read_text())
-        assert midway["deferred"] == 2 and midway["cause"] == sb.MIDWAY_CAUSE_DEADLINE
+        # Out of time is not a Midway problem: the browser backlog, detail budget, deadline cause.
+        browser = json.loads((tmp_path / "jobs" / "bookmarks-browser.backlog.json").read_text())
+        assert browser["deferred"] == 2 and browser["consecutive_deferred_runs"] == 1
+        assert browser["cause"] == f"2 budget: {sb.MIDWAY_CAUSE_DEADLINE}"
+        assert "WARNING: bookmarks-browser backlog persists" in out
+        midway_path = tmp_path / "jobs" / "bookmarks-midway.backlog.json"
+        assert not midway_path.exists() or json.loads(midway_path.read_text())["deferred"] == 0
+
+    def test_job_deadline_deferral_of_every_url_is_not_a_failed_run(self, sb, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(sb, "browser_budget_s", lambda started: 30.0)
+        rc, t = self._main(sb, tmp_path, monkeypatch, [A, B], lambda u: "ok", session_left=[7200.0, 7200.0])
+        out = capsys.readouterr().out
+        assert rc == 0 and t.browser_calls == [] and "eligible=0" in out
 
 
 # --------------------------------------------------------------------------- #
