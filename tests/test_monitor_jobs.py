@@ -49,22 +49,34 @@ def _script(path: Path, body: str) -> Path:
 
 
 def _fake_aws(tmp_path: Path) -> Path:
-    """Stub AWS CLI: exits 1 for any profile named in $FAKE_AWS_FAIL_PROFILES."""
+    """Stub AWS CLI: fails for any profile named in $FAKE_AWS_FAIL_PROFILES.
+
+    A failing call prints $FAKE_AWS_OUTPUT to stderr and exits $FAKE_AWS_RC (default 1).
+    """
     return _script(
         tmp_path / "aws",
         "#!/bin/bash\n"
         'for p in ${FAKE_AWS_FAIL_PROFILES:-}; do\n'
-        '  for a in "$@"; do [[ "$a" == "$p" ]] && exit 1; done\n'
+        '  for a in "$@"; do if [[ "$a" == "$p" ]]; then\n'
+        '    [ -n "${FAKE_AWS_OUTPUT:-}" ] && printf \'%s\\n\' "$FAKE_AWS_OUTPUT" >&2\n'
+        '    exit "${FAKE_AWS_RC:-1}"\n'
+        '  fi; done\n'
         "done\n"
+        "echo \'{\"Account\": \"123456789012\"}\'\n"
         "exit 0\n",
     )
 
 
 def _fake_python(tmp_path: Path, exit_code: int = 0) -> Path:
-    """Stub interpreter for the grasp/slack heredoc probes — never imports src."""
+    """Stub interpreter for the grasp/slack heredoc probes — never imports src.
+
+    Prints $FAKE_PY_OUTPUT to stderr and exits $FAKE_PY_RC (default ``exit_code``).
+    """
     return _script(
         tmp_path / "python",
-        f"#!/bin/bash\ncat >/dev/null\nexit {exit_code}\n",
+        "#!/bin/bash\ncat >/dev/null\n"
+        '[ -n "${FAKE_PY_OUTPUT:-}" ] && printf \'%s\\n\' "$FAKE_PY_OUTPUT" >&2\n'
+        f'exit "${{FAKE_PY_RC:-{exit_code}}}"\n',
     )
 
 
@@ -81,6 +93,24 @@ def _notifications(tmp_path: Path) -> list[str]:
     return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
 
 
+def _scratch_dir(tmp_path: Path) -> Path:
+    d = tmp_path / "scratch"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def _reason_after(stdout: str, marker: str) -> str:
+    """The `reason:` line logged directly under the line containing ``marker``."""
+    lines = stdout.splitlines()
+    for i, line in enumerate(lines):
+        if marker in line:
+            assert i + 1 < len(lines), stdout
+            nxt = lines[i + 1]
+            assert "   reason: " in nxt, f"no reason line under {marker!r}:\n{stdout}"
+            return nxt.split("   reason: ", 1)[1]
+    raise AssertionError(f"{marker!r} not in output:\n{stdout}")
+
+
 def _run_credentials(tmp_path: Path, *args: str, **env_overrides) -> subprocess.CompletedProcess:
     _fake_notifier(tmp_path)
     env = {
@@ -91,6 +121,10 @@ def _run_credentials(tmp_path: Path, *args: str, **env_overrides) -> subprocess.
         "AWS_BIN": str(_fake_aws(tmp_path)),
         "SECOND_BRAIN_PYTHON": str(_fake_python(tmp_path)),
         "FAKE_AWS_FAIL_PROFILES": "",
+        # Hermetic: never probe the real Roles Anywhere certificate, and keep the
+        # probe scratch file somewhere a test can prove it was cleaned up.
+        "SECOND_BRAIN_RA_CERT": str(tmp_path / "no-such-cert.pem"),
+        "TMPDIR": str(_scratch_dir(tmp_path)),
         **env_overrides,
     }
     return subprocess.run(
@@ -228,6 +262,159 @@ def test_usr_local_bin_is_on_the_path_under_a_launchd_environment(tmp_path: Path
     # `timeout` is Homebrew coreutils, not a macOS builtin: if it ever disappears
     # every check returns 127, so its resolution is worth reporting too.
     assert "timeout" in tools
+
+
+
+# --- failure reasons (2026-10-13 triage: "exit 1" could not tell an expired token
+# --- from a hung server or a bug, because probe output went to /dev/null) --------
+
+
+def test_all_green_output_is_unchanged_and_the_scratch_file_is_removed(tmp_path: Path):
+    """The ✅ lines are parsed by people and monitors; success must add nothing."""
+    result = _run_credentials(tmp_path)
+
+    assert result.returncode == 0, result.stdout
+    body = [line.split("] ", 1)[1] for line in result.stdout.splitlines()]
+    assert body == [
+        "✅ aws:second-brain-jobs",
+        "✅ aws:sso-default",
+        "✅ graph:grasp-mcp",
+        "✅ slack:slack-mcp",
+        "=== all required credentials valid ===",
+    ]
+    assert "reason:" not in result.stdout
+    assert "123456789012" not in result.stdout  # a probe's stdout is never echoed
+    assert list(_scratch_dir(tmp_path).iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("rc", "output", "cls"),
+    [
+        (255, "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation: "
+              "The security token included in the request is expired", "auth"),
+        (255, "Unable to locate credentials. You can configure credentials by running \"aws configure\".", "auth"),
+        (124, "", "timeout"),
+        (137, "", "timeout"),
+        (255, "Could not connect to the endpoint URL: \"https://sts.amazonaws.com/\"", "transport"),
+        (1, "something unexpected happened", "other"),
+    ],
+)
+def test_a_failed_aws_probe_logs_a_classified_reason(tmp_path: Path, rc, output, cls):
+    result = _run_credentials(
+        tmp_path, FAKE_AWS_FAIL_PROFILES="second-brain-jobs",
+        FAKE_AWS_RC=str(rc), FAKE_AWS_OUTPUT=output,
+    )
+
+    assert result.returncode == 1
+    # The status line and summary keep their exact shape (exit code included).
+    assert f"❌ aws:second-brain-jobs EXPIRED/BROKEN (exit {rc})" in result.stdout
+    assert "=== REQUIRED EXPIRED/BROKEN: aws:second-brain-jobs ===" in result.stdout
+    reason = _reason_after(result.stdout, "❌ aws:second-brain-jobs")
+    assert reason.startswith(f"{cls}: "), reason
+    if output:
+        assert output[:40] in reason
+    else:
+        assert reason == f"{cls}: (no output)"
+    assert result.stdout.count("reason:") == 1  # one line per failed probe, none for ✅
+    assert list(_scratch_dir(tmp_path).iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("rc", "output", "cls"),
+    [
+        (3, "McpAuthError: get_emails: Authentication failed — your session has expired", "auth"),
+        (4, "McpError: Connection closed", "transport"),
+        (1, "AssertionError: get_emails: unexpected reply (keys: ['error'])", "other"),
+        (1, "FileNotFoundError: [Errno 2] No such file or directory: '/x/grasp-mcp'", "tool-missing"),
+    ],
+)
+def test_a_failed_mcp_probe_logs_its_class_from_the_capture_exit_codes(
+    tmp_path: Path, rc, output, cls,
+):
+    result = _run_credentials(tmp_path, FAKE_PY_RC=str(rc), FAKE_PY_OUTPUT=output)
+
+    assert result.returncode == 1
+    for label in ("graph:grasp-mcp", "slack:slack-mcp"):
+        assert f"❌ {label} EXPIRED/BROKEN (exit {rc})" in result.stdout
+        assert _reason_after(result.stdout, f"❌ {label}") == f"{cls}: {output}"
+
+
+def test_the_reason_is_the_last_meaningful_line_capped_at_160_characters(tmp_path: Path):
+    output = "\n".join([
+        "Traceback (most recent call last):",
+        '  File "<stdin>", line 9, in <module>',
+        "    ^^^^^^^^^^",
+        "RuntimeError: " + "x " * 200,
+        "",
+    ])
+    result = _run_credentials(tmp_path, FAKE_PY_RC="1", FAKE_PY_OUTPUT=output)
+
+    reason = _reason_after(result.stdout, "❌ graph:grasp-mcp")
+    cls, message = reason.split(": ", 1)
+    assert cls == "other"
+    assert message.startswith("RuntimeError: x x")
+    assert len(message) <= 160
+    assert "Traceback" not in result.stdout and 'File "' not in result.stdout
+
+
+def test_secrets_in_probe_output_are_redacted_and_full_output_is_never_printed(tmp_path: Path):
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlMTIzNDU2Nzg5MA"
+    hexrun = "0123456789abcdef0123456789abcdef"
+    earlier = "debug: refresh_token=ZZEARLIERSECRET9 cookie dump follows"
+    last = (f"invalid_grant: Bearer {jwt} token=s3cr3tValue&x=1 sig {hexrun} "
+            "Cookie: midway=abc123; owner user@example.com AKIAABCDEFGHIJKLMNOP")
+    result = _run_credentials(
+        tmp_path, FAKE_AWS_FAIL_PROFILES="second-brain-jobs",
+        FAKE_AWS_RC="255", FAKE_AWS_OUTPUT=f"{earlier}\n{last}",
+    )
+
+    reason = _reason_after(result.stdout, "❌ aws:second-brain-jobs")
+    assert reason.startswith("auth: invalid_grant: Bearer [REDACTED]"), reason
+    for secret in (jwt, "eyJhbGciOiJIUzI1NiJ9", "s3cr3tValue", hexrun, "abc123",
+                   "AKIAABCDEFGHIJKLMNOP", "ZZEARLIERSECRET9"):
+        assert secret not in result.stdout, secret
+    assert "token=[REDACTED]" in reason
+    assert "Cookie: [REDACTED]" in reason
+    assert "debug:" not in result.stdout  # only the last line is ever logged
+
+
+def test_an_email_address_and_ordinary_words_survive_redaction(tmp_path: Path):
+    output = "AccessDenied: user someone.else@example.com is not authorized for sts:GetCallerIdentity"
+    result = _run_credentials(
+        tmp_path, FAKE_AWS_FAIL_PROFILES="second-brain-jobs",
+        FAKE_AWS_RC="254", FAKE_AWS_OUTPUT=output,
+    )
+
+    assert _reason_after(result.stdout, "❌ aws:second-brain-jobs") == f"auth: {output}"
+
+
+def test_an_advisory_failure_also_explains_itself(tmp_path: Path):
+    result = _run_credentials(
+        tmp_path, FAKE_AWS_FAIL_PROFILES="default", FAKE_AWS_RC="255",
+        FAKE_AWS_OUTPUT="Error when retrieving token from sso: Token has expired and refresh failed",
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert _reason_after(result.stdout, "⚠ aws:sso-default expired").startswith("auth: Error when retrieving")
+
+
+def test_the_real_mcp_probe_classifies_a_dead_server_as_transport(tmp_path: Path):
+    """Runs the script's own heredoc probes (real src.capture.mcp_client) against a fake
+    server binary that exits at once — the shape of the 2026-09-21 grasp outage."""
+    dead = _script(tmp_path / "dead-mcp", "#!/bin/bash\necho 'server going away' >&2\nexit 1\n")
+    result = _run_credentials(
+        tmp_path,
+        SECOND_BRAIN_PYTHON=sys.executable,
+        GRASP_MCP=str(dead),
+        SLACK_MCP=str(tmp_path / "no-such-slack-mcp"),
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "❌ graph:grasp-mcp EXPIRED/BROKEN (exit 4)" in result.stdout
+    assert _reason_after(result.stdout, "❌ graph:grasp-mcp").startswith("transport: ")
+    assert "❌ slack:slack-mcp EXPIRED/BROKEN (exit 1)" in result.stdout
+    assert _reason_after(result.stdout, "❌ slack:slack-mcp").startswith("tool-missing: FileNotFoundError")
+    assert list(_scratch_dir(tmp_path).iterdir()) == []
 
 
 
