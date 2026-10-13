@@ -389,7 +389,7 @@ def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
                 logger.info("[DRY] read -> crawlee: %s", url)
         elif fresh:
             scrape_stats = scrape_with_crawlee(fresh, timeout=CRAWLEE_TIMEOUT_S)
-            reading_failed = scrape_stats["failed"]
+            reading_failed = scrape_stats["failed"] + scrape_stats.get("failed_batches", 0)
             reading_sent = scrape_stats["processed"]
 
     stats = run_channel(SOURCE_TYPE, items, dry_run=dry_run, ingest=ingest_batch)

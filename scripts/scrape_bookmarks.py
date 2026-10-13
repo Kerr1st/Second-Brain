@@ -74,6 +74,23 @@ def _is_auth_response(resp):
 
 
 MIDWAY_COOKIE_PATH = os.path.expanduser("~/.midway/cookie")
+MIDWAY_SESSION_DOMAIN = "midway-auth.amazon.com"
+
+
+def _cookie_policy():
+    """Host-only cookies (no Domain attribute) go back to exactly their host,
+    never to subdomains (Python's default policy would send them on)."""
+    import http.cookiejar
+    return http.cookiejar.DefaultCookiePolicy(
+        strict_ns_domain=http.cookiejar.DefaultCookiePolicy.DomainStrictNonDomain)
+
+
+def midway_session_valid(path=None):
+    """True when the Midway cookie file holds an unexpired ``session`` cookie
+    for midway-auth.amazon.com (``load_midway_cookies`` drops expired ones).
+    Only domains/names/expiry are inspected; no value is read out."""
+    return any(c.name == "session" and c.domain.lstrip(".") == MIDWAY_SESSION_DOMAIN
+               for c in load_midway_cookies(path))
 
 
 def load_midway_cookies(path=None):
@@ -84,7 +101,7 @@ def load_midway_cookies(path=None):
     here. Expired cookies are skipped. Values never leave the jar (no logging);
     a missing/unreadable file is an empty jar."""
     import http.cookiejar
-    jar = http.cookiejar.CookieJar()
+    jar = http.cookiejar.CookieJar(_cookie_policy())
     try:
         lines = Path(path or MIDWAY_COOKIE_PATH).read_text(errors="replace").splitlines()
     except OSError:
@@ -123,7 +140,7 @@ def internal_cookie_jar(url, midway_path=None):
     the Midway session. Midway cookies win on (domain, path, name) clashes."""
     import http.cookiejar
     import browser_cookie3
-    jar = http.cookiejar.CookieJar()
+    jar = http.cookiejar.CookieJar(_cookie_policy())
     try:
         chrome = browser_cookie3.chrome(domain_name=urlparse(url).netloc)
     except Exception as exc:  # noqa: BLE001 - no Chrome cookies still leaves the Midway jar
@@ -136,12 +153,36 @@ def internal_cookie_jar(url, midway_path=None):
     return jar
 
 
+def cookie_policy_session(requests):
+    """A ``requests.Session`` whose Cookie headers follow ``_cookie_policy``.
+
+    requests copies the ``cookies=`` jar into a fresh RequestsCookieJar with
+    the default (liberal) policy before building the header, so the jar's own
+    policy would be ignored. The prepared request's jar gets the strict policy
+    and its header is rebuilt; redirects reuse that jar (``copy`` keeps the
+    policy), so every hop of the Midway redirect chain is judged the same way."""
+    session = requests.Session()
+    prepare = session.prepare_request
+
+    def prepare_request(request):
+        prepared = prepare(request)
+        jar = getattr(prepared, "_cookies", None)
+        if jar is not None:
+            jar.set_policy(_cookie_policy())
+            prepared.headers.pop("Cookie", None)
+            prepared.prepare_cookies(jar)
+        return prepared
+    session.prepare_request = prepare_request
+    return session
+
+
 def fetch_internal(url):
     """GET an internal page with the merged cookie jar. Returns (outcome, resp);
     outcome is "ok" (200, not judged as auth), "auth" or "failed". Writes nothing."""
     import requests
-    resp = requests.get(url, cookies=internal_cookie_jar(url), timeout=30,
-                        headers={"User-Agent": "Mozilla/5.0"})
+    with cookie_policy_session(requests) as session:
+        resp = session.get(url, cookies=internal_cookie_jar(url), timeout=30,
+                           headers={"User-Agent": "Mozilla/5.0"})
     if _is_auth_response(resp):
         return "auth", resp
     if resp.status_code != 200:
@@ -186,21 +227,57 @@ def scrape_with_cookies(name, url):
 #   "✓ <title>"   indexed (detected through the index, as before)
 #   "✗ <url>"     failed after Crawlee's retries
 #   "⚠ Skip (too short): <url>"
-# Crawlee's own log lines carry {"url": ...} and say why a request failed.
+# Crawlee's own log records (@apify/log, ANSI-colored even into a file) say why
+# a request failed. A record is one write that may span several lines: Crawlee
+# builds the retry WARN as `[message, userLine].join('\n')`
+# (@crawlee/basic basic-crawler.js:1240/:1287), and Playwright errors carry a
+# "Call log:", so the {"id":..,"url":..} data often lands on a line of its own
+# (tests/fixtures/crawlee-retry-records.log was captured from the real logger).
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _TOO_SHORT_RE = re.compile(r"^\s*⚠ Skip \(too short\):\s*(\S+)\s*$")
 _FAILED_RE = re.compile(r"^\s*✗\s+(\S+)\s*$")
-_LOG_URL_RE = re.compile(r'"url":"([^"]+)"')
+_RECORD_START_RE = re.compile(r"^\s*(WARN|ERROR|INFO)\b")
+_LOG_URL_RE = re.compile(r'\{"id":"[^"]*","url":"((?:[^"\\]|\\.)+)"')
 _LOG_AUTH_RE = re.compile(r"\b(401|403|407)\b status code|status code:? (401|403|407)\b", re.I)
 _LOG_TIMEOUT_RE = re.compile(r"timed? ?out|TimeoutError", re.I)
-_LOG_ERROR_RE = re.compile(r"\b(WARN|ERROR)\b|Error|fail", re.I)
+_LOG_ERROR_RE = re.compile(r"Error|fail", re.I)
+
+
+def strip_ansi(text):
+    return _ANSI_RE.sub("", text or "")
 
 
 #: Any of these in a batch's output means the Crawlee install itself is broken
-#: (missing node_modules, node not on PATH), not that a URL failed.
+#: (missing node_modules, node not on PATH), not that a URL failed. The
+#: module/package patterns also need a non-zero exit (a page *title* can say
+#: "Cannot find module"), and per-URL mark lines (✓/⚠/✗ + title/URL) are never
+#: matched.
 _ENV_BROKEN_RE = re.compile(
-    r"ERR_MODULE_NOT_FOUND|Cannot find (package|module)|node: (command )?not found|"
-    r"No such file or directory.*node|Executable doesn't exist", re.I)
-_MARK_RE = re.compile(r"^\s*(✓|✗|⚠ Skip)", re.M)
+    r"node: (command )?not found|No such file or directory.*node|Executable doesn't exist", re.I)
+_ENV_BROKEN_MODULE_RE = re.compile(r"ERR_MODULE_NOT_FOUND|Cannot find (package|module)", re.I)
+_MARK_RE = re.compile(r"^\s*(✓|✗|⚠)", re.M)
+
+
+def _iter_records(text):
+    """Yield ``(level, joined_text, url)`` for each Crawlee log record that names a URL.
+
+    A record opens on a WARN/ERROR/INFO line and closes on the line carrying
+    its ``{"id":..,"url":..}`` data; a mark line or the next record start ends
+    an open record that never named a URL (e.g. "Starting the crawler.")."""
+    level, lines = None, []
+    for line in text.splitlines():
+        start = _RECORD_START_RE.match(line)
+        if start or (level is not None and _MARK_RE.match(line)):
+            level, lines = None, []
+        if start:
+            level = start.group(1)
+        if level is None:
+            continue
+        lines.append(line)
+        match = _LOG_URL_RE.search(line)
+        if match:
+            yield level, "\n".join(lines), match.group(1).replace('\\"', '"')
+            level, lines = None, []
 
 
 def parse_crawlee_output(text):
@@ -208,20 +285,20 @@ def parse_crawlee_output(text):
 
     A URL is mapped only when the output shows it was attempted and did not
     produce a page: a final ``✗``/``⚠`` line, or (when the batch was killed
-    before Crawlee finished its retries) a Crawlee error line naming it. URLs
-    the output never mentions are absent: the caller decides whether they were
-    attempted (finished run) or never reached (killed batch -> deferred)."""
+    before Crawlee finished its retries) a Crawlee WARN/ERROR record naming it.
+    ANSI colors are stripped first and records are classified on their joined
+    text. URLs the output never mentions are absent: the caller decides whether
+    they were attempted (finished run) or never reached (killed batch -> deferred)."""
+    text = strip_ansi(text)
     hints, outcomes = {}, {}
-    for line in (text or "").splitlines():
-        match = _LOG_URL_RE.search(line)
-        if match:
-            if _LOG_AUTH_RE.search(line):
-                hints[match.group(1)] = "auth"
-            elif _LOG_TIMEOUT_RE.search(line):
-                hints.setdefault(match.group(1), "timeout")
-            elif _LOG_ERROR_RE.search(line):
-                hints.setdefault(match.group(1), "error")
-            continue
+    for level, record, url in _iter_records(text):
+        if _LOG_AUTH_RE.search(record):
+            hints[url] = "auth"
+        elif _LOG_TIMEOUT_RE.search(record):
+            hints.setdefault(url, "timeout")
+        elif level in ("WARN", "ERROR") or _LOG_ERROR_RE.search(record):
+            hints.setdefault(url, "error")
+    for line in text.splitlines():
         match = _TOO_SHORT_RE.match(line)
         if match:
             outcomes[match.group(1)] = "too_short"
@@ -238,17 +315,25 @@ def parse_crawlee_output(text):
 def crawlee_broken(rc, output):
     """True when a batch says nothing about the URLs because Crawlee itself broke:
     its environment is missing, or it exited non-zero without one parseable line."""
-    if _ENV_BROKEN_RE.search(output or ""):
+    text = strip_ansi(output)
+    unmarked = "\n".join(line for line in text.splitlines() if not _MARK_RE.match(line))
+    failed_exit = rc not in (0, None)
+    if _ENV_BROKEN_RE.search(unmarked) or (failed_exit and _ENV_BROKEN_MODULE_RE.search(unmarked)):
         return True
-    return rc not in (0, None) and not _MARK_RE.search(output or "") and not _LOG_URL_RE.search(output or "")
+    return failed_exit and not _MARK_RE.search(text) and not _LOG_URL_RE.search(text)
 
 
-#: Options for batch-scrape.js (read from env by the patched script; harmless
-#: before the patch is applied). Fail fast on blocked/unreachable pages instead
-#: of Crawlee's default 10 session rotations + 3 retries per URL, which let a
-#: few 403s use up a whole batch budget (triage 2026-10-13). batch-scrape.js
-#: reads them once second-brain-triage/2026-10-13/crawlee-batch-scrape.patch is
-#: applied in ~/Work/Tools/Crawlee; its defaults keep other callers unchanged.
+#: Options for batch-scrape.js, read from env only once
+#: second-brain-triage/2026-10-13/crawlee-batch-scrape.patch is applied in
+#: ~/Work/Tools/Crawlee (harmless before; its defaults are Crawlee's, so other
+#: callers are unchanged). What actually bounds a blocked URL is
+#: MAX_REQUEST_RETRIES=1: a 403 "Request blocked" is a plain ``Error``
+#: (basic-crawler.js ``_throwOnBlockedRequest``), not a ``SessionError``, so it
+#: is retried maxRequestRetries times (default 3) and session rotations never
+#: apply to it. MAX_SESSION_ROTATIONS=0 only affects real SessionErrors
+#: (e.g. proxy/session-pool failures). ABORT_DOWNLOADS=1 fails a URL that
+#: starts a file download on its first attempt. ``check_batch_scrape_patch``
+#: warns once per run when the patch is missing.
 BATCH_SCRAPE_ENV = {
     "BATCH_SCRAPE_MAX_REQUEST_RETRIES": "1",
     "BATCH_SCRAPE_MAX_SESSION_ROTATIONS": "0",
@@ -258,16 +343,37 @@ BATCH_SCRAPE_ENV = {
 CRAWLEE_LOG_NAME = "bookmarks-crawlee"
 
 
+def batch_scrape_path():
+    """batch-scrape.js inside ``CRAWLEE_DIR`` (the same place it is run from)."""
+    return os.path.join(CRAWLEE_DIR, "batch-scrape.js")
+
+
+def check_batch_scrape_patch(path=None):
+    """Warn (once per call; main calls it once per run) when batch-scrape.js does
+    not read BATCH_SCRAPE_* options, i.e. the patch is not applied and
+    ``BATCH_SCRAPE_ENV`` has no effect. Returns True when the patch is present."""
+    path = path or batch_scrape_path()
+    try:
+        applied = "BATCH_SCRAPE_" in Path(path).read_text(errors="replace")
+    except OSError:
+        applied = False
+    if not applied:
+        print(f"WARNING: {path} does not read BATCH_SCRAPE_* options (crawlee-batch-scrape.patch "
+              f"not applied): Crawlee keeps its default 3 retries per blocked URL")
+    return applied
+
+
 def log_dir():
     from src.operations.backlog import REPO
     return Path(os.environ.get("SECOND_BRAIN_LOG_DIR", str(REPO / "logs")))
 
 
 def _open_kept_log(name, n):
-    """Open logs/<name>-<n>.log for writing (truncated, mode 0600)."""
+    """Open logs/<name>-<n>.log read/write (truncated, mode 0600). O_NOFOLLOW:
+    a planted symlink is refused, never truncated or chmod'ed through."""
     path = log_dir() / f"{name}-{n}.log"
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     os.fchmod(fd, 0o600)
     return fd, str(path)
 
@@ -299,7 +405,7 @@ def _run_crawlee_batch(batch, timeout, *, keep_log=None, env=None):
         with os.fdopen(fd, "w") as handle:
             for _, url in batch:
                 handle.write(url + "\n")
-        with os.fdopen(log_fd, "w") as log:
+        with os.fdopen(log_fd, "w+", errors="replace") as log:
             try:
                 result = subprocess.run(
                     ["node", "batch-scrape.js", url_file], cwd=CRAWLEE_DIR,
@@ -312,11 +418,14 @@ def _run_crawlee_batch(batch, timeout, *, keep_log=None, env=None):
             except OSError as exc:  # node missing / not executable
                 log.write(f"node: not found ({type(exc).__name__})\n")
                 rc = 127
-        try:
-            with open(log_file, errors="replace") as log:
+            # Read back through the same fd (not by path): another run's file
+            # at that path after _clear_kept_logs can never be read instead.
+            try:
+                log.flush()
+                log.seek(0)            # lseek(fd, 0, SEEK_SET); node wrote via the fd directly
                 output = log.read()
-        except OSError:
-            output = ""
+            except (OSError, ValueError):
+                output = ""
         return rc, output
     finally:
         os.unlink(url_file)
@@ -325,7 +434,7 @@ def _run_crawlee_batch(batch, timeout, *, keep_log=None, env=None):
 
 
 def scrape_with_crawlee(urls, timeout=None, batch_size=None, batch_timeout=None, outcomes=None,
-                        log_name=None, env=None):
+                        log_name=None, env=None, killed_deferred=None):
     """Scrape public URLs via Crawlee in bounded batches.
 
     ``timeout`` is the wall-clock budget for the whole call (default: the job
@@ -344,11 +453,18 @@ def scrape_with_crawlee(urls, timeout=None, batch_size=None, batch_timeout=None,
     whose output shows Crawlee itself broke (see ``crawlee_broken``).
 
     When given, ``outcomes`` is filled with url -> "ok" or a ledger class
-    (never for deferred URLs). ``log_name`` keeps each batch's output as
-    ``logs/<log_name>-<n>.log``; ``env`` is passed to batch-scrape.js.
+    (never for deferred URLs), and ``killed_deferred`` (a set) with the URLs
+    deferred because their batch was killed or crashed (not budget-deferred,
+    not a broken Crawlee): the caller bounds those through the ledger's
+    ``deferred_runs``. ``batches_run`` / ``batches_with_output`` count batches
+    that ran and those whose output showed any mark, Crawlee record or index
+    addition; ``failed_batches`` counts non-zero exits that named no failed URL.
+    ``log_name`` keeps each batch's output as ``logs/<log_name>-<n>.log``;
+    ``env`` is passed to batch-scrape.js.
     """
     stats = {"processed": 0, "skipped": 0, "failed": 0, "too_short": 0, "timed_out_batches": 0,
-             "deferred": 0, "crawlee_broken": 0}
+             "deferred": 0, "crawlee_broken": 0, "batches_run": 0, "batches_with_output": 0,
+             "failed_batches": 0}
     outcomes = {} if outcomes is None else outcomes
     if not urls:
         return stats
@@ -394,6 +510,10 @@ def scrape_with_crawlee(urls, timeout=None, batch_size=None, batch_timeout=None,
                 failed += 1
             else:
                 deferred += 1              # killed / crashed before the output shows an attempt
+                if killed_deferred is not None and not broken:
+                    killed_deferred.add(url)
+        stats["batches_run"] += 1
+        stats["batches_with_output"] += int(bool(processed or parsed or _MARK_RE.search(strip_ansi(output))))
         if rc is None:
             stats["timed_out_batches"] += 1
             print(f"Crawlee batch {n}/{len(batches)} TIMED OUT after {this_timeout:.0f}s: "
@@ -403,7 +523,9 @@ def scrape_with_crawlee(urls, timeout=None, batch_size=None, batch_timeout=None,
             print(f"Crawlee batch {n}/{len(batches)} exited {rc}"
                   f"{' (Crawlee itself broke)' if broken else ''}: {processed} indexed, "
                   f"{failed} failed, {deferred} deferred")
-            failed = max(1, failed)  # a nonzero exit stays a failure even with partial output
+            if not failed:
+                # A nonzero exit without one failed URL: counted on its own, not as a URL failure.
+                stats["failed_batches"] += 1
         stats["processed"] += processed
         stats["skipped"] += len(skipped_here)
         stats["failed"] += failed
@@ -434,14 +556,26 @@ def main():
     pending = [(n, u) for n, u in new if u not in skip]
     internal = [(n, u) for n, u in pending if needs_cookies(u)]
     public = [(n, u) for n, u in pending if not needs_cookies(u)]
+    if ledger is not None:
+        # URLs a killed batch left unattempted go first, so they are attempted
+        # (and bounded by the ledger's deferred_runs) instead of queuing behind
+        # the same hang again. sorted() is stable: bookmark order otherwise.
+        public.sort(key=lambda item: ledger.deferred_runs(item[1]) == 0)
 
     print(f"Total: {len(all_urls)}, Scrapable: {len(scrapable)}, New: {len(new)}")
     print(f"  skipped_unreachable (ledger cool-off): {len(unreachable)}")
     print(f"  Internal (cookies): {len(internal)}")
     print(f"  Public (Crawlee): {len(public)}")
 
-    ok = fail = skipped_auth = too_short = 0
+    ok = fail = skipped_auth = too_short = deferred_auth = 0
     outcomes = {}
+
+    if internal and not midway_session_valid():
+        # Every internal fetch would be an auth strike for a session problem:
+        # skip the path, no ledger strike, retried next run (still unindexed).
+        deferred_auth = len(internal)
+        print(f"WARNING: Midway cookie missing/expired — run mwinit; {deferred_auth} internal URLs deferred")
+        internal = []
 
     # Internal links with cookies
     if internal:
@@ -464,17 +598,25 @@ def main():
 
     # Public links with Crawlee: bounded batches, total kept under the job deadline.
     budget = job_deadline_s() - (time.monotonic() - started) - DEADLINE_MARGIN_S
+    killed_deferred = set()
+    if public:
+        check_batch_scrape_patch()
     public_stats = scrape_with_crawlee(public, timeout=max(0.0, budget), outcomes=outcomes,
-                                       log_name=CRAWLEE_LOG_NAME, env=BATCH_SCRAPE_ENV) if public else \
+                                       log_name=CRAWLEE_LOG_NAME, env=BATCH_SCRAPE_ENV,
+                                       killed_deferred=killed_deferred) if public else \
         {"processed": 0, "skipped": 0, "failed": 0, "too_short": 0, "timed_out_batches": 0, "deferred": 0}
 
-    print(f"\nInternal: {ok} scraped, {skipped_auth} skipped_auth, {fail} failed, {too_short} too_short")
+    print(f"\nInternal: {ok} scraped, {skipped_auth} skipped_auth, {fail} failed, {too_short} too_short, "
+          f"{deferred_auth} deferred_auth")
     print(f"Public: {public_stats}")
-    record_unreachable(ledger, outcomes, len(unreachable))
+    record_unreachable(ledger, outcomes, len(unreachable), killed_deferred=killed_deferred)
     report_backlog(public_stats.get("deferred", 0))
-    internal_counts = {"ok": ok, "auth": skipped_auth, "too_short": too_short, "failed": fail}
+    internal_counts = {"ok": ok, "auth": skipped_auth, "too_short": too_short, "failed": fail,
+                       "deferred_auth": deferred_auth}
+    internal_auth = {u for u, c in outcomes.items() if c == "auth" and needs_cookies(u)}
     return run_exit_code(internal_counts, public_stats, outcomes, ledger,
-                         eligible=len(pending), skipped_unreachable=len(unreachable))
+                         eligible=len(pending) - deferred_auth, public_eligible=len(public),
+                         skipped_unreachable=len(unreachable), internal_auth=internal_auth)
 
 
 #: Fewer attempts than this can not show a systemic break by themselves (one
@@ -483,7 +625,8 @@ def main():
 SYSTEMIC_MIN_ATTEMPTS = 3
 
 
-def run_exit_code(internal, public_stats, outcomes, ledger, *, eligible, skipped_unreachable=0):
+def run_exit_code(internal, public_stats, outcomes, ledger, *, eligible, public_eligible=0,
+                  skipped_unreachable=0, internal_auth=()):
     """The job's exit code: 0 unless the run as a whole broke.
 
     Per-URL outcomes (auth, too_short, timeout, error on individual URLs) are
@@ -491,16 +634,23 @@ def run_exit_code(internal, public_stats, outcomes, ledger, *, eligible, skipped
 
     * a Crawlee batch shows Crawlee itself broke (``crawlee_broken``: missing
       node / node_modules, or non-zero exit with no parseable output);
-    * there were eligible URLs (new, not cooling off) but none was attempted
-      (budget-deferred URLs are not attempts; a hung first batch lands here);
-    * systemic: at least ``SYSTEMIC_MIN_ATTEMPTS`` URLs were attempted
-      (internal skipped_auth excluded — an expired Midway cookie is a session
-      issue), none reached a page (0 ok, 0 too_short), and none of the failed
-      URLs is in ledger cool-off after this run's strikes were recorded.
+    * there were eligible URLs (new, not cooling off, not ``deferred_auth``)
+      but none was attempted (budget-deferred URLs are not attempts);
+    * per path, public: public URLs were eligible, at least one Crawlee batch
+      ran, and the batches produced no mark, no Crawlee record naming a URL
+      and no index addition — a hung Chromium/Crawlee is an outage even when
+      internal fetches were attempted in the same run;
+    * systemic: none reached a page (0 ok, 0 too_short) and at least
+      ``SYSTEMIC_MIN_ATTEMPTS`` of the failed URLs (internal skipped_auth
+      excluded — a session issue) are not in ledger cool-off after this run's
+      strikes were recorded. (A few URLs that just reached strike 3 no longer
+      hide an outage of the rest.)
 
-    This job does not touch the DB (the nightly ingest job ingests Crawlee's
-    index); ledger/backlog bookkeeping errors are warnings, never the exit.
-    Always prints one WARNING summary line with the per-class counts.
+    ``failed_batches`` (non-zero exits that named no failed URL) are reported,
+    not counted as URL failures. This job does not touch the DB (the nightly
+    ingest job ingests Crawlee's index); ledger/backlog bookkeeping errors are
+    warnings, never the exit. Always prints one WARNING summary line with the
+    per-class counts.
     """
     from collections import Counter
     classes = Counter(outcomes.values())
@@ -509,10 +659,16 @@ def run_exit_code(internal, public_stats, outcomes, ledger, *, eligible, skipped
     pub_failed = public_stats.get("failed", 0)
     deferred = public_stats.get("deferred", 0)
     broken = public_stats.get("crawlee_broken", 0)
+    batches_run = public_stats.get("batches_run", 0)
+    batches_with_output = public_stats.get("batches_with_output", batches_run)
+    failed_batches = public_stats.get("failed_batches", 0)
+    deferred_auth = internal.get("deferred_auth", 0)
     reached = internal["ok"] + internal["too_short"] + pub_ok + pub_short
     failed = internal["failed"] + pub_failed
     attempted = reached + failed + internal["auth"]
-    failed_urls = [u for u, c in outcomes.items() if c in ("auth", "timeout", "error")]
+    internal_auth = set(internal_auth or ())
+    failed_urls = [u for u, c in outcomes.items()
+                   if c in ("auth", "timeout", "error") and u not in internal_auth]
     cooling = sum(1 for u in failed_urls if ledger is not None and ledger.should_skip(u))
 
     reason = None
@@ -520,12 +676,15 @@ def run_exit_code(internal, public_stats, outcomes, ledger, *, eligible, skipped
         reason = f"crawlee_broken ({broken} batch(es))"
     elif eligible and not attempted:
         reason = f"0 of {eligible} eligible URL(s) attempted"
-    elif (reached + failed) >= SYSTEMIC_MIN_ATTEMPTS and not reached and not cooling:
-        reason = f"systemic: all {reached + failed} attempted URL(s) failed and none is cooling off"
+    elif public_eligible and batches_run and not batches_with_output:
+        reason = f"0 of {public_eligible} public URL(s) attempted in {batches_run} Crawlee batch(es)"
+    elif not reached and (failed - cooling) >= SYSTEMIC_MIN_ATTEMPTS:
+        reason = f"systemic: all {failed} attempted URL(s) failed, {failed - cooling} not cooling off"
     print(f"WARNING: bookmarks summary — eligible={eligible} attempted={attempted} ok={internal['ok'] + pub_ok} "
           f"auth={classes.get('auth', 0)} too_short={internal['too_short'] + pub_short} "
           f"timeout={classes.get('timeout', 0)} error={classes.get('error', 0)} failed={failed} "
-          f"deferred={deferred} skipped_unreachable={skipped_unreachable} cooling_off={cooling} "
+          f"deferred={deferred} deferred_auth={deferred_auth} skipped_unreachable={skipped_unreachable} "
+          f"cooling_off={cooling} failed_batches={failed_batches} "
           f"crawlee_broken={broken} -> exit {1 if reason else 0}"
           f"{f' ({reason})' if reason else ' (per-URL outcomes are left to the unreachable ledger)'}")
     return 1 if reason else 0
@@ -540,25 +699,37 @@ def _load_ledger():
         return None
 
 
-def record_unreachable(ledger, outcomes, skipped_unreachable):
-    """Persist this run's per-URL outcomes and print the ledger summary (counts only)."""
+def record_unreachable(ledger, outcomes, skipped_unreachable, killed_deferred=()):
+    """Persist this run's per-URL outcomes and print the ledger summary (counts only).
+
+    ``killed_deferred`` URLs (in a killed batch, never shown attempted) get one
+    ``deferred_runs`` count each; at the ledger's ``DEFERRAL_LIMIT`` that is a
+    ``timeout`` strike (``deferral strike(s)`` in the summary)."""
     if ledger is None:
         return None
     from collections import Counter
     counts = Counter(cls for cls in outcomes.values() if cls != "ok")
-    newly = 0
+    newly = deferral_strikes = 0
     try:
         for url, cls in outcomes.items():
             was_skipping = ledger.skip_until(url) is not None
             entry = ledger.record(url, cls)
             if entry and entry.get("skip_until") and not was_skipping:
                 newly += 1
+        for url in sorted(set(killed_deferred) - set(outcomes)):
+            was_skipping = ledger.skip_until(url) is not None
+            entry = ledger.record_deferred(url)
+            if entry:
+                deferral_strikes += 1
+                if entry.get("skip_until") and not was_skipping:
+                    newly += 1
         ledger.save()
     except Exception as exc:  # noqa: BLE001 - ledger bookkeeping must not change the job's outcome
         print(f"WARNING: could not record the bookmarks unreachable ledger: {type(exc).__name__}")
         return None
     print(f"Unreachable: {skipped_unreachable} skipped_unreachable, {newly} newly cooling off, "
-          f"attempt classes {dict(sorted(counts.items()))}, ledger {len(ledger.entries)} URL(s)")
+          f"attempt classes {dict(sorted(counts.items()))}, {len(set(killed_deferred))} killed-batch "
+          f"deferral(s), {deferral_strikes} deferral strike(s), ledger {len(ledger.entries)} URL(s)")
     return counts
 
 
