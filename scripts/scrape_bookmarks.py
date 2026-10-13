@@ -241,6 +241,15 @@ _LOG_URL_RE = re.compile(r'\{"id":"[^"]*","url":"((?:[^"\\]|\\.)+)"')
 _LOG_AUTH_RE = re.compile(r"\b(401|403|407)\b status code|status code:? (401|403|407)\b", re.I)
 _LOG_TIMEOUT_RE = re.compile(r"timed? ?out|TimeoutError", re.I)
 _LOG_ERROR_RE = re.compile(r"Error|fail", re.I)
+#: Stack frames name Crawlee's own timeout wrapper (node_modules/@apify/timeout/...)
+#: on every failed request; those lines say nothing about how the request failed.
+_STACK_PATH_RE = re.compile(r"node_modules|@apify/timeout")
+
+
+def _record_timed_out(record):
+    """True when a non-stack-frame line of the record reports a timeout."""
+    return any(_LOG_TIMEOUT_RE.search(line) for line in record.splitlines()
+               if not _STACK_PATH_RE.search(line))
 
 
 def strip_ansi(text):
@@ -294,7 +303,7 @@ def parse_crawlee_output(text):
     for level, record, url in _iter_records(text):
         if _LOG_AUTH_RE.search(record):
             hints[url] = "auth"
-        elif _LOG_TIMEOUT_RE.search(record):
+        elif _record_timed_out(record):
             hints.setdefault(url, "timeout")
         elif level in ("WARN", "ERROR") or _LOG_ERROR_RE.search(record):
             hints.setdefault(url, "error")

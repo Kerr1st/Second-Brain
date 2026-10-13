@@ -431,6 +431,20 @@ class TestRealCrawleeRecords:
         assert end > start                                      # the URL data is on a later line
         assert sb.parse_crawlee_output("\n".join(lines[start:end + 1])) == {self.REFUSED: "error"}
 
+    def test_lone_error_record_with_apify_timeout_stack_frame_is_an_error(self, sb, text):
+        # The /download ERROR record's stack ends in node_modules/@apify/timeout/cjs/index.cjs;
+        # that frame (on every failed request) must not make it a timeout.
+        lines = text.splitlines()
+        start = next(i for i, l in enumerate(lines)
+                     if sb.strip_ansi(l).startswith("ERROR") and "Download is starting" in l)
+        end = next(i for i in range(start, len(lines)) if "/download" in lines[i] and '"uniqueKey"' in lines[i])
+        record = "\n".join(lines[start:end + 1])
+        assert "@apify/timeout/cjs/index.cjs" in record
+        assert sb.parse_crawlee_output(record) == {self.DOWNLOAD: "error"}
+        # a real timeout message outside the stack frames still classifies as timeout
+        hang = [l for l in lines if sb.strip_ansi(l).startswith("ERROR") and "/hang" in l]
+        assert sb.parse_crawlee_output(hang[0]) == {self.HANG: "timeout"}
+
     def test_the_line_based_parser_would_have_missed_them(self, sb, text):
         """Regression guard for the review's finding: no record's URL data shares the WARN line."""
         plain = sb.strip_ansi(text).splitlines()
