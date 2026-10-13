@@ -193,9 +193,11 @@ class TestMainWithLedger:
                     "timed_out_batches": 0, "deferred": 0}
         monkeypatch.setattr(sb, "scrape_with_crawlee", crawlee)
 
-        assert sb.main() == 1                       # run 1: the public URL failed
-        assert sb.main() == 1                       # run 2
-        assert sb.main() == 1                       # run 3: third consecutive failure
+        # Deliberately changed (triage 2026-10-13): one failed public URL next to a reached
+        # (too_short) page and a skipped_auth one is a per-URL outcome -> exit 0 (was 1).
+        assert sb.main() == 0                       # run 1: the public URL failed
+        assert sb.main() == 0                       # run 2
+        assert sb.main() == 0                       # run 3: third consecutive failure
         assert seen == [[public, short], [public], [public]]   # too-short not re-scraped
         capsys.readouterr()
         assert sb.main() == 0                       # run 4: everything cooling off

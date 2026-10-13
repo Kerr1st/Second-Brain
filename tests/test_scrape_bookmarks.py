@@ -220,9 +220,14 @@ class TestInternalAuth:
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "auth")
         assert sb.main() == 0
-        assert "1 skipped_auth, 0 failed" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "1 skipped_auth, 0 failed" in out
+        assert "WARNING: bookmarks summary" in out and "auth=1" in out and "-> exit 0" in out
+        # Deliberately changed (triage 2026-10-13): one internal URL failing is a per-URL
+        # outcome for the unreachable ledger, no longer a job failure (was exit 1).
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "failed")
-        assert sb.main() == 1
+        assert sb.main() == 0
+        assert "error=1" in capsys.readouterr().out
 
 
 class TestBacklogAlarm:
@@ -235,21 +240,23 @@ class TestBacklogAlarm:
             {"type": "url", "name": "Public", "url": "https://example.org/x"}]}}}))
         monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
+        # processed=1: a run that attempted something but deferred the rest (0 attempted
+        # with eligible URLs is a job failure since 2026-10-13, see TestMainExitCodes).
         monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls, timeout=None, **kw: {
-            "processed": 0, "skipped": 0, "failed": 0, "timed_out_batches": 0, "deferred": deferred})
+            "processed": 1, "skipped": 0, "failed": 0, "timed_out_batches": 0, "deferred": deferred})
         return sb.main()
 
     def test_warning_only_after_three_consecutive_deferring_runs(self, sb, tmp_path, monkeypatch, capsys):
         state = tmp_path / "jobs" / "bookmarks.backlog.json"
         for run in (1, 2):
             assert self._main_with_deferrals(sb, tmp_path, monkeypatch, 7) == 0
-            assert "WARNING" not in capsys.readouterr().out
+            assert "WARNING: bookmarks backlog" not in capsys.readouterr().out   # (the summary WARNING is every run)
             assert json.loads(state.read_text())["consecutive_deferred_runs"] == run
         assert self._main_with_deferrals(sb, tmp_path, monkeypatch, 7) == 0
         out = capsys.readouterr().out
         assert "WARNING: bookmarks backlog persists" in out and "3 consecutive" in out
         assert self._main_with_deferrals(sb, tmp_path, monkeypatch, 0) == 0
-        assert "WARNING" not in capsys.readouterr().out
+        assert "WARNING: bookmarks backlog" not in capsys.readouterr().out
         assert json.loads(state.read_text())["consecutive_deferred_runs"] == 0
 
     def test_backlog_bookkeeping_failure_never_changes_the_exit(self, sb, tmp_path, monkeypatch, capsys):

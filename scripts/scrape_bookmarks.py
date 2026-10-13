@@ -183,6 +183,8 @@ BATCH_SCRAPE_ENV = {
     "BATCH_SCRAPE_MAX_SESSION_ROTATIONS": "0",
     "BATCH_SCRAPE_ABORT_DOWNLOADS": "1",
 }
+#: logs/bookmarks-crawlee-<batch>.log
+CRAWLEE_LOG_NAME = "bookmarks-crawlee"
 
 
 def log_dir():
@@ -391,14 +393,71 @@ def main():
 
     # Public links with Crawlee: bounded batches, total kept under the job deadline.
     budget = job_deadline_s() - (time.monotonic() - started) - DEADLINE_MARGIN_S
-    public_stats = scrape_with_crawlee(public, timeout=max(0.0, budget), outcomes=outcomes) if public else \
+    public_stats = scrape_with_crawlee(public, timeout=max(0.0, budget), outcomes=outcomes,
+                                       log_name=CRAWLEE_LOG_NAME, env=BATCH_SCRAPE_ENV) if public else \
         {"processed": 0, "skipped": 0, "failed": 0, "too_short": 0, "timed_out_batches": 0, "deferred": 0}
 
     print(f"\nInternal: {ok} scraped, {skipped_auth} skipped_auth, {fail} failed, {too_short} too_short")
     print(f"Public: {public_stats}")
     record_unreachable(ledger, outcomes, len(unreachable))
     report_backlog(public_stats.get("deferred", 0))
-    return int(bool(fail or public_stats["failed"]))
+    internal_counts = {"ok": ok, "auth": skipped_auth, "too_short": too_short, "failed": fail}
+    return run_exit_code(internal_counts, public_stats, outcomes, ledger,
+                         eligible=len(pending), skipped_unreachable=len(unreachable))
+
+
+#: Fewer attempts than this can not show a systemic break by themselves (one
+#: bad bookmark left over is not an outage; network loss is caught by the
+#: wrapper's preflight and a broken Crawlee by ``crawlee_broken``).
+SYSTEMIC_MIN_ATTEMPTS = 3
+
+
+def run_exit_code(internal, public_stats, outcomes, ledger, *, eligible, skipped_unreachable=0):
+    """The job's exit code: 0 unless the run as a whole broke.
+
+    Per-URL outcomes (auth, too_short, timeout, error on individual URLs) are
+    the unreachable ledger's business and never fail the job. Exit 1 when:
+
+    * a Crawlee batch shows Crawlee itself broke (``crawlee_broken``: missing
+      node / node_modules, or non-zero exit with no parseable output);
+    * there were eligible URLs (new, not cooling off) but none was attempted
+      (budget-deferred URLs are not attempts; a hung first batch lands here);
+    * systemic: at least ``SYSTEMIC_MIN_ATTEMPTS`` URLs were attempted
+      (internal skipped_auth excluded — an expired Midway cookie is a session
+      issue), none reached a page (0 ok, 0 too_short), and none of the failed
+      URLs is in ledger cool-off after this run's strikes were recorded.
+
+    This job does not touch the DB (the nightly ingest job ingests Crawlee's
+    index); ledger/backlog bookkeeping errors are warnings, never the exit.
+    Always prints one WARNING summary line with the per-class counts.
+    """
+    from collections import Counter
+    classes = Counter(outcomes.values())
+    pub_ok = public_stats.get("processed", 0)
+    pub_short = public_stats.get("too_short", 0)
+    pub_failed = public_stats.get("failed", 0)
+    deferred = public_stats.get("deferred", 0)
+    broken = public_stats.get("crawlee_broken", 0)
+    reached = internal["ok"] + internal["too_short"] + pub_ok + pub_short
+    failed = internal["failed"] + pub_failed
+    attempted = reached + failed + internal["auth"]
+    failed_urls = [u for u, c in outcomes.items() if c in ("auth", "timeout", "error")]
+    cooling = sum(1 for u in failed_urls if ledger is not None and ledger.should_skip(u))
+
+    reason = None
+    if broken:
+        reason = f"crawlee_broken ({broken} batch(es))"
+    elif eligible and not attempted:
+        reason = f"0 of {eligible} eligible URL(s) attempted"
+    elif (reached + failed) >= SYSTEMIC_MIN_ATTEMPTS and not reached and not cooling:
+        reason = f"systemic: all {reached + failed} attempted URL(s) failed and none is cooling off"
+    print(f"WARNING: bookmarks summary — eligible={eligible} attempted={attempted} ok={internal['ok'] + pub_ok} "
+          f"auth={classes.get('auth', 0)} too_short={internal['too_short'] + pub_short} "
+          f"timeout={classes.get('timeout', 0)} error={classes.get('error', 0)} failed={failed} "
+          f"deferred={deferred} skipped_unreachable={skipped_unreachable} cooling_off={cooling} "
+          f"crawlee_broken={broken} -> exit {1 if reason else 0}"
+          f"{f' ({reason})' if reason else ' (per-URL outcomes are left to the unreachable ledger)'}")
+    return 1 if reason else 0
 
 
 def _load_ledger():

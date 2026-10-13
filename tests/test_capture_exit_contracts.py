@@ -372,25 +372,72 @@ class TestMainExitCodes:
                               capture_output=True, text=True, timeout=60)
         assert proc.returncode == 7, proc.stderr
 
-    def test_scrape_bookmarks_main_maps_failures_to_non_zero(self, tmp_path, monkeypatch):
+    def _bookmarks(self, tmp_path, monkeypatch, entries):
         import importlib.util, pathlib
         spec = importlib.util.spec_from_file_location("scrape_bookmarks", pathlib.Path("scripts/scrape_bookmarks.py"))
         sb = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(sb)
         bookmarks = tmp_path / "Bookmarks"
         bookmarks.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
-            {"type": "url", "name": "Public", "url": "https://example.org/public"},
-            {"type": "url", "name": "Internal", "url": "https://w.amazon.com/bin/view/Thing"}]}}}))
+            {"type": "url", "name": name, "url": url} for name, url in entries]}}}))
         monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
-        monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))   # backlog sidecar stays in tmp
+        monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))   # ledger + backlog sidecars stay in tmp
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
+        return sb
+
+    def test_scrape_bookmarks_main_maps_only_run_level_breaks_to_non_zero(self, tmp_path, monkeypatch):
+        """Exit contract since the 2026-10-13 triage. Deliberately changed: per-URL failures
+        (an internal fetch failing, a public batch with failed URLs) used to exit 1; they are
+        now the unreachable ledger's business and exit 0 while the run as a whole worked."""
+        sb = self._bookmarks(tmp_path, monkeypatch, [("Public", "https://example.org/public"),
+                                                     ("Internal", "https://w.amazon.com/bin/view/Thing")])
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: False)
         monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls, **kw: {"processed": 1, "skipped": 0, "failed": 0})
-        assert sb.main() == 1                      # the internal fetch failed
+        assert sb.main() == 0                      # the internal fetch failed: per-URL, ledger
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: True)
         assert sb.main() == 0
         monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls, **kw: {"processed": 0, "skipped": 0, "failed": 1})
-        assert sb.main() == 1                      # the public batch failed
+        assert sb.main() == 0                      # the public URL failed: per-URL, ledger
+        # Crawlee itself broke (missing node_modules / no parseable output): run-level, exit 1.
+        monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls, **kw: {
+            "processed": 0, "skipped": 0, "failed": 1, "deferred": 1, "crawlee_broken": 1})
+        assert sb.main() == 1
+
+    def test_scrape_bookmarks_zero_attempted_with_eligible_urls_is_a_failure(self, tmp_path, monkeypatch, capsys):
+        sb = self._bookmarks(tmp_path, monkeypatch, [("Public", "https://example.org/public")])
+        monkeypatch.setattr(sb, "scrape_with_crawlee", lambda urls, **kw: {
+            "processed": 0, "skipped": 0, "failed": 0, "deferred": 1})
+        assert sb.main() == 1
+        assert "0 of 1 eligible URL(s) attempted" in capsys.readouterr().out
+
+    def test_scrape_bookmarks_nothing_eligible_is_a_clean_noop(self, tmp_path, monkeypatch):
+        sb = self._bookmarks(tmp_path, monkeypatch, [])
+        assert sb.main() == 0
+
+    def test_scrape_bookmarks_systemic_rule_until_the_failures_cool_off(self, tmp_path, monkeypatch, capsys):
+        """>= SYSTEMIC_MIN_ATTEMPTS attempted, none reached, none cooling off -> exit 1. The
+        ledger's third strike puts them in cool-off, and from then on it is exit 0."""
+        urls = [(f"P{i}", f"https://w.amazon.com/bin/view/P{i}") for i in range(3)]
+        sb = self._bookmarks(tmp_path, monkeypatch, urls)
+        monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "timeout")
+        assert sb.main() == 1 and "systemic" in capsys.readouterr().out
+        assert sb.main() == 1                          # strike 2
+        assert sb.main() == 0                          # strike 3: all three now cooling off
+        out = capsys.readouterr().out
+        assert "cooling_off=3" in out and "-> exit 0" in out
+        assert sb.main() == 0                          # cooling off: nothing eligible
+
+    def test_scrape_bookmarks_all_internal_auth_is_not_systemic(self, tmp_path, monkeypatch):
+        """An expired Midway cookie: every internal URL is skipped_auth -> exit 0."""
+        sb = self._bookmarks(tmp_path, monkeypatch, [(f"P{i}", f"https://w.amazon.com/x{i}") for i in range(5)])
+        monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "auth")
+        assert sb.main() == 0
+
+    def test_scrape_bookmarks_one_reached_page_is_not_systemic(self, tmp_path, monkeypatch):
+        sb = self._bookmarks(tmp_path, monkeypatch, [(f"P{i}", f"https://w.amazon.com/x{i}") for i in range(5)])
+        results = iter(["error", "error", "timeout", "error", "too_short"])
+        monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: next(results))
+        assert sb.main() == 0
 
     def test_scrape_with_crawlee_reports_only_index_verified_successes(self, tmp_path, monkeypatch):
         import importlib.util, pathlib
