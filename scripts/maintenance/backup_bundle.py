@@ -106,7 +106,8 @@ STDERR_TAIL_BYTES = 2048
 # Defence in depth for failure messages: a diagnostic line that so much as mentions a
 # credential is replaced, never echoed (the commands here get passphrases and
 # passwords via files/env, so such lines are not expected in the first place).
-_SENSITIVE_LINE = re.compile(r'(?i)passw|passphrase|secret|token|api[_-]?key|://[^\s/]*@')
+_SENSITIVE_LINE = re.compile(
+    r'(?i)passw|passphrase|secret|token|api[_-]?key|bearer|authorization|cookie|credential|x-amz-|://[^\s/]*@')
 
 
 def diagnostic_tail(data, *, lines=STDERR_TAIL_LINES, limit=STDERR_TAIL_BYTES) -> str:

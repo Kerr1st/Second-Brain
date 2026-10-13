@@ -597,6 +597,22 @@ def test_failing_command_error_carries_a_bounded_redacted_stderr_tail():
     assert 'private text' not in str(err.value) and 'exit 2' in str(err.value)
 
 
+@pytest.mark.parametrize('line', [
+    'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.def',
+    'bearer abc123def456',
+    'Cookie: session=abc123',
+    'Set-Cookie: sid=abc123; HttpOnly',
+    'failed to load credentials from ~/.aws',
+    'X-Amz-Security-Token: IQoJb3JpZ2luX2VjEPr',
+    'x-amz-date: 20261013T000000Z',
+])
+def test_diagnostic_tail_redacts_http_auth_cookie_credential_and_aws_header_lines(line):
+    """rclone and pg_dump stderr reach the log via the default diagnostics=True, so
+    HTTP auth headers, cookies, credential errors and signed AWS headers are withheld."""
+    tail = backup.diagnostic_tail(f'harmless before\n{line}\nharmless after\n')
+    assert tail.splitlines() == ['harmless before', '[redacted line]', 'harmless after']
+
+
 # ------------------------------------------------- the real thing: dump → bundle → restore
 
 def test_bundle_from_a_disposable_database_restores_into_another_with_identical_row_counts(test_conn, tmp_path, sample_memory_factory, monkeypatch):
