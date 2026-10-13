@@ -21,6 +21,15 @@ def sb(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "MIDWAY_COOKIE_PATH", str(tmp_path / "no-midway-cookie"))   # never the real one
     monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
     monkeypatch.setenv("SECOND_BRAIN_LOG_DIR", str(tmp_path / "logs"))
+    # Never the real midway-playwright browser: by default every browser URL is
+    # deferred (recorded in mod.browser_calls); browser tests install their own.
+    mod.browser_calls = []
+
+    def _no_browser(urls, budget_s):
+        from src.capture.browser_fetch import PageResult
+        mod.browser_calls.append(list(urls))
+        return {u: PageResult(u, "deferred", detail="test") for u in urls}
+    monkeypatch.setattr(mod, "browser_fetch_pages", _no_browser)
     return mod
 
 
@@ -789,7 +798,7 @@ class TestInternalAuthRouting:
     @pytest.mark.parametrize("url,unsupported", [
         ("https://amazon.sharepoint.com/sites/X", True), ("https://amazon-my.sharepoint.com/x", True),
         ("https://atoz.amazon.work/home", True), ("https://atoz-login.amazon.work/", True),
-        ("https://amazon.coupahost.com/x", True), ("https://docs.hub.amazon.dev/kiro/", True),
+        ("https://amazon.coupahost.com/x", True), ("https://docs.hub.amazon.dev/kiro/", False),   # browser path now
         ("https://w.amazon.com/bin/view/X", False), ("https://broadcast.amazon.com/x", False),
         ("https://evilsharepoint.com/x", False), ("https://docs.hub.amazon.dev.evil.io/", False),
         ("https://ivy-help-center.talent.a2z.com/x", False),
@@ -819,7 +828,7 @@ class TestInternalAuthRouting:
     def test_non_midway_hosts_are_not_fetched_and_take_no_strike(self, sb, tmp_path, monkeypatch, capsys):
         from src.capture.unreachable import url_key
         foreign = ["https://amazon.sharepoint.com/sites/A", "https://atoz.amazon.work/home",
-                   "https://docs.hub.amazon.dev/kiro/"]
+                   "https://amazon.coupahost.com/x"]
         ledger = self._ledger(tmp_path)
         for _ in range(2):                                    # today's state: 2 strikes, 1 more = cool-off
             ledger.record(foreign[0], "auth")
@@ -835,9 +844,12 @@ class TestInternalAuthRouting:
         assert all(url_key(u) not in entries for u in foreign[1:])
 
     def test_dynamic_unsupported_auth_takes_no_strike(self, sb, tmp_path, monkeypatch, capsys):
-        urls = ["https://awsinsights.aws.dev/a", "https://w.amazon.com/bin/view/Ok"]
+        # (Was awsinsights: a BROWSER_HOSTS host now. With a full session an unknown
+        # host's unsupported_auth falls back to the browser; with < 30 min it stays.)
+        monkeypatch.setattr(sb, "midway_session_seconds_left", lambda path=None: 600)
+        urls = ["https://foo.corp.amazon.com/a", "https://w.amazon.com/bin/view/Ok"]
         rc, calls = self._main(sb, tmp_path, monkeypatch, urls,
-                               lambda u: "unsupported_auth" if "awsinsights" in u else "ok")
+                               lambda u: "unsupported_auth" if "corp" in u else "ok")
         out = capsys.readouterr().out
         assert rc == 0 and calls == urls and "unsupported_auth=1" in out
         assert self._ledger(tmp_path).entries == {}
@@ -932,7 +944,7 @@ class TestInternalAuthRouting:
         """Only pre-routed non-Midway bookmarks pending: nothing eligible, so nothing
         'eligible but not attempted' (exit 0)."""
         urls = ["https://amazon.sharepoint.com/sites/A", "https://atoz.amazon.work/home",
-                "https://docs.hub.amazon.dev/kiro/"]
+                "https://amazon.coupahost.com/x"]
         rc, calls = self._main(sb, tmp_path, monkeypatch, urls, lambda u: "ok")
         out = capsys.readouterr().out
         assert rc == 0 and calls == []
@@ -942,7 +954,8 @@ class TestInternalAuthRouting:
 
     def test_dynamic_unsupported_auth_builds_its_own_streak_naming_the_hosts(self, sb, tmp_path, monkeypatch, capsys):
         state = tmp_path / "jobs" / "bookmarks-unsupported.backlog.json"
-        urls = ["https://awsinsights.aws.dev/a", "https://hyperbadge.amazon.dev/b", "https://awsinsights.aws.dev/c",
+        monkeypatch.setattr(sb, "midway_session_seconds_left", lambda path=None: 600)   # no browser fallback
+        urls = ["https://a.corp.amazon.com/a", "https://b.corp.amazon.com/b", "https://a.corp.amazon.com/c",
                 "https://w.amazon.com/bin/view/Ok"]
         outcome = lambda u: "ok" if "w.amazon" in u else "unsupported_auth"
         for run in (1, 2, 3):
@@ -950,8 +963,8 @@ class TestInternalAuthRouting:
             out = capsys.readouterr().out
             value = json.loads(state.read_text())
             assert rc == 0 and value["consecutive_deferred_runs"] == run and value["deferred"] == 3
-            assert value["cause"] == "hosts: awsinsights.aws.dev, hyperbadge.amazon.dev"
-            assert "awsinsights.aws.dev (2), hyperbadge.amazon.dev (1)" in out           # job log WARNING
+            assert value["cause"] == "hosts: a.corp.amazon.com, b.corp.amazon.com"
+            assert "a.corp.amazon.com (2), b.corp.amazon.com (1)" in out                 # job log WARNING
             assert ("WARNING: bookmarks-unsupported backlog persists" in out) is (run == 3)
         assert "/a" not in value["cause"]                                                # hosts only
         self._main(sb, tmp_path, monkeypatch, urls[-1:], lambda u: "ok")
@@ -960,7 +973,7 @@ class TestInternalAuthRouting:
     def test_pre_routed_non_midway_hosts_do_not_count_toward_the_unsupported_streak(
             self, sb, tmp_path, monkeypatch, capsys):
         urls = ["https://amazon.sharepoint.com/sites/A", "https://atoz.amazon.work/home",
-                "https://amazon.coupahost.com/x", "https://docs.hub.amazon.dev/kiro/", "https://w.amazon.com/bin/view/Ok"]
+                "https://amazon.coupahost.com/x", "https://amazon-my.sharepoint.com/x", "https://w.amazon.com/bin/view/Ok"]
         rc, _ = self._main(sb, tmp_path, monkeypatch, urls, lambda u: "ok")
         assert rc == 0 and "4 not fetched" in capsys.readouterr().out
         value = json.loads((tmp_path / "jobs" / "bookmarks-unsupported.backlog.json").read_text())

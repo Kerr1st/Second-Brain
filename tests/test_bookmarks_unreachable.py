@@ -155,6 +155,11 @@ def sb(tmp_path, monkeypatch):
     cookie = tmp_path / "midway-cookie"     # a valid Midway session (never the real ~/.midway/cookie)
     cookie.write_text("#HttpOnly_midway-auth.amazon.com\tFALSE\t/\tTRUE\t4102444800\tsession\tv\n")
     monkeypatch.setattr(mod, "MIDWAY_COOKIE_PATH", str(cookie))
+
+    def _no_browser(urls, budget_s):        # never the real midway-playwright browser
+        from src.capture.browser_fetch import PageResult
+        return {u: PageResult(u, "deferred", detail="test") for u in urls}
+    monkeypatch.setattr(mod, "browser_fetch_pages", _no_browser)
     return mod
 
 
