@@ -533,7 +533,7 @@ class TestMidwayExpiry:
     """Finding 5: no unexpired midway-auth.amazon.com `session` cookie -> the internal path
     is skipped, its URLs are deferred_auth (no ledger strike), exit 0 for that alone."""
 
-    def _main(self, sb, tmp_path, monkeypatch, cookie_path):
+    def _main(self, sb, tmp_path, monkeypatch, cookie_path, outcome="ok"):
         bookmarks = tmp_path / "Bookmarks"
         bookmarks.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
             {"type": "url", "name": f"I{i}", "url": f"https://w.amazon.com/bin/view/I{i}"} for i in range(3)]}}}))
@@ -541,7 +541,9 @@ class TestMidwayExpiry:
         monkeypatch.setattr(sb, "MIDWAY_COOKIE_PATH", str(cookie_path))
         monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
         calls = []
-        monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: calls.append(url) or "auth")
+        # (Was "auth": since 2026-10-13 three-of-three auth with a valid session is a
+        # systemic deferral, see TestInternalAuthRouting; a valid run here reaches its pages.)
+        monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: calls.append(url) or outcome)
         return sb.main(), calls
 
     @pytest.mark.parametrize("make", [
@@ -721,3 +723,133 @@ class TestKeptLog:
         monkeypatch.setattr(sb.subprocess, "run", run)
         rc, output = sb._run_crawlee_batch([("P", "https://example.org/p0")], 10, keep_log=("bookmarks-crawlee", 1))
         assert rc == 0 and output == "✗ https://example.org/p0\n"
+
+
+class TestInternalAuthRouting:
+    """2026-10-13 live run: 0 scraped / 127 skipped_auth with a valid Midway session.
+    The completed Midway SSO round-trip (hops through idp.federate / midway-auth,
+    then 200 back on the page) was judged ``auth``; hosts behind a non-Midway
+    login (Microsoft, A to Z, JS-auth CloudFront) took ledger strikes every run."""
+
+    # Hop sequences as observed live (query strings dropped).
+    W_CHAIN = ["https://w.amazon.com/bin/view/WorkingBackwards/",
+               "https://idp.federate.amazon.com/api/oauth2/v1/authorize",
+               "https://midway-auth.amazon.com/SSO/redirect",
+               "https://idp.federate.amazon.com:443/api/v1/intermediate",
+               "https://w.amazon.com/"]
+    BROADCAST_CHAIN = ["https://broadcast.amazon.com/channels/1",
+                       "https://idp.federate.amazon.com/api/oauth2/v1/authorize",
+                       "https://midway-auth.amazon.com/SSO/redirect",
+                       "https://idp.federate.amazon.com:443/api/v1/intermediate",
+                       "https://broadcast.amazon.com/", "https://broadcast.amazon.com/channels/1",
+                       "https://idp.federate.amazon.com/api/oauth2/v1/authorize",
+                       "https://midway-auth.amazon.com/SSO/redirect",
+                       "https://idp.federate.amazon.com:443/api/v1/intermediate",
+                       "https://broadcast.amazon.com:443/redirect"]
+
+    @pytest.fixture
+    def fetch(self, sb, monkeypatch, tmp_path):
+        monkeypatch.setattr(sb, "KNOWLEDGE_DIR", str(tmp_path / "sources"))
+        holder = {}
+        monkeypatch.setitem(sys.modules, "requests", _fake_requests(lambda *a, **k: holder["resp"]))
+        monkeypatch.setitem(sys.modules, "browser_cookie3", types.SimpleNamespace(chrome=lambda domain_name=None: None))
+
+        def run(url, resp):
+            holder["resp"] = resp
+            return sb.scrape_with_cookies("Page", url)
+        return run
+
+    def test_completed_midway_round_trip_is_ok(self, fetch):
+        assert fetch(self.W_CHAIN[0], _resp(url="https://w.amazon.com/bin/view/WorkingBackwards/",
+                                            history=self.W_CHAIN)) == "ok"
+        assert fetch(self.BROADCAST_CHAIN[0], _resp(url="https://broadcast.amazon.com:443/channels/1",
+                                                    history=self.BROADCAST_CHAIN)) == "ok"
+
+    @pytest.mark.parametrize("resp", [
+        _resp(url="https://midway-auth.amazon.com/login?next=x", history=W_CHAIN[:3]),   # session refused
+        _resp(status=403, url="https://w.amazon.com/bin/view/Restricted", history=W_CHAIN),
+        _resp(status=403),                                    # bare refusal on a verified Midway host
+    ])
+    def test_sign_in_on_a_midway_host_is_auth(self, fetch, resp):
+        assert fetch("https://w.amazon.com/bin/view/X", resp) == "auth"
+
+    @pytest.mark.parametrize("url,resp", [
+        ("https://atoz.amazon.work/home", _resp(url="https://atoz-login.amazon.work/",
+                                                history=["https://atoz.amazon.work/home", "https://atoz-login.amazon.work/login"])),
+        ("https://amazon.sharepoint.com/sites/X", _resp(url="https://login.microsoftonline.com:443/tenant/oauth2/authorize",
+                                                        history=["https://amazon.sharepoint.com/sites/X"])),
+        ("https://docs.hub.amazon.dev/kiro/", _resp(status=403, url="https://docs.hub.amazon.dev/kiro/")),
+        ("https://awsinsights.aws.dev/x", _resp(status=403, url="https://awsinsights.aws.dev/x")),
+    ])
+    def test_sign_in_midway_cannot_satisfy_is_unsupported(self, fetch, url, resp):
+        assert fetch(url, resp) == "unsupported_auth"
+
+    @pytest.mark.parametrize("url,unsupported", [
+        ("https://amazon.sharepoint.com/sites/X", True), ("https://amazon-my.sharepoint.com/x", True),
+        ("https://atoz.amazon.work/home", True), ("https://atoz-login.amazon.work/", True),
+        ("https://amazon.coupahost.com/x", True), ("https://docs.hub.amazon.dev/kiro/", True),
+        ("https://w.amazon.com/bin/view/X", False), ("https://broadcast.amazon.com/x", False),
+        ("https://evilsharepoint.com/x", False), ("https://docs.hub.amazon.dev.evil.io/", False),
+        ("https://ivy-help-center.talent.a2z.com/x", False),
+    ])
+    def test_unsupported_hosts(self, sb, url, unsupported):
+        assert sb.midway_unsupported(url) is unsupported
+
+    def _main(self, sb, tmp_path, monkeypatch, urls, outcome_for):
+        bookmarks = tmp_path / "Bookmarks"
+        bookmarks.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
+            {"type": "url", "name": f"B{i}", "url": u} for i, u in enumerate(urls)]}}}))
+        monkeypatch.setattr(sb, "BOOKMARKS_PATH", str(bookmarks))
+        monkeypatch.setattr(sb, "MIDWAY_COOKIE_PATH", str(_midway_file(tmp_path / "midway")))
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
+        calls = []
+        monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: calls.append(url) or outcome_for(url))
+        return sb.main(), calls
+
+    def _ledger(self, tmp_path):
+        from src.capture.unreachable import Ledger
+        return Ledger.load(tmp_path / "jobs" / "bookmarks.unreachable.json")
+
+    def test_non_midway_hosts_are_not_fetched_and_take_no_strike(self, sb, tmp_path, monkeypatch, capsys):
+        from src.capture.unreachable import url_key
+        foreign = ["https://amazon.sharepoint.com/sites/A", "https://atoz.amazon.work/home",
+                   "https://docs.hub.amazon.dev/kiro/"]
+        ledger = self._ledger(tmp_path)
+        for _ in range(2):                                    # today's state: 2 strikes, 1 more = cool-off
+            ledger.record(foreign[0], "auth")
+        ledger.save()
+        wiki = "https://w.amazon.com/bin/view/Ok"
+        rc, calls = self._main(sb, tmp_path, monkeypatch, [*foreign, wiki], lambda u: "ok")
+        out = capsys.readouterr().out
+        assert rc == 0 and calls == [wiki]
+        assert "3 unsupported_auth (3 not fetched: non-Midway sign-in)" in out
+        entries = self._ledger(tmp_path).entries
+        assert entries[url_key(foreign[0])]["consecutive_failures"] == 2
+        assert entries[url_key(foreign[0])]["skip_until"] is None
+        assert all(url_key(u) not in entries for u in foreign[1:])
+
+    def test_dynamic_unsupported_auth_takes_no_strike(self, sb, tmp_path, monkeypatch, capsys):
+        urls = ["https://awsinsights.aws.dev/a", "https://w.amazon.com/bin/view/Ok"]
+        rc, calls = self._main(sb, tmp_path, monkeypatch, urls,
+                               lambda u: "unsupported_auth" if "awsinsights" in u else "ok")
+        out = capsys.readouterr().out
+        assert rc == 0 and calls == urls and "unsupported_auth=1" in out
+        assert self._ledger(tmp_path).entries == {}
+
+    def test_valid_session_reaching_no_page_defers_instead_of_striking(self, sb, tmp_path, monkeypatch, capsys):
+        urls = [f"https://w.amazon.com/bin/view/P{i}" for i in range(4)]
+        rc, _ = self._main(sb, tmp_path, monkeypatch, urls, lambda u: "auth")
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Midway session valid but all 4 Midway-path fetch(es) hit sign-in" in out
+        assert "0 skipped_auth" in out and "deferred_auth=4" in out
+        assert self._ledger(tmp_path).entries == {}
+
+    def test_restricted_pages_among_reached_ones_still_strike(self, sb, tmp_path, monkeypatch, capsys):
+        from src.capture.unreachable import url_key
+        urls = [f"https://w.amazon.com/bin/view/P{i}" for i in range(4)]
+        rc, _ = self._main(sb, tmp_path, monkeypatch, urls, lambda u: "ok" if u.endswith("P0") else "auth")
+        out = capsys.readouterr().out
+        assert rc == 0 and "1 scraped, 3 skipped_auth" in out
+        entries = self._ledger(tmp_path).entries
+        assert [entries[url_key(u)]["status"] for u in urls[1:]] == ["auth"] * 3

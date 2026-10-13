@@ -65,12 +65,48 @@ def job_deadline_s():
 
 
 def _is_auth_response(resp):
+    """Auth when the *final* response is refused for auth or is a sign-in page.
+
+    Intermediate hops are not judged: a Midway-authenticated fetch always passes
+    through idp.federate.amazon.com and midway-auth.amazon.com and then lands,
+    200, back on the requested page (2026-10-13: judging those hops turned every
+    successful w.amazon.com/broadcast fetch into ``auth``)."""
     if resp.status_code in _AUTH_STATUS:
         return True
-    # Any redirect target, or the final URL, pointing at sign-in. The originally
-    # requested URL (history[0]) is not judged.
-    redirects = [getattr(r, "url", "") or "" for r in (getattr(resp, "history", None) or [])][1:]
-    return any(_AUTH_URL_RE.search(u) for u in [*redirects, resp.url or ""])
+    return bool(_AUTH_URL_RE.search(resp.url or ""))
+
+
+#: Hops of the Midway SSO chain; a chain through them means Midway handles the host.
+_MIDWAY_HOP_RE = re.compile(r"^https?://(idp\.federate\.amazon\.com|midway-auth\.amazon\.com)(:\d+)?([/?#]|$)", re.I)
+#: Hosts verified (2026-10-13) to sign in through that chain with ~/.midway/cookie,
+#: so a bare 401/403 there is a real per-URL refusal (a ledger strike).
+MIDWAY_HOSTS = re.compile(r"^(w|broadcast|idp\.federate)\.amazon\.com$", re.I)
+#: Hosts behind a login Midway cookies can never satisfy (checked 2026-10-13):
+#: Microsoft 365 (login.microsoftonline.com), A to Z (atoz-login.amazon.work),
+#: Coupa SSO, and docs.hub (CloudFront page whose auth runs in JavaScript).
+#: They are not fetched: ``unsupported_auth``, no ledger strike, no request.
+NON_MIDWAY_AUTH_HOSTS = re.compile(
+    r"^(([a-z0-9-]+\.)*sharepoint\.com|atoz(-[a-z]+)?\.amazon\.(work|com)|"
+    r"([a-z0-9-]+\.)*coupahost\.com|docs\.hub\.amazon\.dev)$", re.I)
+
+
+def _host(url):
+    try:
+        return (urlparse(url or "").hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+
+
+def midway_unsupported(url):
+    """True for hosts whose sign-in Midway cookies cannot satisfy (never fetched)."""
+    return bool(NON_MIDWAY_AUTH_HOSTS.match(_host(url)))
+
+
+def _midway_handled(url, resp):
+    """True when Midway is the host's sign-in: the host is a verified Midway host,
+    or the redirect chain went through idp.federate / midway-auth."""
+    hops = [getattr(r, "url", "") or "" for r in (getattr(resp, "history", None) or [])]
+    return bool(MIDWAY_HOSTS.match(_host(url))) or any(_MIDWAY_HOP_RE.match(u) for u in [*hops, resp.url or ""])
 
 
 MIDWAY_COOKIE_PATH = os.path.expanduser("~/.midway/cookie")
@@ -178,13 +214,16 @@ def cookie_policy_session(requests):
 
 def fetch_internal(url):
     """GET an internal page with the merged cookie jar. Returns (outcome, resp);
-    outcome is "ok" (200, not judged as auth), "auth" or "failed". Writes nothing."""
+    outcome is "ok" (200, final response not judged as auth), "auth" (sign-in /
+    refusal on a host Midway handles), "unsupported_auth" (sign-in that is not
+    Midway's: a foreign login page, or a refusal that never touched Midway) or
+    "failed". Writes nothing."""
     import requests
     with cookie_policy_session(requests) as session:
         resp = session.get(url, cookies=internal_cookie_jar(url), timeout=30,
                            headers={"User-Agent": "Mozilla/5.0"})
     if _is_auth_response(resp):
-        return "auth", resp
+        return ("auth" if _midway_handled(url, resp) else "unsupported_auth"), resp
     if resp.status_code != 200:
         return "failed", resp
     return "ok", resp
@@ -193,10 +232,11 @@ def fetch_internal(url):
 def scrape_with_cookies(name, url):
     """Fetch an internal page using Chrome + Midway cookies, save as markdown.
 
-    Returns "ok", "auth" (redirected to sign-in / refused for auth: counted as
-    skipped_auth — also when the Midway cookie has expired), "too_short"
-    (reached, but too little text to index), "timeout" or "failed" (genuine
-    fetch error)."""
+    Returns "ok", "auth" (redirected to sign-in / refused for auth on a host
+    Midway handles: counted as skipped_auth — also when the Midway cookie has
+    expired), "unsupported_auth" (a login Midway cannot satisfy: no ledger
+    strike), "too_short" (reached, but too little text to index), "timeout" or
+    "failed" (genuine fetch error)."""
     try:
         outcome, resp = fetch_internal(url)
         if outcome != "ok":
@@ -576,8 +616,12 @@ def main():
     print(f"  Internal (cookies): {len(internal)}")
     print(f"  Public (Crawlee): {len(public)}")
 
-    ok = fail = skipped_auth = too_short = deferred_auth = 0
+    ok = fail = skipped_auth = too_short = deferred_auth = unsupported_auth = skipped_unsupported = 0
     outcomes = {}
+
+    # Hosts Midway can never sign in to: not fetched, no ledger strike.
+    skipped_unsupported = sum(1 for _, u in internal if midway_unsupported(u))
+    internal = [(n, u) for n, u in internal if not midway_unsupported(u)]
 
     if internal and not midway_session_valid():
         # Every internal fetch would be an auth strike for a session problem:
@@ -598,12 +642,22 @@ def main():
             elif outcome == "auth":
                 skipped_auth += 1
                 outcomes[url] = "auth"
+            elif outcome == "unsupported_auth":
+                unsupported_auth += 1      # attempted; not a ledger outcome (no strike)
             elif outcome == "too_short":
                 too_short += 1
                 outcomes[url] = "too_short"
             else:
                 fail += 1
                 outcomes[url] = "timeout" if outcome == "timeout" else "error"
+        if skipped_auth >= SYSTEMIC_MIN_ATTEMPTS and not ok and not too_short:
+            # A valid session that reached no internal page at all is a session or
+            # routing problem, not that many broken bookmarks: defer, no strikes.
+            print(f"WARNING: Midway session valid but all {skipped_auth} Midway-path fetch(es) hit "
+                  f"sign-in and none reached a page — deferred_auth, no ledger strike")
+            for url in [u for u, c in outcomes.items() if c == "auth"]:
+                del outcomes[url]
+            deferred_auth, skipped_auth = skipped_auth, 0
 
     # Public links with Crawlee: bounded batches, total kept under the job deadline.
     budget = job_deadline_s() - (time.monotonic() - started) - DEADLINE_MARGIN_S
@@ -616,16 +670,17 @@ def main():
         {"processed": 0, "skipped": 0, "failed": 0, "too_short": 0, "timed_out_batches": 0, "deferred": 0}
 
     print(f"\nInternal: {ok} scraped, {skipped_auth} skipped_auth, {fail} failed, {too_short} too_short, "
-          f"{deferred_auth} deferred_auth")
+          f"{deferred_auth} deferred_auth, {unsupported_auth + skipped_unsupported} unsupported_auth "
+          f"({skipped_unsupported} not fetched: non-Midway sign-in)")
     print(f"Public: {public_stats}")
     record_unreachable(ledger, outcomes, len(unreachable), killed_deferred=killed_deferred)
     report_backlog(public_stats.get("deferred", 0))
     report_backlog(deferred_auth, job=MIDWAY_BACKLOG_JOB)
     internal_counts = {"ok": ok, "auth": skipped_auth, "too_short": too_short, "failed": fail,
-                       "deferred_auth": deferred_auth}
+                       "deferred_auth": deferred_auth, "unsupported_auth": unsupported_auth}
     internal_auth = {u for u, c in outcomes.items() if c == "auth" and needs_cookies(u)}
     return run_exit_code(internal_counts, public_stats, outcomes, ledger,
-                         eligible=len(pending) - deferred_auth, public_eligible=len(public),
+                         eligible=len(pending) - deferred_auth - skipped_unsupported, public_eligible=len(public),
                          skipped_unreachable=len(unreachable), internal_auth=internal_auth)
 
 
@@ -675,7 +730,7 @@ def run_exit_code(internal, public_stats, outcomes, ledger, *, eligible, public_
     deferred_auth = internal.get("deferred_auth", 0)
     reached = internal["ok"] + internal["too_short"] + pub_ok + pub_short
     failed = internal["failed"] + pub_failed
-    attempted = reached + failed + internal["auth"]
+    attempted = reached + failed + internal["auth"] + internal.get("unsupported_auth", 0)
     internal_auth = set(internal_auth or ())
     failed_urls = [u for u, c in outcomes.items()
                    if c in ("auth", "timeout", "error") and u not in internal_auth]
@@ -693,7 +748,8 @@ def run_exit_code(internal, public_stats, outcomes, ledger, *, eligible, public_
     print(f"WARNING: bookmarks summary — eligible={eligible} attempted={attempted} ok={internal['ok'] + pub_ok} "
           f"auth={classes.get('auth', 0)} too_short={internal['too_short'] + pub_short} "
           f"timeout={classes.get('timeout', 0)} error={classes.get('error', 0)} failed={failed} "
-          f"deferred={deferred} deferred_auth={deferred_auth} skipped_unreachable={skipped_unreachable} "
+          f"deferred={deferred} deferred_auth={deferred_auth} "
+          f"unsupported_auth={internal.get('unsupported_auth', 0)} skipped_unreachable={skipped_unreachable} "
           f"cooling_off={cooling} failed_batches={failed_batches} "
           f"crawlee_broken={broken} -> exit {1 if reason else 0}"
           f"{f' ({reason})' if reason else ' (per-URL outcomes are left to the unreachable ledger)'}")
