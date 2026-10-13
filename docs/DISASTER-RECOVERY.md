@@ -23,7 +23,7 @@ Receipt fields: `sha256`, `bytes`, `files`, `payload_verified`, `file_modes_veri
 
 1. `rclone lsf gdrive:memory-bank-backups --files-only --max-depth 1 --include '*.gpg'` — both naming schemes, because the remote holds pre-R5 dumps next to bundles during the transition.
 2. `backup_bundle.py select-latest`: newest by the timestamp in the name; **fails if older than 36 h** — a Drive copy that stopped updating no longer passes because it decrypts.
-3. Bundle → `backup_bundle.py verify <file> --restore`: manifest checksums and modes, then a full `pg_restore` into a freshly initialized socket-only cluster under `/private/tmp` (its own superuser, never an existing database), per-table row counts, cluster stopped, plaintext removed, subprocess groups unwound on interruption. Legacy dump → `verify-legacy` (decrypt + `pg_restore --list`).
+3. Bundle → `backup_bundle.py verify <file> --restore`: manifest checksums and modes, then a full `pg_restore` into a freshly initialized socket-only cluster under `/private/tmp` (its own superuser, never an existing database), per-table row counts, cluster stopped, plaintext removed, subprocess groups unwound on interruption. The disposable cluster runs with `LC_ALL=C`, because launchd sets no locale and PostgreSQL 17 aborts startup without one. A failure reports a redacted stderr tail, plus the `restore.log` tail when `pg_ctl start` fails; `pg_restore` stderr is withheld because it may echo decrypted content. Legacy dump → `verify-legacy` (decrypt + `pg_restore --list`).
 
 Budget: ~1.1 GB download + ~10 s decrypt + ~4 min restore. PostgreSQL 17, pgvector and GPG must be available to the wrapper; rclone only for cloud operations.
 

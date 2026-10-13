@@ -9,7 +9,7 @@ feeds them through the standard pipeline (``src.ingest.ingest_content``) as
 Engagement signal: each memory records which playlist it came from
 (``Engagement:`` header -> metadata) so later phases can weight by interest.
 
-Requires (venv): yt-dlp==2026.3.17, curl_cffi==0.13.0.
+Requires (venv): yt-dlp==2026.8.19, curl_cffi==0.13.0.
 Run: python -m src.capture.youtube [--limit N] [--dry-run] [--min-duration 300]
 
 Validated recipe (see docs / session notes): one subtitle track + a request
