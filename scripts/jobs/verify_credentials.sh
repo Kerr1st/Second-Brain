@@ -230,8 +230,10 @@ try:
             if auth:
                 raise McpAuthError(f"get_emails: {auth}")
             # Name the keys, never the payload: it is someone's mailbox.
-            assert isinstance(d, dict) and "emails" in d, \
-                f"get_emails: unexpected reply (keys: {sorted(d)[:5] if isinstance(d, dict) else type(d).__name__})"
+            # An explicit raise, not assert: PYTHONOPTIMIZE would strip an assert.
+            if not (isinstance(d, dict) and "emails" in d):
+                raise RuntimeError(
+                    f"get_emails: unexpected reply (keys: {sorted(d)[:5] if isinstance(d, dict) else type(d).__name__})")
     asyncio.run(main())
 except Exception as e:  # one classified line on stderr + the capture jobs' exit code
     leaf = _leaf(e)
@@ -255,8 +257,9 @@ try:
             auth = auth_error_in_payload(d)
             if auth:
                 raise McpAuthError(f"list_dms: {auth}")
-            assert isinstance(d, dict) and "dms" in d, \
-                f"list_dms: unexpected reply (keys: {sorted(d)[:5] if isinstance(d, dict) else type(d).__name__})"
+            if not (isinstance(d, dict) and "dms" in d):  # not assert: PYTHONOPTIMIZE strips those
+                raise RuntimeError(
+                    f"list_dms: unexpected reply (keys: {sorted(d)[:5] if isinstance(d, dict) else type(d).__name__})")
     asyncio.run(main())
 except Exception as e:  # one classified line on stderr + the capture jobs' exit code
     leaf = _leaf(e)

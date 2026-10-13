@@ -463,6 +463,22 @@ def test_the_real_mcp_probe_classifies_a_dead_server_as_transport(tmp_path: Path
 
 
 
+def test_the_mcp_probes_check_their_reply_without_assert(tmp_path: Path):
+    """PYTHONOPTIMIZE strips assert statements, which would turn an unexpected reply
+    into a pass: each probe's reply check must be an explicit raise."""
+    import ast
+    import re as _re
+
+    text = CREDENTIALS.read_text(encoding="utf-8")
+    probes = _re.findall(r"<<'EOF'\n(.*?)\nEOF\n", text, flags=_re.S)
+    assert len(probes) == 2
+    for probe, key in zip(probes, ("emails", "dms")):
+        tree = ast.parse(probe)
+        assert not any(isinstance(n, ast.Assert) for n in ast.walk(tree)), probe
+        assert f'if not (isinstance(d, dict) and "{key}" in d):' in probe
+        assert "raise RuntimeError(" in probe
+
+
 # --------------------------------------------------------------------------- #
 # verify_liveness.sh (adapter around src.operations.liveness)
 # --------------------------------------------------------------------------- #
