@@ -337,6 +337,66 @@ class TestReadingExitRule:
         stats, rc = run(_scrape_stats(processed=1, failed=6), outcomes)
         assert rc == 0 and stats["failed"] == 0 and stats["reading_failed"] == 6
 
+    def test_real_scrape_with_every_url_failed_exits_one(self, history_db, tmp_path, monkeypatch, caplog):
+        """The real scrape_with_crawlee drives a fake ``node`` (first on PATH) that prints
+        batch-scrape.js's per-URL "✗ <url>" line for every URL and exits 0, as a Chromium
+        that fails every page does: systemic rule (b) must fail the job."""
+        import stat
+        import src.db, src.ingest
+        import scripts.scrape_bookmarks as sb
+        from src.capture.common import exit_code
+        caplog.set_level("INFO", logger=b.__name__)
+        bindir, crawlee = tmp_path / "bin", tmp_path / "crawlee"
+        bindir.mkdir(); crawlee.mkdir()
+        node = bindir / "node"
+        # argv: node batch-scrape.js <url-file>
+        node.write_text('#!/bin/sh\nwhile IFS= read -r url; do printf \'✗ %s\\n\' "$url"; done < "$2"\nexit 0\n')
+        node.chmod(node.stat().st_mode | stat.S_IXUSR)
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("SECOND_BRAIN_LOG_DIR", str(tmp_path / "logs"))
+        monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "status"))
+        monkeypatch.setattr(sb, "CRAWLEE_DIR", str(crawlee))
+        monkeypatch.setattr(sb, "load_indexed_urls", lambda: set())
+        urls = ["https://news.example.com/a", "https://news.example.com/b", "https://blog.example.org/c"]
+        monkeypatch.setattr(b, "reading_urls", lambda s: [("t", u) for u in urls])
+        monkeypatch.setattr(b, "completed_days", lambda n: [date(2026, 9, 15)])
+        monkeypatch.setattr(src.db, "get_processed_source_urls", lambda st: set())
+        monkeypatch.setattr(src.ingest, "ingest_batch", lambda items, st: {
+            "processed": len(items), "skipped": 0, "failed": 0})
+        stats = b.capture(days_back=1, history_path=history_db)
+        assert exit_code(stats) == 1 and stats["failed"] == 1 and stats["reading_failed"] == 3
+        for url in urls:
+            assert ("WARNING", f"reading error: {url}") in [(r.levelname, r.getMessage()) for r in caplog.records]
+        assert "systemic: 0 pages reached, 3 URL(s) auth/timeout/error across 2 hosts" in self._summary(caplog)
+        log = tmp_path / "logs" / f"{b.CRAWLEE_LOG_NAME}-1.log"
+        assert log.read_text().splitlines() == [f"\u2717 {u}" for u in urls]
+        assert stat.S_IMODE(log.stat().st_mode) == 0o600
+
+    def test_no_page_text_is_logged(self, run, caplog, capsys):
+        caplog.set_level("DEBUG")
+        stats = _scrape_stats(failed=2, too_short=5)
+        stats["page_text"] = _PAGE_TEXT                  # even if the scraper returned text
+        run(stats, self._todays_outcomes())
+        reading_lines = [r.getMessage() for r in caplog.records
+                         if r.name == b.__name__ and r.getMessage().startswith("reading ")]
+        urls = set(_ACM + _SHORT)
+        for line in reading_lines:
+            if not line.startswith("reading summary"):
+                cls, _, url = line[len("reading "):].partition(": ")
+                assert cls in ("auth", "timeout", "error", "too_short") and url in urls
+        assert _PAGE_TEXT not in caplog.text
+        assert _PAGE_TEXT not in "".join(capsys.readouterr())
+
+    def test_select_and_record_hooks_are_the_integration_points(self, run, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(b, "_select_reading", lambda fresh: seen.setdefault("select", list(fresh))[:1])
+        monkeypatch.setattr(b, "_record_reading", lambda outcomes: seen.setdefault("record", dict(outcomes)))
+        run(_scrape_stats(failed=1), {_ACM[0]: "auth"})
+        assert {u for _, u in seen["select"]} == set(_ACM + _SHORT)
+        (urls, _), = run.calls
+        assert urls == seen["select"][:1]                 # what _select_reading returns is what is sent
+        assert seen["record"] == {_ACM[0]: "auth"}
+
 class TestReadingLedgerWiring:
     """_select_reading / _record_reading go through src.capture.reading_ledger."""
 
