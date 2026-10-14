@@ -20,6 +20,11 @@ gives the reading step what the bookmarks job already has:
   public pages. The bookmarks ledger is only ever read here. Amazon-internal
   hosts are never bot-walled: an internal 403 is an auth problem.
 
+* **Bad-render guard**: a run where nothing rendered (no ``ok``, at least
+  ``BAD_RUN_MIN`` URLs) does not record ``too_short``; that pattern is a broken
+  render night, not thin pages, and ``too_short`` would cool the page off for
+  30 days on its first hit.
+
 Locking. The job runner (``src/operations/jobs.py``) holds ``flock`` on
 ``<status-dir>/capture-browser.lock`` in the *wrapper* process for the whole run;
 the child (``python -m src.capture.browser``) gets ``SECOND_BRAIN_WRAPPED=1`` but
@@ -55,6 +60,8 @@ FILENAME = f"{JOB}.unreachable.json"
 LOCK_NAME = f"{JOB}.lock"
 #: Seconds a caller outside the job waits for the job's lock before skipping.
 LOCK_WAIT_S = 5.0
+#: A run with no ``ok`` and at least this many URLs is a bad render: no ``too_short``.
+BAD_RUN_MIN = 3
 #: Distinct URLs of one host cooling off with class ``auth`` that make it bot-walled.
 DYNAMIC_THRESHOLD = 2
 
@@ -279,6 +286,11 @@ def record_outcomes(outcomes: dict[str, str], *, status_dir=None, now=None) -> N
         if not outcomes:
             return
         now = _now(now)
+        values = list(outcomes.values())
+        bad_render = len(values) >= BAD_RUN_MIN and "ok" not in values
+        if bad_render and "too_short" in values:
+            logger.warning("reading ledger: 0 ok of %d URLs: not recording %d too_short "
+                           "(looks like a bad render, not thin pages)", len(values), values.count("too_short"))
         directory = _status_dir(status_dir)
         with _job_lock(directory) as allowed:
             if not allowed:
@@ -287,6 +299,8 @@ def record_outcomes(outcomes: dict[str, str], *, status_dir=None, now=None) -> N
             path = directory / FILENAME
             ledger = _load(path, "reading", warn_missing=False) or unreachable.Ledger(path)
             for url, cls in outcomes.items():
+                if bad_render and cls == "too_short":
+                    continue
                 ledger.record(url, cls, now=now)
             ledger.save()
     except Exception as exc:  # noqa: BLE001 - bookkeeping must not change the job's outcome

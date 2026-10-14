@@ -263,6 +263,33 @@ def test_record_outcomes_too_short_cools_off_immediately(sd):
     assert rl.filter_reading([url], status_dir=sd, now=NOW)[1] == {url: "cooling_off"}
 
 
+def test_bad_render_run_does_not_record_too_short(sd, caplog):
+    thin = [f"https://thin{i}.example/p" for i in range(3)]
+    outcomes = {**{u: "too_short" for u in thin}, "https://wall.example/a": "auth"}
+    with caplog.at_level(logging.WARNING, logger=rl.__name__):
+        rl.record_outcomes(outcomes, status_dir=sd, now=NOW)
+    entries = _entries(sd)
+    assert not any(unreachable.url_key(u) in entries for u in thin)
+    assert entries[unreachable.url_key("https://wall.example/a")]["status"] == "auth"   # other classes still count
+    assert rl.filter_reading(thin, status_dir=sd, now=NOW) == (thin, {})
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "0 ok of 4 URLs" in warning.getMessage() and "3 too_short" in warning.getMessage()
+
+
+@pytest.mark.parametrize("outcomes", [
+    {"https://thin.example/1": "too_short", "https://thin.example/2": "too_short"},          # < 3 URLs
+    {"https://thin.example/1": "too_short", "https://thin.example/2": "too_short",
+     "https://thin.example/3": "too_short", "https://fine.example/": "ok"},                  # something rendered
+])
+def test_too_short_recorded_outside_a_bad_render_run(sd, caplog, outcomes):
+    with caplog.at_level(logging.WARNING, logger=rl.__name__):
+        rl.record_outcomes(outcomes, status_dir=sd, now=NOW)
+    for url, cls in outcomes.items():
+        if cls == "too_short":
+            assert _entries(sd)[unreachable.url_key(url)]["status"] == "too_short"
+    assert not caplog.records
+
+
 def test_record_outcomes_auth_feeds_dynamic_rule(sd):
     urls = ["https://wall.example/a", "https://wall.example/b"]
     for _ in range(unreachable.THRESHOLD):
