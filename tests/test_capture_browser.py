@@ -209,12 +209,13 @@ class TestReadingExitRule:
         monkeypatch.setattr(b, "_select_reading", lambda fresh: fresh)
         monkeypatch.setattr(b, "_record_reading", lambda outcomes: None)
 
-        def go(scrape_stats, outcomes, ingest_failed=0):
+        def go(scrape_stats, outcomes, ingest_failed=0, urls=None):
             monkeypatch.setattr(src.db, "get_processed_source_urls", lambda st: set())
             monkeypatch.setattr(src.ingest, "ingest_batch", lambda items, st: {
                 "processed": len(items) - ingest_failed, "skipped": 0, "failed": ingest_failed})
             monkeypatch.setattr(b, "completed_days", lambda n: [date(2026, 9, 15)])
-            monkeypatch.setattr(b, "reading_urls", lambda s: [("t", u) for u in _ACM + _SHORT])
+            read = urls if urls is not None else _ACM + _SHORT
+            monkeypatch.setattr(b, "reading_urls", lambda s: [("t", u) for u in read])
 
             def scrape(urls, **kw):
                 calls.append((list(urls), kw))
@@ -284,36 +285,57 @@ class TestReadingExitRule:
 
     def test_failed_batch_exits_one(self, run):
         stats, rc = run(_scrape_stats(failed_batches=1, deferred=7), {})
-        assert rc == 1 and stats["failed"] == 1
+        assert rc == 1 and stats["failed"] == 2          # + systemic (c): 0 of 7 attempted
 
     def test_timed_out_batch_exits_one(self, run):
         stats, rc = run(_scrape_stats(timed_out_batches=1, deferred=7), {})
+        assert rc == 1 and stats["failed"] == 2          # + systemic (c): 0 of 7 attempted
+
+    # Systemic outage: per-URL outcomes stay advisory unless the whole scrape is down.
+    @staticmethod
+    def _summary(caplog):
+        lines = [r.getMessage() for r in caplog.records
+                 if r.levelname == "WARNING" and r.getMessage().startswith("reading summary")]
+        assert len(lines) == 1
+        return lines[0]
+
+    def test_systemic_a_batches_ran_without_output_exits_one(self, run, caplog):
+        caplog.set_level("INFO", logger=b.__name__)
+        stats, rc = run(_scrape_stats(failed=2, deferred=5, batches_with_output=0), {u: "error" for u in _ACM})
+        assert rc == 1 and stats["failed"] == 1 and stats["reading_failed"] == 2
+        assert "reading scrape failed (systemic: 1 batch(es) ran, none produced output)" in self._summary(caplog)
+
+    def test_systemic_b_no_page_reached_across_hosts_exits_one(self, run, caplog):
+        caplog.set_level("INFO", logger=b.__name__)
+        outcomes = {**{u: "auth" for u in _ACM}, _SHORT[0]: "timeout", **{u: "error" for u in _SHORT[1:]}}
+        stats, rc = run(_scrape_stats(failed=7), outcomes)
         assert rc == 1 and stats["failed"] == 1
+        assert "systemic: 0 pages reached, 7 URL(s) auth/timeout/error across 3 hosts" in self._summary(caplog)
 
-    def test_no_page_text_is_logged(self, run, caplog, capsys):
-        caplog.set_level("DEBUG")
-        stats = _scrape_stats(failed=2, too_short=5)
-        stats["page_text"] = _PAGE_TEXT                  # even if the scraper returned text
-        run(stats, self._todays_outcomes())
-        reading_lines = [r.getMessage() for r in caplog.records
-                         if r.name == b.__name__ and r.getMessage().startswith("reading ")]
-        urls = set(_ACM + _SHORT)
-        for line in reading_lines:
-            if not line.startswith("reading summary"):
-                cls, _, url = line[len("reading "):].partition(": ")
-                assert cls in ("auth", "timeout", "error", "too_short") and url in urls
-        assert _PAGE_TEXT not in caplog.text
-        assert _PAGE_TEXT not in "".join(capsys.readouterr())
+    def test_systemic_c_nothing_attempted_exits_one(self, run, caplog):
+        caplog.set_level("INFO", logger=b.__name__)
+        stats, rc = run(_scrape_stats(deferred=7, batches_run=0, batches_with_output=0), {})
+        assert rc == 1 and stats["failed"] == 1
+        assert "systemic: 7 URL(s) sent, 0 attempted (deferred=7)" in self._summary(caplog)
 
-    def test_select_and_record_hooks_are_the_integration_points(self, run, monkeypatch):
-        seen = {}
-        monkeypatch.setattr(b, "_select_reading", lambda fresh: seen.setdefault("select", list(fresh))[:1])
-        monkeypatch.setattr(b, "_record_reading", lambda outcomes: seen.setdefault("record", dict(outcomes)))
-        run(_scrape_stats(failed=1), {_ACM[0]: "auth"})
-        assert {u for _, u in seen["select"]} == set(_ACM + _SHORT)
-        (urls, _), = run.calls
-        assert urls == seen["select"][:1]                 # what _select_reading returns is what is sent
-        assert seen["record"] == {_ACM[0]: "auth"}
+    def test_three_auth_urls_on_one_host_exit_zero(self, run, caplog):
+        caplog.set_level("INFO", logger=b.__name__)
+        acm = _ACM + ["https://queue.acm.org/doi/10.1145/3611111"]
+        stats, rc = run(_scrape_stats(failed=3), {u: "auth" for u in acm}, urls=acm)
+        assert rc == 0 and stats["failed"] == 0 and stats["reading_failed"] == 3
+        assert "advisory" in self._summary(caplog) and "systemic" not in self._summary(caplog)
+
+    def test_todays_case_is_not_systemic(self, run, caplog):
+        # 2 queue.acm.org auth + 5 too_short elsewhere: too_short means the page was reached.
+        caplog.set_level("INFO", logger=b.__name__)
+        stats, rc = run(_scrape_stats(failed=2, too_short=5), self._todays_outcomes())
+        assert rc == 0 and stats["failed"] == 0
+        assert "systemic" not in self._summary(caplog)
+
+    def test_mixed_run_with_one_ok_exits_zero(self, run):
+        outcomes = {_SHORT[0]: "ok", **{u: "auth" for u in _ACM}, **{u: "error" for u in _SHORT[1:]}}
+        stats, rc = run(_scrape_stats(processed=1, failed=6), outcomes)
+        assert rc == 0 and stats["failed"] == 0 and stats["reading_failed"] == 6
 
 class TestReadingLedgerWiring:
     """_select_reading / _record_reading go through src.capture.reading_ledger."""

@@ -373,8 +373,10 @@ def _report_reading(fresh: list[tuple[str, str]], scrape_stats: dict, outcomes: 
 
     Exit rule: an individual URL that fails (auth/timeout/error) or is too short
     never fails the job. Real failures are a broken Crawlee (``crawlee_broken``),
-    a batch that exited non-zero naming no failed URL (``failed_batches``) and a
-    batch killed at its timeout (``timed_out_batches``)."""
+    a batch that exited non-zero naming no failed URL (``failed_batches``), a
+    batch killed at its timeout (``timed_out_batches``), and one more for a
+    systemic outage (``_systemic_reasons``): a Chromium that fails every page
+    and exits 0 would otherwise look like a run of advisory per-URL failures."""
     for _, url in fresh:
         cls = outcomes.get(url)
         if cls in _READING_CLASSES:
@@ -383,17 +385,51 @@ def _report_reading(fresh: list[tuple[str, str]], scrape_stats: dict, outcomes: 
     broken = scrape_stats.get("crawlee_broken", 0)
     failed_batches = scrape_stats.get("failed_batches", 0)
     timed_out = scrape_stats.get("timed_out_batches", 0)
-    real = failed_batches + timed_out + broken
+    systemic = _systemic_reasons(fresh, scrape_stats, outcomes)
+    real = failed_batches + timed_out + broken + int(bool(systemic))
     failed, too_short = scrape_stats.get("failed", 0), scrape_stats.get("too_short", 0)
     if real or failed or too_short:
+        verdict = "per-URL outcomes are advisory, not a job failure"
+        if real:
+            verdict = "reading scrape failed" + (f" (systemic: {'; '.join(systemic)})" if systemic else "")
         logger.warning(
             "reading summary — sent=%d ok=%d auth=%d timeout=%d error=%d too_short=%d failed=%d "
             "deferred=%d failed_batches=%d timed_out_batches=%d crawlee_broken=%d -> %s",
             len(fresh), scrape_stats.get("processed", 0), classes.get("auth", 0), classes.get("timeout", 0),
             classes.get("error", 0), too_short, failed, scrape_stats.get("deferred", 0),
-            failed_batches, timed_out, broken,
-            "reading scrape failed" if real else "per-URL outcomes are advisory, not a job failure")
+            failed_batches, timed_out, broken, verdict)
     return {"failed": failed, "too_short": too_short, "broken": real}
+
+
+#: Rule (b): this many auth/timeout/error URLs, on at least SYSTEMIC_MIN_HOSTS
+#: distinct hosts, with no page reached, is an outage rather than walled sites.
+SYSTEMIC_MIN_FAILED = 3
+SYSTEMIC_MIN_HOSTS = 2
+
+
+def _systemic_reasons(fresh: list[tuple[str, str]], scrape_stats: dict, outcomes: dict[str, str]) -> list[str]:
+    """Reasons this run's reading scrape is a systemic outage (empty: it is not).
+
+    (a) batches ran but none produced any output (no mark, record or index addition);
+    (b) no page was reached (ok + too_short == 0) and >= SYSTEMIC_MIN_FAILED URLs
+        ended auth/timeout/error across >= SYSTEMIC_MIN_HOSTS hosts — too_short
+        counts as reaching the page, and several reads of one walled host do not;
+    (c) URLs were sent but none was attempted (e.g. all deferred by the budget)."""
+    reasons = []
+    batches_run = scrape_stats.get("batches_run", 0)
+    if batches_run > 0 and scrape_stats.get("batches_with_output", batches_run) == 0:
+        reasons.append(f"{batches_run} batch(es) ran, none produced output")
+    classes = collections.Counter(outcomes.values())
+    ok = max(scrape_stats.get("processed", 0), classes.get("ok", 0))
+    too_short = max(scrape_stats.get("too_short", 0), classes.get("too_short", 0))
+    bad = [url for url, cls in outcomes.items() if cls in ("auth", "timeout", "error")]
+    hosts = {host_of(url) for url in bad}
+    if ok + too_short == 0 and len(bad) >= SYSTEMIC_MIN_FAILED and len(hosts) >= SYSTEMIC_MIN_HOSTS:
+        reasons.append(f"0 pages reached, {len(bad)} URL(s) auth/timeout/error across {len(hosts)} hosts")
+    attempted = max(len(outcomes), ok + too_short + scrape_stats.get("failed", 0))
+    if fresh and attempted == 0:
+        reasons.append(f"{len(fresh)} URL(s) sent, 0 attempted (deferred={scrape_stats.get('deferred', 0)})")
+    return reasons
 
 
 # --------------------------------------------------------------------------- #
@@ -459,7 +495,7 @@ def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
 
     stats = run_channel(SOURCE_TYPE, items, dry_run=dry_run, ingest=ingest_batch)
     stats["reading_planned" if dry_run else "reading"] = reading_sent
-    # Per-URL reading outcomes are advisory; only a broken scrape is a real failure.
+    # Per-URL reading outcomes are advisory; only a broken scrape or a systemic outage is a real failure.
     stats["reading_failed"] = reading["failed"]
     stats["reading_too_short"] = reading["too_short"]
     stats["failed"] += reading["broken"]
