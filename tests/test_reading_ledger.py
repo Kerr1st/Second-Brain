@@ -156,11 +156,13 @@ def test_corrupt_ledger_keeps_everything_with_warning(sd, caplog, content):
     assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
-def test_missing_ledger_keeps_everything_with_warning(tmp_path, caplog):
+def test_missing_ledger_keeps_everything_without_warning(tmp_path, caplog):
     urls = ["https://a.example/1"]
-    with caplog.at_level(logging.WARNING, logger=rl.__name__):
-        assert rl.filter_reading(urls, status_dir=tmp_path / "nope", now=NOW) == (urls, {})
-    assert any("missing" in r.getMessage() for r in caplog.records)
+    with caplog.at_level(logging.DEBUG, logger=rl.__name__):
+        for _ in range(3):                                   # every run until the first record
+            assert rl.filter_reading(urls, status_dir=tmp_path / "nope", now=NOW) == (urls, {})
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert all(r.levelno == logging.INFO for r in caplog.records if "not created yet" in r.getMessage())
 
 
 def test_filter_reading_never_raises(sd, monkeypatch):

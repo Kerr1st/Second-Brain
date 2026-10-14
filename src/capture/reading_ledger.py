@@ -190,7 +190,10 @@ def filter_reading(urls: list[str], *, status_dir=None, now=None) -> tuple[list[
     """Return (keep, skipped) where skipped maps url -> reason ("cooling_off" | "bot_walled")."""
     try:
         now = _now(now)
-        reading = _load(ledger_path(status_dir), "reading")
+        path = ledger_path(status_dir)
+        reading = _load(path, "reading", warn_missing=False)
+        if reading is None and not path.exists():
+            logger.info("reading ledger not created yet (%s): no cool-offs to apply", path.name)
         bookmarks = _load(_bookmarks_path(status_dir), "bookmarks", warn_missing=False)
         walled = _bot_walled(reading, bookmarks, now)
     except Exception as exc:  # noqa: BLE001
