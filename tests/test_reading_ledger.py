@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -31,7 +32,6 @@ def _write(path, entries):
 
 @pytest.fixture
 def sd(tmp_path, monkeypatch):
-    monkeypatch.delenv("SECOND_BRAIN_WRAPPED", raising=False)
     _write(tmp_path / rl.FILENAME, [])
     return tmp_path
 
@@ -53,6 +53,7 @@ def _reading(sd, *entries):
     "http://www.yelp.com/biz/mr-tint-san-jose",
     "https://www.etsy.com/listing/1",
     "https://www.homedepot.com/p/1",
+    "https://www.ebay.com/itm/284044233400",
     "https://QUEUE.ACM.ORG./doi/1",
 ])
 def test_seed_matches_host_and_subdomains(sd, url):
@@ -73,6 +74,21 @@ def test_lookalike_hosts_are_not_matched(sd, url):
 
 def test_seed_is_in_bot_walled_hosts(sd):
     assert rl.BOT_WALLED_SEED <= rl.bot_walled_hosts(status_dir=sd, now=NOW)
+
+
+def test_seed_curation():
+    assert "datatracker.ietf.org" not in rl.BOT_WALLED_SEED     # 1 URL in 1 run: dynamic rule decides
+    assert "ebay.com" in rl.BOT_WALLED_SEED                     # 2 URLs x 2 blocked attempts
+    assert not any(rl.never_walled(h) for h in rl.BOT_WALLED_SEED)
+
+
+def test_bot_walled_skip_is_logged_at_info_with_host_and_url(sd, caplog):
+    url = "https://www.etsy.com/listing/9"
+    with caplog.at_level(logging.INFO, logger=rl.__name__):
+        rl.filter_reading([url, "https://a.example/1"], status_dir=sd, now=NOW)
+    (record,) = [r for r in caplog.records if "bot_walled" in r.getMessage()]
+    assert record.levelno == logging.INFO
+    assert record.getMessage() == f"reading skipped (bot_walled): host=www.etsy.com url={url}"
 
 
 # ------------------------------------------------------------- dynamic rule
@@ -104,6 +120,41 @@ def test_dynamic_rule_needs_auth_and_active_cool_off(sd):
                _entry("https://d.example/1"), _entry("https://d.example/2", status="error"))
     hosts = rl.bot_walled_hosts(status_dir=sd, now=NOW)
     assert not {"a.example", "b.example", "c.example", "d.example"} & hosts
+
+
+def test_dynamic_host_matches_exactly_not_subdomains(sd):
+    _bookmarks(sd, _entry("https://a.example.com/1"), _entry("https://a.example.com/2"))
+    assert "a.example.com" in rl.bot_walled_hosts(status_dir=sd, now=NOW)
+    exact, sub, parent = "https://a.example.com/3", "https://b.a.example.com/1", "https://example.com/1"
+    keep, skipped = rl.filter_reading([exact, sub, parent], status_dir=sd, now=NOW)
+    assert skipped == {exact: "bot_walled"} and keep == [sub, parent]
+
+
+def test_seed_still_matches_subdomains_alongside_dynamic(sd):
+    _bookmarks(sd, _entry("https://a.example.com/1"), _entry("https://a.example.com/2"))
+    url = "https://deep.www.crunchbase.com/x"
+    assert rl.filter_reading([url], status_dir=sd, now=NOW) == ([], {url: "bot_walled"})
+
+
+def test_private_github_bookmarks_do_not_wall_github(sd):
+    _bookmarks(sd, _entry("https://github.com/me/private-a"), _entry("https://github.com/me/private-b"))
+    assert "github.com" not in rl.bot_walled_hosts(status_dir=sd, now=NOW)
+    url = "https://github.com/public/repo"
+    assert rl.filter_reading([url], status_dir=sd, now=NOW) == ([url], {})
+
+
+@pytest.mark.parametrize("host", ["github.com", "gist.github.com", "google.com", "docs.google.com",
+                                  "drive.google.com", "medium.com", "linkedin.com", "www.linkedin.com",
+                                  "notion.so", "x.com", "twitter.com", "youtube.com", "someone.medium.com"])
+def test_never_walled_hosts_are_never_walled_dynamically(sd, host):
+    assert {"github.com", "gist.github.com", "google.com", "docs.google.com", "drive.google.com",
+            "medium.com", "linkedin.com", "www.linkedin.com", "notion.so", "x.com", "twitter.com",
+            "youtube.com"} <= rl.NEVER_WALLED
+    _bookmarks(sd, *(_entry(f"https://{host}/{i}") for i in range(4)))
+    _reading(sd, *(_entry(f"https://{host}/r{i}") for i in range(4)))
+    assert host not in rl.bot_walled_hosts(status_dir=sd, now=NOW)
+    url = f"https://{host}/new"
+    assert rl.filter_reading([url], status_dir=sd, now=NOW) == ([url], {})
 
 
 def test_dynamic_host_ignores_port_in_domain(sd):
@@ -156,11 +207,13 @@ def test_corrupt_ledger_keeps_everything_with_warning(sd, caplog, content):
     assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
-def test_missing_ledger_keeps_everything_with_warning(tmp_path, caplog):
+def test_missing_ledger_keeps_everything_without_warning(tmp_path, caplog):
     urls = ["https://a.example/1"]
-    with caplog.at_level(logging.WARNING, logger=rl.__name__):
-        assert rl.filter_reading(urls, status_dir=tmp_path / "nope", now=NOW) == (urls, {})
-    assert any("missing" in r.getMessage() for r in caplog.records)
+    with caplog.at_level(logging.DEBUG, logger=rl.__name__):
+        for _ in range(3):                                   # every run until the first record
+            assert rl.filter_reading(urls, status_dir=tmp_path / "nope", now=NOW) == (urls, {})
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert all(r.levelno == logging.INFO for r in caplog.records if "not created yet" in r.getMessage())
 
 
 def test_filter_reading_never_raises(sd, monkeypatch):
@@ -210,6 +263,55 @@ def test_record_outcomes_too_short_cools_off_immediately(sd):
     assert rl.filter_reading([url], status_dir=sd, now=NOW)[1] == {url: "cooling_off"}
 
 
+def test_bad_render_run_does_not_record_too_short(sd, caplog):
+    thin = [f"https://thin{i}.example/p" for i in range(3)]
+    outcomes = {**{u: "too_short" for u in thin}, "https://wall.example/a": "auth"}
+    with caplog.at_level(logging.WARNING, logger=rl.__name__):
+        rl.record_outcomes(outcomes, status_dir=sd, now=NOW)
+    entries = _entries(sd)
+    assert not any(unreachable.url_key(u) in entries for u in thin)
+    assert entries[unreachable.url_key("https://wall.example/a")]["status"] == "auth"   # other classes still count
+    assert rl.filter_reading(thin, status_dir=sd, now=NOW) == (thin, {})
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "0 ok of 4 URLs" in warning.getMessage() and "3 too_short" in warning.getMessage()
+
+
+@pytest.mark.parametrize("outcomes", [
+    {"https://thin.example/1": "too_short", "https://thin.example/2": "too_short"},          # < 3 URLs
+    {"https://thin.example/1": "too_short", "https://thin.example/2": "too_short",
+     "https://thin.example/3": "too_short", "https://fine.example/": "ok"},                  # something rendered
+])
+def test_too_short_recorded_outside_a_bad_render_run(sd, caplog, outcomes):
+    with caplog.at_level(logging.WARNING, logger=rl.__name__):
+        rl.record_outcomes(outcomes, status_dir=sd, now=NOW)
+    for url, cls in outcomes.items():
+        if cls == "too_short":
+            assert _entries(sd)[unreachable.url_key(url)]["status"] == "too_short"
+    assert not caplog.records
+
+
+def test_save_prunes_long_expired_and_idle_entries(sd):
+    def entry(url, skip_until, last):
+        return unreachable.url_key(url), {"domain": urlparse(url).netloc, "status": "timeout", "attempts": 1,
+                                          "consecutive_failures": 1, "last_attempt_at": last.isoformat(),
+                                          "skip_until": skip_until and skip_until.isoformat()}
+    keep = {
+        "https://k.example/cooling": entry("https://k.example/cooling", NOW + timedelta(days=5), NOW),
+        "https://k.example/expired-29d": entry("https://k.example/expired-29d", NOW - timedelta(days=29), NOW - timedelta(days=59)),
+        "https://k.example/idle-59d": entry("https://k.example/idle-59d", None, NOW - timedelta(days=59)),
+    }
+    drop = {
+        "https://d.example/expired-31d": entry("https://d.example/expired-31d", NOW - timedelta(days=31), NOW - timedelta(days=61)),
+        "https://d.example/idle-61d": entry("https://d.example/idle-61d", None, NOW - timedelta(days=61)),
+    }
+    _reading(sd, *keep.values(), *drop.values())
+    rl.record_outcomes({"https://new.example/": "auth"}, status_dir=sd, now=NOW)
+    entries = _entries(sd)
+    assert all(unreachable.url_key(u) in entries for u in keep)
+    assert not any(unreachable.url_key(u) in entries for u in drop)
+    assert unreachable.url_key("https://new.example/") in entries
+
+
 def test_record_outcomes_auth_feeds_dynamic_rule(sd):
     urls = ["https://wall.example/a", "https://wall.example/b"]
     for _ in range(unreachable.THRESHOLD):
@@ -248,8 +350,8 @@ def test_bookmarks_ledger_is_never_modified(sd):
 
 # ------------------------------------------------------------- locking
 
-def _hold(sd):
-    handle = (sd / rl.LOCK_NAME).open("a")
+def _hold(sd, name=rl.LOCK_NAME):
+    handle = (sd / name).open("a")
     fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     return handle
 
@@ -264,7 +366,8 @@ def _lock_is_free(sd):
         return True
 
 
-def test_outside_job_takes_and_releases_the_job_lock(sd, monkeypatch):
+def test_lock_is_dedicated_and_held_during_save(sd, monkeypatch):
+    assert rl.LOCK_NAME == "capture-browser.unreachable.lock"
     seen = []
     real_save = unreachable.Ledger.save
 
@@ -275,39 +378,74 @@ def test_outside_job_takes_and_releases_the_job_lock(sd, monkeypatch):
     rl.record_outcomes({"https://a.example/": "auth"}, status_dir=sd, now=NOW)
     assert seen == [False]
     assert _lock_is_free(sd)
+    assert (sd / rl.LOCK_NAME).stat().st_mode & 0o777 == 0o600
+
+
+def test_second_holder_blocks_until_released(sd, monkeypatch):
+    monkeypatch.setattr(rl, "LOCK_TIMEOUT_S", 10.0)
+    holder = _hold(sd)
+    worker = threading.Thread(target=rl.record_outcomes,
+                              args=({"https://a.example/": "auth"},), kwargs={"status_dir": sd, "now": NOW})
+    try:
+        worker.start()
+        time.sleep(0.4)
+        assert worker.is_alive() and _entries(sd) == {}      # waiting, nothing written
+    finally:
+        holder.close()
+    worker.join(5)
+    assert not worker.is_alive()
     assert unreachable.url_key("https://a.example/") in _entries(sd)
 
 
-def test_outside_job_with_lock_busy_skips_without_hanging(sd, monkeypatch, caplog):
-    monkeypatch.setattr(rl, "LOCK_WAIT_S", 0.3)
+def test_lock_timeout_skips_the_write_with_warning(sd, monkeypatch, caplog):
+    monkeypatch.setattr(rl, "LOCK_TIMEOUT_S", 0.3)
     holder = _hold(sd)
     try:
         started = time.monotonic()
         with caplog.at_level(logging.WARNING, logger=rl.__name__):
             rl.record_outcomes({"https://a.example/": "auth"}, status_dir=sd, now=NOW)
-        assert time.monotonic() - started < 3
+        assert 0.25 <= time.monotonic() - started < 3
     finally:
         holder.close()
     assert _entries(sd) == {}
-    assert any(rl.LOCK_NAME in r.getMessage() for r in caplog.records)
+    assert any(r.levelno == logging.WARNING and rl.LOCK_NAME in r.getMessage() for r in caplog.records)
 
 
-def test_inside_job_does_not_relock_when_wrapper_holds_it(sd, monkeypatch):
+def test_concurrent_writers_both_land(sd, monkeypatch):
+    real_load = rl._load
+
+    def slow_load(*a, **k):                  # widen the load -> save window
+        ledger = real_load(*a, **k)
+        time.sleep(0.05)
+        return ledger
+    monkeypatch.setattr(rl, "_load", slow_load)
+    urls = [f"https://w{i}.example/" for i in range(6)]
+    workers = [threading.Thread(target=rl.record_outcomes, args=({u: "auth"},),
+                                kwargs={"status_dir": sd, "now": NOW}) for u in urls]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(10)
+    entries = _entries(sd)
+    assert all(unreachable.url_key(u) in entries for u in urls)    # no lost update
+
+
+def test_job_wrapper_lock_is_not_involved(sd, monkeypatch):
+    """Behavioural (replaces a source grep of jobs.run_job): the wrapper's
+    capture-browser.lock held, inside or outside a job, never delays or skips the write."""
     monkeypatch.setenv("SECOND_BRAIN_WRAPPED", "1")
-    monkeypatch.setattr(rl, "LOCK_WAIT_S", 30.0)          # a re-lock attempt would hang the test
-    holder = _hold(sd)                                     # stands in for jobs.run_job's fd
+    monkeypatch.setattr(rl, "LOCK_TIMEOUT_S", 30.0)
+    wrapper = _hold(sd, f"{rl.JOB}.lock")
     try:
         started = time.monotonic()
         rl.record_outcomes({"https://a.example/": "auth"}, status_dir=sd, now=NOW)
         assert time.monotonic() - started < 3
         assert unreachable.url_key("https://a.example/") in _entries(sd)
-        assert not _lock_is_free(sd)                       # the wrapper's lock is untouched
     finally:
-        holder.close()
+        wrapper.close()
 
 
-def test_lock_name_matches_job_runner():
-    import inspect
-    from src.operations import jobs
-    assert 'f"{name}.lock"' in inspect.getsource(jobs.run_job)
-    assert rl.LOCK_NAME == f"{rl.JOB}.lock"
+def test_lock_file_is_not_read_by_the_job_status_sweep(sd):
+    rl.record_outcomes({"https://a.example/": "auth"}, status_dir=sd, now=NOW)
+    assert (sd / rl.LOCK_NAME).exists() and (sd / rl.FILENAME).exists()
+    assert liveness.inspect_statuses(sd, now=NOW) == []
