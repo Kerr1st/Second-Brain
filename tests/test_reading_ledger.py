@@ -290,6 +290,28 @@ def test_too_short_recorded_outside_a_bad_render_run(sd, caplog, outcomes):
     assert not caplog.records
 
 
+def test_save_prunes_long_expired_and_idle_entries(sd):
+    def entry(url, skip_until, last):
+        return unreachable.url_key(url), {"domain": urlparse(url).netloc, "status": "timeout", "attempts": 1,
+                                          "consecutive_failures": 1, "last_attempt_at": last.isoformat(),
+                                          "skip_until": skip_until and skip_until.isoformat()}
+    keep = {
+        "https://k.example/cooling": entry("https://k.example/cooling", NOW + timedelta(days=5), NOW),
+        "https://k.example/expired-29d": entry("https://k.example/expired-29d", NOW - timedelta(days=29), NOW - timedelta(days=59)),
+        "https://k.example/idle-59d": entry("https://k.example/idle-59d", None, NOW - timedelta(days=59)),
+    }
+    drop = {
+        "https://d.example/expired-31d": entry("https://d.example/expired-31d", NOW - timedelta(days=31), NOW - timedelta(days=61)),
+        "https://d.example/idle-61d": entry("https://d.example/idle-61d", None, NOW - timedelta(days=61)),
+    }
+    _reading(sd, *keep.values(), *drop.values())
+    rl.record_outcomes({"https://new.example/": "auth"}, status_dir=sd, now=NOW)
+    entries = _entries(sd)
+    assert all(unreachable.url_key(u) in entries for u in keep)
+    assert not any(unreachable.url_key(u) in entries for u in drop)
+    assert unreachable.url_key("https://new.example/") in entries
+
+
 def test_record_outcomes_auth_feeds_dynamic_rule(sd):
     urls = ["https://wall.example/a", "https://wall.example/b"]
     for _ in range(unreachable.THRESHOLD):

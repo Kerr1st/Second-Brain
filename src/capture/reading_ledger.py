@@ -25,6 +25,10 @@ gives the reading step what the bookmarks job already has:
   render night, not thin pages, and ``too_short`` would cool the page off for
   30 days on its first hit.
 
+* **Pruning**: on save, entries more than ``PRUNE_AFTER_SKIP`` past their
+  ``skip_until``, and entries without ``skip_until`` whose last attempt is
+  more than ``PRUNE_IDLE`` old, are dropped.
+
 Locking. The job runner (``src/operations/jobs.py``) holds ``flock`` on
 ``<status-dir>/capture-browser.lock`` in the *wrapper* process for the whole run;
 the child (``python -m src.capture.browser``) gets ``SECOND_BRAIN_WRAPPED=1`` but
@@ -47,7 +51,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -62,6 +66,10 @@ LOCK_NAME = f"{JOB}.lock"
 LOCK_WAIT_S = 5.0
 #: A run with no ``ok`` and at least this many URLs is a bad render: no ``too_short``.
 BAD_RUN_MIN = 3
+#: Pruned on save: entries this far past ``skip_until`` ...
+PRUNE_AFTER_SKIP = timedelta(days=30)
+#: ... and entries without ``skip_until`` whose last attempt is this old.
+PRUNE_IDLE = timedelta(days=60)
 #: Distinct URLs of one host cooling off with class ``auth`` that make it bot-walled.
 DYNAMIC_THRESHOLD = 2
 
@@ -280,6 +288,26 @@ def _job_lock(directory: Path):
             return
 
 
+def _prune(ledger, now) -> int:
+    """Drop entries long past their cool-off, or idle without one. Returns the count."""
+    stale = []
+    for key, entry in ledger.entries.items():
+        try:
+            until = unreachable._parse_time(entry.get("skip_until"))
+            if until is not None:
+                if now - until > PRUNE_AFTER_SKIP:
+                    stale.append(key)
+                continue
+            last = unreachable._parse_time(entry.get("last_attempt_at") or entry.get("first_failed_at"))
+            if last is not None and now - last > PRUNE_IDLE:
+                stale.append(key)
+        except Exception:  # noqa: BLE001 - an odd entry is kept
+            continue
+    for key in stale:
+        ledger.entries.pop(key, None)
+    return len(stale)
+
+
 def record_outcomes(outcomes: dict[str, str], *, status_dir=None, now=None) -> None:
     """Record Crawlee per-URL classes (ok / too_short / auth / timeout / error) in the reading ledger."""
     try:
@@ -302,6 +330,7 @@ def record_outcomes(outcomes: dict[str, str], *, status_dir=None, now=None) -> N
                 if bad_render and cls == "too_short":
                     continue
                 ledger.record(url, cls, now=now)
+            _prune(ledger, now)
             ledger.save()
     except Exception as exc:  # noqa: BLE001 - bookkeeping must not change the job's outcome
         logger.warning("could not record the reading ledger: %s", type(exc).__name__)
