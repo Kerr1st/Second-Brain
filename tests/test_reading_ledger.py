@@ -53,6 +53,7 @@ def _reading(sd, *entries):
     "http://www.yelp.com/biz/mr-tint-san-jose",
     "https://www.etsy.com/listing/1",
     "https://www.homedepot.com/p/1",
+    "https://www.ebay.com/itm/284044233400",
     "https://QUEUE.ACM.ORG./doi/1",
 ])
 def test_seed_matches_host_and_subdomains(sd, url):
@@ -73,6 +74,12 @@ def test_lookalike_hosts_are_not_matched(sd, url):
 
 def test_seed_is_in_bot_walled_hosts(sd):
     assert rl.BOT_WALLED_SEED <= rl.bot_walled_hosts(status_dir=sd, now=NOW)
+
+
+def test_seed_curation():
+    assert "datatracker.ietf.org" not in rl.BOT_WALLED_SEED     # 1 URL in 1 run: dynamic rule decides
+    assert "ebay.com" in rl.BOT_WALLED_SEED                     # 2 URLs x 2 blocked attempts
+    assert not any(rl.never_walled(h) for h in rl.BOT_WALLED_SEED)
 
 
 def test_bot_walled_skip_is_logged_at_info_with_host_and_url(sd, caplog):

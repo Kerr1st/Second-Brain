@@ -10,8 +10,8 @@ gives the reading step what the bookmarks job already has:
   domain-only entries, atomic 0600 writes) under its own file name. The
   ``.unreachable.json`` suffix is in ``liveness.SIDECAR_SUFFIXES``, so the
   job-status sweep does not read it as a job.
-* **Bot-walled hosts**: ``BOT_WALLED_SEED`` (hosts seen answering Crawlee with
-  403 "Request blocked", host-anchored, subdomains included) plus any *dynamic* host: at least
+* **Bot-walled hosts**: ``BOT_WALLED_SEED`` (curated, see the rule above it;
+  host-anchored, subdomains included) plus any *dynamic* host: at least
   ``DYNAMIC_THRESHOLD`` distinct URLs currently cooling off with class ``auth``
   across the reading ledger and the bookmarks ledger (union, URL keys
   deduplicated). Dynamic hosts match exactly (no subdomains) and never include
@@ -58,12 +58,15 @@ LOCK_WAIT_S = 5.0
 #: Distinct URLs of one host cooling off with class ``auth`` that make it bot-walled.
 DYNAMIC_THRESHOLD = 2
 
-#: Hosts confirmed to answer Crawlee's headless Chromium with HTTP 403
-#: "Request blocked": queue.acm.org (capture-browser 2026-10-14), and the public
-#: hosts with ``auth`` entries in logs/jobs/bookmarks.unreachable.json whose
-#: attempts logged "Request blocked - received 403 status code" in
-#: logs/bookmarks-crawlee-1.log (2026-10-13). Matched host-anchored at a label
-#: boundary, so www. and other subdomains match and queue.acm.org.evil.io does not.
+#: Qualification rule for a seed host: at least 2 attempts answered with the
+#: bot response HTTP 403 "Request blocked - received 403 status code" (Crawlee
+#: log or capture-browser triage), on a public host (not internal), and the host
+#: is not in ``NEVER_WALLED``. One blocked URL in one run is not enough: leave
+#: such a host to the dynamic rule. Evidence: queue.acm.org (capture-browser
+#: 2026-10-14 triage); the others in logs/bookmarks-crawlee-1.log (2026-10-13)
+#: with entries in logs/jobs/bookmarks.unreachable.json (ebay.com: 2 URLs, 2
+#: blocked attempts each). Matched host-anchored at a label boundary, so www. and
+#: other subdomains match and queue.acm.org.evil.io does not.
 BOT_WALLED_SEED = frozenset({
     "queue.acm.org",
     "crunchbase.com",
@@ -72,7 +75,7 @@ BOT_WALLED_SEED = frozenset({
     "etsy.com",
     "homedepot.com",
     "saleshacker.com",
-    "datatracker.ietf.org",
+    "ebay.com",
 })
 
 #: Hosts that wall *private* pages behind a login but serve public pages to
