@@ -337,6 +337,57 @@ def reading_urls(summary: dict, read_secs: int = READ_SECS) -> list[tuple[str, s
 
 
 # --------------------------------------------------------------------------- #
+# Reading (full text via Crawlee)                                              #
+# --------------------------------------------------------------------------- #
+#: logs/capture-browser-crawlee-<batch>.log (mode 0600). The bookmarks job keeps
+#: logs/bookmarks-crawlee-<batch>.log; each run clears only ``<its name>-*.log``,
+#: so neither job overwrites or deletes the other's logs.
+CRAWLEE_LOG_NAME = "capture-browser-crawlee"
+#: Per-URL classes ``scrape_with_crawlee`` writes into ``outcomes`` besides "ok".
+_READING_CLASSES = ("auth", "timeout", "error", "too_short")
+
+
+def _select_reading(fresh: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Reading URLs to send to Crawlee this run. Returns them unchanged for now;
+    integration point for ``src.capture.reading_ledger.filter_reading``."""
+    return fresh
+
+
+def _record_reading(outcomes: dict[str, str]) -> None:
+    """Persist this run's per-URL reading outcomes. No-op for now; integration
+    point for ``src.capture.reading_ledger.record_outcomes``."""
+
+
+def _report_reading(fresh: list[tuple[str, str]], scrape_stats: dict, outcomes: dict[str, str]) -> dict:
+    """Log one line per failed/too_short URL (URL only, never page text) and one
+    summary line; return the advisory counts and the real (batch-level) failures.
+
+    Exit rule: an individual URL that fails (auth/timeout/error) or is too short
+    never fails the job. Real failures are a broken Crawlee (``crawlee_broken``),
+    a batch that exited non-zero naming no failed URL (``failed_batches``) and a
+    batch killed at its timeout (``timed_out_batches``)."""
+    for _, url in fresh:
+        cls = outcomes.get(url)
+        if cls in _READING_CLASSES:
+            (logger.info if cls == "too_short" else logger.warning)("reading %s: %s", cls, url)
+    classes = collections.Counter(outcomes.values())
+    broken = scrape_stats.get("crawlee_broken", 0)
+    failed_batches = scrape_stats.get("failed_batches", 0)
+    timed_out = scrape_stats.get("timed_out_batches", 0)
+    real = failed_batches + timed_out + broken
+    failed, too_short = scrape_stats.get("failed", 0), scrape_stats.get("too_short", 0)
+    if real or failed or too_short:
+        logger.warning(
+            "reading summary — sent=%d ok=%d auth=%d timeout=%d error=%d too_short=%d failed=%d "
+            "deferred=%d failed_batches=%d timed_out_batches=%d crawlee_broken=%d -> %s",
+            len(fresh), scrape_stats.get("processed", 0), classes.get("auth", 0), classes.get("timeout", 0),
+            classes.get("error", 0), too_short, failed, scrape_stats.get("deferred", 0),
+            failed_batches, timed_out, broken,
+            "reading scrape failed" if real else "per-URL outcomes are advisory, not a job failure")
+    return {"failed": failed, "too_short": too_short, "broken": real}
+
+
+# --------------------------------------------------------------------------- #
 # Entry point                                                                  #
 # --------------------------------------------------------------------------- #
 def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
@@ -372,9 +423,10 @@ def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
 
     # Full text of read pages via the bookmark pipeline (dedup against Crawlee's index).
     reading_sent = 0
-    reading_failed = 0
+    reading = {"failed": 0, "too_short": 0, "broken": 0}
     if scrape and to_read:
-        from scripts.scrape_bookmarks import load_indexed_urls, scrape_with_crawlee  # type: ignore
+        from scripts.scrape_bookmarks import (  # type: ignore
+            BATCH_SCRAPE_ENV, load_indexed_urls, scrape_with_crawlee)
         indexed = load_indexed_urls()
         fresh, seen = [], set()
         for title, url in to_read:
@@ -382,19 +434,26 @@ def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
                 continue
             seen.add(url)
             fresh.append((title, url))
+        fresh = _select_reading(fresh)
         fresh = fresh[:MAX_READ_URLS_PER_RUN]
         reading_sent = len(fresh)
         if dry_run:
             for _, url in fresh:
                 logger.info("[DRY] read -> crawlee: %s", url)
         elif fresh:
-            scrape_stats = scrape_with_crawlee(fresh, timeout=CRAWLEE_TIMEOUT_S)
-            reading_failed = scrape_stats["failed"] + scrape_stats.get("failed_batches", 0)
+            outcomes: dict[str, str] = {}
+            scrape_stats = scrape_with_crawlee(fresh, timeout=CRAWLEE_TIMEOUT_S, outcomes=outcomes,
+                                               log_name=CRAWLEE_LOG_NAME, env=BATCH_SCRAPE_ENV)
+            _record_reading(outcomes)
+            reading = _report_reading(fresh, scrape_stats, outcomes)
             reading_sent = scrape_stats["processed"]
 
     stats = run_channel(SOURCE_TYPE, items, dry_run=dry_run, ingest=ingest_batch)
     stats["reading_planned" if dry_run else "reading"] = reading_sent
-    stats["failed"] += reading_failed
+    # Per-URL reading outcomes are advisory; only a broken scrape is a real failure.
+    stats["reading_failed"] = reading["failed"]
+    stats["reading_too_short"] = reading["too_short"]
+    stats["failed"] += reading["broken"]
     logger.info("%s: %s", SOURCE_TYPE, stats)
     return stats
 

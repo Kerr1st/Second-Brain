@@ -142,12 +142,15 @@ class TestCapture:
         monkeypatch.setattr(src.ingest, "ingest_batch", lambda items, st: ingested.setdefault(st, list(items)) and
                             {"processed": len(items), "skipped": 0, "failed": 0})
         sent, timeouts = [], []
-        fake_sb = type("SB", (), {"load_indexed_urls": staticmethod(lambda: {"https://example.org/background-tab"}),
+        fake_sb = type("SB", (), {"BATCH_SCRAPE_ENV": {},
+                                  "load_indexed_urls": staticmethod(lambda: {"https://example.org/background-tab"}),
                                   "scrape_with_crawlee": staticmethod(lambda urls, **kw: sent.extend(urls) or timeouts.append(kw.get("timeout")) or {"processed": len(urls), "failed": 0})})
         monkeypatch.setitem(__import__("sys").modules, "scripts.scrape_bookmarks", fake_sb)
         monkeypatch.setattr(b, "completed_days", lambda n: [date(2026, 9, 14), date(2026, 9, 15)])
         stats = b.capture(days_back=2, history_path=history_db)
-        assert stats == {"processed": 1, "skipped": 0, "failed": 0, "reading": 1}
+        # reading_failed / reading_too_short are now always reported (advisory, not in "failed").
+        assert stats == {"processed": 1, "skipped": 0, "failed": 0, "reading": 1,
+                         "reading_failed": 0, "reading_too_short": 0}
         assert [u for u, _ in ingested[b.SOURCE_TYPE]] == ["browser://history/2026-09-15"]
         assert sent == [("Deep article", "https://example.com/article")]   # indexed URL not re-sent
         assert not os.path.exists(history_db + ".tmp")
@@ -159,7 +162,7 @@ class TestCapture:
         monkeypatch.setattr(src.db, "get_processed_source_urls", lambda st: {"browser://history/2026-09-15"})
         monkeypatch.setattr(src.ingest, "ingest_batch", lambda items, st: {"processed": 0, "skipped": 0, "failed": 0})
         sent, timeouts = [], []
-        fake_sb = type("SB", (), {"load_indexed_urls": staticmethod(lambda: set()),
+        fake_sb = type("SB", (), {"BATCH_SCRAPE_ENV": {}, "load_indexed_urls": staticmethod(lambda: set()),
                                   "scrape_with_crawlee": staticmethod(lambda urls, **kw: sent.extend(urls) or timeouts.append(kw.get("timeout")) or {"processed": len(urls), "failed": 0})})
         monkeypatch.setitem(__import__("sys").modules, "scripts.scrape_bookmarks", fake_sb)
         monkeypatch.setattr(b, "completed_days", lambda n: [date(2026, 9, 15)])
@@ -174,6 +177,144 @@ class TestCapture:
         assert stats["processed"] == 0 and stats["failed"] == 1
         from src.capture.common import exit_code
         assert exit_code(stats) == 1
+
+
+#: 2026-10-14: 7 reading URLs sent, 2 queue.acm.org pages 403 "Request blocked"
+#: (classed auth), 5 too short, the one batch exited 0.
+_ACM = ["https://queue.acm.org/doi/10.1145/3454122.3454124", "https://queue.acm.org/doi/10.1145/3595878"]
+_SHORT = ["https://culturecloud.com/x"] + [f"https://apg-library.amazonaws.com/p/{i}" for i in range(4)]
+_PAGE_TEXT = "PAGE-BODY-SENTINEL never logged"
+
+
+def _scrape_stats(**over):
+    stats = {"processed": 0, "skipped": 0, "failed": 0, "too_short": 0, "timed_out_batches": 0,
+             "deferred": 0, "crawlee_broken": 0, "batches_run": 1, "batches_with_output": 1,
+             "failed_batches": 0}
+    stats.update(over)
+    return stats
+
+
+class TestReadingExitRule:
+    """Per-URL reading outcomes are advisory; only the day log or a broken scrape fails the job."""
+
+    @pytest.fixture
+    def run(self, history_db, monkeypatch):
+        import sys
+        import src.db, src.ingest
+        from src.capture.common import exit_code
+        calls = []
+        env = {"BATCH_SCRAPE_MAX_REQUEST_RETRIES": "1"}   # identity-checked: imported, not duplicated
+
+        def go(scrape_stats, outcomes, ingest_failed=0):
+            monkeypatch.setattr(src.db, "get_processed_source_urls", lambda st: set())
+            monkeypatch.setattr(src.ingest, "ingest_batch", lambda items, st: {
+                "processed": len(items) - ingest_failed, "skipped": 0, "failed": ingest_failed})
+            monkeypatch.setattr(b, "completed_days", lambda n: [date(2026, 9, 15)])
+            monkeypatch.setattr(b, "reading_urls", lambda s: [("t", u) for u in _ACM + _SHORT])
+
+            def scrape(urls, **kw):
+                calls.append((list(urls), kw))
+                kw["outcomes"].update(outcomes)      # what scrape_with_crawlee fills in
+                return scrape_stats
+            fake = type("SB", (), {"BATCH_SCRAPE_ENV": env, "load_indexed_urls": staticmethod(set),
+                                   "scrape_with_crawlee": staticmethod(scrape)})
+            monkeypatch.setitem(sys.modules, "scripts.scrape_bookmarks", fake)
+            stats = b.capture(days_back=1, history_path=history_db)
+            return stats, exit_code(stats)
+        go.calls, go.env = calls, env
+        return go
+
+    @staticmethod
+    def _todays_outcomes():
+        return {**{u: "auth" for u in _ACM}, **{u: "too_short" for u in _SHORT}}
+
+    def test_todays_auth_and_too_short_exit_zero_with_summary_and_per_url_lines(self, run, caplog):
+        caplog.set_level("INFO", logger=b.__name__)
+        stats, rc = run(_scrape_stats(failed=2, too_short=5), self._todays_outcomes())
+        assert rc == 0
+        assert stats["failed"] == 0 and stats["reading_failed"] == 2 and stats["reading_too_short"] == 5
+        msgs = [(r.levelname, r.getMessage()) for r in caplog.records]
+        for url in _ACM:
+            assert ("WARNING", f"reading auth: {url}") in msgs
+        for url in _SHORT:
+            assert ("INFO", f"reading too_short: {url}") in msgs
+        summary = [m for lvl, m in msgs if lvl == "WARNING" and m.startswith("reading summary")]
+        assert len(summary) == 1
+        assert "auth=2" in summary[0] and "too_short=5" in summary[0] and "failed=2" in summary[0]
+        assert "advisory" in summary[0]
+
+    def test_scrape_is_called_with_outcomes_log_name_and_batch_env(self, run):
+        run(_scrape_stats(failed=2, too_short=5), self._todays_outcomes())
+        (urls, kw), = run.calls
+        assert {u for _, u in urls} == set(_ACM + _SHORT)
+        assert isinstance(kw["outcomes"], dict)
+        assert kw["log_name"] == b.CRAWLEE_LOG_NAME == "capture-browser-crawlee"
+        assert kw["env"] is run.env                       # the bookmarks constant itself
+        assert kw["timeout"] is not None and kw["timeout"] < 3600
+
+    def test_batch_env_is_imported_not_duplicated(self):
+        import inspect
+        assert "BATCH_SCRAPE_MAX_REQUEST_RETRIES" not in inspect.getsource(b)
+
+    def test_kept_log_name_does_not_collide_with_bookmarks(self):
+        import importlib.util, pathlib
+        spec = importlib.util.spec_from_file_location("sb_names", pathlib.Path("scripts/scrape_bookmarks.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        # Each job clears "<name>-*.log": neither name may be a prefix of the other.
+        assert not b.CRAWLEE_LOG_NAME.startswith(mod.CRAWLEE_LOG_NAME + "-")
+        assert not mod.CRAWLEE_LOG_NAME.startswith(b.CRAWLEE_LOG_NAME + "-")
+        assert b.CRAWLEE_LOG_NAME != mod.CRAWLEE_LOG_NAME
+        assert mod.BATCH_SCRAPE_ENV["BATCH_SCRAPE_MAX_REQUEST_RETRIES"] == "1"
+
+    def test_day_log_ingest_failure_exits_one(self, run):
+        stats, rc = run(_scrape_stats(processed=7), {u: "ok" for u in _ACM + _SHORT}, ingest_failed=1)
+        assert rc == 1 and stats["failed"] == 1 and stats["reading_failed"] == 0
+
+    def test_crawlee_broken_exits_one(self, run, caplog):
+        caplog.set_level("INFO", logger=b.__name__)
+        stats, rc = run(_scrape_stats(crawlee_broken=1, deferred=7, batches_with_output=0), {})
+        assert rc == 1 and stats["failed"] >= 1 and stats["reading_failed"] == 0
+        assert any("crawlee_broken=1" in r.getMessage() and "reading scrape failed" in r.getMessage()
+                   for r in caplog.records if r.levelname == "WARNING")
+
+    def test_failed_batch_exits_one(self, run):
+        stats, rc = run(_scrape_stats(failed_batches=1, deferred=7), {})
+        assert rc == 1 and stats["failed"] == 1
+
+    def test_timed_out_batch_exits_one(self, run):
+        stats, rc = run(_scrape_stats(timed_out_batches=1, deferred=7), {})
+        assert rc == 1 and stats["failed"] == 1
+
+    def test_no_page_text_is_logged(self, run, caplog, capsys):
+        caplog.set_level("DEBUG")
+        stats = _scrape_stats(failed=2, too_short=5)
+        stats["page_text"] = _PAGE_TEXT                  # even if the scraper returned text
+        run(stats, self._todays_outcomes())
+        reading_lines = [r.getMessage() for r in caplog.records
+                         if r.name == b.__name__ and r.getMessage().startswith("reading ")]
+        urls = set(_ACM + _SHORT)
+        for line in reading_lines:
+            if not line.startswith("reading summary"):
+                cls, _, url = line[len("reading "):].partition(": ")
+                assert cls in ("auth", "timeout", "error", "too_short") and url in urls
+        assert _PAGE_TEXT not in caplog.text
+        assert _PAGE_TEXT not in "".join(capsys.readouterr())
+
+    def test_select_and_record_hooks_are_the_integration_points(self, run, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(b, "_select_reading", lambda fresh: seen.setdefault("select", list(fresh))[:1])
+        monkeypatch.setattr(b, "_record_reading", lambda outcomes: seen.setdefault("record", dict(outcomes)))
+        run(_scrape_stats(failed=1), {_ACM[0]: "auth"})
+        assert {u for _, u in seen["select"]} == set(_ACM + _SHORT)
+        (urls, _), = run.calls
+        assert urls == seen["select"][:1]                 # what _select_reading returns is what is sent
+        assert seen["record"] == {_ACM[0]: "auth"}
+
+    def test_hooks_are_identity_and_noop_for_now(self):
+        fresh = [("t", "https://e.com/a")]
+        assert b._select_reading(fresh) == fresh
+        assert b._record_reading({"https://e.com/a": "auth"}) is None
 
 
 class TestSnapshot:

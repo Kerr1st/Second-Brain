@@ -288,6 +288,15 @@ class TestMainExitCodes:
         monkeypatch.setattr(browser, "capture", lambda **kw: {"processed": 2, "skipped": 0, "failed": 0, "reading": 0})
         assert browser.main() == 0
 
+    def test_browser_main_treats_per_url_reading_failures_as_advisory(self, monkeypatch):
+        # Before 2026-10-14 every failed reading URL was added to "failed" and exited 1;
+        # now per-URL outcomes are reported as reading_failed and only "failed" fails.
+        from src.capture import browser
+        monkeypatch.setattr("sys.argv", ["prog"])
+        monkeypatch.setattr(browser, "capture", lambda **kw: {
+            "processed": 1, "skipped": 0, "failed": 0, "reading": 0, "reading_failed": 2, "reading_too_short": 5})
+        assert browser.main() == 0
+
     def test_browser_missing_history_is_a_failure_not_a_clean_noop(self, tmp_path, monkeypatch):
         from src.capture import browser
         monkeypatch.setattr("src.db.get_processed_source_urls", lambda *a, **k: set())
