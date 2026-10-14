@@ -75,6 +75,15 @@ def test_seed_is_in_bot_walled_hosts(sd):
     assert rl.BOT_WALLED_SEED <= rl.bot_walled_hosts(status_dir=sd, now=NOW)
 
 
+def test_bot_walled_skip_is_logged_at_info_with_host_and_url(sd, caplog):
+    url = "https://www.etsy.com/listing/9"
+    with caplog.at_level(logging.INFO, logger=rl.__name__):
+        rl.filter_reading([url, "https://a.example/1"], status_dir=sd, now=NOW)
+    (record,) = [r for r in caplog.records if "bot_walled" in r.getMessage()]
+    assert record.levelno == logging.INFO
+    assert record.getMessage() == f"reading skipped (bot_walled): host=www.etsy.com url={url}"
+
+
 # ------------------------------------------------------------- dynamic rule
 
 @pytest.mark.parametrize("ledger", ["reading", "bookmarks"])
@@ -104,6 +113,41 @@ def test_dynamic_rule_needs_auth_and_active_cool_off(sd):
                _entry("https://d.example/1"), _entry("https://d.example/2", status="error"))
     hosts = rl.bot_walled_hosts(status_dir=sd, now=NOW)
     assert not {"a.example", "b.example", "c.example", "d.example"} & hosts
+
+
+def test_dynamic_host_matches_exactly_not_subdomains(sd):
+    _bookmarks(sd, _entry("https://a.example.com/1"), _entry("https://a.example.com/2"))
+    assert "a.example.com" in rl.bot_walled_hosts(status_dir=sd, now=NOW)
+    exact, sub, parent = "https://a.example.com/3", "https://b.a.example.com/1", "https://example.com/1"
+    keep, skipped = rl.filter_reading([exact, sub, parent], status_dir=sd, now=NOW)
+    assert skipped == {exact: "bot_walled"} and keep == [sub, parent]
+
+
+def test_seed_still_matches_subdomains_alongside_dynamic(sd):
+    _bookmarks(sd, _entry("https://a.example.com/1"), _entry("https://a.example.com/2"))
+    url = "https://deep.www.crunchbase.com/x"
+    assert rl.filter_reading([url], status_dir=sd, now=NOW) == ([], {url: "bot_walled"})
+
+
+def test_private_github_bookmarks_do_not_wall_github(sd):
+    _bookmarks(sd, _entry("https://github.com/me/private-a"), _entry("https://github.com/me/private-b"))
+    assert "github.com" not in rl.bot_walled_hosts(status_dir=sd, now=NOW)
+    url = "https://github.com/public/repo"
+    assert rl.filter_reading([url], status_dir=sd, now=NOW) == ([url], {})
+
+
+@pytest.mark.parametrize("host", ["github.com", "gist.github.com", "google.com", "docs.google.com",
+                                  "drive.google.com", "medium.com", "linkedin.com", "www.linkedin.com",
+                                  "notion.so", "x.com", "twitter.com", "youtube.com", "someone.medium.com"])
+def test_never_walled_hosts_are_never_walled_dynamically(sd, host):
+    assert {"github.com", "gist.github.com", "google.com", "docs.google.com", "drive.google.com",
+            "medium.com", "linkedin.com", "www.linkedin.com", "notion.so", "x.com", "twitter.com",
+            "youtube.com"} <= rl.NEVER_WALLED
+    _bookmarks(sd, *(_entry(f"https://{host}/{i}") for i in range(4)))
+    _reading(sd, *(_entry(f"https://{host}/r{i}") for i in range(4)))
+    assert host not in rl.bot_walled_hosts(status_dir=sd, now=NOW)
+    url = f"https://{host}/new"
+    assert rl.filter_reading([url], status_dir=sd, now=NOW) == ([url], {})
 
 
 def test_dynamic_host_ignores_port_in_domain(sd):

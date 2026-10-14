@@ -11,10 +11,13 @@ gives the reading step what the bookmarks job already has:
   ``.unreachable.json`` suffix is in ``liveness.SIDECAR_SUFFIXES``, so the
   job-status sweep does not read it as a job.
 * **Bot-walled hosts**: ``BOT_WALLED_SEED`` (hosts seen answering Crawlee with
-  403 "Request blocked", host-anchored, subdomains included) plus any host with
-  at least ``DYNAMIC_THRESHOLD`` distinct URLs currently cooling off with class
-  ``auth`` across the reading ledger and the bookmarks ledger (union, URL keys
-  deduplicated). The bookmarks ledger is only ever read here. Amazon-internal
+  403 "Request blocked", host-anchored, subdomains included) plus any *dynamic* host: at least
+  ``DYNAMIC_THRESHOLD`` distinct URLs currently cooling off with class ``auth``
+  across the reading ledger and the bookmarks ledger (union, URL keys
+  deduplicated). Dynamic hosts match exactly (no subdomains) and never include
+  a ``NEVER_WALLED`` host: bookmarks ``auth`` also means "private page behind a
+  login" (a private repo, a shared doc), which says nothing about the host's
+  public pages. The bookmarks ledger is only ever read here. Amazon-internal
   hosts are never bot-walled: an internal 403 is an auth problem.
 
 Locking. The job runner (``src/operations/jobs.py``) holds ``flock`` on
@@ -71,6 +74,20 @@ BOT_WALLED_SEED = frozenset({
     "saleshacker.com",
     "datatracker.ietf.org",
 })
+
+#: Hosts that wall *private* pages behind a login but serve public pages to
+#: headless browsers: an ``auth`` cool-off there means "private", not "bot wall",
+#: so the dynamic rule never walls them (host-anchored: subdomains included).
+NEVER_WALLED = frozenset({
+    "github.com", "gist.github.com", "raw.githubusercontent.com", "gitlab.com", "bitbucket.org",
+    "google.com", "docs.google.com", "drive.google.com", "sites.google.com",
+    "medium.com", "substack.com", "linkedin.com", "www.linkedin.com",
+    "notion.so", "notion.site", "x.com", "twitter.com", "youtube.com", "www.youtube.com",
+    "facebook.com", "instagram.com", "reddit.com", "dropbox.com", "figma.com",
+    "atlassian.net", "slack.com", "zoom.us", "microsoft.com", "sharepoint.com",
+    "office.com", "live.com", "box.com", "airtable.com", "trello.com",
+})
+
 
 #: Amazon-owned (and Amazon-tenant) registrable suffixes: never bot-walled.
 INTERNAL_SUFFIXES = (
@@ -158,18 +175,28 @@ def _cooling_auth(ledger, now) -> dict[str, set[str]]:
     return hosts
 
 
-def _bot_walled(reading, bookmarks, now) -> set[str]:
-    hosts = set(BOT_WALLED_SEED)
+def never_walled(host: str) -> bool:
+    return any(_under(host, h) for h in NEVER_WALLED)
+
+
+def _bot_walled(reading, bookmarks, now) -> tuple[set[str], set[str]]:
+    """(seed hosts, dynamic hosts); internal hosts removed from both."""
     merged: dict[str, set[str]] = {}
     for ledger in (reading, bookmarks):
         for host, keys in _cooling_auth(ledger, now).items():
             merged.setdefault(host, set()).update(keys)
-    hosts.update(h for h, keys in merged.items() if len(keys) >= DYNAMIC_THRESHOLD)
-    return {h for h in hosts if not internal_host(h)}
+    dynamic = {h for h, keys in merged.items()
+               if len(keys) >= DYNAMIC_THRESHOLD and not never_walled(h)}
+    seed = set(BOT_WALLED_SEED)
+    return ({h for h in seed if not internal_host(h)},
+            {h for h in dynamic - seed if not internal_host(h)})
 
 
-def _matches(host: str, walled: set[str]) -> bool:
-    return not internal_host(host) and any(_under(host, h) for h in walled)
+def _matches(host: str, seed: set[str], dynamic: set[str]) -> bool:
+    """Seed: host-anchored (subdomains match). Dynamic: exact host only."""
+    if not host or internal_host(host):
+        return False
+    return host in dynamic or any(_under(host, h) for h in seed)
 
 
 # ------------------------------------------------------------------ public API
@@ -180,7 +207,8 @@ def bot_walled_hosts(*, status_dir=None, now=None) -> set[str]:
         now = _now(now)
         reading = _load(ledger_path(status_dir), "reading", warn_missing=False)
         bookmarks = _load(_bookmarks_path(status_dir), "bookmarks", warn_missing=False)
-        return _bot_walled(reading, bookmarks, now)
+        seed, dynamic = _bot_walled(reading, bookmarks, now)
+        return seed | dynamic
     except Exception as exc:  # noqa: BLE001 - a blocklist must never break the job
         logger.warning("bot-walled hosts unavailable (%s): seed only", type(exc).__name__)
         return {h for h in BOT_WALLED_SEED if not internal_host(h)}
@@ -195,7 +223,7 @@ def filter_reading(urls: list[str], *, status_dir=None, now=None) -> tuple[list[
         if reading is None and not path.exists():
             logger.info("reading ledger not created yet (%s): no cool-offs to apply", path.name)
         bookmarks = _load(_bookmarks_path(status_dir), "bookmarks", warn_missing=False)
-        walled = _bot_walled(reading, bookmarks, now)
+        seed, dynamic = _bot_walled(reading, bookmarks, now)
     except Exception as exc:  # noqa: BLE001
         logger.warning("reading ledger check failed (%s): nothing skipped", type(exc).__name__)
         return list(urls), {}
@@ -205,9 +233,12 @@ def filter_reading(urls: list[str], *, status_dir=None, now=None) -> tuple[list[
             if reading is not None and reading.should_skip(url, now=now):
                 skipped[url] = "cooling_off"
                 continue
-            if _matches(_host(url), walled):
+            host = _host(url)
+            if _matches(host, seed, dynamic):
                 skipped[url] = "bot_walled"
+                logger.info("reading skipped (bot_walled): host=%s url=%s", host, url)
                 continue
+
         except Exception:  # noqa: BLE001 - an odd URL is kept, never fatal
             pass
         keep.append(url)
