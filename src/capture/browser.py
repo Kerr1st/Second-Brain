@@ -348,14 +348,23 @@ _READING_CLASSES = ("auth", "timeout", "error", "too_short")
 
 
 def _select_reading(fresh: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Reading URLs to send to Crawlee this run. Returns them unchanged for now;
-    integration point for ``src.capture.reading_ledger.filter_reading``."""
-    return fresh
+    """Reading URLs to send to Crawlee this run: drops URLs cooling off in the reading
+    ledger and URLs on bot-walled hosts (``src.capture.reading_ledger``). Read-only, so
+    it also applies to dry runs; never raises (a broken ledger keeps everything)."""
+    from src.capture import reading_ledger
+    keep, skipped = reading_ledger.filter_reading([url for _, url in fresh])
+    if skipped:
+        reasons = collections.Counter(skipped.values())
+        logger.info("reading skipped: %s", ", ".join(f"{n} {r}" for r, n in sorted(reasons.items())))
+    kept = set(keep)
+    return [(title, url) for title, url in fresh if url in kept]
 
 
 def _record_reading(outcomes: dict[str, str]) -> None:
-    """Persist this run's per-URL reading outcomes. No-op for now; integration
-    point for ``src.capture.reading_ledger.record_outcomes``."""
+    """Persist this run's per-URL reading outcomes in the reading ledger (strikes,
+    cool-off; ``ok`` clears). Never raises."""
+    from src.capture import reading_ledger
+    reading_ledger.record_outcomes(outcomes)
 
 
 def _report_reading(fresh: list[tuple[str, str]], scrape_stats: dict, outcomes: dict[str, str]) -> dict:

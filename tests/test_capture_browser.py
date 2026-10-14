@@ -204,6 +204,10 @@ class TestReadingExitRule:
         from src.capture.common import exit_code
         calls = []
         env = {"BATCH_SCRAPE_MAX_REQUEST_RETRIES": "1"}   # identity-checked: imported, not duplicated
+        # The exit rule is tested on its own: the reading ledger (which would bot-wall the
+        # queue.acm.org fixtures) is covered by TestReadingLedgerWiring below.
+        monkeypatch.setattr(b, "_select_reading", lambda fresh: fresh)
+        monkeypatch.setattr(b, "_record_reading", lambda outcomes: None)
 
         def go(scrape_stats, outcomes, ingest_failed=0):
             monkeypatch.setattr(src.db, "get_processed_source_urls", lambda st: set())
@@ -311,10 +315,32 @@ class TestReadingExitRule:
         assert urls == seen["select"][:1]                 # what _select_reading returns is what is sent
         assert seen["record"] == {_ACM[0]: "auth"}
 
-    def test_hooks_are_identity_and_noop_for_now(self):
-        fresh = [("t", "https://e.com/a")]
+class TestReadingLedgerWiring:
+    """_select_reading / _record_reading go through src.capture.reading_ledger."""
+
+    def test_select_drops_bot_walled_and_cooling_urls_and_keeps_order(self, tmp_path, monkeypatch):
+        from src.capture import reading_ledger
+        monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path))
+        reading_ledger.record_outcomes({"https://blog.example.org/cooling": "too_short"}, status_dir=tmp_path)
+        fresh = [("a", "https://news.example.com/1"), ("b", "https://queue.acm.org/doi/10.1145/1"),
+                 ("c", "https://blog.example.org/cooling"), ("d", "https://news.example.com/2")]
+        assert b._select_reading(fresh) == [fresh[0], fresh[3]]
+
+    def test_record_writes_the_reading_ledger_not_the_bookmarks_one(self, tmp_path, monkeypatch):
+        import json
+        from src.capture import reading_ledger, unreachable
+        monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path))
+        b._record_reading({"https://blocked.example.net/x": "auth"})
+        data = json.loads((tmp_path / reading_ledger.FILENAME).read_text())
+        assert len(data["urls"]) == 1
+        assert not (tmp_path / unreachable.FILENAME).exists()
+
+    def test_a_broken_ledger_keeps_everything_but_the_seed(self, tmp_path, monkeypatch):
+        from src.capture import reading_ledger
+        monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path))
+        (tmp_path / reading_ledger.FILENAME).write_text("{not json")
+        fresh = [("a", "https://news.example.com/1")]
         assert b._select_reading(fresh) == fresh
-        assert b._record_reading({"https://e.com/a": "auth"}) is None
 
 
 class TestSnapshot:
