@@ -243,6 +243,41 @@ class TestClassification:
         res = run([A], FakeBrowser({A: page(A, ["tiny"])}))[A]
         assert res.outcome == "too_short" and res.chars == 4
 
+    # bookmarks-gaps-probe.md §3 / Risk 1: non-Midway sign-in pages of 245-505 chars were "ok".
+    ATOZ_LOGIN = ("Log in Enter your Amazon alias* Forgot alias? Continue or I deliver packages to customers "
+                  "I accepted a job offer from my recruiter I'm a customer service associate ") * 3
+
+    @pytest.mark.parametrize("final", [
+        "https://atoz-login.amazon.work/?redirect=feed",
+        "https://atozworkforce.idprism-auth.amazon.com/login",
+        "https://ATOZ-LOGIN.amazon.work./",
+        "https://accelerate.amazonaws.com/portal/signin?appId=mpl",
+        "https://accelerate.amazonaws.com/portal/signin/",
+        "https://idp.federate.amazon.com/api/oauth2/v1/authorize?x=1",
+    ])
+    def test_known_non_midway_sign_in_pages_are_auth_even_when_long(self, final):
+        assert len(self.ATOZ_LOGIN) > bf.MIN_CHARS
+        res = run([B], FakeBrowser({B: page(B, [self.ATOZ_LOGIN], final=final)}))[B]
+        assert res.outcome == "auth"
+        assert not bf.is_auth_host(final)              # the Midway-only (session-problem) rule is unchanged
+
+    @pytest.mark.parametrize("final", [
+        "https://atoz-login.amazon.work.evil.io/",
+        "https://idprism-auth.amazon.com.evil.io/x",
+        "https://evil-idprism-auth.amazon.com.io/",
+        "https://accelerate.amazonaws.com/portal/home",
+        "https://accelerate.amazonaws.com/portal/signin-help-article",
+        "https://www.atoz.amazon.work/feed/content/1",
+    ])
+    def test_lookalikes_and_other_paths_are_not_sign_in(self, final):
+        assert not bf.is_sign_in_page(final)
+        res = run([B], FakeBrowser({B: page(B, [LONG], final=final)}))[B]
+        assert res.outcome == "ok"
+
+    def test_a_real_article_about_logging_in_stays_ok(self):
+        res = run([B], FakeBrowser({B: page(B, [self.ATOZ_LOGIN + LONG])}))[B]
+        assert res.outcome == "ok"                     # no text heuristic: only the final host/path
+
 
 class TestErrorsNeverHang:
     def test_hung_tool_hits_the_page_cap_and_the_run_continues(self):

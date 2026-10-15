@@ -300,14 +300,29 @@ def _prune(ledger, now) -> int:
     return len(stale)
 
 
-def record_outcomes(outcomes: dict[str, str], *, status_dir=None, now=None) -> None:
-    """Record Crawlee per-URL classes (ok / too_short / auth / timeout / error) in the reading ledger."""
+def is_bad_render(outcomes: dict[str, str]) -> bool:
+    """No ``ok`` among >= ``BAD_RUN_MIN`` URLs: a broken render, not thin pages."""
+    values = list(outcomes.values())
+    return len(values) >= BAD_RUN_MIN and "ok" not in values
+
+
+def record_outcomes(outcomes: dict[str, str], *, status_dir=None, now=None,
+                    bad_render: bool | None = None, unguarded: dict[str, str] | None = None) -> None:
+    """Record Crawlee per-URL classes (ok / too_short / auth / timeout / error) in the reading ledger.
+
+    The bad-render guard (no ``ok`` in >= ``BAD_RUN_MIN`` URLs: ``too_short`` not
+    recorded) applies to ``outcomes`` only, judged by ``bad_render`` when given (the
+    caller's verdict on the whole Crawlee run) or else on ``outcomes`` itself.
+    ``unguarded`` (e.g. the browser route's classes) is recorded under the same lock
+    and is neither subject to the guard nor counted by it."""
     try:
-        if not outcomes:
+        unguarded = dict(unguarded or {})
+        if not outcomes and not unguarded:
             return
         now = _now(now)
         values = list(outcomes.values())
-        bad_render = len(values) >= BAD_RUN_MIN and "ok" not in values
+        if bad_render is None:
+            bad_render = is_bad_render(outcomes)
         if bad_render and "too_short" in values:
             logger.warning("reading ledger: 0 ok of %d URLs: not recording %d too_short "
                            "(looks like a bad render, not thin pages)", len(values), values.count("too_short"))
@@ -321,6 +336,8 @@ def record_outcomes(outcomes: dict[str, str], *, status_dir=None, now=None) -> N
             for url, cls in outcomes.items():
                 if bad_render and cls == "too_short":
                     continue
+                ledger.record(url, cls, now=now)
+            for url, cls in unguarded.items():
                 ledger.record(url, cls, now=now)
             _prune(ledger, now)
             ledger.save()
