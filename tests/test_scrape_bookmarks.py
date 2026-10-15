@@ -830,8 +830,9 @@ class TestInternalAuthRouting:
         foreign = ["https://amazon.sharepoint.com/sites/A", "https://atoz.amazon.work/home",
                    "https://amazon.coupahost.com/x"]
         ledger = self._ledger(tmp_path)
-        for _ in range(2):                                    # today's state: 2 strikes, 1 more = cool-off
-            ledger.record(foreign[0], "auth")
+        from datetime import datetime, timedelta, timezone
+        for days_ago in (2, 1):                               # 2 strikes on 2 days, 1 more = cool-off
+            ledger.record(foreign[0], "auth", now=datetime.now(timezone.utc) - timedelta(days=days_ago))
         ledger.save()
         wiki = "https://w.amazon.com/bin/view/Ok"
         rc, calls = self._main(sb, tmp_path, monkeypatch, [*foreign, wiki], lambda u: "ok")
