@@ -14,6 +14,12 @@ locked while Chrome runs) and produces two things:
    Crawlee batch scraper, exactly like bookmarks, so the nightly ``ingest`` job
    lands their full text as ``article`` memories. Amazon-internal pages are not
    scraped (cookie/VPN dependent); they still appear in the daily log.
+   Reading URLs on Amazon-owned hosts (the bookmarks job's ``browser_host`` /
+   ``browser_fallback_allowed`` rules, plus ``browser_fetch.SIGN_IN_HOPS`` hosts)
+   that Crawlee returned too_short/auth/error — or that are known to need it
+   (``browser_direct``: skip Crawlee) — are fetched in one midway-playwright
+   session (``browser_route``: capped, time-budgeted; Midway session < 30 min or
+   an MCP that will not start defers them with no ledger strike).
 
 Dedup: ``browser://history/<YYYY-MM-DD>`` per day (ingest_batch skips known
 days); reading URLs are deduped against Crawlee's own index.
@@ -80,7 +86,10 @@ _NOISE_HOST_RE = re.compile(
 _APP_HOST_RE = re.compile(
     r"(^|\.)(force\.com|salesforce\.com|sharepoint\.com|office\.com|microsoft\.com|"
     r"quip\.com|quip-amazon\.com|atlassian\.net|notion\.so|figma\.com|kudoboard\.com|"
-    r"docs\.google\.com|drive\.google\.com|highspot\.com)$", re.I)
+    r"docs\.google\.com|drive\.google\.com|highspot\.com|"
+    # O.C. Tanner recognition (Culture Cloud): third-party SSO lookup page, never content
+    # for a headless fetch (probe 2026-10-15) and never given the Midway browser.
+    r"culturecloud\.com|octanner\.(com|io))$", re.I)
 _SEARCH_HOST_RE = re.compile(r"(^|\.)(google\.[a-z.]+|bing\.com|duckduckgo\.com)$", re.I)
 _CHAT_HOST_RE = re.compile(r"(^|\.)(chatgpt\.com|chat\.openai\.com|claude\.ai|gemini\.google\.com)$", re.I)
 # Auth plumbing by path, whatever the host; and personal HR/benefits/finance portals.
@@ -407,6 +416,180 @@ SYSTEMIC_MIN_FAILED = 3
 SYSTEMIC_MIN_HOSTS = 2
 
 
+# --------------------------------------------------------------------------- #
+# Reading: browser route (midway-playwright) for Amazon-owned pages            #
+# --------------------------------------------------------------------------- #
+#: At most this many reading URLs per run take the browser route (the rest: deferred).
+READING_BROWSER_MAX_URLS = int(os.environ.get("BROWSER_READING_BROWSER_MAX_URLS", "25"))
+#: Wall-clock budget of the browser pass (also bounded by the job deadline and the Midway session).
+READING_BROWSER_BUDGET_S = float(os.environ.get("BROWSER_READING_BROWSER_BUDGET_S", "900"))
+#: Left untouched at the end of the job deadline (day-log ingest, reporting).
+READING_DEADLINE_MARGIN_S = 600.0
+#: Crawlee classes the browser may rescue: the page was reached but showed a sign-in/shell, or failed.
+_BROWSER_RETRY_CLASSES = ("too_short", "auth", "error")
+#: File downloads (apg-library get-attachments: "Your download ... should have started") are no reading.
+_DOWNLOAD_PATH_RE = re.compile(r"/(get-attachments?|attachments?|downloads?)/", re.I)
+#: Browser classes counted in the scrape stats the exit rules read.
+_STAT_KEY = {"ok": "processed", "too_short": "too_short", "auth": "failed", "timeout": "failed", "error": "failed"}
+
+
+#: What the browser route uses from scripts/scrape_bookmarks.py (the one source of the
+#: Amazon-owned host rules, Midway session checks and the browser outcome mapping).
+_BOOKMARKS_RULES = ("browser_host", "browser_fallback_allowed", "browser_outcome", "browser_midway_login",
+                    "midway_session_seconds_left", "save_page", "BROWSER_MIN_SESSION_S",
+                    "BROWSER_SESSION_MARGIN_S", "BROWSER_MIN_BUDGET_S", "SYSTEMIC_MIN_ATTEMPTS")
+
+
+def _bookmarks_rules():
+    """scripts.scrape_bookmarks when it provides every ``_BOOKMARKS_RULES`` name, else None:
+    without the shared host rules no URL is given the Midway browser (route off)."""
+    try:
+        import importlib
+        sb = importlib.import_module("scripts.scrape_bookmarks")
+    except Exception:  # noqa: BLE001
+        return None
+    return sb if all(hasattr(sb, name) for name in _BOOKMARKS_RULES) else None
+
+
+def browser_route_allowed(url: str) -> bool:
+    """True when a reading URL may be fetched in the Midway-cookie browser: its host is
+    Amazon-owned by the bookmarks job's own rules (``scrape_bookmarks.browser_host`` /
+    ``browser_fallback_allowed``) or is a ``browser_fetch.SIGN_IN_HOPS`` host, and it
+    is not a file download. Third-party hosts never see the Midway browser."""
+    from src.capture.browser_fetch import sign_in_hop
+    sb = _bookmarks_rules()
+    if sb is None:
+        return False
+    try:
+        if _DOWNLOAD_PATH_RE.search(urlsplit(url).path):
+            return False
+    except ValueError:
+        return False
+    return bool(sign_in_hop(url) or sb.browser_host(url) or sb.browser_fallback_allowed(url))
+
+
+def browser_direct(url: str) -> bool:
+    """Known to need the browser (Crawlee only ever sees its sign-in): skips Crawlee."""
+    from src.capture.browser_fetch import sign_in_hop
+    return browser_route_allowed(url) and bool(sign_in_hop(url) or _bookmarks_rules().browser_host(url))
+
+
+def _reading_deadline_s() -> float:
+    try:
+        from src.operations.jobs import resolve_timeout
+        return resolve_timeout("capture-browser", os.environ)[0]
+    except Exception:  # noqa: BLE001 - a bad env value must not stop the job; the plist default
+        return 3600.0
+
+
+def _browser_log(message: str) -> None:
+    """browser_fetch progress lines (hosts, outcomes, counts; never page text)."""
+    (logger.warning if message.lstrip().startswith("WARNING") else logger.info)("%s", message.strip())
+
+
+def _browser_fetch(urls: list[str], budget_s: float, max_pages: int) -> dict:
+    from src.capture import browser_fetch
+    return browser_fetch.fetch_pages_sync(urls, budget_s=budget_s, max_pages=max_pages, log=_browser_log)
+
+
+def _browser_save(title: str, url: str, text: str) -> None:
+    """Store a browser-fetched page where Crawlee's pages go (the nightly ingest reads it;
+    ``load_indexed_urls`` dedups it next run), tagged ``fetched_via: browser``."""
+    _bookmarks_rules().save_page(title or url, url, text, fetched_via="browser")
+
+
+def browser_route(candidates: list[tuple[str, str]], *, started: float, fetch=None, save=_browser_save,
+                  session_left: float | None = None, deadline_s: float | None = None,
+                  clock=_time.monotonic) -> dict[str, str]:
+    """Fetch ``candidates`` ((title, url), already filtered by the caller) in ONE
+    midway-playwright session; return url -> class for every candidate:
+    ``ok`` / ``too_short`` / ``auth`` / ``timeout`` / ``error`` (a real per-URL
+    result) or ``deferred`` (not attempted: cap, budget, Midway session short, MCP
+    down, or a systemic Midway sign-in — never a ledger strike).
+
+    ``save(title, url, text)`` stores an ``ok`` page (None: dry run, nothing written);
+    a failed store is ``error``. Logs hosts and counts, never page text."""
+    result: dict[str, str] = {}
+    if not candidates:
+        return result
+    sb = _bookmarks_rules()
+    if sb is None:
+        return result               # route off: Crawlee's classes stand (never reached: callers filter)
+    BROWSER_MIN_BUDGET_S, BROWSER_MIN_SESSION_S = sb.BROWSER_MIN_BUDGET_S, sb.BROWSER_MIN_SESSION_S
+    BROWSER_SESSION_MARGIN_S, SYSTEMIC_MIN_ATTEMPTS = sb.BROWSER_SESSION_MARGIN_S, sb.SYSTEMIC_MIN_ATTEMPTS
+    browser_outcome, browser_midway_login = sb.browser_outcome, sb.browser_midway_login
+    midway_session_seconds_left = sb.midway_session_seconds_left
+    for _, url in candidates[READING_BROWSER_MAX_URLS:]:
+        result[url] = "deferred"
+    batch = candidates[:READING_BROWSER_MAX_URLS]
+    if len(candidates) > len(batch):
+        logger.info("browser route: cap %d reached; %d URL(s) deferred", READING_BROWSER_MAX_URLS,
+                    len(candidates) - len(batch))
+    left = (midway_session_seconds_left() if session_left is None else session_left) or 0.0
+    deadline_left = (_reading_deadline_s() if deadline_s is None else deadline_s) \
+        - (clock() - started) - READING_DEADLINE_MARGIN_S
+    budget = min(READING_BROWSER_BUDGET_S, deadline_left, left - BROWSER_SESSION_MARGIN_S)
+    if left < BROWSER_MIN_SESSION_S or budget < BROWSER_MIN_BUDGET_S:
+        why = (f"Midway session has {max(0.0, left) / 60:.0f} min left — run mwinit"
+               if left < BROWSER_MIN_SESSION_S or left - BROWSER_SESSION_MARGIN_S <= deadline_left
+               else f"only {max(0.0, deadline_left):.0f} s of the job deadline left")
+        logger.warning("browser route: %d URL(s) deferred (%s; no launch, no ledger strike)", len(batch), why)
+        result.update({url: "deferred" for _, url in batch})
+        return result
+    logger.info("browser route: %d URL(s) via midway-playwright (budget %.0fs)", len(batch), budget)
+    pages = (fetch or _browser_fetch)([url for _, url in batch], budget, len(batch))
+    midway_auth = []
+    for title, url in batch:
+        res = pages.get(url)
+        cls = browser_outcome(url, res) if res is not None else "deferred"
+        if cls in ("deferred", "invalid_url"):
+            cls = "deferred"
+        elif cls == "ok":
+            if save is not None:
+                try:
+                    save(title or res.title, url, res.text)
+                except OSError as exc:
+                    logger.warning("browser route: could not store %s (%s)", url, type(exc).__name__)
+                    cls = "error"
+        elif cls == "auth":
+            if browser_midway_login(res):
+                midway_auth.append(url)
+        elif cls != "too_short":
+            cls = "timeout" if getattr(res, "detail", "") == "timeout" else "error"
+        result[url] = cls
+    attempted = [u for _, u in batch if result[u] != "deferred"]
+    if len(attempted) >= SYSTEMIC_MIN_ATTEMPTS and len(midway_auth) == len(attempted):
+        logger.warning("browser route: all %d page(s) hit Midway sign-in — session problem; deferred, "
+                       "no ledger strike", len(attempted))
+        result.update({u: "deferred" for u in midway_auth})
+    classes = collections.Counter(result[u] for _, u in batch)
+    deferred = sum(1 for v in result.values() if v == "deferred")
+    # A launch failure / dead server is already one WARNING line from browser_fetch.
+    logger.info("browser route summary — sent=%d %s deferred=%d", len(batch),
+                " ".join(f"{k}={classes.get(k, 0)}" for k in ("ok", "too_short", "auth", "timeout", "error")),
+                deferred)
+    return result
+
+
+def _apply_browser(routed: dict[str, str], outcomes: dict[str, str], scrape_stats: dict) -> set[str]:
+    """Fold browser results into Crawlee's ``outcomes`` / ``scrape_stats``: a browser
+    class replaces Crawlee's for that URL (a rescued page is ``ok``, so no cool-off);
+    ``deferred`` drops the URL's outcome (no strike). Returns the deferred URLs."""
+    deferred = set()
+    for url, cls in routed.items():
+        prev = outcomes.get(url)
+        if prev in _STAT_KEY:
+            key = _STAT_KEY[prev]
+            scrape_stats[key] = max(0, scrape_stats.get(key, 0) - 1)
+        if cls == "deferred":
+            outcomes.pop(url, None)
+            deferred.add(url)
+            continue
+        outcomes[url] = cls
+        scrape_stats[_STAT_KEY[cls]] = scrape_stats.get(_STAT_KEY[cls], 0) + 1
+    return deferred
+
+
 def _systemic_reasons(fresh: list[tuple[str, str]], scrape_stats: dict, outcomes: dict[str, str]) -> list[str]:
     """Reasons this run's reading scrape is a systemic outage (empty: it is not).
 
@@ -440,6 +623,7 @@ def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
     from src.db import get_processed_source_urls
     from src.ingest import ingest_batch
 
+    started = _time.monotonic()
     if not os.path.exists(history_path):
         logger.error("Chrome History not found: %s", history_path)
         return {"processed": 0, "skipped": 0, "failed": 1, "reading": 0}
@@ -482,15 +666,29 @@ def capture(days_back: int = 2, dry_run: bool = False, scrape: bool = True,
         fresh = _select_reading(fresh)
         fresh = fresh[:MAX_READ_URLS_PER_RUN]
         reading_sent = len(fresh)
+        direct = {url for _, url in fresh if browser_direct(url)}
+        crawl = [(title, url) for title, url in fresh if url not in direct]
         if dry_run:
             for _, url in fresh:
-                logger.info("[DRY] read -> crawlee: %s", url)
+                logger.info("[DRY] read -> %s: %s", "browser" if url in direct else "crawlee", url)
         elif fresh:
             outcomes: dict[str, str] = {}
-            scrape_stats = scrape_with_crawlee(fresh, timeout=CRAWLEE_TIMEOUT_S, outcomes=outcomes,
-                                               log_name=CRAWLEE_LOG_NAME, env=BATCH_SCRAPE_ENV)
+            scrape_stats = {"processed": 0, "failed": 0, "too_short": 0, "deferred": 0}
+            if crawl:
+                scrape_stats = scrape_with_crawlee(crawl, timeout=CRAWLEE_TIMEOUT_S, outcomes=outcomes,
+                                                   log_name=CRAWLEE_LOG_NAME, env=BATCH_SCRAPE_ENV)
+            # Amazon-owned pages Crawlee could not render (or that only ever show it a
+            # sign-in) get one midway-playwright session; its results replace Crawlee's.
+            candidates = [(title, url) for title, url in fresh
+                          if url in direct or (outcomes.get(url) in _BROWSER_RETRY_CLASSES
+                                               and browser_route_allowed(url))]
+            browser_deferred: set[str] = set()
+            if candidates:
+                routed = browser_route(candidates, started=started)
+                browser_deferred = _apply_browser(routed, outcomes, scrape_stats)
             _record_reading(outcomes)
-            reading = _report_reading(fresh, scrape_stats, outcomes)
+            reported = [(title, url) for title, url in fresh if url not in browser_deferred]
+            reading = _report_reading(reported, scrape_stats, outcomes)
             reading_sent = scrape_stats["processed"]
 
     stats = run_channel(SOURCE_TYPE, items, dry_run=dry_run, ingest=ingest_batch)
