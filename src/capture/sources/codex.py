@@ -61,6 +61,55 @@ class CodexSourceChangedDuringRead(RuntimeError):
     """A Codex rollout changed while it was being read and must be retried."""
 
 
+class CodexSourceMissing(FileNotFoundError):
+    """The indexed rollout exists in no known Codex layout (truly gone).
+
+    Raised only after every known location was checked: the indexed path, its
+    zstd-compressed sibling, and the same file name under ``sessions/`` or
+    ``archived_sessions/``. Any other ``FileNotFoundError`` stays a plain read
+    failure.
+    """
+
+
+#: Codex Desktop compresses older rollouts in place (``x.jsonl`` ->
+#: ``x.jsonl.zst``) without rewriting ``threads.rollout_path`` (seen 2026-10-14).
+_ZSTD_SUFFIX = ".zst"
+_ROLLOUT_ROOTS = ("sessions", "archived_sessions")
+
+
+def _resolve_rollout(source_locator, codex_home: Path | None = None) -> Path:
+    """Return the on-disk rollout for an indexed locator, or raise CodexSourceMissing."""
+    path = Path(source_locator)
+    if path.is_file():
+        return path
+    compressed = path.with_name(path.name + _ZSTD_SUFFIX)
+    if compressed.is_file():
+        return compressed
+    if codex_home is not None and path.name:
+        # Moved between Codex layouts (e.g. sessions/ <-> archived_sessions/).
+        for name in (path.name, path.name + _ZSTD_SUFFIX):
+            for root in _ROLLOUT_ROOTS:
+                base = codex_home / root
+                if not base.is_dir():
+                    continue
+                matches = sorted(match for match in base.rglob(name) if match.is_file())
+                if matches:
+                    return matches[0]
+    raise CodexSourceMissing(f"Codex rollout not found: {path.name}")
+
+
+def _open_rollout_text(path: Path):
+    if path.name.endswith(_ZSTD_SUFFIX):
+        try:
+            from compression import zstd
+        except ImportError as exc:  # Python < 3.14: a broken reader, not a gone source
+            raise CodexSourceCompatibilityError(
+                "Codex rollout is zstd-compressed but compression.zstd is unavailable"
+            ) from exc
+        return zstd.open(path, "rt", encoding="utf-8")
+    return path.open(encoding="utf-8")
+
+
 @dataclass(frozen=True, slots=True)
 class _TitleObservation:
     title: str
@@ -182,16 +231,25 @@ def _fingerprint(path):
     return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
 
-def _read_rollout(source_locator):
+def _read_rollout(source_locator, codex_home: Path | None = None):
     """Return a bounded streaming reader plus its verified source fingerprint.
 
     The caller must consume the iterator before constructing a snapshot. Any
     concurrent rewrite aborts the capture, so no cursor advances over stale data.
+    The locator is resolved first (see ``_resolve_rollout``); a source found in
+    no known location raises ``CodexSourceMissing``.
     """
-    path = Path(source_locator)
+    path = _resolve_rollout(source_locator, codex_home)
     fingerprint = _fingerprint(path)
     def records():
-        with path.open(encoding="utf-8") as handle:
+        try:
+            handle = _open_rollout_text(path)
+        except FileNotFoundError as exc:
+            # Removed (e.g. compressed by Codex) between resolve and open.
+            raise CodexSourceChangedDuringRead(
+                "Codex rollout moved during read; retry the task"
+            ) from exc
+        with handle:
             number = 0
             while True:
                 line = handle.readline(8 * 1024 * 1024 + 1)
@@ -207,7 +265,11 @@ def _read_rollout(source_locator):
                         break  # an in-progress final append
                     raise CodexSourceParseError(f"invalid Codex rollout JSONL: malformed interior record at line {number}") from exc
                 yield record
-        if _fingerprint(path) != fingerprint:
+        try:
+            final = _fingerprint(path)
+        except FileNotFoundError:
+            final = None
+        if final != fingerprint:
             raise CodexSourceChangedDuringRead("Codex rollout changed during read; retry the task")
     return records(), fingerprint
 
@@ -467,7 +529,7 @@ class CodexDesktopSource:
         assembler = RolloutTurnAssembler(ref.native_task_id, legacy=True)
         git_repository, git_branch, git_commit = (ref.native_git if ref.native_git is not None
             else _sqlite_git_provenance(self._state_path, ref.native_task_id))
-        records, fingerprint = _read_rollout(ref.source_locator)
+        records, fingerprint = _read_rollout(ref.source_locator, self.codex_home)
         for record in records:
             attachments = ()
             payload = record.get("payload") if isinstance(record, dict) else None

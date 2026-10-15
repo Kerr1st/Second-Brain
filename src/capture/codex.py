@@ -38,7 +38,7 @@ from src.capture.agent_tasks import (
     TaskSemanticResult,
     TopicSegment,
 )
-from src.capture.sources.codex import CodexDesktopSource
+from src.capture.sources.codex import CodexDesktopSource, CodexSourceMissing
 from src.embeddings import generate_embedding
 
 
@@ -146,6 +146,10 @@ class CaptureReport:
     eligible: int = 0
     skipped_recent: int = 0
     skipped_archived: int = 0
+    #: Indexed Tasks whose rollout exists in no known Codex layout (deleted by
+    #: Codex). Not a failure: it is re-checked each run but never fails the job,
+    #: unless *every* attempted source read was missing (a broken reader).
+    skipped_missing_source: int = 0
     incomplete: int = 0
     captured: int = 0
     refreshed: int = 0
@@ -327,6 +331,7 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         "eligible": 0,
         "skipped_recent": 0,
         "skipped_archived": 0,
+        "skipped_missing_source": 0,
         "incomplete": 0,
         "captured": 0,
         "refreshed": 0,
@@ -341,6 +346,8 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         "failed": 0,
     }
     failures: list[TaskFailure] = []
+    missing_sources: list[tuple[str, CodexSourceMissing]] = []
+    source_reads_ok = 0
     semantic_budget_stopped = False
     refs = tuple(services.source.enumerate_tasks(now))
     counts["enumerated"] = len(refs)
@@ -362,9 +369,13 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
 
         try:
             snapshot = services.source.fetch_task(ref)
+        except CodexSourceMissing as exc:
+            missing_sources.append((ref.native_task_id, exc))
+            continue
         except Exception as exc:
             _record_failure(counts, failures, ref.native_task_id, "source_read", exc)
             continue
+        source_reads_ok += 1
         if now - snapshot.source_updated_at < IDLE_THRESHOLD:
             counts["skipped_recent"] += 1
             continue
@@ -474,6 +485,7 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
             continue
         counts["semantic_processed"] += 1
 
+    _settle_missing_sources(counts, failures, missing_sources, source_reads_ok)
     return CaptureReport(
         **counts,
         dry_run=dry_run,
@@ -481,6 +493,32 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         semantic_cost_usd=getattr(getattr(services.semantic, "tracker", None), "total_usd", 0.0),
         semantic_metered_calls=getattr(getattr(services.semantic, "tracker", None), "calls", 0),
         semantic_spend_incomplete=bool(getattr(getattr(services.semantic, "tracker", None), "blocked_reason", None)),
+    )
+
+
+def _settle_missing_sources(counts, failures, missing, source_reads_ok) -> None:
+    """Skip truly-gone rollouts, unless no source could be read at all.
+
+    A few deleted rollouts are Codex housekeeping and must not fail the job. If
+    every attempted read was missing, the reader (or its path layout) is broken,
+    so each one is reported as a ``source_read`` failure instead.
+    """
+    if not missing:
+        return
+    if source_reads_ok == 0:
+        for task_id, exc in missing:
+            _record_failure(counts, failures, task_id, "source_read", exc)
+        logger.error(
+            "Codex capture: all %d attempted Task source read(s) found no rollout "
+            "on disk; treating as a broken source reader",
+            len(missing),
+        )
+        return
+    counts["skipped_missing_source"] = len(missing)
+    logger.warning(
+        "Codex capture: skipped %d Task(s) whose indexed rollout no longer exists "
+        "on disk (skipped_missing_source; not a failure)",
+        len(missing),
     )
 
 
