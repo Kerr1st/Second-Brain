@@ -148,13 +148,49 @@ class TestBrowserRoute:
 
 
 class TestApply:
-    def test_browser_classes_replace_crawlee_and_deferred_drops_the_strike(self):
+    def test_browser_classes_replace_crawlee_and_deferred_keeps_crawlees_own_class(self):
         outcomes = {APG[0]: "too_short", WS: "too_short", PUB: "ok"}
         stats = {"processed": 1, "too_short": 2, "failed": 0}
-        deferred = b._apply_browser({APG[0]: "ok", WS: "deferred", APG[1]: "auth"}, outcomes, stats)
-        assert deferred == {WS}
-        assert outcomes == {APG[0]: "ok", PUB: "ok", APG[1]: "auth"}
-        assert stats == {"processed": 2, "too_short": 0, "failed": 1}
+        deferred = b._apply_browser({APG[0]: "ok", WS: "deferred", APG[1]: "auth", APG[2]: "deferred"},
+                                    outcomes, stats)
+        assert deferred == {APG[2]}                         # only a URL Crawlee never saw has no outcome
+        assert outcomes == {APG[0]: "ok", WS: "too_short", PUB: "ok", APG[1]: "auth"}
+        assert stats == {"processed": 2, "too_short": 1, "failed": 1}
+
+
+class TestRouteGuards:
+    @pytest.mark.parametrize("url", [
+        "http://apg-library.amazonaws.com/view/1",
+        "https://apg-library.amazonaws.com:444/view/1",
+        "https://catalog.workshops.aws:8443/abc",
+        "https://apg-library.amazonaws.com:bad/view/1",
+    ])
+    def test_only_https_on_the_default_port_takes_the_browser(self, url):
+        assert not b.browser_route_allowed(url) and not b.browser_direct(url)
+
+    def test_explicit_443_is_the_default_port(self):
+        assert b.browser_route_allowed("https://apg-library.amazonaws.com:443/view/1")
+
+    def test_ok_that_ended_off_amazon_is_auth_and_never_stored(self, caplog):
+        saved = []
+        off = bf.PageResult(APG[0], "ok", text=SENTINEL, final_url="https://evil.example.com/landing",
+                            title="Elsewhere", status=200)
+        out, _ = route([APG[0], APG[1]], {APG[0]: off, APG[1]: ok(APG[1])}, saved=saved)
+        assert out == {APG[0]: "auth", APG[1]: "ok"}
+        assert saved == [("t", APG[1], SENTINEL)]
+        assert any("off Amazon-owned" in r.getMessage() and "evil.example.com" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_ok_that_moved_within_amazon_is_kept(self):
+        moved = bf.PageResult(WS, "ok", text=SENTINEL, final_url="https://catalog.us-east-1.prod.workshops.aws/x",
+                              title="W", status=200)
+        out, _ = route([WS], {WS: moved})
+        assert out == {WS: "ok"}
+
+    def test_route_is_off_when_browser_fetch_cannot_import(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "src.capture.browser_fetch", None)    # e.g. a broken mcp SDK
+        assert not b.browser_route_allowed(APG[0]) and not b.browser_direct(APG[0])
+        assert not b.browser_route_allowed(WS)
 
 
 class TestSignInHop:
@@ -178,6 +214,17 @@ class TestSignInHop:
     def test_no_hop_for_other_hosts(self):
         assert bf.sign_in_hop(WS) is None and bf.sign_in_hop("https://apg-library.amazonaws.com.evil.io/") is None
 
+    def test_budget_spent_by_the_hop_defers_instead_of_a_near_zero_page_timeout(self):
+        clock = FakeClock()
+        pages = {u: page(u, [LONG]) for u in APG[:2]}
+        pages[HOP] = page("https://accelerate.amazonaws.com/", [LONG])
+        browser, lines = FakeBrowser(pages, clock=clock, nav_cost=15.0), []
+        out = asyncio.run(bf.fetch_pages(APG[:2], client_factory=browser.factory, clock=clock, sleep=clock.sleep,
+                                         log=lines.append, budget_s=20.0))
+        assert browser.navigated == [HOP]                     # the page itself is never started
+        assert [(out[u].outcome, out[u].detail) for u in APG[:2]] == [("deferred", "budget")] * 2
+        assert any("after the sign-in hop" in line for line in lines)
+
 
 class TestCaptureWiring:
     """capture() end to end with the real scrape_bookmarks rules; Crawlee, the browser,
@@ -190,13 +237,27 @@ class TestCaptureWiring:
         from src.capture.common import exit_code
         hist = tmp_path / "History"
         hist.write_text("x")
-        rec = {"crawlee": [], "fetch": [], "recorded": None, "saved": []}
+        rec = {"crawlee": [], "fetch": [], "recorded": {}, "saved": [], "channel": 0}
         monkeypatch.setattr(b, "snapshot_history", lambda p: str(tmp_path / "snap" / "History"))
         monkeypatch.setattr(b, "discard_snapshot", lambda s: None)
         monkeypatch.setattr(b, "load_visits", lambda db, day: [])
         monkeypatch.setattr(b, "completed_days", lambda n: [date(2026, 10, 14)])
         monkeypatch.setattr(b, "_select_reading", lambda fresh: fresh)
-        monkeypatch.setattr(b, "_record_reading", lambda o: rec.__setitem__("recorded", dict(o)))
+        # The real reading ledger (in tmp_path); "recorded" is what it actually struck/cleared.
+        from src.capture import reading_ledger, unreachable
+        real_record = unreachable.Ledger.record
+
+        def spy(self, url, outcome, now=None):
+            rec["recorded"][url] = outcome
+            return real_record(self, url, outcome, now=now)
+        monkeypatch.setattr(unreachable.Ledger, "record", spy)
+        monkeypatch.setattr(reading_ledger, "_status_dir", lambda d: tmp_path)
+        real_channel = b.run_channel
+
+        def channel(*a, **kw):
+            rec["channel"] += 1                                  # the day-log ingest ran
+            return real_channel(*a, **kw)
+        monkeypatch.setattr(b, "run_channel", channel)
         monkeypatch.setattr(src.db, "get_processed_source_urls", lambda st: set())
         monkeypatch.setattr(src.ingest, "ingest_batch", lambda items, st: {
             "processed": len(items), "skipped": 0, "failed": 0})
@@ -221,6 +282,8 @@ class TestCaptureWiring:
 
             def fetch(urls, budget, max_pages):
                 rec["fetch"].append(list(urls))
+                if callable(browser_results):
+                    return browser_results(urls)
                 return {u: browser_results.get(u, bf.PageResult(u, "deferred", detail="launch")) for u in urls}
             monkeypatch.setattr(b, "_browser_fetch", fetch)
             stats = b.capture(days_back=1, history_path=str(hist))
@@ -241,8 +304,10 @@ class TestCaptureWiring:
         caplog.set_level("INFO")
         stats, rc, rec = run([*APG, WS], {WS: "too_short"}, {}, session_left=10 * 60.0)
         assert rec["fetch"] == []
-        assert rec["recorded"] == {}                                # neither the views nor WS struck
-        assert rc == 0 and stats["failed"] == 0
+        # The direct views take no strike; WS keeps Crawlee's own verdict (R4: a deferral
+        # never erases a real Crawlee attempt, so a persistently thin page still cools off).
+        assert rec["recorded"] == {WS: "too_short"}
+        assert rc == 0 and stats["failed"] == 0 and stats["reading_too_short"] == 1
         warns = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"
                  and r.getMessage().startswith("browser route")]
         assert len(warns) == 1
@@ -260,3 +325,45 @@ class TestCaptureWiring:
         stats, rc, rec = run([PUB, "https://blog.example.org/x"],
                              {PUB: "too_short", "https://blog.example.org/x": "too_short"}, {})
         assert rec["fetch"] == [] and rc == 0 and stats["reading_too_short"] == 2
+
+    # R1: Crawlee's own outcomes alone drive the health guards (review-1.md §2).
+    BLOG, NET = "https://blog.example.org/x", "https://other.example.net/y"
+
+    def test_crawlee_outage_is_not_masked_by_a_browser_rescue(self, run):
+        stats, rc, rec = run([WS, PUB, self.BLOG, self.NET],
+                             {WS: "error", PUB: "error", self.BLOG: "error", self.NET: "error"}, {WS: ok(WS)})
+        assert rec["fetch"] == [[WS]] and rec["saved"] == [(WS, "browser")]
+        assert rc == 1 and stats["failed"] >= 1                  # 0 reached by Crawlee across 4 hosts
+
+    def test_crawlee_bad_render_guard_ignores_a_browser_ok(self, run):
+        stats, rc, rec = run([PUB, self.BLOG, self.NET, APG[0]],
+                             {PUB: "too_short", self.BLOG: "too_short", self.NET: "too_short"},
+                             {APG[0]: ok(APG[0])})
+        assert rec["recorded"] == {APG[0]: "ok"}                 # no too_short strikes for Crawlee's URLs
+        assert rc == 0
+
+    def test_browser_auth_on_crawlee_too_short_pages_is_not_a_systemic_outage(self, run):
+        ws = [f"https://catalog.workshops.aws/{c}/en-US" for c in "abc"]
+        stats, rc, rec = run([*ws, PUB], {**{u: "too_short" for u in ws}, PUB: "error"},
+                             {u: signin(u) for u in ws})
+        assert rec["fetch"] == [ws]
+        assert rec["recorded"] == {**{u: "auth" for u in ws}, PUB: "error"}
+        assert rc == 0 and stats["failed"] == 0
+
+    # R3: the browser pass never costs the day log.
+    def test_browser_route_exception_defers_its_candidates_and_the_job_goes_on(self, run, caplog):
+        def boom(urls):
+            raise RuntimeError("PAGE-BODY-SENTINEL leaked?")
+        caplog.set_level("INFO")
+        stats, rc, rec = run([APG[0], WS, PUB], {WS: "too_short", PUB: "ok"}, boom)
+        warns = [r.getMessage() for r in caplog.records if "browser route failed" in r.getMessage()]
+        assert warns == ["browser route failed (RuntimeError); 2 URL(s) deferred"]
+        assert "PAGE-BODY-SENTINEL" not in caplog.text
+        assert rec["recorded"] == {WS: "too_short", PUB: "ok"}    # APG[0] (direct) takes no strike
+        assert rc == 0 and rec["channel"] == 1
+
+    def test_broken_browser_fetch_import_turns_the_route_off_and_the_day_log_still_runs(self, run, monkeypatch):
+        monkeypatch.setitem(sys.modules, "src.capture.browser_fetch", None)
+        stats, rc, rec = run([APG[0], PUB], {APG[0]: "too_short", PUB: "ok"}, {})
+        assert rec["crawlee"] == [[APG[0], PUB]] and rec["fetch"] == []
+        assert rc == 0 and rec["channel"] == 1
