@@ -92,7 +92,13 @@ def _resolve_rollout(source_locator, codex_home: Path | None = None) -> Path:
                 base = codex_home / root
                 if not base.is_dir():
                     continue
-                matches = sorted(match for match in base.rglob(name) if match.is_file())
+                # Exact-name match: rglob treats its argument as a glob pattern, and a
+                # locator containing * or [..] must never resolve to another Task's file.
+                matches = sorted(
+                    match
+                    for match in base.rglob("rollout-*")
+                    if match.name == name and match.is_file()
+                )
                 if matches:
                     return matches[0]
     raise CodexSourceMissing(f"Codex rollout not found: {path.name}")

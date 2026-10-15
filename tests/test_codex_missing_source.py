@@ -110,6 +110,16 @@ def test_rollout_moved_to_archived_sessions_is_found(tmp_path):
     assert len(_snapshot(home).turns) == 3
 
 
+def test_glob_metacharacters_in_locator_never_match_another_tasks_rollout(tmp_path):
+    other = tmp_path / "sessions" / "2026" / "10" / "01" / "rollout-2026-10-01-OTHER.jsonl"
+    other.parent.mkdir(parents=True)
+    other.write_text("{}\n", encoding="utf-8")
+
+    for name in ("rollout-2026-10-01-*.jsonl", "rollout-2026-10-01-[O]THER.jsonl"):
+        with pytest.raises(CodexSourceMissing):
+            _resolve_rollout(tmp_path / "gone" / name, tmp_path)
+
+
 def test_plain_rollout_is_preferred_over_a_compressed_sibling(tmp_path):
     rollout = tmp_path / "rollout-x.jsonl"
     rollout.write_text("{}\n", encoding="utf-8")
