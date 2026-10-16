@@ -4,7 +4,9 @@ import json
 import logging
 from src.models import CandidateInsight, MemorySlice
 from src.prompts import get_thinker_prompt
-from src.dream_cycle.packet import TOOLED_NOTE, TOOLLESS_NOTE, build_packet, load_memories_by_ids
+from src.dream_cycle.packet import (
+    TOOLED_NOTE, TOOLLESS_NOTE, assign_refs, build_packet, load_memories_by_ids, resolve_candidate_refs,
+)
 from src.dream_cycle.storage import canonical_uuid, is_active_memory
 from src.dream_cycle.budget import *
 logger = logging.getLogger(__name__)
@@ -60,7 +62,10 @@ def invoke_thinker(
             payload["memory_slice"]["memory_titles"] = [t for t, k in zip(slice.memory_titles, keep) if k]
     for memory in memories:
         self._slice_memory_cache[str(memory.get("id"))] = memory
-    payload["memory_slice"]["memories"] = build_packet(memories)
+    # Each packet entry carries a short ref ("m1".."mN") the Thinker cites
+    # instead of copying 36-char UUIDs (I3, 2026-10-16: a corrupted copy got two
+    # valid candidates blocked). ref_map resolves them back before authorization.
+    payload["memory_slice"]["memories"], ref_map = assign_refs(build_packet(memories))
     payload["note"] = TOOLED_NOTE if thinker_has_tools else TOOLLESS_NOTE
     if len(loaded) < len(slice.memory_ids):
         logger.warning(
@@ -100,6 +105,9 @@ def invoke_thinker(
 
     candidates = []
     for raw in raw_candidates:
+        # Refs -> UUIDs. Unknown refs and non-packet/corrupted UUIDs pass through
+        # unchanged, so authorize_candidate still blocks them.
+        raw = resolve_candidate_refs(raw, ref_map)
         try:
             candidate = CandidateInsight(
                 title=raw.get("title", ""),
