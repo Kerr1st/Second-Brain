@@ -56,6 +56,7 @@ def invoke_explorer(
     # 4-samples-per-channel manifest (docs/SKIM-STAGE.md, Phase 3).
     manifest = ""
     self._explorer_input = {}
+    self._explorer_pre_budget = {}
     try:
         window_start = ledger.arrival_window_start(self._current_run_id, run_type,
                                                    self._current_started_at, dcdb=self.db)
@@ -113,11 +114,26 @@ def invoke_explorer(
         try:
             if not isinstance(raw, dict):
                 raise ValueError("Explorer slice must be an object")
+            raw_ids = raw.get("memory_ids", [])
+            raw_titles = raw.get("memory_titles", [])
+            memory_ids, memory_titles = raw_ids, raw_titles
+            if isinstance(raw_ids, (list, tuple)):
+                # Canonicalise once at parse time (issue I4, 2026-10-14): the
+                # provenance lookup, revisit set and Thinker cache are keyed by
+                # canonical UUIDs. Non-UUID strings stay verbatim so they still
+                # fail to resolve. Titles aligned with ids follow the dedupe.
+                memory_ids = ledger.canonical_ids(raw_ids)
+                if (len(memory_ids) != len(raw_ids) and isinstance(raw_titles, (list, tuple))
+                        and len(raw_titles) == len(raw_ids)):
+                    first: dict[str, int] = {}
+                    for pos, mid in enumerate(raw_ids):
+                        first.setdefault(ledger.canonical_ids([mid])[0], pos)
+                    memory_titles = [raw_titles[first[mid]] for mid in memory_ids]
             slice_obj = MemorySlice(
                 name=raw.get("name", ""),
                 strategy=raw.get("strategy", ""),
-                memory_ids=raw.get("memory_ids", []),
-                memory_titles=raw.get("memory_titles", []),
+                memory_ids=memory_ids,
+                memory_titles=memory_titles,
                 hypothesis=raw.get("hypothesis", ""),
             )
             slices.append(slice_obj)
@@ -132,7 +148,25 @@ def invoke_explorer(
 
     if not slices:
         logger.warning("Explorer produced no usable slices (raw_candidates=%d)", len(raw_slices))
+    self._explorer_pre_budget = pre_budget_summary(slices, len(raw_slices))
     return slices
+
+
+# Bounds for the persisted pre-budget record (run stats JSON): ids and counts
+# only, never content. 10 slices x 40 ids x 36 chars stays well under 20 KB.
+PRE_BUDGET_MAX_SLICES = 10
+PRE_BUDGET_MAX_IDS = 40
+
+
+def pre_budget_summary(slices: list[MemorySlice], raw_count: int) -> dict:
+    """What the Explorer proposed before the budget ran, so a later drop
+    ("none of its N memory ids resolve") can be diagnosed from the run row."""
+    out = []
+    for s in slices[:PRE_BUDGET_MAX_SLICES]:
+        ids = [str(m) for m in (s.memory_ids or [])] if isinstance(s.memory_ids, (list, tuple)) else []
+        out.append({"name": str(s.name)[:120], "strategy": str(s.strategy)[:60],
+                    "requested": len(ids), "memory_ids": ids[:PRE_BUDGET_MAX_IDS]})
+    return {"raw_slices": raw_count, "parsed_slices": len(slices), "slices": out}
 
 
 def _allocate_attention(self, run_id: str, run_type: str, started_at: datetime,
@@ -156,6 +190,10 @@ def _allocate_attention(self, run_id: str, run_type: str, started_at: datetime,
         rows = ledger.compute_slice_rows(run_id, run_type, slices, started_at, dcdb=self.db,
                                          window_start=window_start, provenance=provenance)
         metrics = [r["metrics"] for r in rows]
+        pre = getattr(self, "_explorer_pre_budget", None)
+        if isinstance(pre, dict):
+            for entry, m in zip(pre.get("slices") or [], metrics):
+                entry["resolved"] = m.get("resolved", 0)
         origins: dict[int, str] = {}
         extra_metrics: dict[int, dict] = {}
 

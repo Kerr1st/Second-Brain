@@ -27,6 +27,7 @@ episodic_share 0.00. See docs/ARCHITECTURE.md.
 """
 from __future__ import annotations
 from src.db import get_memory_provenance
+from src.dream_cycle.storage import canonical_uuid
 
 import logging
 import psycopg2
@@ -53,6 +54,21 @@ def _aware(dt: datetime | None) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def canonical_ids(memory_ids: Iterable) -> list[str]:
+    """Explorer ids in canonical form (lower-case, hyphenated UUID), deduplicated
+    in first-seen order. Upper-case, braced, URN or unhyphenated UUIDs resolve in
+    the database but would miss a provenance dict keyed by canonical ids; strings
+    that are not UUIDs are kept verbatim so they still fail to resolve."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in memory_ids or []:
+        key = canonical_uuid(m) or str(m)
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
 def slice_metrics(memory_ids: Iterable[str], provenance: dict[str, dict],
                   window_start: datetime, previous_ids: set[str] | None = None) -> dict:
     """Metrics for one slice.
@@ -64,7 +80,9 @@ def slice_metrics(memory_ids: Iterable[str], provenance: dict[str, dict],
         window_start: start of the arrivals window.
         previous_ids: memory ids seen in slices of recent runs.
     """
-    ids = [str(m) for m in memory_ids]
+    # Defensive: canonicalise before the lookup (provenance is keyed by canonical
+    # ids; the Explorer path also canonicalises at parse time, issue I4 2026-10-14).
+    ids = canonical_ids(memory_ids)
     rows = [provenance[i] for i in ids if i in provenance]
     n = len(rows)
     previous_ids = previous_ids or set()
@@ -196,7 +214,7 @@ def fetch_provenance(slices, dcdb=None) -> dict[str, dict] | None:
     prov = get_memory_provenance(all_ids)
     if not isinstance(prov, list):
         return None
-    return {str(r["id"]): r for r in prov}
+    return {canonical_uuid(r["id"]) or str(r["id"]): r for r in prov}
 
 
 def compute_slice_rows(run_id: str, run_type: str, slices, started_at: datetime | None = None,

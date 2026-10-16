@@ -114,6 +114,7 @@ class DreamCycleOrchestrator(AgentRunner):
         # and the weighted guaranteed slice) and what the Explorer was actually given.
         self._skim_records: list[dict] = []
         self._explorer_input: dict = {}
+        self._explorer_pre_budget: dict = {}  # Explorer slices before the budget (ids + counts; I4)
         # Ledger rows (origin + metrics) aligned with the slices _allocate_attention
         # returned — the judging order (Phase 4) is derived from them.
         self._slice_rows: list[dict] = []
@@ -163,6 +164,7 @@ class DreamCycleOrchestrator(AgentRunner):
         self._candidate_contexts = {}
         self._skim_records = []
         self._explorer_input = {}
+        self._explorer_pre_budget = {}
         self._slice_rows = []
 
         # Session-start frequency cap: check before creating a run record
@@ -320,7 +322,7 @@ class DreamCycleOrchestrator(AgentRunner):
         if not slices:
             logger.warning("Circuit breaker: no slices to examine (Explorer returned none and "
                            "nothing arrived), aborting early")
-            dream_cycle_db.complete_run(run_id, stats=self._run_stats | self._explorer_input | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd, "spend_unknown": bool(self._spend.blocked_reason)}, digest="")
+            dream_cycle_db.complete_run(run_id, stats=self._run_stats | self._explorer_input | ({"explorer_pre_budget": self._explorer_pre_budget} if self._explorer_pre_budget else {}) | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd, "spend_unknown": bool(self._spend.blocked_reason)}, digest="")
             return self._aborted_result(run_id, run_type, started_at)
 
         # Judging order (Phase 4): the guaranteed arrivals slice first, then the
@@ -516,6 +518,7 @@ class DreamCycleOrchestrator(AgentRunner):
                 "candidates_rejected": len(rejected),
                 **skim_stats,
                 **self._explorer_input,
+                **({"explorer_pre_budget": self._explorer_pre_budget} if self._explorer_pre_budget else {}),
                 **budget_stats,
             },
             digest=digest,

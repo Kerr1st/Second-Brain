@@ -295,7 +295,12 @@ def enforce_budget(slices: list[MemorySlice], metrics: list[dict]) -> tuple[list
     kept: list[tuple[MemorySlice, dict]] = []
     for s, m in zip(slices, metrics):
         if m.get("resolved", 0) == 0:
-            logger.warning("Dropping slice %r: none of its %d memory ids resolve", s.name, m.get("requested", 0))
+            # Ids and counts only (module rule): every id is unresolved here, so the
+            # first three are a sample of what failed to resolve (issue I4).
+            ids = list(s.memory_ids) if isinstance(s.memory_ids, (list, tuple)) else []
+            logger.warning("Dropping slice %r: none of its %d memory ids resolve (0/%d resolved; "
+                           "first unresolved: %s)", s.name, m.get("requested", 0), m.get("requested", 0),
+                           ", ".join(str(i)[:64] for i in ids[:3]) or "none")
             continue
         kept.append((s, m))
 
