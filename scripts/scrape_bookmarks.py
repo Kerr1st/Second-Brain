@@ -65,11 +65,18 @@ def job_deadline_s():
         return 3 * 3600.0
 
 
-#: Hosts that only ever serve sign-in (the final URL's path is judged there even
-#: without a cross-host redirect). Bookmarks pointing at them are not content and
-#: are pre-skipped as unsupported (``midway_unsupported``).
+#: Hosts that only ever serve sign-in: a final URL there is auth whatever its
+#: path, on the cookie path and the browser route alike. Bookmarks pointing at
+#: them are not content and are pre-skipped as unsupported (``midway_unsupported``).
+#: Single source of truth for the sign-in hosts: ``src.capture.browser_fetch``
+#: (``AUTH_FINAL_HOSTS`` + ``SIGN_IN_FINAL_HOSTS``). This list must match every
+#: host those match (tests/test_ledger_strike_per_night.py checks it) and adds
+#: login.microsoftonline.com. It is a copy, not an import, because browser_fetch
+#: imports the mcp SDK at import time (via ``mcp_client``) and the cookie path
+#: must keep working when that SDK is missing or broken.
 SIGN_IN_HOSTS = re.compile(
-    r"^(midway-auth\.amazon\.com|idp\.federate\.amazon\.com|login\.microsoftonline\.com|atoz-login\.amazon\.work)$", re.I)
+    r"^(midway-auth\.amazon\.com|sentry\.amazon\.com|idp\.federate\.amazon\.com|login\.microsoftonline\.com"
+    r"|atoz-login\.amazon\.work|[a-z0-9-]+\.idprism-auth\.amazon\.com)$", re.I)
 #: OIDC error returns (``?error=``) that mean "not signed in" after a Midway hop.
 _OIDC_AUTH_ERRORS = {"login_required", "interaction_required", "access_denied"}
 #: Only this much of a 200 body is looked at for sign-in markers.
@@ -99,9 +106,10 @@ def _is_auth_response(resp, requested_url=None):
     successful w.amazon.com/broadcast fetch into ``auth``).
 
     * 401/403/407 is auth.
+    * A final URL on a ``SIGN_IN_HOSTS`` host is auth (whatever its path).
     * The sign-in URL pattern is applied to the final URL only when the fetch
-      ended on another host than requested, or on a ``SIGN_IN_HOSTS`` host: a
-      wiki path containing /SSO/ or /Login that was not redirected is content.
+      ended on another host than requested: a wiki path containing /SSO/ or
+      /Login that was not redirected is content.
     * A 200 after a Midway hop whose final URL carries an OIDC ``error=``
       (login_required / interaction_required / access_denied) is auth.
     * A 200 whose first 20 KB shows a sign-in page (a midway-auth form action,
@@ -111,7 +119,7 @@ def _is_auth_response(resp, requested_url=None):
     final = resp.url or ""
     requested = requested_url or next(iter(_chain_urls(resp)), final)
     final_host = _host(final)
-    if (final_host != _host(requested) or SIGN_IN_HOSTS.match(final_host)) and _AUTH_URL_RE.search(final):
+    if SIGN_IN_HOSTS.match(final_host) or (final_host != _host(requested) and _AUTH_URL_RE.search(final)):
         return True
     if resp.status_code != 200:
         return False

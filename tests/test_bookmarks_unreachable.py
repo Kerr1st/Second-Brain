@@ -248,12 +248,14 @@ class TestMainWithLedger:
 
         # Deliberately changed (triage 2026-10-13): one failed public URL next to a reached
         # (too_short) page and a skipped_auth one is a per-URL outcome -> exit 0 (was 1).
-        assert sb.main() == 0                       # run 1: the public URL failed
-        assert sb.main() == 0                       # run 2
-        assert sb.main() == 0                       # run 3: third consecutive failure
+        def week(n):                                # one strike per URL per day: weekly runs
+            monkeypatch.setattr(unreachable, "_now", lambda: T0 + timedelta(days=7 * n))
+        week(0); assert sb.main() == 0              # run 1: the public URL failed
+        week(1); assert sb.main() == 0              # run 2
+        week(2); assert sb.main() == 0              # run 3: third consecutive failure
         assert seen == [[public, short], [public], [public]]   # too-short not re-scraped
         capsys.readouterr()
-        assert sb.main() == 0                       # run 4: everything cooling off
+        week(3); assert sb.main() == 0              # run 4: everything cooling off
         out = capsys.readouterr().out
         assert "skipped_unreachable (ledger cool-off): 3" in out
         assert "Unreachable: 3 skipped_unreachable" in out

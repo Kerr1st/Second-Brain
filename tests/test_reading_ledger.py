@@ -241,14 +241,15 @@ def _entries(sd):
 def test_record_outcomes_strikes_then_cools_off_and_ok_clears(sd):
     url = "https://slow.example/1"
     key = unreachable.url_key(url)
-    for i in range(unreachable.THRESHOLD - 1):
-        rl.record_outcomes({url: "timeout"}, status_dir=sd, now=NOW)
+    for i in range(unreachable.THRESHOLD - 1):                    # one strike per night
+        rl.record_outcomes({url: "timeout"}, status_dir=sd, now=NOW + timedelta(days=i))
         assert _entries(sd)[key]["skip_until"] is None
-        assert rl.filter_reading([url], status_dir=sd, now=NOW) == ([url], {})
-    rl.record_outcomes({url: "timeout"}, status_dir=sd, now=NOW)
+        assert rl.filter_reading([url], status_dir=sd, now=NOW + timedelta(days=i)) == ([url], {})
+    last = NOW + timedelta(days=unreachable.THRESHOLD - 1)
+    rl.record_outcomes({url: "timeout"}, status_dir=sd, now=last)
     assert _entries(sd)[key]["consecutive_failures"] == unreachable.THRESHOLD
-    assert rl.filter_reading([url], status_dir=sd, now=NOW)[1] == {url: "cooling_off"}
-    later = NOW + unreachable.COOL_OFF + timedelta(seconds=1)
+    assert rl.filter_reading([url], status_dir=sd, now=last)[1] == {url: "cooling_off"}
+    later = last + unreachable.COOL_OFF + timedelta(seconds=1)
     assert rl.filter_reading([url], status_dir=sd, now=later) == ([url], {})
     rl.record_outcomes({url: "ok"}, status_dir=sd, now=later)
     assert key not in _entries(sd)
@@ -314,9 +315,9 @@ def test_save_prunes_long_expired_and_idle_entries(sd):
 
 def test_record_outcomes_auth_feeds_dynamic_rule(sd):
     urls = ["https://wall.example/a", "https://wall.example/b"]
-    for _ in range(unreachable.THRESHOLD):
-        rl.record_outcomes({u: "auth" for u in urls}, status_dir=sd, now=NOW)
-    assert "wall.example" in rl.bot_walled_hosts(status_dir=sd, now=NOW)
+    for day in range(unreachable.THRESHOLD):                      # one strike per night
+        rl.record_outcomes({u: "auth" for u in urls}, status_dir=sd, now=NOW + timedelta(days=day))
+    assert "wall.example" in rl.bot_walled_hosts(status_dir=sd, now=NOW + timedelta(days=unreachable.THRESHOLD))
 
 
 def test_record_outcomes_never_raises(sd, monkeypatch):

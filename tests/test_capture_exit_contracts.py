@@ -468,12 +468,18 @@ class TestMainExitCodes:
         urls = [(f"P{i}", f"https://w.amazon.com/bin/view/P{i}") for i in range(3)]
         sb = self._bookmarks(tmp_path, monkeypatch, urls)
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "timeout")
-        assert sb.main() == 1 and "systemic" in capsys.readouterr().out
-        assert sb.main() == 1                          # strike 2
-        assert sb.main() == 0                          # strike 3: all three now cooling off
+        from datetime import datetime, timedelta, timezone
+        from src.capture import unreachable
+        start = datetime(2026, 10, 2, 17, 0, tzinfo=timezone.utc)
+
+        def week(n):                                   # at most one strike per URL per day
+            monkeypatch.setattr(unreachable, "_now", lambda: start + timedelta(days=7 * n))
+        week(0); assert sb.main() == 1 and "systemic" in capsys.readouterr().out
+        week(1); assert sb.main() == 1                 # strike 2
+        week(2); assert sb.main() == 0                 # strike 3: all three now cooling off
         out = capsys.readouterr().out
         assert "cooling_off=3" in out and "-> exit 0" in out
-        assert sb.main() == 0                          # cooling off: nothing eligible
+        week(3); assert sb.main() == 0                 # cooling off: nothing eligible
 
     def test_scrape_bookmarks_a_few_cooling_urls_do_not_hide_an_outage(self, tmp_path, monkeypatch, capsys):
         """Finding 4: one URL reaching strike 3 this run must not hide the other failures:
@@ -482,8 +488,9 @@ class TestMainExitCodes:
         urls = [(f"P{i}", f"https://w.amazon.com/bin/view/P{i}") for i in range(4)]
         sb = self._bookmarks(tmp_path, monkeypatch, urls)
         ledger = Ledger.load()
-        for _ in range(2):                              # P0 already has two strikes
-            ledger.record(urls[0][1], "timeout")
+        from datetime import datetime, timedelta, timezone
+        for days_ago in (2, 1):                         # P0 already has two strikes (2 days)
+            ledger.record(urls[0][1], "timeout", now=datetime.now(timezone.utc) - timedelta(days=days_ago))
         ledger.save()
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "timeout")
         assert sb.main() == 1                           # P0 cools off now; P1..P3 (3) still failing
