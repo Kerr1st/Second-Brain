@@ -23,6 +23,13 @@ killed or fails simply leaves the remainder for the next run:
 
 Legacy ``.chat`` IDE files are a dead channel (newest file 2026-02): only files
 whose identity is not yet stored are parsed and ingested, never refreshed.
+
+Kiro CLI v2 sessions (``sessions/<workspace-hash>/sess_<uuid>/``) share the
+native session format and tree with the IDE store but belong to
+``kiro_cli_chat`` (identity ``kiro-cli://session/<id>``). Those already stored
+as ``kiro_ide_chat`` before the split stay there (and keep refreshing) so no
+session is duplicated across channels; ``sub-executions/`` sub-agent runs are
+never read.
 """
 from __future__ import annotations
 import argparse
@@ -93,8 +100,10 @@ def capture(*, dry_run=False, ide=True, cli=True, max_sessions=None) -> dict:
     if not isinstance(max_sessions, int) or isinstance(max_sessions, bool) or max_sessions < 1:
         raise ValueError("max_sessions must be a positive integer")
     result = {}
+    ide_known = None
     if ide:
         known, stored = _inventory("kiro_ide_chat")
+        ide_known = known
         items = CaptureBatch()
         metadata = {}
         counters = {"unchanged": 0, "incomplete": 0, "filtered": 0, "deferred": 0, "candidates": 0, "legacy_new": 0}
@@ -125,6 +134,12 @@ def capture(*, dry_run=False, ide=True, cli=True, max_sessions=None) -> dict:
             # A session migrated from the legacy store keeps its existing identity.
             url = next((alias for alias in kiro_sessions.legacy_aliases(sid) if alias in known),
                        kiro_sessions.session_url(sid))
+            # Kiro CLI v2 sessions share this tree but belong to kiro_cli_chat. Ones
+            # already stored here (before the split) keep their identity and refresh
+            # here until retagged, so they are never duplicated across channels.
+            if kiro_sessions.is_cli_v2_session(path) and url not in known:
+                counters["cli_v2"] = counters.get("cli_v2", 0) + 1  # reported only when non-zero
+                continue
             fingerprint = kiro_sessions.fingerprint(path)
             if fingerprint is None:
                 counters["incomplete"] += 1
@@ -154,7 +169,7 @@ def capture(*, dry_run=False, ide=True, cli=True, max_sessions=None) -> dict:
         items = CaptureBatch()
         metadata = {}
         counters = {"unchanged": 0, "incomplete": 0, "filtered": 0, "deferred": 0, "candidates": 0}
-        candidates = []
+        candidates = []  # (recency_ns, kind, path, url, fingerprint)
         sessions_dir = Path(cli_chat.SESSIONS_DIR)
         paths = sorted(sessions_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime_ns, reverse=True) \
             if sessions_dir.is_dir() else []
@@ -165,11 +180,46 @@ def capture(*, dry_run=False, ide=True, cli=True, max_sessions=None) -> dict:
             if url in known and stored.get(url) == fingerprint:
                 counters["unchanged"] += 1
                 continue
-            candidates.append((path, url, fingerprint))
+            candidates.append((path.stat().st_mtime_ns, "v1", path, url, fingerprint))
+
+        # Kiro CLI v2 store: <sessions>/<workspace-hash>/sess_<uuid>/ next to the v1 cli/ dir.
+        v2_root = sessions_dir.parent
+        v2_paths = [p for p in kiro_sessions.find_sessions(v2_root) if kiro_sessions.is_cli_v2_session(p)] \
+            if v2_root.is_dir() else []
+        if v2_paths and ide_known is None:
+            ide_known, _ = _inventory("kiro_ide_chat")
+        for path in v2_paths:
+            try:
+                sid = kiro_sessions.session_id(path)
+            except Exception:  # noqa: BLE001
+                logger.warning("Kiro CLI v2 session metadata could not be read; retry next cycle", exc_info=True)
+                items.failed += 1
+                continue
+            if any(alias in ide_known for alias in [kiro_sessions.session_url(sid), *kiro_sessions.legacy_aliases(sid)]):
+                counters["v2_owned_by_ide"] = counters.get("v2_owned_by_ide", 0) + 1  # captured as kiro_ide_chat before the split
+                continue
+            # A row retagged from kiro_ide_chat keeps its original URL.
+            ide_url = kiro_sessions.session_url(sid)
+            url = ide_url if ide_url in known else kiro_sessions.cli_v2_url(sid)
+            fingerprint = kiro_sessions.fingerprint(path)
+            if fingerprint is None:
+                counters["incomplete"] += 1
+                continue
+            if url in known and stored.get(url) == fingerprint:
+                counters["unchanged"] += 1
+                continue
+            transcript = kiro_sessions.transcript_path(path)
+            candidates.append((transcript.stat().st_mtime_ns, "v2", path, url, fingerprint))
+        candidates.sort(key=lambda c: c[0], reverse=True)  # newest first across both stores
         counters["candidates"] = len(candidates)
 
         def parse_cli(candidate):
-            path, url, fingerprint = candidate
+            _, kind, path, url, fingerprint = candidate
+            if kind == "v2":
+                parsed = kiro_sessions.parse_session(
+                    path, source_type="kiro_cli_chat", url_for=lambda _sid: url,
+                    default_title="Kiro CLI session", reject=cli_chat.is_automated_conversation)
+                return None if parsed is None else (url, parsed[1], fingerprint)
             messages, created = cli_chat.extract_session_messages(path, strict=True)
             parsed = cli_chat.parse_conversation(path.stem, messages, created)
             if parsed is None:

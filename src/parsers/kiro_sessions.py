@@ -27,6 +27,8 @@ SESSIONS_DIR = Path(os.path.expanduser("~/.kiro/sessions"))
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_RECORD_CHARS = 8 * 1024 * 1024
 URL_PREFIX = "kiro-ide://session/"
+CLI_V2_DIR_PREFIX = "sess_"
+CLI_V2_URL_PREFIX = "kiro-cli://session/"
 
 
 class IncompleteSession(Exception):
@@ -112,7 +114,29 @@ def legacy_aliases(sid: str) -> list[str]:
     return aliases
 
 
-def parse_session(metadata_path) -> tuple[str, str, dict] | None:
+def is_cli_v2_session(metadata_path) -> bool:
+    """True for a Kiro CLI v2 (TUI) session: ``<workspace-hash>/sess_<uuid>/session.json``.
+
+    Kiro CLI moved interactive sessions out of ``sessions/cli/*.jsonl`` into this
+    layout (last interactive v1 session 2026-05-19) and, from ~2026-10-08, its
+    sub-agent runs too (under ``sess_*/sub-executions/``, never matched by
+    :func:`find_sessions`). The native IDE store uses bare-UUID directories, so
+    the ``sess_`` directory prefix tells the two writers apart.
+    """
+    return Path(metadata_path).parent.name.startswith(CLI_V2_DIR_PREFIX)
+
+
+def cli_v2_url(sid: str) -> str:
+    return CLI_V2_URL_PREFIX + quote(sid, safe="")
+
+
+def parse_session(metadata_path, *, source_type="kiro_ide_chat", url_for=None,
+                  default_title="Kiro IDE session", reject=None) -> tuple[str, str, dict] | None:
+    """Render one native session (IDE by default; the CLI v2 store shares the format).
+
+    ``url_for(sid)`` overrides the identity URL, ``reject(messages)`` is an
+    extra channel filter over the stripped ``(role, content)`` messages.
+    """
     path = Path(metadata_path)
     observed = path.stat()
     before = (observed.st_mtime_ns, observed.st_size)
@@ -157,16 +181,18 @@ def parse_session(metadata_path) -> tuple[str, str, dict] | None:
     messages = strip_messages(messages_as_dicts(messages))
     if not passes_size_filter(messages) or not passes_content_filter(messages):
         return None
-    url = session_url(sid)
+    if reject is not None and reject(messages):
+        return None
+    url = (url_for or session_url)(sid)
     paths = meta.get("workspacePaths") or []
     project = normalize_project_tag(Path(paths[0]).name) if paths and isinstance(paths[0], str) else None
-    fields = {"Source": url, "Source_Type": "kiro_ide_chat", "Source_ID": sid,
+    fields = {"Source": url, "Source_Type": source_type, "Source_ID": sid,
               "Date": str(meta.get("createdAt") or "")[:10],
               "Updated": meta.get("lastModifiedAt") or "", "Model": meta.get("modelId") or "",
               "Workflow": meta.get("agentMode") or "", "Project": project,
               "Capture_Format": "kiro_session_jsonl"}
     body = "\n\n".join(f"**{'User' if role == 'human' else 'Assistant'}:**\n\n{content}" for role, content in messages)
-    return url, render_document(meta.get("title") or "Kiro IDE session", fields, body), fields
+    return url, render_document(meta.get("title") or default_title, fields, body), fields
 
 
 def messages_as_dicts(messages):
