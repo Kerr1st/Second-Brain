@@ -208,8 +208,9 @@ def capture(*, dry_run=False, ide=True, cli=True, max_sessions=None) -> dict:
             if url in known and stored.get(url) == fingerprint:
                 counters["unchanged"] += 1
                 continue
-            transcript = kiro_sessions.transcript_path(path)
-            candidates.append((transcript.stat().st_mtime_ns, "v2", path, url, fingerprint))
+            # Recency from the fingerprint just taken (meta_mtime:meta_size:transcript_mtime:size):
+            # a second stat() could race a rotating transcript and abort the whole channel.
+            candidates.append((int(fingerprint.split(":")[2]), "v2", path, url, fingerprint))
         candidates.sort(key=lambda c: c[0], reverse=True)  # newest first across both stores
         counters["candidates"] = len(candidates)
 

@@ -365,6 +365,20 @@ class TestLoadSkimRecords:
         st.fetch_window_records.assert_called_once_with(STARTED - timedelta(days=2), SKIM_MODEL, PROMPT_VERSION)
         cw.assert_called_once_with(recs, model=SKIM_MODEL, prompt_version=PROMPT_VERSION)
 
+    def test_backlog_ids_reach_the_window_query(self):
+        orch = _orch()
+        skim = SkimResult(docs_total=2, skimmed=2, model=SKIM_MODEL, prompt_version=PROMPT_VERSION)
+        skim.backlog_ids = ["f" * 8 + "-0000-0000-0000-000000000000"]
+        db = MagicMock()
+        db.get_previous_run_started_at.return_value = STARTED - timedelta(days=2)
+        with patch("src.dream_cycle.stages.skim_stage.skim_store") as st, \
+             patch("src.dream_cycle.stages.skim_stage.cluster_window"), \
+             patch("src.dream_cycle.orchestrator.dream_cycle_db", db):
+            st.fetch_window_records.return_value = [_skim_record("a")]
+            orch._load_skim_records(skim, "run-s", "scheduled", STARTED)
+        st.fetch_window_records.assert_called_once_with(STARTED - timedelta(days=2), SKIM_MODEL, PROMPT_VERSION,
+                                                        extra_ids=skim.backlog_ids)
+
     def test_store_failure_and_clustering_failure_are_non_fatal(self, caplog):
         orch = _orch()
         skim = SkimResult(docs_total=2, skimmed=2, model=SKIM_MODEL, prompt_version=PROMPT_VERSION)

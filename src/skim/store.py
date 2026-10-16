@@ -214,7 +214,7 @@ def fetch_window_records(window_start: datetime, model: str, prompt_version: str
     (``SkimResult.backlog_ids``: their earlier skim call failed), so they reach
     this run's inventory instead of staying invisible to it.
     """
-    extra = _ids(extra_ids or [])
+    extra = list(dict.fromkeys(_ids(extra_ids or [])))
     window_sql, window_params = ("(m.created_at >= %s OR m.id = ANY(%s::uuid[]))", (window_start, extra)) \
         if extra else ("m.created_at >= %s", (window_start,))
     with get_connection() as conn:

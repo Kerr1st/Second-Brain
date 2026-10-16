@@ -53,6 +53,10 @@ DEFAULT_TIMEOUT_S = 120
 #: earlier pass had in scope but failed to store, and how many to retry per run.
 DEFAULT_BACKLOG_LOOKBACK_DAYS = 14
 DEFAULT_BACKLOG_MAX_DOCS = 20
+#: A skim row counts as proof that an earlier pass had a window covering later
+#: arrivals only if it was written within this long of its own arrival. Normal
+#: windows are <= 3 days (Fri -> Mon); backlog rows for old docs are older than this.
+BACKLOG_COVER_MAX_GAP = timedelta(days=7)
 #: Tier for the single retry of an empty reply (the stage itself asks for Flex).
 RETRY_SERVICE_TIER = "default"
 
@@ -187,10 +191,15 @@ def _select_backlog(window_start: datetime, model: str, prompt_version: str, *, 
     # Skimmed arrivals by arrival time, with the running latest skim time: for a
     # missing D, a covering pass exists iff some skimmed A with A.created_at <=
     # D.created_at was skimmed at or after D.created_at.
+    # Only rows written within BACKLOG_COVER_MAX_GAP of their arrival count as
+    # coverage: a row the backlog itself wrote days later for an old failed doc
+    # proves nothing about the docs after it (they may have arrived while the skim
+    # was disabled), so it must not seed further re-skims.
     skimmed = sorted(
         (created, rows[i].get("created_at"))
         for i, created in prior
         if i in rows and isinstance(rows[i].get("created_at"), datetime)
+        and rows[i]["created_at"] - created <= BACKLOG_COVER_MAX_GAP
     )
     arrival_times = [c for c, _ in skimmed]
     latest_skim: list[datetime] = []

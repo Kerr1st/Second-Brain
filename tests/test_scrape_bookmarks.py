@@ -831,7 +831,7 @@ class TestInternalAuthRouting:
                    "https://amazon.coupahost.com/x"]
         ledger = self._ledger(tmp_path)
         from datetime import datetime, timedelta, timezone
-        for days_ago in (2, 1):                               # 2 strikes on 2 days, 1 more = cool-off
+        for days_ago in (3, 2):                               # 2 strikes on 2 days (DST-safe), 1 more = cool-off
             ledger.record(foreign[0], "auth", now=datetime.now(timezone.utc) - timedelta(days=days_ago))
         ledger.save()
         wiki = "https://w.amazon.com/bin/view/Ok"

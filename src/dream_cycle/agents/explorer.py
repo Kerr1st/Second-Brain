@@ -163,7 +163,7 @@ def pre_budget_summary(slices: list[MemorySlice], raw_count: int) -> dict:
     ("none of its N memory ids resolve") can be diagnosed from the run row."""
     out = []
     for s in slices[:PRE_BUDGET_MAX_SLICES]:
-        ids = [str(m) for m in (s.memory_ids or [])] if isinstance(s.memory_ids, (list, tuple)) else []
+        ids = [str(m)[:64] for m in (s.memory_ids or [])] if isinstance(s.memory_ids, (list, tuple)) else []
         out.append({"name": str(s.name)[:120], "strategy": str(s.strategy)[:60],
                     "requested": len(ids), "memory_ids": ids[:PRE_BUDGET_MAX_IDS]})
     return {"raw_slices": raw_count, "parsed_slices": len(slices), "slices": out}

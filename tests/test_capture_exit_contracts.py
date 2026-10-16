@@ -489,7 +489,7 @@ class TestMainExitCodes:
         sb = self._bookmarks(tmp_path, monkeypatch, urls)
         ledger = Ledger.load()
         from datetime import datetime, timedelta, timezone
-        for days_ago in (2, 1):                         # P0 already has two strikes (2 days)
+        for days_ago in (3, 2):                         # P0 already has two strikes (2 days; DST-safe)
             ledger.record(urls[0][1], "timeout", now=datetime.now(timezone.utc) - timedelta(days=days_ago))
         ledger.save()
         monkeypatch.setattr(sb, "scrape_with_cookies", lambda name, url: "timeout")

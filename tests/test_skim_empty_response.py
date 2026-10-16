@@ -348,12 +348,20 @@ class TestBacklog:
         failed = [_doc(None, _hours(24 * 13 - i)) for i in range(1, 31)]
         too_old = _doc("o" * 8, _hours(24 * 15))  # outside the 14-day lookback, no row
         store = _Store([anchor, too_old, *failed])
-        store.add_row(anchor["id"], _hours(1))
+        store.add_row(anchor["id"], _hours(24 * 11))  # the pass that covered [anchor, -11d]
         res = _skim_store(store, _Client(*[_tool_reply() for _ in range(25)]))
         assert res.backlog == runner.DEFAULT_BACKLOG_MAX_DOCS == 20
         newest_first = sorted(failed, key=lambda d: d["created_at"], reverse=True)
         assert res.backlog_ids == [d["id"] for d in newest_first[:20]]
         assert too_old["id"] not in res.backlog_ids
+
+    def test_backlog_written_rows_do_not_seed_more_reskims(self):
+        # F failed 10 days ago and was backlog-skimmed an hour ago; G arrived after F
+        # while the skim was disabled. F's late row must not make G look "failed before".
+        f, g = _doc("f" * 8, _hours(24 * 10)), _doc("g" * 8, _hours(24 * 9))
+        store = _Store([f, g])
+        store.add_row(f["id"], _hours(1))
+        assert _skim_store(store, _Client()).backlog == 0
 
     def test_disabled_and_fetch_docs_override_skip_the_backlog(self):
         store, *_ = self._previous_pass()
