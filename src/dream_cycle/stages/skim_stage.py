@@ -37,7 +37,12 @@ def _load_skim_records(self, skim: SkimResult | None, run_id: str, run_type: str
         return []
     try:
         window_start = ledger.arrival_window_start(run_id, run_type, started_at, dcdb=self.db)
-        records = skim_store.fetch_window_records(window_start, skim.model, skim.prompt_version)
+        backlog_ids = list(getattr(skim, "backlog_ids", None) or [])
+        if backlog_ids:  # earlier-window docs whose skim failed before, skimmed by this run
+            records = skim_store.fetch_window_records(window_start, skim.model, skim.prompt_version,
+                                                      extra_ids=backlog_ids)
+        else:
+            records = skim_store.fetch_window_records(window_start, skim.model, skim.prompt_version)
     except Exception:
         logger.warning("Skim records unavailable for the window (non-fatal); the Explorer gets the manifest",
                        exc_info=True)

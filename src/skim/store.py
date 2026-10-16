@@ -202,14 +202,21 @@ def missing_ids(memory_ids: Iterable[Any], model: str, prompt_version: str) -> l
 
 
 def fetch_window_records(window_start: datetime, model: str, prompt_version: str,
-                         limit: int = 5000) -> list[dict]:
+                         limit: int = 5000, extra_ids: Iterable[Any] | None = None) -> list[dict]:
     """Skim records for the arrivals in a window, joined with the memory row —
     the input of the Phase 3 arrivals inventory.
 
     Each item: ``id, title, source_type, created_at, skim, cluster_id, truncated``,
     newest arrival first. Uses :data:`ARRIVALS_FILTER_SQL` so a superseded or
     dream-cycle memory never re-enters the inventory through its skim.
+
+    ``extra_ids`` adds earlier-window arrivals skimmed by this run's backlog pass
+    (``SkimResult.backlog_ids``: their earlier skim call failed), so they reach
+    this run's inventory instead of staying invisible to it.
     """
+    extra = _ids(extra_ids or [])
+    window_sql, window_params = ("(m.created_at >= %s OR m.id = ANY(%s::uuid[]))", (window_start, extra)) \
+        if extra else ("m.created_at >= %s", (window_start,))
     with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -218,12 +225,12 @@ def fetch_window_records(window_start: datetime, model: str, prompt_version: str
                        s.skim, s.cluster_id, s.truncated
                 FROM memory_skim s
                 JOIN memories m ON m.id = s.memory_id
-                WHERE m.created_at >= %s AND s.model = %s AND s.prompt_version = %s
+                WHERE {window_sql} AND s.model = %s AND s.prompt_version = %s
                   AND {arrivals_filter_sql('m.')}
                 ORDER BY m.created_at DESC
                 LIMIT %s
                 """,
-                (window_start, model, prompt_version, limit),
+                (*window_params, model, prompt_version, limit),
             )
             rows = [dict(r) for r in cur.fetchall()]
     for r in rows:

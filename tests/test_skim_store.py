@@ -164,6 +164,16 @@ class TestWindowAndSummary:
         assert rows == [{"id": str(a), "title": "T", "source_type": "article", "created_at": WINDOW,
                          "skim": {"summary": "s"}, "cluster_id": "c1", "truncated": False}]
 
+    def test_fetch_window_records_includes_backlog_ids(self):
+        b = str(uuid4())
+        get_conn, _, cur = _conn(fetchall=[])
+        with patch("src.skim.store.get_connection", get_conn):
+            store.fetch_window_records(WINDOW, MODEL, PV, extra_ids=[b, b])
+        sql, params = cur.execute.call_args[0]
+        assert "(m.created_at >= %s OR m.id = ANY(%s::uuid[]))" in sql
+        assert store.arrivals_filter_sql("m.") in sql
+        assert params == (WINDOW, [b], MODEL, PV, 5000)
+
     def test_run_summary_shape(self):
         rid = str(uuid4())
         get_conn, _, cur = _conn(fetchone=(12, 1, 30000, 4000, 0.0123))
