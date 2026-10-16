@@ -63,7 +63,7 @@ import os
 import re
 from typing import TYPE_CHECKING, Any, Optional
 
-from src.backends.direct_api import DirectApiInvoker
+from src.backends.direct_api import DirectApiInvoker, EmptyModelResponse
 
 if TYPE_CHECKING:
     pass
@@ -195,6 +195,9 @@ class BedrockInvoker(DirectApiInvoker):
 
     BACKEND_NAME: str = "bedrock"
     DEFAULT_MODEL: str = ""  # metered → must be set explicitly
+    #: ``invoke(..., service_tier=<tier>)`` overrides the constructor's tier for
+    #: one call (the skim's retry of an empty Flex reply on ``"default"``).
+    SUPPORTS_SERVICE_TIER_OVERRIDE: bool = True
 
     def __init__(
         self,
@@ -367,6 +370,22 @@ class BedrockInvoker(DirectApiInvoker):
         }
 
     # ------------------------------------------------------------------ #
+    # Provider hook: per-call request overrides                          #
+    # ------------------------------------------------------------------ #
+    def _provider_call_options(self, **adapter_opts) -> dict:
+        """``{"service_tier": <tier>}`` when the call overrides the tier, else ``{}``.
+
+        ``None`` (or absent) keeps the constructor's tier; anything else must be
+        one of :data:`SERVICE_TIERS`.
+        """
+        tier = adapter_opts.get("service_tier")
+        if tier is None:
+            return {}
+        if tier not in SERVICE_TIERS:
+            raise ValueError(f"service_tier must be one of {sorted(SERVICE_TIERS)}, got {tier!r}")
+        return {"service_tier": tier}
+
+    # ------------------------------------------------------------------ #
     # Provider hook: Converse request construction                       #
     # ------------------------------------------------------------------ #
     def _invoke_provider(
@@ -377,6 +396,7 @@ class BedrockInvoker(DirectApiInvoker):
         effort: str | None,
         timeout: int,
         structured_schema: Optional[dict],
+        service_tier: str | None = None,
     ) -> Any:
         """Build and execute the Converse API call (or InvokeModel fallback).
 
@@ -426,9 +446,10 @@ class BedrockInvoker(DirectApiInvoker):
         if structured_schema is not None:
             kwargs.update(structured_schema)
 
-        # --- Service tier (Flex for the skim stage) ---
-        if self._service_tier is not None:
-            kwargs["serviceTier"] = {"type": self._service_tier}
+        # --- Service tier (Flex for the skim stage; a per-call override wins) ---
+        tier = service_tier if service_tier is not None else self._service_tier
+        if tier is not None:
+            kwargs["serviceTier"] = {"type": tier}
 
         # --- Effort / reasoning control (Req 11) ---
         # Where the model exposes a native reasoning control, map effort onto
@@ -632,7 +653,22 @@ class BedrockInvoker(DirectApiInvoker):
             for block in content_blocks
             if "text" in block
         ]
-        return "".join(text_parts)
+        text = "".join(text_parts)
+        if not text.strip():
+            # No tool call and no text: a provider-side non-answer (seen live as
+            # zero usage + empty content, triage I1 — stop reasons such as
+            # malformed_tool_use / malformed_model_output). Raise it typed, with
+            # the stop reason, instead of letting "" reach the JSON backstop.
+            # (Refusal stop reasons never get here — the base maps them to
+            # ModelRefusalError first; max_tokens is handled above.)
+            stop_reason = response.get("stopReason") if isinstance(response, dict) else None
+            block_kinds = sorted({k for b in content_blocks if isinstance(b, dict) for k in b})
+            raise EmptyModelResponse(
+                f"Bedrock returned no text or tool output for model {self.model!r} "
+                f"(stopReason={stop_reason!r}, content blocks={block_kinds or 'none'})",
+                stop_reason=stop_reason if isinstance(stop_reason, str) else None,
+            )
+        return text
 
     # ------------------------------------------------------------------ #
     # Provider hook: usage extraction (Req 6)                            #

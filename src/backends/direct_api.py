@@ -49,6 +49,26 @@ from src.backends.base import (
 logger = logging.getLogger(__name__)
 
 
+class EmptyModelResponse(RuntimeError, ValueError):
+    """The provider answered but returned no usable content (no text, no tool call).
+
+    Raised instead of handing ``""`` to the JSON backstop, so the failure is
+    typed and carries the provider's ``stop_reason`` (e.g. ``malformed_tool_use``,
+    ``malformed_model_output``, ``end_turn``). Explicit refusals
+    (content filter / guardrail / refusal) stay :class:`ModelRefusalError`, and a
+    ``max_tokens`` stop stays the existing truncation ``RuntimeError``.
+
+    It subclasses both ``RuntimeError`` (a provider-side non-answer, retryable
+    like a transport failure) and ``ValueError`` (what the same condition raised
+    before, as a JSON-parse failure), so every existing handler that caught the
+    old ``ValueError`` — or a ``RuntimeError`` — still catches it.
+    """
+
+    def __init__(self, message: str, *, stop_reason: str | None = None):
+        super().__init__(message)
+        self.stop_reason = stop_reason
+
+
 class DirectApiInvoker:
     """Template-method base for direct-API (tool-less) backends.
 
@@ -127,6 +147,11 @@ class DirectApiInvoker:
         try:
             # --- Structured-output shaping ---
             structured_schema = self._shape_structured_output(**adapter_opts)
+            # Per-call provider options (e.g. Bedrock's service-tier override).
+            # Empty by default, so adapters that don't take them are unaffected.
+            provider_opts = self._provider_call_options(**adapter_opts)
+            if provider_opts.get("service_tier"):
+                metrics["requested_tier"] = provider_opts["service_tier"]
 
             # --- Timed provider call ---
             try:
@@ -136,6 +161,7 @@ class DirectApiInvoker:
                     effort=effort,
                     timeout=timeout,
                     structured_schema=structured_schema,
+                    **provider_opts,
                 )
             except Exception as exc:
                 mapped = self._map_exception(exc)
@@ -167,6 +193,11 @@ class DirectApiInvoker:
                         metrics[metric_key] = usage[usage_key]
             try:
                 stop_reason = response.get("stopReason") if isinstance(response, dict) else None
+                # Observability (triage I1): the provider's stop reason and the
+                # tier the call was actually served on, on every metrics line.
+                metrics["stop_reason"] = stop_reason if isinstance(stop_reason, str) else None
+                served_tier = usage.get("serviceTier") if isinstance(usage, dict) else None
+                metrics["served_tier"] = served_tier if isinstance(served_tier, str) else None
                 if stop_reason in {"content_filtered", "guardrail_intervened", "refusal"}:
                     raise ModelRefusalError(f"Provider refused completion ({stop_reason})")
                 raw = self._extract_raw(response)
@@ -224,6 +255,8 @@ class DirectApiInvoker:
             "usage_source": None,
             "real_input_tokens": None,
             "real_output_tokens": None,
+            "stop_reason": None,
+            "served_tier": None,
             "latency_s": None,
         }
 
@@ -322,3 +355,12 @@ class DirectApiInvoker:
         The default returns ``None`` (no structured output).
         """
         return None
+
+    def _provider_call_options(self, **adapter_opts) -> dict:
+        """Extra keyword arguments for this call's :meth:`_invoke_provider`.
+
+        Adapters override this for per-call request overrides (Bedrock: a
+        ``service_tier`` override). The default returns ``{}``, so adapters whose
+        ``_invoke_provider`` takes no extra keywords are never passed any.
+        """
+        return {}
