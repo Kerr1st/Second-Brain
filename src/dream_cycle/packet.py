@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import logging
 import psycopg2
+import re
 import uuid
 
 from src.db import get_memories_by_ids, iso as _iso
-from src.dream_cycle.storage import is_mutable_target
+from src.dream_cycle.storage import canonical_uuid, is_mutable_target
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,100 @@ def build_packet(memories: list[dict]) -> list[dict]:
             remaining -= len(entry["content"])
         entries.append(entry)
     return entries
+
+
+#: Short per-packet memory refs ("m1".."mN") the Thinker cites instead of
+#: 36-char UUIDs. On 2026-10-16 the Thinker copied
+#: 1264ac24-b8f6-472c-b5bd-107b793d836a as ...-107b835b5e9c (last 12 hex chars
+#: rewritten) and two otherwise-valid candidates were blocked before judging.
+REF_PREFIX = "m"
+_REF_RE = re.compile(rf"^{REF_PREFIX}[1-9]\d*$")
+#: A bracketed ref group in prose: "[m3]" or "[m3, m5]".
+_TEXT_REF_GROUP_RE = re.compile(rf"\[\s*{REF_PREFIX}\d+(?:\s*[,;]\s*{REF_PREFIX}\d+)*\s*\]", re.IGNORECASE)
+_TEXT_REF_RE = re.compile(rf"{REF_PREFIX}\d+", re.IGNORECASE)
+#: Free-text candidate fields that may cite memories in prose.
+_TEXT_FIELDS = ("title", "content", "confidence_reasoning", "schema_note", "supersedes_reason")
+
+
+def assign_refs(entries: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """Give each packet entry a short stable ref, in packet order.
+
+    Returns the entries with ``"ref"`` as their first key and the ref -> memory
+    id map used to resolve the Thinker's citations. Refs are per packet: "m3" in
+    one slice's packet means nothing in another's.
+    """
+    ref_map: dict[str, str] = {}
+    out: list[dict] = []
+    for i, entry in enumerate(entries, start=1):
+        ref = f"{REF_PREFIX}{i}"
+        ref_map[ref] = str(entry["id"])
+        out.append({"ref": ref, **{k: v for k, v in entry.items() if k != "ref"}})
+    return out, ref_map
+
+
+def resolve_memory_ref(value, ref_map: dict[str, str]):
+    """Map one cited id to its packet memory id; anything else is returned unchanged.
+
+    A packet ref ("m3", tolerated as "M3" or "[m3]") becomes its memory's id. A
+    full UUID of a packet memory is accepted too (backward compatible) and
+    returned in canonical form. Every other value — an unknown ref, a corrupted
+    or out-of-packet UUID, a non-string — passes through untouched so
+    ``authorize_candidate`` still blocks it. No fuzzy matching, ever.
+    """
+    if not isinstance(value, str):
+        return value
+    key = value.strip().strip("[]").strip().lower()
+    if _REF_RE.match(key) and key in ref_map:
+        return ref_map[key]
+    canonical = canonical_uuid(value.strip())
+    if canonical is not None and canonical in {canonical_uuid(mid) for mid in ref_map.values()}:
+        return canonical
+    return value
+
+
+def _resolve_text_refs(text, ref_map: dict[str, str]):
+    """Replace bracketed in-packet refs in prose ("[m3]" -> "[<uuid>]"); unknown refs stay."""
+    if not isinstance(text, str) or not ref_map:
+        return text
+
+    def group(match: re.Match) -> str:
+        return _TEXT_REF_RE.sub(lambda m: ref_map.get(m.group(0).lower(), m.group(0)), match.group(0))
+
+    return _TEXT_REF_GROUP_RE.sub(group, text)
+
+
+def resolve_candidate_refs(raw, ref_map: dict[str, str]):
+    """Return a copy of one raw Thinker candidate with packet refs mapped to memory ids.
+
+    Id fields: ``source_memories[]``, ``target_memory_id`` and
+    ``relationships[].target_id``. Prose fields (title, content,
+    confidence_reasoning, schema_note, supersedes_reason, relationships[].note)
+    have bracketed refs replaced so a stored candidate or digest never carries a
+    ref. Non-dict input, and fields of an unexpected shape, are returned as-is
+    for the existing parser and gate to handle.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    out = dict(raw)
+    if isinstance(out.get("source_memories"), list):
+        out["source_memories"] = [resolve_memory_ref(m, ref_map) for m in out["source_memories"]]
+    if out.get("target_memory_id") is not None:
+        out["target_memory_id"] = resolve_memory_ref(out["target_memory_id"], ref_map)
+    if isinstance(out.get("relationships"), list):
+        rels = []
+        for rel in out["relationships"]:
+            if isinstance(rel, dict):
+                rel = dict(rel)
+                if "target_id" in rel:
+                    rel["target_id"] = resolve_memory_ref(rel["target_id"], ref_map)
+                if "note" in rel:
+                    rel["note"] = _resolve_text_refs(rel["note"], ref_map)
+            rels.append(rel)
+        out["relationships"] = rels
+    for field in _TEXT_FIELDS:
+        if field in out:
+            out[field] = _resolve_text_refs(out[field], ref_map)
+    return out
 
 
 def format_sources_for_evaluator(cache: dict[str, dict], source_ids) -> str:

@@ -94,6 +94,18 @@ in the packet) is immutable: cite it in source_memories or relationships and \
 use CREATE instead. A candidate that targets an immutable memory is discarded \
 unjudged.
 
+## Citing memories by ref
+
+Every memory in memory_slice.memories has a short "ref" ("m1", "m2", …). \
+Cite memories by ref, never by copying the 36-character id: in \
+source_memories, in target_memory_id and in every relationships[].target_id \
+write the ref exactly as given (e.g. "m3"). In prose — content, title, \
+schema_note, confidence_reasoning, supersedes_reason and relationship notes — \
+write refs in square brackets, e.g. [m3] or [m3, m5]. Only memories in \
+memory_slice.memories have refs and only they may be cited, targeted or \
+related to. (A memory's full "id" is still given for tool calls such as \
+memory_graph; do not use it in your output.)
+
 ## Depth framework
 
 Every candidate MUST include:
@@ -147,16 +159,16 @@ Return a JSON array of 0-2 CandidateInsight objects per memory slice:
     "title": "Concise, specific title",
     "type": "insight | connection | question | synthesis",
     "operation": "CREATE | UPDATE | SUPERSEDE",
-    "target_memory_id": "uuid (for UPDATE/SUPERSEDE only, null for CREATE)",
+    "target_memory_id": "ref, e.g. m4 (for UPDATE/SUPERSEDE only, null for CREATE)",
     "supersedes_reason": "Why the old memory is being replaced (SUPERSEDE only, null otherwise)",
     "schema_operation": "assimilation | accommodation",
     "schema_note": "Which existing principle this reinforces or what needs to change",
     "confidence": "high | medium | low",
     "confidence_reasoning": "Why this confidence level — what would change it?",
     "content": "Full insight text with WHAT, EVIDENCE, WHY IT MATTERS, and Questions this answers",
-    "source_memories": ["uuid1", "uuid2"],
+    "source_memories": ["m1", "m3"],
     "relationships": [
-      {"target_id": "uuid", "relation_type": "extends|contradicts|supports", "note": "..."}
+      {"target_id": "m2", "relation_type": "extends|contradicts|supports", "note": "..."}
     ],
     "strategy_that_found_it": "e.g., cross_project_collision"
   }
