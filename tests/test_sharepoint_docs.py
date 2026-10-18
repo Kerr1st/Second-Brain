@@ -899,6 +899,44 @@ def test_fallback_walk_is_bounded_and_runs_once_per_site(tmp_path, monkeypatch):
     assert grasp.calls.count("list_library_files") == 1
 
 
+class EmptyPagesForever(SearchMisses):
+    """list_library_files answers an empty page with the same nextPageToken forever."""
+    async def call_json(self, tool, params):
+        if tool == "list_library_files":
+            self.calls.append(tool)
+            return {"items": [], "nextPageToken": "same"}
+        return await super().call_json(tool, params)
+
+
+def test_walk_call_count_is_bounded_on_empty_pages_with_a_token(tmp_path):
+    url = doc_link("Quality engineering Questions.docx", GUID_A, site="AmazonQ-CSS", kind="w")
+    grasp = EmptyPagesForever(qe_items())
+    summary, _ = run([("x", url)], grasp, tmp_root=str(tmp_path))
+    walk_calls = sum(grasp.calls.count(t) for t in ("list_sharepoint_sites", "list_sharepoint_site_libraries",
+                                                    "list_library_files"))
+    assert walk_calls <= sp.MAX_WALK_CALLS
+    assert grasp.calls.count("list_library_files") <= 2      # an empty page ends that folder's paging
+    assert summary["results"][url].outcome == "unresolved"   # not deferred-by-budget
+
+
+def test_walk_call_cap_marks_the_walk_incomplete(tmp_path, monkeypatch):
+    monkeypatch.setattr(sp, "MAX_WALK_CALLS", 2)
+    url = f"{HOST}/:w:/r/sites/AmazonQ-CSS/_layouts/15/Doc.aspx?sourcedoc=%7B{GUID_A.lower()}%7D&action=edit"
+    summary, lines = run([("Quality engineering Questions.docx", url)], SearchMisses(qe_items()),
+                         tmp_root=str(tmp_path))
+    result = summary["results"][url]
+    assert (result.outcome, result.reason) == ("unresolved", "walk_incomplete")
+    assert any("call cap 2" in line for line in lines)
+
+
+def test_rate_limited_walk_of_a_guid_only_bookmark_is_advisory_not_permanent(tmp_path):
+    url = f"{HOST}/:w:/r/sites/AmazonQ-CSS/_layouts/15/Doc.aspx?sourcedoc=%7B{GUID_A.lower()}%7D&action=edit"
+    grasp = SearchMisses(qe_items(), fail_tool=("list_library_files", McpToolError("RATE_LIMIT_EXCEEDED 429")))
+    summary, _ = run([("Quality engineering Questions.docx", url)], grasp, tmp_root=str(tmp_path))
+    result = summary["results"][url]
+    assert (result.outcome, result.reason) == ("unresolved", "walk_incomplete")
+
+
 def test_walk_listing_error_is_not_found_not_fatal(tmp_path):
     url = doc_link("Quality engineering Questions.docx", GUID_A, site="AmazonQ-CSS", kind="w")
     grasp = SearchMisses(qe_items(), fail_tool=("list_library_files", McpToolError("list_library_files: 429")))

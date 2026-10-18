@@ -106,6 +106,13 @@ SEARCH_MAX_RESULTS = 50
 MAX_WALK_ITEMS = 300
 MAX_WALK_DEPTH = 3
 WALK_PAGE_SIZE = 100
+#: Hard cap on grasp listing calls per site walk (items alone don't bound calls:
+#: an empty page with a nextPageToken advances nothing).
+MAX_WALK_CALLS = 40
+
+
+class _WalkCapped(Exception):
+    """The site walk reached MAX_WALK_CALLS."""
 #: grasp's download dir when ``--download-dir`` is ignored (``grasp-mcp serve --help``).
 GRASP_DEFAULT_DOWNLOAD_DIR = os.path.expanduser("~/.config/grasp-mcp/downloads")
 TMP_PREFIX = "sb-spdocs-"
@@ -424,19 +431,29 @@ class SiteWalker:
     (what was listed is kept); a session failure or the deadline propagates."""
 
     def __init__(self, log=print):
-        self._index = {}     # (host, site) -> {GUID: (drive_id, item)}
+        self._index = {}     # (host, site) -> ({GUID: (drive_id, item)}, complete)
         self.calls = 0
+        self._site_calls = 0
         self.log = log
 
     async def find(self, call, ref, names):
-        """The :class:`Resolved` item with the bookmark's GUID and one of ``names``, else None."""
+        """The :class:`Resolved` item with the bookmark's GUID and one of ``names``, else None.
+
+        Raises ``Unresolved("walk_incomplete")`` (advisory, retried next run) when the
+        item is not in the index and the walk did not finish (tool error / rate limit,
+        or a cap), so a recoverable bookmark is never classified as a permanent skip."""
         if ref.sourcedoc is None or not names:
             return None
         key = (ref.host, ref.site)
         if key not in self._index:
             self._index[key] = await self._walk(call, ref)
-        hit = self._index[key].get(ref.sourcedoc)
-        if hit is None or _norm(hit[1].get("name")) not in names:
+        index, complete = self._index[key]
+        hit = index.get(ref.sourcedoc)
+        if hit is None:
+            if not complete:
+                raise Unresolved("walk_incomplete")
+            return None
+        if _norm(hit[1].get("name")) not in names:
             return None
         drive_id, listed = hit
         try:
@@ -450,12 +467,31 @@ class SiteWalker:
         return _to_resolved(drive_id, str(item.get("id") or listed["id"]), item)
 
     async def _list(self, call, tool, params):
+        if self._site_calls >= MAX_WALK_CALLS:
+            raise _WalkCapped()
         self.calls += 1
+        self._site_calls += 1
         reply = await call(tool, params)
         return reply if isinstance(reply, dict) else {}
 
+    async def _pages(self, call, tool, params, key):
+        """Yield each page's ``key`` list, following ``nextPageToken``; stops on an
+        empty page or a repeated token (Graph can return empty pages with a link)."""
+        token, tokens = None, set()
+        while True:
+            page = await self._list(call, tool, {**params, **({"pageToken": token} if token else {})})
+            items = [i for i in page.get(key) or () if isinstance(i, dict)]
+            yield items
+            token = page.get("nextPageToken") or page.get("NextPageToken")
+            if not token or not items or token in tokens:
+                return
+            tokens.add(token)
+
     async def _walk(self, call, ref):
-        index = {}
+        """``(index, complete)``: ``complete`` is False when a cap, a tool error or a
+        rate limit stopped the walk before every listed library/folder was seen."""
+        index, complete = {}, True
+        self._site_calls = 0
         try:
             site_id = None
             for term in _site_terms(ref):
@@ -467,45 +503,52 @@ class SiteWalker:
                     site_id = ids.pop()
                     break
             if site_id is None:
-                return index
-            libs = await self._list(call, "list_sharepoint_site_libraries", {"siteId": site_id, "maxResults": 100})
+                return index, True     # no such site: a complete (empty) answer
+            libraries = []
+            async for page in self._pages(call, "list_sharepoint_site_libraries",
+                                          {"siteId": site_id, "maxResults": 100}, "libraries"):
+                libraries += [lib for lib in page if lib.get("id")]
             seen = 0
-            for lib in libs.get("libraries") or ():
-                if not isinstance(lib, dict) or not lib.get("id"):
-                    continue
+            for lib in libraries:
                 queue = [("root", 0)]
-                while queue and seen < MAX_WALK_ITEMS:
+                while queue:
+                    if seen >= MAX_WALK_ITEMS:
+                        complete = False
+                        break
                     folder, depth = queue.pop(0)
-                    token = None
-                    while seen < MAX_WALK_ITEMS:
-                        params = {"siteId": site_id, "libraryId": lib["id"], "folderId": folder,
-                                  "maxResults": max(1, min(WALK_PAGE_SIZE, MAX_WALK_ITEMS - seen))}
-                        if token:
-                            params["pageToken"] = token
-                        page = await self._list(call, "list_library_files", params)
-                        for item in page.get("items") or ():
-                            if seen >= MAX_WALK_ITEMS:
-                                break
-                            if not isinstance(item, dict) or not item.get("id"):
+                    params = {"siteId": site_id, "libraryId": lib["id"], "folderId": folder,
+                              "maxResults": max(1, min(WALK_PAGE_SIZE, MAX_WALK_ITEMS - seen))}
+                    async for page in self._pages(call, "list_library_files", params, "items"):
+                        for item in page:
+                            if not item.get("id"):
                                 continue
+                            if seen >= MAX_WALK_ITEMS:
+                                complete = False
+                                break
                             seen += 1
                             if item.get("isFolder"):
                                 if depth + 1 <= MAX_WALK_DEPTH:
                                     queue.append((item["id"], depth + 1))
+                                else:
+                                    complete = False
                                 continue
                             guid = _guid((_url_parts(item.get("webUrl"))[2].get("sourcedoc") or [None])[0])
                             if guid:
                                 index.setdefault(guid, (lib["id"], item))
-                        token = page.get("nextPageToken") or page.get("NextPageToken")
-                        if not token:
+                        if seen >= MAX_WALK_ITEMS:
+                            complete = False
                             break
-                if seen >= MAX_WALK_ITEMS:
+                if not complete and seen >= MAX_WALK_ITEMS:
                     break
+        except _WalkCapped:
+            complete = False
+            self.log(f"  SharePoint library walk of {ref.site} stopped (call cap {MAX_WALK_CALLS})")
         except Exception as exc:  # noqa: BLE001 - a listing error ends this site's walk
             if _fatal(exc):
                 raise
+            complete = False
             self.log(f"  SharePoint library walk of {ref.site} stopped ({type(exc).__name__})")
-        return index
+        return index, complete
 
 
 # --------------------------------------------------------------------------- #

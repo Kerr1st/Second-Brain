@@ -36,7 +36,7 @@ reason = "upstream Quick export stale (knowledge_v1.db unchanged since 2026-09-1
 [channels.web_articles]
 # SharePoint documents (bookmarks job, grasp) are also source_type 'article'; a weekly
 # refresh of one must not keep this channel green while Crawlee is dead.
-predicate = "source_type = 'article' AND source_url NOT LIKE 'sharepoint://%'"
+predicate = "source_type = 'article' AND COALESCE(source_url, '') NOT LIKE 'sharepoint://%'"
 max_age_days = 9
 severity = "required"
 
