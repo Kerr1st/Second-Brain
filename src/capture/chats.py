@@ -24,12 +24,16 @@ killed or fails simply leaves the remainder for the next run:
 Legacy ``.chat`` IDE files are a dead channel (newest file 2026-02): only files
 whose identity is not yet stored are parsed and ingested, never refreshed.
 
-Kiro CLI v2 sessions (``sessions/<workspace-hash>/sess_<uuid>/``) share the
-native session format and tree with the IDE store but belong to
-``kiro_cli_chat`` (identity ``kiro-cli://session/<id>``). Those already stored
-as ``kiro_ide_chat`` before the split stay there (and keep refreshing) so no
-session is duplicated across channels; ``sub-executions/`` sub-agent runs are
-never read.
+Kiro CLI v2 sessions (``sessions/<workspace-hash>/<sess_*|cli_*>/`` with a
+``sessions/cli/<id>.history`` prompt history, see
+:func:`src.parsers.kiro_sessions.is_cli_v2_session`) share the native session
+format and tree with the IDE store but belong to ``kiro_cli_chat`` (identity
+``kiro-cli://session/<id>``). The IDE writes ``sess_*`` dirs too; those stay
+``kiro_ide_chat``. A session already stored in the other channel stays there
+(and keeps refreshing) so no session is duplicated across channels;
+``sub-executions/`` sub-agent runs are never read. A ``cli_<uuid>_<suffix>``
+session that resumes a v1 conversation (and structurally contains it) refreshes
+that v1 row instead of creating a second one.
 """
 from __future__ import annotations
 import argparse
@@ -56,6 +60,19 @@ def _legacy_url(identity, source, known):
 def _cli_fingerprint(path: Path) -> str:
     stat = path.stat()
     return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _continues_v1(metadata_path, v1_path: Path) -> bool | None:
+    """Whether a ``cli_<uuid>_*`` session's turns contain its v1 conversation, in order.
+
+    ``None`` when the v1 file is absent (nothing to compare). Structural only:
+    whitespace-normalised turn texts are compared, nothing is logged.
+    """
+    if not v1_path.is_file():
+        return None
+    v1_messages, _ = cli_chat.extract_session_messages(v1_path, strict=True)
+    v1_turns = [(role, " ".join(text.split())) for role, text in v1_messages]
+    return kiro_sessions.contains_conversation(kiro_sessions.conversation_turns(metadata_path), v1_turns)
 
 
 def _inventory(source_type):
@@ -101,9 +118,12 @@ def capture(*, dry_run=False, ide=True, cli=True, max_sessions=None) -> dict:
         raise ValueError("max_sessions must be a positive integer")
     result = {}
     ide_known = None
+    cli_inventory = None
     if ide:
         known, stored = _inventory("kiro_ide_chat")
         ide_known = known
+        cli_inventory = _inventory("kiro_cli_chat")
+        cli_owned = cli_inventory[0]
         items = CaptureBatch()
         metadata = {}
         counters = {"unchanged": 0, "incomplete": 0, "filtered": 0, "deferred": 0, "candidates": 0, "legacy_new": 0}
@@ -140,6 +160,11 @@ def capture(*, dry_run=False, ide=True, cli=True, max_sessions=None) -> dict:
             if kiro_sessions.is_cli_v2_session(path) and url not in known:
                 counters["cli_v2"] = counters.get("cli_v2", 0) + 1  # reported only when non-zero
                 continue
+            # The mirror rule: a session whose identity already lives in kiro_cli_chat
+            # (e.g. retagged there) is never written a second time here.
+            if url not in known and url in cli_owned:
+                counters["owned_by_cli"] = counters.get("owned_by_cli", 0) + 1  # reported only when non-zero
+                continue
             fingerprint = kiro_sessions.fingerprint(path)
             if fingerprint is None:
                 counters["incomplete"] += 1
@@ -165,7 +190,7 @@ def capture(*, dry_run=False, ide=True, cli=True, max_sessions=None) -> dict:
                             ingest=ingest_with_metadata(metadata, refresh=True))
         result["kiro_ide_chat"] = {**stats, **counters}
     if cli:
-        known, stored = _inventory("kiro_cli_chat")
+        known, stored = cli_inventory if cli_inventory is not None else _inventory("kiro_cli_chat")
         items = CaptureBatch()
         metadata = {}
         counters = {"unchanged": 0, "incomplete": 0, "filtered": 0, "deferred": 0, "candidates": 0}
@@ -173,21 +198,20 @@ def capture(*, dry_run=False, ide=True, cli=True, max_sessions=None) -> dict:
         sessions_dir = Path(cli_chat.SESSIONS_DIR)
         paths = sorted(sessions_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime_ns, reverse=True) \
             if sessions_dir.is_dir() else []
+        v1_entries = []  # (path, url, fingerprint); decided after v2 continuations are known
         for path in paths:
             identity = path.stem
             url = _legacy_url(identity, "kiro_cli_chat", known)
-            fingerprint = _cli_fingerprint(path)
-            if url in known and stored.get(url) == fingerprint:
-                counters["unchanged"] += 1
-                continue
-            candidates.append((path.stat().st_mtime_ns, "v1", path, url, fingerprint))
+            v1_entries.append((path, url, _cli_fingerprint(path)))
 
-        # Kiro CLI v2 store: <sessions>/<workspace-hash>/sess_<uuid>/ next to the v1 cli/ dir.
+        # Kiro CLI v2 store: <sessions>/<workspace-hash>/<sess_*|cli_*>/ next to the v1 cli/ dir.
         v2_root = sessions_dir.parent
         v2_paths = [p for p in kiro_sessions.find_sessions(v2_root) if kiro_sessions.is_cli_v2_session(p)] \
             if v2_root.is_dir() else []
         if v2_paths and ide_known is None:
             ide_known, _ = _inventory("kiro_ide_chat")
+        continuations = {}  # v1 url -> (recency_ns, path, fingerprint): newest continuation wins
+        held = set()  # v1 urls whose continuation could not be compared this run
         for path in v2_paths:
             try:
                 sid = kiro_sessions.session_id(path)
@@ -205,12 +229,52 @@ def capture(*, dry_run=False, ide=True, cli=True, max_sessions=None) -> dict:
             if fingerprint is None:
                 counters["incomplete"] += 1
                 continue
+            v1_identity = kiro_sessions.cli_continuation_of(path)
+            if v1_identity is not None and url not in known:
+                v1_url = _legacy_url(v1_identity, "kiro_cli_chat", known)
+                try:
+                    contained = _continues_v1(path, sessions_dir / f"{v1_identity}.jsonl")
+                except Exception:  # noqa: BLE001
+                    logger.warning("Kiro CLI continuation could not be compared; retry next cycle", exc_info=True)
+                    items.failed += 1
+                    # Its v1 row may already hold the continuation: never overwrite it
+                    # with the shorter v1 file while the comparison is unreadable.
+                    held.add(v1_url)
+                    continue
+                if contained is None and v1_url in known:
+                    # The v1 row exists but its file is gone: containment cannot be
+                    # verified, and a new identity could duplicate it. Left for review.
+                    counters["continuation_unverified"] = counters.get("continuation_unverified", 0) + 1
+                    continue
+                if contained:
+                    recency = int(fingerprint.split(":")[2])
+                    previous = continuations.get(v1_url)
+                    if previous is not None:
+                        counters["continuation_superseded"] = counters.get("continuation_superseded", 0) + 1
+                    if previous is None or recency > previous[0]:
+                        continuations[v1_url] = (recency, path, fingerprint)
+                    continue
             if url in known and stored.get(url) == fingerprint:
                 counters["unchanged"] += 1
                 continue
             # Recency from the fingerprint just taken (meta_mtime:meta_size:transcript_mtime:size):
             # a second stat() could race a rotating transcript and abort the whole channel.
             candidates.append((int(fingerprint.split(":")[2]), "v2", path, url, fingerprint))
+        # A continuation that contains its v1 conversation refreshes the v1 identity;
+        # the v1 file is then not a candidate this run (one write per identity).
+        for url, (recency, path, fingerprint) in continuations.items():
+            counters["v1_continued"] = counters.get("v1_continued", 0) + 1
+            if url in known and stored.get(url) == fingerprint:
+                counters["unchanged"] += 1
+                continue
+            candidates.append((recency, "v2", path, url, fingerprint))
+        for path, url, fingerprint in v1_entries:
+            if url in continuations or url in held:
+                continue
+            if url in known and stored.get(url) == fingerprint:
+                counters["unchanged"] += 1
+                continue
+            candidates.append((int(fingerprint.split(":")[0]), "v1", path, url, fingerprint))
         candidates.sort(key=lambda c: c[0], reverse=True)  # newest first across both stores
         counters["candidates"] = len(candidates)
 
