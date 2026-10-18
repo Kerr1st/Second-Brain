@@ -488,3 +488,22 @@ def test_a_complete_walk_replaces_the_site_and_entries_are_bounded(tmp_path, mon
     assert len(cache._load()[key]) == 3                           # capped
     cache.update(key, {GUID: ("d", {"id": "qe", "name": TITLE})}, complete=True)
     assert set(cache._load()[key]) == {GUID}                      # a complete walk drops what it did not list
+
+
+def test_a_walk_cut_by_the_deadline_keeps_its_partial_index_for_the_next_run(tmp_path):
+    path = tmp_path / sp.WALK_INDEX_FILENAME
+    grasp = Grasp(amazonq_css(target_folder=""), libraries=("Documents",))      # qe at the library root
+    real = grasp.call_json
+
+    async def call(tool, params):
+        if tool == "list_library_files" and params["folderId"] != "root":
+            raise sp._BudgetExceeded(tool)                                    # the deadline, mid-walk
+        return await real(tool, params)
+    grasp.call_json = call
+    with pytest.raises(sp._BudgetExceeded):
+        asyncio.run(sp.resolve(call, sp.doc_ref(guid_only()), title=TITLE,
+                               walker=sp.SiteWalker(log=lambda _l: None, cache=_cache(path))))
+    assert _cache(path).lookup("amazon.sharepoint.com/sites/amazonq-css", GUID) == ("Documents", "qe", TITLE)
+    nxt = Grasp(amazonq_css(target_folder=""), libraries=("Documents",))
+    assert resolve(nxt, sp.SiteWalker(log=lambda _l: None, cache=_cache(path))).item_id == "qe"
+    assert nxt.calls == ["get_drive_item"]

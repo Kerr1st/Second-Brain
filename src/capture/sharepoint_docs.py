@@ -118,7 +118,8 @@ WALK_PAGE_SIZE = 100
 #: an empty page with a nextPageToken advances nothing).
 MAX_WALK_CALLS = 250
 #: Minimum gap between two walk listing calls: a burst trips Graph throttling (HTTP 429).
-WALK_PACE_S = float(os.environ.get("SHAREPOINT_WALK_PACE_S", "0.5"))
+#: Clamped to 5 s: the pacing sleep happens outside the per-call deadline bound.
+WALK_PACE_S = min(5.0, max(0.0, float(os.environ.get("SHAREPOINT_WALK_PACE_S", "0.5"))))
 #: grasp rate limits (McpClient): retries per call, cap on one wait, on all waits of
 #: one call and of the whole session (all also bounded by the pass deadline).
 RATE_LIMIT_RETRIES = 3
@@ -621,6 +622,7 @@ class SiteWalker:
         self.log = log
         self.cache = cache
         self.stats = {}
+        self._partial = {}
 
     async def _confirm(self, call, ref, names, drive_id, item_id):
         """The :class:`Resolved` item when ``get_drive_item`` shows the bookmark's GUID and a name of ``names``."""
@@ -667,7 +669,16 @@ class SiteWalker:
             if found is not None:
                 return found
         if key not in self._index:
-            self._index[key] = await self._walk(call, ref)
+            self._partial = {}
+            try:
+                self._index[key] = await self._walk(call, ref)
+            except Exception:
+                # Deadline / session failure mid-walk: keep what was listed for the next
+                # run (each hint is still confirmed by get_drive_item before use).
+                if self.cache is not None and self._partial:
+                    self.cache.update(_cache_key(ref), self._partial, False)
+                    self.cache.save()
+                raise
             if self.cache is not None:
                 self.cache.update(_cache_key(ref), *self._index[key])
                 self.cache.save()
@@ -718,7 +729,7 @@ class SiteWalker:
     async def _walk(self, call, ref):
         """``(index, complete)``: ``complete`` is False when a cap, a tool error or a
         rate limit stopped the walk before every listed library/folder was seen."""
-        index, complete = {}, True
+        index, complete = self._partial, True
         self._site_calls = 0
         progress = {"items": 0, "depth": 0, "libraries": 0}
         try:
