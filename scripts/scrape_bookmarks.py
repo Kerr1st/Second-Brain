@@ -821,6 +821,59 @@ def browser_defer_cause(details, overrides=None):
                      for d, n in sorted(details.items())) or None
 
 
+def sharepoint_doc(url):
+    """True for a SharePoint Office-document bookmark (src/capture/sharepoint_docs.py)."""
+    from src.capture import sharepoint_docs   # stdlib-only at import time (no mcp SDK)
+    return sharepoint_docs.doc_ref(url) is not None
+
+
+#: SharePoint documents not captured this run (unresolved / too_large / failed /
+#: empty / deferred): ``<status-dir>/bookmarks-sharepoint.backlog.json``.
+SHAREPOINT_BACKLOG_JOB = "bookmarks-sharepoint"
+
+
+def run_sharepoint_docs(docs, started):
+    """The SharePoint pass over ``docs`` ([(name, url)]); a summary even when it breaks."""
+    from collections import Counter
+    if not docs:
+        return {"counts": Counter(), "results": {}, "cause": None, "ingest": None}
+    print(f"\n--- SharePoint documents via grasp-mcp ({len(docs)}) ---")
+    try:
+        from src.capture import sharepoint_docs
+        budget = min(sharepoint_docs.RUN_BUDGET_S,
+                     job_deadline_s() - (time.monotonic() - started) - DEADLINE_MARGIN_S)
+        summary = sharepoint_docs.capture_bookmarked_docs(docs, session_left=midway_session_seconds_left(),
+                                                          budget_s=budget)
+    except Exception as exc:  # noqa: BLE001 - advisory: never changes the bookmarks run
+        summary = {"counts": Counter(deferred=len(docs)), "results": {}, "cause": f"error ({type(exc).__name__})",
+                   "ingest": None}
+    counts = summary["counts"]
+    stored = f", stored {summary['ingest']}" if summary.get("ingest") else ""
+    cause = f" — {summary['cause']}" if summary.get("cause") else ""
+    print(f"SharePoint docs: {dict(sorted(counts.items()))}{stored}{cause}")
+    advisories = sharepoint_advisories(summary)
+    if advisories:
+        print(f"WARNING: {advisories} SharePoint document(s) not captured (advisory, no strike): "
+              + sharepoint_cause(summary))
+    return summary
+
+
+def sharepoint_advisories(summary):
+    from src.capture.sharepoint_docs import ADVISORY_OUTCOMES
+    stored_failed = (summary.get("ingest") or {}).get("failed", 0)
+    return sum(summary["counts"].get(k, 0) for k in ADVISORY_OUTCOMES) + stored_failed
+
+
+def sharepoint_cause(summary):
+    """``"unresolved: <name> (not_found); deferred: ... — <cause>"`` (names and reasons, never text)."""
+    from src.capture.sharepoint_docs import ADVISORY_OUTCOMES
+    parts = [f"{r.outcome}: {r.name[:60]} ({r.reason})" for r in summary.get("results", {}).values()
+             if r.outcome in ADVISORY_OUTCOMES]
+    if summary.get("cause"):
+        parts.append(summary["cause"])
+    return "; ".join(parts) or None
+
+
 def canary_outcome(fetch=None):
     """``fetch_internal(CANARY_URL)``'s outcome ("ok", "auth", ...); writes nothing.
     An exception is "failed" (inconclusive)."""
@@ -867,6 +920,10 @@ def main():
     outcomes = {}
     browser = Counter()
 
+    # SharePoint Office documents: read through grasp-mcp (src/capture/sharepoint_docs.py),
+    # never by the cookie/browser paths; every other sharepoint URL stays pre-skipped below.
+    sharepoint = [(n, u) for n, u in internal if sharepoint_doc(u)]
+    internal = [(n, u) for n, u in internal if not sharepoint_doc(u)]
     # Hosts Midway can never sign in to: not fetched, no ledger strike.
     skipped_unsupported = sum(1 for _, u in internal if midway_unsupported(u))
     internal = [(n, u) for n, u in internal if not midway_unsupported(u)]
@@ -1041,6 +1098,10 @@ def main():
               f"403/sign-in (unsupported_auth, no strike): "
               + ", ".join(f"{h} ({n})" for h, n in sorted(unsupported_hosts.items())))
 
+    # SharePoint Office documents (one grasp-mcp session): advisory only, never a
+    # ledger strike, never the job's exit.
+    sharepoint_summary = run_sharepoint_docs(sharepoint, started)
+
     # Public links with Crawlee: bounded batches, total kept under the job deadline.
     budget = job_deadline_s() - (time.monotonic() - started) - DEADLINE_MARGIN_S
     killed_deferred = set()
@@ -1074,15 +1135,20 @@ def main():
         # pre-routed known non-Midway hosts (skipped_unsupported) are expected, not counted.
         report_backlog(unsupported_auth, job=UNSUPPORTED_BACKLOG_JOB,
                        cause=("hosts: " + ", ".join(sorted(unsupported_hosts))) if unsupported_hosts else None)
+    if sharepoint:
+        report_backlog(sharepoint_advisories(sharepoint_summary), job=SHAREPOINT_BACKLOG_JOB,
+                       cause=sharepoint_cause(sharepoint_summary))
     internal_counts = {"ok": ok, "auth": skipped_auth, "too_short": too_short, "failed": fail,
                        "deferred_auth": deferred_auth, "unsupported_auth": unsupported_auth,
                        "browser_ok": browser["ok"], "browser_auth": browser["auth"],
                        "browser_error": browser["error"], "browser_deferred": browser["deferred"],
                        "skipped_personal": skipped_personal, "skipped_invalid_url": skipped_invalid_url}
+    if sharepoint:
+        internal_counts["sharepoint"] = dict(sharepoint_summary["counts"])
     internal_auth = {u for u, c in outcomes.items() if c == "auth" and needs_cookies(u)}
     return run_exit_code(internal_counts, public_stats, outcomes, ledger,
                          eligible=len(pending) - deferred_auth - skipped_unsupported - skipped_personal
-                         - skipped_invalid_url - browser_deadline_deferred,
+                         - skipped_invalid_url - browser_deadline_deferred - len(sharepoint),
                          public_eligible=len(public),
                          skipped_unreachable=len(unreachable), internal_auth=internal_auth)
 
@@ -1158,9 +1224,16 @@ def run_exit_code(internal, public_stats, outcomes, ledger, *, eligible, public_
           f"browser_auth={internal.get('browser_auth', 0)} browser_error={internal.get('browser_error', 0)} "
           f"browser_deferred={internal.get('browser_deferred', 0)} "
           f"skipped_personal={internal.get('skipped_personal', 0)} "
-          f"skipped_invalid_url={internal.get('skipped_invalid_url', 0)} -> exit {1 if reason else 0}"
+          f"skipped_invalid_url={internal.get('skipped_invalid_url', 0)}"
+          + (f" sharepoint={_counts_text(internal['sharepoint'])}" if "sharepoint" in internal else "")
+          + f" -> exit {1 if reason else 0}"
           f"{f' ({reason})' if reason else ' (per-URL outcomes are left to the unreachable ledger)'}")
     return 1 if reason else 0
+
+
+def _counts_text(counts):
+    """``captured:1,unchanged:5`` (sorted), or ``0`` when empty."""
+    return ",".join(f"{k}:{v}" for k, v in sorted(counts.items())) or "0"
 
 
 def _load_ledger():
@@ -1241,7 +1314,8 @@ def report_backlog(deferred, job="bookmarks", cause=None):
     if streak >= limit:
         defaults = {MIDWAY_BACKLOG_JOB: MIDWAY_CAUSE_COOKIE,
                     UNSUPPORTED_BACKLOG_JOB: "unknown internal hosts answer a bare 403/sign-in",
-                    BROWSER_BACKLOG_JOB: "the browser pass deferred URLs"}
+                    BROWSER_BACKLOG_JOB: "the browser pass deferred URLs",
+                    SHAREPOINT_BACKLOG_JOB: "SharePoint documents were not captured"}
         cause = cause or defaults.get(job, "the Crawlee budget is not draining the queue")
         print(f"WARNING: {job} backlog persists — {deferred} URL(s) deferred, {streak} consecutive "
               f"run(s) with deferrals (threshold {limit}); {cause}")

@@ -434,3 +434,72 @@ def test_document_text_never_reaches_the_log(tmp_path, capsys):
     assert summary["counts"] == {"captured": 1} and summary["results"][url].chars > 0
     out = "\n".join(lines) + capsys.readouterr().out + repr(summary)
     assert SECRET not in out and "Plan.docx" in out
+
+
+# --------------------------------------------------------------------------- #
+# scrape_bookmarks wiring                                                      #
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def sb(tmp_path, monkeypatch):
+    import importlib.util
+    import json
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("scrape_bookmarks_sp", root / "scripts" / "scrape_bookmarks.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "CRAWLEE_DIR", str(tmp_path))
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
+    monkeypatch.setenv("SECOND_BRAIN_LOG_DIR", str(tmp_path / "logs"))
+    cookie = tmp_path / "midway-cookie"
+    cookie.write_text("#HttpOnly_midway-auth.amazon.com\tFALSE\t/\tTRUE\t4102444800\tsession\tv\n")
+    monkeypatch.setattr(mod, "MIDWAY_COOKIE_PATH", str(cookie))
+    monkeypatch.setattr(mod, "load_indexed_urls", lambda: set())
+    monkeypatch.setattr(mod, "browser_fetch_pages", lambda urls, budget_s: pytest.fail("no browser"))
+    monkeypatch.setattr(mod, "scrape_with_cookies", lambda name, url: pytest.fail("no cookie fetch"))
+    monkeypatch.setattr(mod, "scrape_with_crawlee", lambda *a, **k: pytest.fail("no crawlee"))
+
+    def bookmarks(urls):
+        path = tmp_path / "Bookmarks"
+        path.write_text(json.dumps({"roots": {"bar": {"type": "folder", "children": [
+            {"type": "url", "name": f"B{i}", "url": u} for i, u in enumerate(urls)]}}}))
+        monkeypatch.setattr(mod, "BOOKMARKS_PATH", str(path))
+    mod.test_bookmarks = bookmarks
+    return mod
+
+
+def test_main_routes_docs_to_grasp_and_leaves_other_sharepoint_pre_skipped(sb, tmp_path, monkeypatch, capsys):
+    import json
+    doc, site = doc_link(AWOS, GUID_A), f"{HOST}/sites/CSCOE/Shared%20Documents/Forms/AllItems.aspx?id=x"
+    sb.test_bookmarks([doc, site])
+    seen = {}
+
+    def fake_capture(docs, *, session_left, budget_s):
+        seen["docs"], seen["session_left"], seen["budget"] = docs, session_left, budget_s
+        result = sp.DocResult(doc, AWOS, outcome="unresolved", reason="not_found")
+        return {"counts": sp.Counter(unresolved=1), "results": {doc: result}, "cause": None, "ingest": None}
+    monkeypatch.setattr(sp, "capture_bookmarked_docs", fake_capture)
+    assert sb.main() == 0                      # an unresolved document never fails the job
+    out = capsys.readouterr().out
+    assert [u for _, u in seen["docs"]] == [doc] and seen["session_left"] > 0 and 0 < seen["budget"] <= sp.RUN_BUDGET_S
+    assert "(1 not fetched: non-Midway sign-in)" in out          # the library view stays pre-skipped
+    assert "eligible=0" in out and "sharepoint=unresolved:1 -> exit 0" in out
+    assert f"WARNING: 1 SharePoint document(s) not captured (advisory, no strike): unresolved: {AWOS} (not_found)" in out
+    state = json.loads((tmp_path / "jobs" / "bookmarks-sharepoint.backlog.json").read_text())
+    assert state["deferred"] == 1 and "not_found" in state["cause"]
+    ledger = tmp_path / "jobs" / "bookmarks.unreachable.json"
+    assert not ledger.exists() or doc not in ledger.read_text()
+
+
+def test_main_sharepoint_pass_error_is_advisory(sb, monkeypatch, capsys):
+    sb.test_bookmarks([doc_link(AWOS, GUID_A)])
+    monkeypatch.setattr(sp, "capture_bookmarked_docs", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    assert sb.main() == 0
+    assert "sharepoint=deferred:1 -> exit 0" in capsys.readouterr().out
+
+
+def test_main_without_sharepoint_docs_keeps_the_summary_line(sb, monkeypatch, capsys):
+    sb.test_bookmarks([f"{HOST}/sites/CSCOE"])
+    monkeypatch.setattr(sp, "capture_bookmarked_docs", lambda *a, **k: pytest.fail("no pass"))
+    assert sb.main() == 0
+    out = capsys.readouterr().out
+    assert "sharepoint=" not in out and "SharePoint" not in out
