@@ -221,8 +221,17 @@ def search_candidates(ref, results):
     return keep
 
 
-def _item_matches(ref, item):
-    if not isinstance(item, dict) or item.get("isFolder") or _norm(item.get("name")) != _norm(ref.name):
+def _item_matches(ref, item, renamed=False):
+    """The item is the bookmark's document: same host and site, a file, and the
+    bookmark's GUID when it has one. The name must match too, except for a
+    renamed file, which needs the GUID."""
+    if not isinstance(item, dict) or item.get("isFolder"):
+        return False
+    if renamed and ref.sourcedoc is None:
+        return False
+    if not renamed and _norm(item.get("name")) != _norm(ref.name):
+        return False
+    if _ext(item.get("name")) is None:
         return False
     host, path, query = _url_parts(item.get("webUrl"))
     if host != ref.host or _site_of_path(path) != ref.site:
@@ -232,26 +241,72 @@ def _item_matches(ref, item):
     return True
 
 
+def _queries(name):
+    """Search queries, in order: the file name, then its stem (grasp's search
+    sometimes misses a name with its extension, or answers 400 on one)."""
+    stem = name.rsplit(".", 1)[0]
+    return [name] + ([stem] if stem and stem != name else [])
+
+
+def _site_hits(ref, results):
+    """Any-title hits on the bookmark's host and site (for a GUID-only match of a renamed file)."""
+    keep = []
+    for hit in results or ():
+        if isinstance(hit, dict) and hit.get("id") and hit.get("driveId"):
+            host, path, _ = _url_parts(hit.get("webUrl"))
+            if host == ref.host and _site_of_path(path) == ref.site:
+                keep.append(hit)
+    return keep
+
+
 async def resolve(call, ref):
-    """The one driveItem the bookmark points at; raises :class:`Unresolved`."""
+    """The one driveItem the bookmark points at; raises :class:`Unresolved`.
+
+    Per query (file name, then stem): exact-title hits on the bookmark's site;
+    when none of them is the document and the bookmark carries a ``sourcedoc``
+    GUID, the other same-site hits whose item GUID matches (a renamed file). A
+    per-call tool error just tries the next query / candidate; a session failure
+    (auth, closed transport) propagates. Candidates are bounded."""
     if ref.name is None:
         raise Unresolved("no_file_name")
-    reply = await call("search_sharepoint_content", {"query": ref.name, "entityTypes": ["driveItem"],
-                                                     "maxResults": SEARCH_MAX_RESULTS})
-    hits = search_candidates(ref, (reply or {}).get("results") if isinstance(reply, dict) else None)
-    if not hits:
-        raise Unresolved("not_found")
-    if len(hits) > MAX_CANDIDATES:
-        raise Unresolved(f"ambiguous ({len(hits)} candidates)")
-    from src.capture.mcp_client import McpToolError
-    matches = {}
-    for hit in hits:
+    matches, tried, errors = {}, set(), 0
+
+    async def check(hits, renamed):
+        for hit in hits:
+            if hit["id"] in tried:
+                continue
+            tried.add(hit["id"])
+            try:
+                item = await call("get_drive_item", {"driveId": hit["driveId"], "itemId": hit["id"]})
+            except Exception as exc:  # noqa: BLE001 - a stale search hit (404) is just not a match
+                if _is_session_failure(exc):
+                    raise
+                continue
+            if _item_matches(ref, item, renamed=renamed):
+                matches[(hit["driveId"], str(item.get("id") or hit["id"]))] = item
+
+    queries = _queries(ref.name)
+    for query in queries:
         try:
-            item = await call("get_drive_item", {"driveId": hit["driveId"], "itemId": hit["id"]})
-        except McpToolError:
-            continue   # a stale search hit (404) is just not a match
-        if _item_matches(ref, item):
-            matches[(hit["driveId"], str(item.get("id") or hit["id"]))] = item
+            reply = await call("search_sharepoint_content", {"query": query, "entityTypes": ["driveItem"],
+                                                             "maxResults": SEARCH_MAX_RESULTS})
+        except Exception as exc:  # noqa: BLE001 - classified here
+            if _is_session_failure(exc):
+                raise
+            errors += 1
+            continue
+        results = (reply or {}).get("results") if isinstance(reply, dict) else None
+        exact = search_candidates(ref, results)
+        if len(exact) > MAX_CANDIDATES:
+            raise Unresolved(f"ambiguous ({len(exact)} candidates)")
+        await check(exact, renamed=False)
+        if not matches and ref.sourcedoc is not None and ref.path is None:
+            ids = {h["id"] for h in exact}
+            await check([h for h in _site_hits(ref, results) if h["id"] not in ids][:MAX_CANDIDATES], renamed=True)
+        if matches:
+            break
+    if errors == len(queries):
+        raise UnsafeDocument("search failed")
     if len(matches) != 1:
         raise Unresolved("not_found" if not matches else f"ambiguous ({len(matches)} matches)")
     (drive_id, item_id), item = next(iter(matches.items()))
@@ -722,9 +777,10 @@ async def process_docs(call, docs, results, *, download_dir, fingerprints, deadl
             result.reason = "budget"
             continue
         started = time.monotonic()
-        save_path = f"{index:03d}.{ref.ext or 'bin'}"
         try:
             resolved = await resolve(call, ref)
+            ext = _ext(resolved.name) or ref.ext       # a renamed file keeps its own format
+            save_path = f"{index:03d}.{ext}"
             result.name, result.size = resolved.name, resolved.size
             result.source_url, result.fingerprint = resolved.source_url, resolved.fingerprint
             if resolved.source_url in seen:
@@ -738,7 +794,7 @@ async def process_docs(call, docs, results, *, download_dir, fingerprints, deadl
                                                         "savePath": save_path, "maxSizeBytes": MAX_DOWNLOAD_BYTES})
                 try:
                     data = _read_download(download_dir, save_path)
-                    text = extract_text(data, ref.ext)
+                    text = extract_text(data, ext)
                 finally:
                     try:
                         os.unlink(os.path.join(download_dir, save_path))
@@ -749,7 +805,7 @@ async def process_docs(call, docs, results, *, download_dir, fingerprints, deadl
                     result.outcome, result.reason = "empty", "no text extracted"
                 else:
                     result.outcome = "captured"
-                    result.markdown = render_markdown(resolved, ref, text, ref.ext)
+                    result.markdown = render_markdown(resolved, ref, text, ext)
             seen.setdefault(resolved.source_url, index)
         except Unresolved as exc:
             result.outcome, result.reason = "unresolved", exc.reason

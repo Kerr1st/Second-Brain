@@ -503,3 +503,38 @@ def test_main_without_sharepoint_docs_keeps_the_summary_line(sb, monkeypatch, ca
     assert sb.main() == 0
     out = capsys.readouterr().out
     assert "sharepoint=" not in out and "SharePoint" not in out
+
+
+def test_renamed_file_resolves_by_guid_only(tmp_path):
+    items = awos_items()
+    items["id-b"]["name"] = "Extended AWOS Framework v2.xlsx"     # renamed since bookmarked
+    grasp = FakeGrasp(items, {"id-b": make_xlsx()})
+    grasp_search = grasp.call_json
+
+    async def stem_search(tool, params):                         # the stem query finds the renamed file
+        if tool == "search_sharepoint_content":
+            params = dict(params, query=params["query"].removesuffix(".xlsx"))
+        return await grasp_search(tool, params)
+    grasp.call_json = stem_search
+    summary, _ = run([("b", doc_link(AWOS, GUID_B))], grasp, tmp_root=str(tmp_path))
+    assert summary["results"][doc_link(AWOS, GUID_B)].source_url == f"sharepoint://{DRIVE}/id-b"
+    # A direct link (no GUID) never matches a different name.
+    exact = f"{HOST}/sites/CSCOE/Shared%20Documents/SOPs/Extended%20AWOS%20Framework.xlsx"
+    summary, _ = run([("d", exact)], FakeGrasp(items), tmp_root=str(tmp_path))
+    assert summary["results"][exact].outcome == "unresolved"
+
+
+def test_search_error_falls_back_to_the_stem_query(tmp_path):
+    grasp = FakeGrasp(awos_items(), {"id-a": make_xlsx()})
+    real = grasp.call_json
+    queries = []
+
+    async def flaky(tool, params):
+        if tool == "search_sharepoint_content":
+            queries.append(params["query"])
+            if params["query"].endswith(".xlsx"):
+                raise McpToolError("search_sharepoint_content: 400 BadRequest")
+        return await real(tool, params)
+    grasp.call_json = flaky
+    summary, _ = run([("a", doc_link(AWOS, GUID_A))], grasp, tmp_root=str(tmp_path))
+    assert queries == [AWOS, AWOS[:-5]] and summary["counts"] == {"captured": 1}
