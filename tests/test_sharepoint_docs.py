@@ -154,11 +154,49 @@ class FakeGrasp:
         from urllib.parse import quote
         return f"{HOST}/sites/{it['site']}/{quote(it.get('folder', 'Shared Documents'))}/{quote(it['name'])}"
 
+    def _folders(self, site):
+        """{folder path within the library: [child folder names]} of ``site``'s items."""
+        tree = {"": set()}
+        for it in self.items.values():
+            if it["site"] != site:
+                continue
+            parts = it.get("folder", "Shared Documents").split("/")[1:]
+            for depth in range(len(parts)):
+                tree.setdefault("/".join(parts[:depth]), set()).add(parts[depth])
+                tree.setdefault("/".join(parts[:depth + 1]), set())
+        return tree
+
+    def _list_library(self, params):
+        site = params["siteId"].removeprefix("site:")
+        folder = "" if params.get("folderId", "root") == "root" else params["folderId"].removeprefix("f:")
+        out = [{"id": f"f:{folder + '/' if folder else ''}{name}", "name": name, "isFolder": True}
+               for name in sorted(self._folders(site).get(folder, ()))]
+        out += [{"id": i, "name": it["name"], "isFolder": False, "size": it["size"],
+                 "lastModifiedDateTime": it["modified"], "webUrl": item_url(it["name"], it["guid"], it["site"])}
+                for i, it in self.items.items()
+                if it["site"] == site and "/".join(it.get("folder", "Shared Documents").split("/")[1:]) == folder]
+        start = int(params.get("pageToken") or 0)
+        size = int(params.get("maxResults") or 25)
+        page = out[start:start + size]
+        return {"items": page, **({"nextPageToken": str(start + size)} if start + size < len(out) else {})}
+
     async def call_json(self, tool, params):
         self.calls.append(tool)
-        assert tool in ("search_sharepoint_content", "get_drive_item", "download_sharepoint_file"), tool
+        assert tool in ("search_sharepoint_content", "get_drive_item", "download_sharepoint_file",
+                        "list_sharepoint_sites", "list_sharepoint_site_libraries", "list_library_files"), tool
+        assert tool in sp.READ_ONLY_TOOLS, tool
         if self.fail_tool and self.fail_tool[0] == tool:
             raise self.fail_tool[1]
+        if tool == "list_sharepoint_sites":
+            names = sorted({it["site"] for it in self.items.values()})
+            term = params.get("searchTerm", "").lower()
+            return {"sites": [{"id": f"site:{n}", "name": n, "webUrl": f"{HOST}/sites/{n}"} for n in names
+                              if term in n.lower() or term in n.lower().replace("-", " ")]}
+        if tool == "list_sharepoint_site_libraries":
+            return {"libraries": [{"id": DRIVE, "name": "Documents",
+                                   "webUrl": f"{HOST}/sites/{params['siteId'].removeprefix('site:')}/Shared%20Documents"}]}
+        if tool == "list_library_files":
+            return self._list_library(params)
         if tool == "search_sharepoint_content":
             return {"results": [{"id": i, "driveId": DRIVE, "title": it["name"], "webUrl": self._web(it),
                                  "lastModified": it["modified"], "size": it["size"]}
@@ -223,12 +261,31 @@ def test_direct_link_without_guid_needs_exact_path_and_ambiguity_is_unresolved(t
     assert (summary["results"][exact].outcome, summary["results"][exact].reason[:9]) == ("unresolved", "ambiguous")
 
 
-def test_nameless_link_is_unresolved_without_calls(tmp_path):
+def test_nameless_link_without_an_office_title_is_a_permanent_skip_without_calls(tmp_path):
     grasp = FakeGrasp(awos_items())
     url = f"{HOST}/:w:/r/sites/CSCOE/_layouts/15/Doc.aspx?sourcedoc=%7B{GUID_A}%7D&action=edit"
-    summary, _ = run([("n", url)], grasp, tmp_root=str(tmp_path))
-    assert (summary["results"][url].outcome, summary["results"][url].reason) == ("unresolved", "no_file_name")
+    summary, lines = run([("n", url)], grasp, tmp_root=str(tmp_path))
+    assert (summary["results"][url].outcome, summary["results"][url].reason) == ("skipped_permanent", "no_file_name")
     assert grasp.calls == []
+    assert [line for line in lines if line.startswith("INFO:")] == [
+        "INFO: 1 SharePoint bookmark(s) can never resolve, skipped (not an advisory): n (no_file_name)"]
+
+
+def test_doc_aspx_without_guid_is_never_resolved_by_name_alone(tmp_path):
+    """B1: one same-named search hit elsewhere in the site must not be captured."""
+    items = {"other": dict(name="Plan.xlsx", site="cscoe", folder="Shared Documents/Archive", guid=GUID_C,
+                           modified="2026-01-01T00:00:00Z", size=100)}
+    grasp = FakeGrasp(items, {"other": make_xlsx()})
+    url = f"{HOST}/sites/cscoe/_layouts/15/Doc.aspx?file=Plan.xlsx"
+    assert sp.doc_ref(url).sourcedoc is None
+    summary, lines = run([("Plan.xlsx", url)], grasp, tmp_root=str(tmp_path))
+    result = summary["results"][url]
+    assert (result.outcome, result.reason, result.source_url) == ("skipped_permanent", "no_guid", None)
+    assert grasp.calls == [] and sum(line.startswith("INFO:") for line in lines) == 1
+    # resolve() itself refuses too (defence in depth), even with a single same-named hit.
+    import asyncio
+    with pytest.raises(sp.Unresolved, match="no_guid"):
+        asyncio.run(sp.resolve(grasp.call_json, sp.doc_ref(url)))
 
 
 # --------------------------------------------------------------------------- #
@@ -303,7 +360,7 @@ def test_extract_xlsx_sheets_shared_strings_and_row_cap(monkeypatch):
     monkeypatch.setattr(sp, "MAX_SHEET_ROWS", 5)
     text = sp.extract_text(make_xlsx(), "xlsx")
     assert "## Sheet: Plan\n| Goal |  | Rich |\n| 42 | TRUE | inline |" in text
-    assert "## Sheet: Data" in text and "| 5 |" in text and "| 6 |" not in text and "[2 more rows not extracted]" in text
+    assert "## Sheet: Data" in text and "| 5 |" in text and "| 6 |" not in text and "[further rows not extracted]" in text
 
 
 @pytest.mark.parametrize("payload", [
@@ -375,14 +432,116 @@ def test_temp_dir_is_private_and_removed_even_on_error(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_sigterm_mid_pass_cleans_up_then_terminates(tmp_path, monkeypatch):
+def test_sigterm_mid_pass_cleans_up_then_exits_143_without_self_kill(tmp_path, monkeypatch):
+    """S2: no os.kill under SIG_DFL (it would skip stdout flush and atexit): SystemExit(143)."""
+    monkeypatch.setattr(sp.os, "kill", lambda pid, sig: pytest.fail("self-kill"))
     killed = []
-    monkeypatch.setattr(sp.os, "kill", lambda pid, sig: killed.append(sig))
-    grasp = FakeGrasp(awos_items(), {"id-a": make_xlsx()}, fail_tool=("download_sharepoint_file", sp._Terminated()))
-    with pytest.raises(SystemExit):
-        run([("a", doc_link(AWOS, GUID_A))], grasp, tmp_root=str(tmp_path))
-    assert killed == [sp.signal.SIGTERM] and list(tmp_path.iterdir()) == []
-    assert sp.signal.getsignal(sp.signal.SIGTERM) is not None
+    monkeypatch.setattr(sp, "_kill_servers", lambda client: killed.append(client))
+    before = sp.signal.signal(sp.signal.SIGTERM, sp.signal.SIG_DFL)
+    try:
+        grasp = FakeGrasp(awos_items(), {"id-a": make_xlsx()},
+                          fail_tool=("download_sharepoint_file", sp._Terminated()))
+        with pytest.raises(SystemExit) as exc:
+            run([("a", doc_link(AWOS, GUID_A))], grasp, tmp_root=str(tmp_path))
+        assert exc.value.code == 143 and killed == [grasp] and list(tmp_path.iterdir()) == []
+        assert sp.signal.getsignal(sp.signal.SIGTERM) == sp.signal.SIG_DFL
+    finally:
+        sp.signal.signal(sp.signal.SIGTERM, before)
+
+
+def test_sigterm_chains_to_a_callable_previous_handler(tmp_path):
+    seen = []
+    before = sp.signal.signal(sp.signal.SIGTERM, lambda signum, frame: seen.append(signum))
+    try:
+        grasp = FakeGrasp(awos_items(), {"id-a": make_xlsx()},
+                          fail_tool=("download_sharepoint_file", sp._Terminated()))
+        summary, _ = run([("a", doc_link(AWOS, GUID_A))], grasp, tmp_root=str(tmp_path))
+        assert seen == [sp.signal.SIGTERM] and summary["counts"] == {"deferred": 1}
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        sp.signal.signal(sp.signal.SIGTERM, before)
+
+
+def test_second_sigterm_during_cleanup_is_recorded_and_cleanup_finishes(tmp_path, monkeypatch):
+    """N2: SIGTERM inside the finally only sets a flag; rmtree and the handler restore complete."""
+    real_rmtree = sp.shutil.rmtree
+
+    def rmtree_with_signal(path, **kw):
+        os.kill(os.getpid(), sp.signal.SIGTERM)     # delivered to the flag-only cleanup handler
+        real_rmtree(path, **kw)
+    monkeypatch.setattr(sp.shutil, "rmtree", rmtree_with_signal)
+    before = sp.signal.signal(sp.signal.SIGTERM, sp.signal.SIG_DFL)
+    try:
+        grasp = FakeGrasp(awos_items(), {"id-a": make_xlsx()})
+        with pytest.raises(SystemExit) as exc:
+            run([("a", doc_link(AWOS, GUID_A))], grasp, tmp_root=str(tmp_path))
+        assert exc.value.code == 143 and list(tmp_path.iterdir()) == []
+        assert sp.signal.getsignal(sp.signal.SIGTERM) == sp.signal.SIG_DFL
+    finally:
+        sp.signal.signal(sp.signal.SIGTERM, before)
+
+
+_SIGTERM_CHILD = r"""
+import asyncio, os, sys, time
+sys.path.insert(0, sys.argv[1])
+import anyio
+from src.capture import sharepoint_docs as sp
+URL = sys.argv[2]
+killed = []
+sp._kill_servers = lambda client: (killed.append(1), print("KILLED", flush=True))
+
+class BusyClient:
+    server_pids = []
+    async def __aenter__(self):
+        self._tg = anyio.create_task_group()
+        await self._tg.__aenter__()
+        self._tg.start_soon(self._busy)     # like the SDK's stdio reader/writer tasks
+        return self
+    async def _busy(self):
+        while True:
+            sum(range(20000))               # busy in the anyio task when SIGTERM lands
+            await asyncio.sleep(0)
+    async def __aexit__(self, *exc):
+        self._tg.cancel_scope.cancel()
+        await self._tg.__aexit__(None, None, None)
+    async def call_json(self, tool, params):
+        print("READY", flush=True)
+        await asyncio.sleep(30)
+
+try:
+    sp.capture_bookmarked_docs([("a", URL)], session_left=7200, save=False, budget_s=60,
+                               client_factory=lambda d: BusyClient(), fingerprints={}, tmp_root=sys.argv[3])
+except SystemExit as exc:
+    print("EXIT", exc.code, type(exc).__name__, flush=True)
+    raise
+except BaseException as exc:
+    print("ESCAPED", repr(exc), flush=True)
+    raise
+print("RETURNED", flush=True)
+"""
+
+
+def test_real_sigterm_while_an_anyio_task_is_busy_kills_servers_and_exits_143(tmp_path):
+    """S1: a real SIGTERM landing in an anyio task is a SystemExit (not a BaseExceptionGroup)."""
+    import signal
+    import subprocess
+    import time
+    root = str(Path(__file__).resolve().parents[1])
+    tmp_root = tmp_path / "t"
+    tmp_root.mkdir()
+    proc = subprocess.Popen([sys.executable, "-c", _SIGTERM_CHILD, root, doc_link(AWOS, GUID_A), str(tmp_root)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "READY"
+        time.sleep(0.3)
+        proc.send_signal(signal.SIGTERM)
+        out, err = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert "ESCAPED" not in out and "BaseExceptionGroup" not in err, (out, err)
+    assert "KILLED" in out and "EXIT 143 SystemExit" in out and proc.returncode == 143, (out, err)
+    assert list(tmp_root.iterdir()) == []
 
 
 def test_stale_dirs_of_a_killed_run_are_swept(tmp_path):
@@ -538,3 +697,225 @@ def test_search_error_falls_back_to_the_stem_query(tmp_path):
     grasp.call_json = flaky
     summary, _ = run([("a", doc_link(AWOS, GUID_A))], grasp, tmp_root=str(tmp_path))
     assert queries == [AWOS, AWOS[:-5]] and summary["counts"] == {"captured": 1}
+
+
+# --------------------------------------------------------------------------- #
+# Budget (S3)                                                                  #
+# --------------------------------------------------------------------------- #
+def test_a_slow_call_is_cut_at_the_remaining_budget(tmp_path, monkeypatch):
+    import asyncio
+    grasp = FakeGrasp(awos_items(), {"id-a": make_xlsx()})
+    real = grasp.call_json
+
+    async def slow(tool, params):
+        if tool == "search_sharepoint_content":
+            await asyncio.sleep(30)
+        return await real(tool, params)
+    grasp.call_json = slow
+    started = __import__("time").monotonic()
+    summary = sp.capture_bookmarked_docs([("a", doc_link(AWOS, GUID_A)), ("b", doc_link(AWOS, GUID_B))],
+                                         session_left=7200, save=False, budget_s=1.5, client_factory=grasp.factory,
+                                         fingerprints={}, log=lambda _l: None, tmp_root=str(tmp_path))
+    assert __import__("time").monotonic() - started < 10
+    assert [(r.outcome, r.reason) for r in summary["results"].values()] == [("deferred", "budget")] * 2
+    assert "budget" in summary["cause"]
+
+
+def test_no_get_drive_item_starts_after_the_deadline(tmp_path, monkeypatch):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(sp.time, "monotonic", lambda: clock["t"])
+    grasp = FakeGrasp(awos_items())
+    real = grasp.call_json
+
+    async def tick(tool, params):
+        reply = await real(tool, params)
+        if tool == "search_sharepoint_content":
+            clock["t"] += 100          # the search used up the budget
+        return reply
+    grasp.call_json = tick
+    summary, _ = run([("a", doc_link(AWOS, GUID_A))], grasp, tmp_root=str(tmp_path))
+    assert summary["counts"] == {"deferred": 1} and "get_drive_item" not in grasp.calls
+
+
+def test_captured_text_is_capped_per_run_and_the_rest_deferred(tmp_path, monkeypatch):
+    monkeypatch.setattr(sp, "MAX_RUN_CHARS", 30)
+    grasp = FakeGrasp(awos_items(), {"id-a": make_xlsx(), "id-b": make_xlsx()})
+    summary, _ = run([("a", doc_link(AWOS, GUID_A)), ("b", doc_link(AWOS, GUID_B))], grasp, tmp_root=str(tmp_path))
+    outcomes = [(r.outcome, r.reason) for r in summary["results"].values()]
+    assert outcomes == [("captured", None), ("deferred", "run_char_cap")]
+
+
+def test_ingest_stops_at_the_deadline_and_defers_the_rest(tmp_path, monkeypatch):
+    results = {u: sp.DocResult(u, u, outcome="captured", source_url=f"sharepoint://d/{u}", fingerprint="f",
+                               markdown=f"# {u}\n\nSource: sharepoint://d/{u}\n\n" + "text " * 20)
+               for u in ("u1", "u2")}
+    stored = []
+    clock = {"t": 0.0}
+    monkeypatch.setattr(sp.time, "monotonic", lambda: clock["t"])
+
+    def ingest(content, source_type, source_url, **kw):
+        stored.append(source_url)
+        clock["t"] = 100.0             # the first document used up the budget
+        return "id"
+    stats = sp._ingest(results, ingest, lambda _l: None, deadline=50.0)
+    assert stored == ["sharepoint://d/u1"] and stats["processed"] == 1
+    assert (results["u2"].outcome, results["u2"].reason) == ("deferred", "budget")
+
+
+# --------------------------------------------------------------------------- #
+# Change detection without a timestamp (N5), stray default downloads (N6)       #
+# --------------------------------------------------------------------------- #
+def test_missing_last_modified_is_always_rechecked(tmp_path):
+    items = awos_items()
+    items["id-a"]["modified"] = ""
+    grasp = FakeGrasp(items, {"id-a": make_xlsx()})
+    source = f"sharepoint://{DRIVE}/id-a"
+    summary, _ = run([("a", doc_link(AWOS, GUID_A))], grasp, fingerprints={source: "spdoc-v1::1000"},
+                     tmp_root=str(tmp_path))
+    assert summary["counts"] == {"captured": 1} and "download_sharepoint_file" in grasp.calls
+
+
+def test_a_download_landing_in_grasps_default_dir_is_removed(tmp_path, monkeypatch):
+    default = tmp_path / "grasp-downloads"
+    default.mkdir()
+    monkeypatch.setattr(sp, "GRASP_DEFAULT_DOWNLOAD_DIR", str(default))
+    keep = default / "002.xlsx"
+    keep.write_bytes(b"pre-existing, not ours")
+    grasp = FakeGrasp(awos_items(), {"id-a": make_xlsx(), "id-b": make_xlsx()})
+
+    async def ignores_download_dir(tool, params):
+        grasp.calls.append(tool)
+        if tool == "download_sharepoint_file":
+            (default / params["savePath"]).write_bytes(b"stray")      # --download-dir ignored
+            return {"saved": params["savePath"]}
+        grasp.calls.pop()
+        return await FakeGrasp.call_json(grasp, tool, params)
+    grasp.call_json = ignores_download_dir
+    tmp_root = tmp_path / "t"
+    tmp_root.mkdir()
+    summary, _ = run([("a", doc_link(AWOS, GUID_A)), ("b", doc_link(AWOS, GUID_B))], grasp, tmp_root=str(tmp_root))
+    assert [r.reason for r in summary["results"].values()] == ["download produced no file"] * 2
+    assert not (default / "001.xlsx").exists()                        # created by this call: removed
+    assert keep.read_bytes() == b"stray"                               # existed before: left alone
+
+
+# --------------------------------------------------------------------------- #
+# XML hardening (N1) and bounded parsing (S6)                                  #
+# --------------------------------------------------------------------------- #
+def test_expat_handlers_refuse_a_dtd_the_regex_misses(monkeypatch):
+    monkeypatch.setattr(sp, "_DTD_RE", __import__("re").compile(rb"(?!)"))     # the regex sees nothing
+    for payload in (b'<?xml version="1.0"?><!DOCTYPE d [<!ENTITY a "x">]><d>&a;</d>',
+                    b'<!DOCTYPE d SYSTEM "file:///etc/passwd"><d/>'):
+        with pytest.raises(sp.UnsafeDocument, match="DTD/entity"):
+            sp.parse_xml(payload)
+        with pytest.raises(sp.UnsafeDocument, match="DTD/entity"):
+            list(sp.iter_rows(payload))
+
+
+def test_worksheet_rows_are_streamed_and_detached():
+    body = "".join(f'<row r="{i}"><c r="A{i}"><v>{i}</v></c></row>' for i in range(1, 2001))
+    data = f'<worksheet {S}><sheetData>{body}</sheetData></worksheet>'.encode()
+    seen = 0
+    for row in sp.iter_rows(data):
+        seen += 1
+        assert len(row) == 1                 # complete when yielded
+    assert seen == 2000
+    # Stopping early stops the parse (the generator is just abandoned).
+    gen = sp.iter_rows(data)
+    assert next(gen).get("r") == "1"
+    gen.close()
+
+
+def test_tree_parsed_parts_have_their_own_cap(monkeypatch):
+    monkeypatch.setattr(sp, "MAX_XML_TREE_BYTES", 100)
+    with pytest.raises(sp.UnsafeDocument, match="tree-parse cap"):
+        sp.extract_text(make_docx(), "docx")
+
+
+# --------------------------------------------------------------------------- #
+# Library-walk fallback (search misses)                                        #
+# --------------------------------------------------------------------------- #
+class SearchMisses(FakeGrasp):
+    async def call_json(self, tool, params):
+        if tool == "search_sharepoint_content":
+            self.calls.append(tool)
+            return {"results": [], "totalCount": 0}
+        return await super().call_json(tool, params)
+
+
+def qe_items(guid=GUID_A, name="Quality engineering Questions.docx", folder="Shared Documents/A/B/C"):
+    return {"qe": dict(name=name, site="AmazonQ-CSS", folder=folder, guid=guid,
+                       modified="2026-05-01T00:00:00Z", size=500),
+            "other": dict(name=name, site="AmazonQ-CSS", folder="Shared Documents/A", guid=GUID_B,
+                          modified="2026-05-01T00:00:00Z", size=500)}
+
+
+def test_fallback_walk_resolves_by_guid_and_exact_name(tmp_path):
+    url = doc_link("Quality engineering Questions.docx", GUID_A, site="AmazonQ-CSS", kind="w")
+    grasp = SearchMisses(qe_items(), {"qe": make_docx()})
+    summary, _ = run([("x", url)], grasp, tmp_root=str(tmp_path))
+    result = summary["results"][url]
+    assert (result.outcome, result.source_url) == ("captured", f"sharepoint://{DRIVE}/qe")
+    assert {"list_sharepoint_sites", "list_sharepoint_site_libraries", "list_library_files"} <= set(grasp.calls)
+    assert grasp.calls[-2:] == ["get_drive_item", "download_sharepoint_file"]
+
+
+def test_fallback_needs_the_guid_and_the_exact_name(tmp_path):
+    url = doc_link("Quality engineering Questions.docx", GUID_C, site="AmazonQ-CSS", kind="w")
+    summary, _ = run([("x", url)], SearchMisses(qe_items()), tmp_root=str(tmp_path))
+    assert summary["results"][url].outcome == "unresolved"                       # no item has the GUID
+    url = doc_link("Quality engineering Questions.docx", GUID_A, site="AmazonQ-CSS", kind="w")
+    grasp = SearchMisses(qe_items(name="Renamed.docx"))
+    summary, _ = run([("x", url)], grasp, tmp_root=str(tmp_path))
+    assert summary["results"][url].outcome == "unresolved"                       # GUID ok, name differs
+    assert "download_sharepoint_file" not in grasp.calls
+
+
+def test_guid_only_bookmark_resolves_by_its_office_title(tmp_path):
+    url = f"{HOST}/:w:/r/sites/AmazonQ-CSS/_layouts/15/Doc.aspx?sourcedoc=%7B{GUID_A.lower()}%7D&action=edit"
+    grasp = SearchMisses(qe_items(), {"qe": make_docx()})
+    summary, _ = run([("Quality engineering Questions.docx", url)], grasp, tmp_root=str(tmp_path))
+    assert summary["results"][url].outcome == "captured" and "search_sharepoint_content" not in grasp.calls
+    # The walk misses it: a permanent skip (never an advisory).
+    summary, _ = run([("Quality engineering Questions.docx", url)], SearchMisses(qe_items(guid=GUID_C)),
+                     tmp_root=str(tmp_path))
+    assert (summary["results"][url].outcome, summary["results"][url].reason) == ("skipped_permanent", "no_file_name")
+
+
+def test_fallback_walk_is_bounded_and_runs_once_per_site(tmp_path, monkeypatch):
+    url = doc_link("Quality engineering Questions.docx", GUID_A, site="AmazonQ-CSS", kind="w")
+    deep = qe_items(folder="Shared Documents/A/B/C/D")                          # depth 4: beyond the walk
+    grasp = SearchMisses(deep)
+    summary, _ = run([("x", url), ("y", doc_link("Quality engineering Questions.docx", GUID_C,
+                                                 site="AmazonQ-CSS", kind="w"))], grasp, tmp_root=str(tmp_path))
+    assert [r.outcome for r in summary["results"].values()] == ["unresolved", "unresolved"]
+    assert grasp.calls.count("list_sharepoint_site_libraries") == 1               # walked once for both
+    monkeypatch.setattr(sp, "MAX_WALK_ITEMS", 2)
+    many = {f"f{i}": dict(name=f"f{i}.docx", site="AmazonQ-CSS", folder="Shared Documents", guid=GUID_B,
+                          modified="m", size=1) for i in range(10)}
+    grasp = SearchMisses({**many, **qe_items(folder="Shared Documents")})
+    summary, _ = run([("x", url)], grasp, tmp_root=str(tmp_path))
+    assert summary["results"][url].outcome == "unresolved"
+    assert grasp.calls.count("list_library_files") == 1
+
+
+def test_walk_listing_error_is_not_found_not_fatal(tmp_path):
+    url = doc_link("Quality engineering Questions.docx", GUID_A, site="AmazonQ-CSS", kind="w")
+    grasp = SearchMisses(qe_items(), fail_tool=("list_library_files", McpToolError("list_library_files: 429")))
+    summary, lines = run([("x", url)], grasp, tmp_root=str(tmp_path))
+    assert summary["results"][url].outcome == "unresolved"
+    assert any("library walk of sites/amazonq-css stopped (McpToolError)" in line for line in lines)
+
+
+def test_main_permanent_skips_are_not_fed_to_the_backlog(sb, tmp_path, monkeypatch, capsys):
+    """S5: a no_guid / no_file_name bookmark is counted and logged, never an advisory."""
+    import json
+    nameless = f"{HOST}/:w:/r/sites/CSCOE/_layouts/15/Doc.aspx?sourcedoc=%7B{GUID_A}%7D&action=edit"
+    sb.test_bookmarks([nameless])
+    monkeypatch.setattr(sp, "default_client", lambda d: pytest.fail("no grasp needed"))
+    assert sb.main() == 0
+    out = capsys.readouterr().out
+    assert "SharePoint document(s) not captured" not in out
+    assert out.count("can never resolve") == 1 and "sharepoint=skipped_permanent:1 -> exit 0" in out
+    state = json.loads((tmp_path / "jobs" / "bookmarks-sharepoint.backlog.json").read_text())
+    assert state["deferred"] == 0

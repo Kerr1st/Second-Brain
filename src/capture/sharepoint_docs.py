@@ -5,29 +5,46 @@ sign-in is Microsoft's, so the cookie/browser paths never fetch
 ``*.sharepoint.com``; Office documents (``.docx`` / ``.pptx`` / ``.xlsx``) are
 read through ``grasp-mcp`` (Amazon-built, Midway-authenticated) instead. Only
 read-only grasp tools are called: ``search_sharepoint_content``,
-``get_drive_item`` and ``download_sharepoint_file``.
+``get_drive_item``, ``download_sharepoint_file`` and, for the library-walk
+fallback, ``list_sharepoint_sites``, ``list_sharepoint_site_libraries`` and
+``list_library_files``.
 
 Resolution (grasp has no sharing-URL lookup): search by the bookmark's file
 name, keep exact-title hits on the same host and ``/sites/<site>/``, then
 ``get_drive_item`` each (at most ``MAX_CANDIDATES``). That item's ``webUrl`` is
 the ``Doc.aspx?sourcedoc={GUID}`` form, so a ``Doc.aspx`` bookmark must match
 its GUID; a direct ``/.../<name>.docx`` link must match the full path. Anything
-else - none, several, a missing ``file=`` name - is ``unresolved``: a wrong copy
-is never captured (three different "Extended AWOS Framework.xlsx" live in the
-same site).
+else - none, several - is ``unresolved``: a wrong copy is never captured (three
+different "Extended AWOS Framework.xlsx" live in the same site). A ``Doc.aspx``
+link without a ``sourcedoc`` GUID is never resolved by name alone (``no_guid``).
+
+Fallback (search misses an item, or a GUID-only bookmark has no ``file=``): a
+bounded, read-only walk of the bookmark's site libraries (``MAX_WALK_ITEMS``
+items, ``MAX_WALK_DEPTH`` folder levels, once per site per run) looks for the
+bookmark's GUID; the item must also carry one of the bookmark's names (its
+``file=`` or its Chrome title) exactly, and ``get_drive_item`` must confirm the
+GUID. ``no_guid`` / ``no_file_name`` bookmarks that cannot resolve are a
+permanent skip: counted and logged once per run, never an advisory.
 
 Identity and change detection: ``source_url`` is ``sharepoint://<driveId>/<itemId>``
 (stable across renames, moves and bookmark-URL variants such as ``action=`` or
 ``wdPreviousSession=``; two bookmarks of one document are one row). The row's
 ``source_fingerprint`` is ``EXTRACTOR_VERSION:lastModifiedDateTime:size``; an
-unchanged document is not downloaded. A changed one is ingested with
-``refresh=True`` and replaces its row.
+unchanged document is not downloaded (an item without ``lastModifiedDateTime``
+is always re-checked). A changed one is ingested with ``refresh=True`` and
+replaces its row; the row keeps its first ``created_at`` (like every other
+``refresh=True`` channel), so a changed document is not a new skim arrival.
+
+Budget: every grasp call is bounded by the time left in the pass (``budget``),
+captured text is capped per run (``MAX_RUN_CHARS``) and ingest stops at the
+deadline; what is left is deferred to the next run.
 
 Files are downloaded into a private 0700 temp dir and deleted right after
 extraction; the dir is removed in a ``finally`` (SIGTERM included; stale dirs
 of a SIGKILLed run are swept at the next start). Text is extracted locally with
-the stdlib (zipfile + ElementTree) under zip-bomb caps; DTDs/entities are
-refused. Document text is never logged: names, hosts and counts only.
+the stdlib (zipfile + expat/ElementTree; worksheets streamed) under zip-bomb
+caps; DTDs/entities are refused by expat handlers. Document text is never
+logged: names, hosts and counts only.
 """
 from __future__ import annotations
 
@@ -42,8 +59,10 @@ import stat
 import tempfile
 import threading
 import time
+import sys
 import unicodedata
 import zipfile
+from xml.parsers import expat
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -69,22 +88,38 @@ MIN_SESSION_S = 30 * 60
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 MAX_UNCOMPRESSED_TOTAL = 50 * 1024 * 1024
 MAX_MEMBER_BYTES = 50 * 1024 * 1024
+#: XML parts parsed into a tree (everything but worksheets, which are streamed).
+MAX_XML_TREE_BYTES = 16 * 1024 * 1024
 MAX_MEMBERS = 5000
 MAX_SHEET_ROWS = 5000
 MAX_SHEET_COLS = 100
 MAX_CELLS = 200_000
 MAX_SLIDES = 1000
 MAX_TEXT_CHARS = 2_000_000
+#: Captured text per run (bounds ingest/embedding time); the rest is deferred.
+MAX_RUN_CHARS = int(os.environ.get("SHAREPOINT_MAX_RUN_CHARS", str(MAX_TEXT_CHARS)))
 #: Less extracted text than this is ``empty`` (not ingested).
 MIN_TEXT_CHARS = 20
 MAX_CANDIDATES = 10
 SEARCH_MAX_RESULTS = 50
+#: Library-walk fallback bounds (per site, once per run).
+MAX_WALK_ITEMS = 300
+MAX_WALK_DEPTH = 3
+WALK_PAGE_SIZE = 100
+#: grasp's download dir when ``--download-dir`` is ignored (``grasp-mcp serve --help``).
+GRASP_DEFAULT_DOWNLOAD_DIR = os.path.expanduser("~/.config/grasp-mcp/downloads")
 TMP_PREFIX = "sb-spdocs-"
 #: A leftover temp dir older than this is from a killed run: swept at start.
 STALE_TMP_S = 3600
 
 #: Outcomes that are an advisory (never a strike, never the job's exit).
 ADVISORY_OUTCOMES = ("unresolved", "too_large", "failed", "empty", "deferred")
+#: Bookmarks that can never resolve (no GUID / no name): counted, logged once, not advisory.
+PERMANENT_OUTCOME = "skipped_permanent"
+PERMANENT_REASONS = ("no_file_name", "no_guid")
+#: The only grasp tools this module calls (all read-only).
+READ_ONLY_TOOLS = ("search_sharepoint_content", "get_drive_item", "download_sharepoint_file",
+                   "list_sharepoint_sites", "list_sharepoint_site_libraries", "list_library_files")
 
 _SITE_ROOTS = ("sites", "teams", "personal")
 _DOC_PAGES = ("doc.aspx", "doc2.aspx")
@@ -187,6 +222,11 @@ class Resolved:
     def fingerprint(self):
         return f"{EXTRACTOR_VERSION}:{self.modified}:{self.size}"
 
+    @property
+    def change_detectable(self):
+        """False without ``lastModifiedDateTime``: a same-size edit would look unchanged, so always re-check."""
+        return bool(self.modified)
+
 
 class Unresolved(Exception):
     """No single driveItem matches the bookmark (``reason`` says why)."""
@@ -194,6 +234,32 @@ class Unresolved(Exception):
     def __init__(self, reason):
         super().__init__(reason)
         self.reason = reason
+
+
+class _BudgetExceeded(Exception):
+    """The pass deadline was reached before or during a grasp call."""
+
+
+def _fatal(exc):
+    """Errors no per-call handler may swallow: the session is gone, or the time is."""
+    return isinstance(exc, _BudgetExceeded) or _is_session_failure(exc)
+
+
+def bounded_call(call, deadline):
+    """``call`` with each grasp call capped by the time left before ``deadline``:
+    no call starts after it, and one that runs past it is ``_BudgetExceeded``."""
+    async def bounded(tool, params):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise _BudgetExceeded(tool)
+        limit = max(1.0, min(CALL_TIMEOUT_S, left))
+        try:
+            return await asyncio.wait_for(call(tool, params), timeout=limit)
+        except asyncio.TimeoutError:
+            if limit < CALL_TIMEOUT_S:
+                raise _BudgetExceeded(tool) from None
+            raise
+    return bounded
 
 
 def _url_parts(web_url):
@@ -259,16 +325,38 @@ def _site_hits(ref, results):
     return keep
 
 
-async def resolve(call, ref):
+def _to_resolved(drive_id, item_id, item):
+    size = item.get("size")
+    return Resolved(drive_id, item_id, str(item.get("name")),
+                    int(size) if isinstance(size, (int, float)) and not isinstance(size, bool) else None,
+                    str(item.get("lastModifiedDateTime") or ""), str(item.get("webUrl") or ""))
+
+
+def _names(ref, title):
+    """The names a bookmark gives its document: ``file=`` and the Chrome title (if an Office file name)."""
+    names = {_norm(ref.name)} if ref.name else set()
+    if title and _ext(title.strip()):
+        names.add(_norm(title.strip()))
+    return names
+
+
+async def resolve(call, ref, *, title=None, walker=None):
     """The one driveItem the bookmark points at; raises :class:`Unresolved`.
 
     Per query (file name, then stem): exact-title hits on the bookmark's site;
     when none of them is the document and the bookmark carries a ``sourcedoc``
     GUID, the other same-site hits whose item GUID matches (a renamed file). A
     per-call tool error just tries the next query / candidate; a session failure
-    (auth, closed transport) propagates. Candidates are bounded."""
+    (auth, closed transport) or the deadline propagates. Candidates are bounded.
+    A GUID bookmark that search does not find goes to ``walker`` (a
+    :class:`SiteWalker`: library listing, GUID and exact name mandatory)."""
+    if ref.sourcedoc is None and ref.path is None:
+        raise Unresolved("no_guid")     # a Doc.aspx link by name alone could be any same-named copy
     if ref.name is None:
-        raise Unresolved("no_file_name")
+        found = await walker.find(call, ref, _names(ref, title)) if walker is not None else None
+        if found is None:
+            raise Unresolved("no_file_name")
+        return found
     matches, tried, errors = {}, set(), 0
 
     async def check(hits, renamed):
@@ -279,7 +367,7 @@ async def resolve(call, ref):
             try:
                 item = await call("get_drive_item", {"driveId": hit["driveId"], "itemId": hit["id"]})
             except Exception as exc:  # noqa: BLE001 - a stale search hit (404) is just not a match
-                if _is_session_failure(exc):
+                if _fatal(exc):
                     raise
                 continue
             if _item_matches(ref, item, renamed=renamed):
@@ -291,7 +379,7 @@ async def resolve(call, ref):
             reply = await call("search_sharepoint_content", {"query": query, "entityTypes": ["driveItem"],
                                                              "maxResults": SEARCH_MAX_RESULTS})
         except Exception as exc:  # noqa: BLE001 - classified here
-            if _is_session_failure(exc):
+            if _fatal(exc):
                 raise
             errors += 1
             continue
@@ -305,15 +393,119 @@ async def resolve(call, ref):
             await check([h for h in _site_hits(ref, results) if h["id"] not in ids][:MAX_CANDIDATES], renamed=True)
         if matches:
             break
+    if not matches and ref.sourcedoc is not None and walker is not None:
+        found = await walker.find(call, ref, _names(ref, title))
+        if found is not None:
+            return found
     if errors == len(queries):
         raise UnsafeDocument("search failed")
     if len(matches) != 1:
         raise Unresolved("not_found" if not matches else f"ambiguous ({len(matches)} matches)")
     (drive_id, item_id), item = next(iter(matches.items()))
-    size = item.get("size")
-    return Resolved(drive_id, item_id, str(item.get("name")),
-                    int(size) if isinstance(size, (int, float)) and not isinstance(size, bool) else None,
-                    str(item.get("lastModifiedDateTime") or ""), str(item.get("webUrl") or ""))
+    return _to_resolved(drive_id, item_id, item)
+
+
+def _site_terms(ref):
+    """``list_sharepoint_sites`` search terms for the bookmark's site (grasp finds
+    "AmazonQ CSS" but not "AmazonQ-CSS")."""
+    name = ref.site.split("/", 1)[1]
+    spaced = re.sub(r"[-_.]+", " ", name).strip()
+    return [name] + ([spaced] if spaced and spaced != name else [])
+
+
+class SiteWalker:
+    """Read-only library walk of a bookmark's site, at most once per site per run.
+
+    ``list_sharepoint_sites`` -> the one site whose ``webUrl`` is the bookmark's
+    host and ``/sites/<x>``; ``list_sharepoint_site_libraries``; then a
+    breadth-first ``list_library_files`` over each library (``MAX_WALK_ITEMS``
+    items in all, folders to ``MAX_WALK_DEPTH``). Listed files are indexed by the
+    ``sourcedoc`` GUID of their ``webUrl``. A tool error ends that site's walk
+    (what was listed is kept); a session failure or the deadline propagates."""
+
+    def __init__(self, log=print):
+        self._index = {}     # (host, site) -> {GUID: (drive_id, item)}
+        self.calls = 0
+        self.log = log
+
+    async def find(self, call, ref, names):
+        """The :class:`Resolved` item with the bookmark's GUID and one of ``names``, else None."""
+        if ref.sourcedoc is None or not names:
+            return None
+        key = (ref.host, ref.site)
+        if key not in self._index:
+            self._index[key] = await self._walk(call, ref)
+        hit = self._index[key].get(ref.sourcedoc)
+        if hit is None or _norm(hit[1].get("name")) not in names:
+            return None
+        drive_id, listed = hit
+        try:
+            item = await call("get_drive_item", {"driveId": drive_id, "itemId": listed["id"]})
+        except Exception as exc:  # noqa: BLE001 - a vanished item is just not found
+            if _fatal(exc):
+                raise
+            return None
+        if not _item_matches(ref, item, renamed=True) or _norm(item.get("name")) not in names:
+            return None
+        return _to_resolved(drive_id, str(item.get("id") or listed["id"]), item)
+
+    async def _list(self, call, tool, params):
+        self.calls += 1
+        reply = await call(tool, params)
+        return reply if isinstance(reply, dict) else {}
+
+    async def _walk(self, call, ref):
+        index = {}
+        try:
+            site_id = None
+            for term in _site_terms(ref):
+                reply = await self._list(call, "list_sharepoint_sites", {"searchTerm": term, "maxResults": 25})
+                ids = {s.get("id") for s in reply.get("sites") or () if isinstance(s, dict) and s.get("id")
+                       and _url_parts(s.get("webUrl"))[0] == ref.host
+                       and _site_of_path(_url_parts(s.get("webUrl"))[1]) == ref.site}
+                if len(ids) == 1:
+                    site_id = ids.pop()
+                    break
+            if site_id is None:
+                return index
+            libs = await self._list(call, "list_sharepoint_site_libraries", {"siteId": site_id, "maxResults": 100})
+            seen = 0
+            for lib in libs.get("libraries") or ():
+                if not isinstance(lib, dict) or not lib.get("id"):
+                    continue
+                queue = [("root", 0)]
+                while queue and seen < MAX_WALK_ITEMS:
+                    folder, depth = queue.pop(0)
+                    token = None
+                    while seen < MAX_WALK_ITEMS:
+                        params = {"siteId": site_id, "libraryId": lib["id"], "folderId": folder,
+                                  "maxResults": max(1, min(WALK_PAGE_SIZE, MAX_WALK_ITEMS - seen))}
+                        if token:
+                            params["pageToken"] = token
+                        page = await self._list(call, "list_library_files", params)
+                        for item in page.get("items") or ():
+                            if seen >= MAX_WALK_ITEMS:
+                                break
+                            if not isinstance(item, dict) or not item.get("id"):
+                                continue
+                            seen += 1
+                            if item.get("isFolder"):
+                                if depth + 1 <= MAX_WALK_DEPTH:
+                                    queue.append((item["id"], depth + 1))
+                                continue
+                            guid = _guid((_url_parts(item.get("webUrl"))[2].get("sourcedoc") or [None])[0])
+                            if guid:
+                                index.setdefault(guid, (lib["id"], item))
+                        token = page.get("nextPageToken") or page.get("NextPageToken")
+                        if not token:
+                            break
+                if seen >= MAX_WALK_ITEMS:
+                    break
+        except Exception as exc:  # noqa: BLE001 - a listing error ends this site's walk
+            if _fatal(exc):
+                raise
+            self.log(f"  SharePoint library walk of {ref.site} stopped ({type(exc).__name__})")
+        return index
 
 
 # --------------------------------------------------------------------------- #
@@ -372,18 +564,68 @@ class _Package:
             if required:
                 raise UnsafeDocument(f"missing part {name}")
             return None
+        if len(data) > MAX_XML_TREE_BYTES:
+            raise UnsafeDocument("XML part over the tree-parse cap")
         return parse_xml(data)
 
 
-def parse_xml(data):
-    """ElementTree root of an OOXML part; DTDs and entity declarations are refused
-    (OOXML never has them), as are non-UTF-8 parts the check could not see into."""
+def _refuse(*_args):
+    raise UnsafeDocument("XML part declares a DTD/entity")
+
+
+def check_xml(data):
+    """Refuse DTDs and entity declarations (OOXML never has them) and non-UTF-8
+    parts: a byte regex, then a streaming expat pass whose DOCTYPE / entity
+    handlers raise (so the guard does not depend on the regex seeing through
+    the part's declared encoding). No tree is built here."""
     if data[:2] in (b"\xff\xfe", b"\xfe\xff") or b"\x00" in data[:200]:
         raise UnsafeDocument("non-UTF-8 XML part")
     if _DTD_RE.search(data):
         raise UnsafeDocument("XML part declares a DTD/entity")
+    parser = expat.ParserCreate()
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.StartDoctypeDeclHandler = _refuse
+    parser.EntityDeclHandler = _refuse
+    parser.UnparsedEntityDeclHandler = _refuse
+    parser.ExternalEntityRefHandler = _refuse
+    try:
+        for start in range(0, max(len(data), 1), 1 << 20):
+            parser.Parse(data[start:start + (1 << 20)], False)
+        parser.Parse(b"", True)
+    except expat.ExpatError as exc:
+        raise UnsafeDocument(f"malformed XML ({exc.code})") from None
+
+
+def parse_xml(data):
+    """ElementTree root of an OOXML part, after :func:`check_xml`."""
+    check_xml(data)
     try:
         return ET.fromstring(data)
+    except ET.ParseError as exc:
+        raise UnsafeDocument(f"malformed XML ({exc.code})") from None
+
+
+def iter_rows(data):
+    """Stream the ``<row>`` elements of a worksheet part (after :func:`check_xml`):
+    each row is yielded complete, then cleared and detached, so memory stays
+    bounded by one row whatever the sheet's size. Stop iterating to stop parsing."""
+    check_xml(data)
+    pull = ET.XMLPullParser(events=("start", "end"))
+    stack = []
+    try:
+        for start in range(0, max(len(data), 1), 1 << 20):
+            pull.feed(data[start:start + (1 << 20)])
+            for event, el in pull.read_events():
+                if event == "start":
+                    stack.append(el)
+                    continue
+                stack.pop()
+                if _local(el.tag) == "row":
+                    yield el
+                    el.clear()
+                    if stack:
+                        stack[-1].remove(el)
+        pull.close()
     except ET.ParseError as exc:
         raise UnsafeDocument(f"malformed XML ({exc.code})") from None
 
@@ -621,13 +863,14 @@ def extract_xlsx(pkg):
         kind, part = rels.get(_rid(sheet), ("", ""))
         if kind != "worksheet":
             continue
-        root = pkg.xml(part)
-        if root is None:
+        if cells_left <= 0:
+            out.append(f"[sheet {_cell(sheet.get('name') or part)} not extracted: cell cap]")
             continue
-        lines, rows, truncated = [f"## Sheet: {_cell(sheet.get('name') or part)}"], 0, 0
-        for row in root.iter():
-            if _local(row.tag) != "row":
-                continue
+        data = pkg.read(part)
+        if data is None:
+            continue
+        lines, rows, truncated = [f"## Sheet: {_cell(sheet.get('name') or part)}"], 0, False
+        for row in iter_rows(data):
             values = {}
             for pos, c in enumerate(el for el in row if _local(el.tag) == "c"):
                 col = _col_index(c.get("r"))
@@ -640,13 +883,13 @@ def extract_xlsx(pkg):
             if not values:
                 continue
             if rows >= MAX_SHEET_ROWS or cells_left <= 0:
-                truncated += 1
-                continue
+                truncated = True
+                break        # stop parsing at the caps
             rows += 1
             cells_left -= len(values)
             lines.append("| " + " | ".join(values.get(i, "") for i in range(max(values) + 1)) + " |")
         if truncated:
-            lines.append(f"[{truncated} more rows not extracted]")
+            lines.append("[further rows not extracted]")
         if rows:
             out.append("\n".join(lines))
     return "\n\n".join(out)
@@ -700,8 +943,14 @@ class DocResult:
     markdown: str | None = field(default=None, repr=False)
 
 
-class _Terminated(BaseException):
-    """SIGTERM during the pass: unwinds through the cleanup ``finally``."""
+class _Terminated(SystemExit):
+    """SIGTERM during the pass: unwinds through the cleanup ``finally``. A
+    ``SystemExit`` (like ``browser_fetch._SigtermExit``) so asyncio re-raises it
+    straight out of the loop from whichever task it lands in (the MCP SDK's anyio
+    reader/writer tasks included) instead of wrapping it in a ``BaseExceptionGroup``."""
+
+    def __init__(self):
+        super().__init__(128 + signal.SIGTERM)
 
 
 class _Abort(Exception):
@@ -766,35 +1015,68 @@ def _is_session_failure(exc):
     return is_auth_error(exc) or is_connection_closed(exc) or isinstance(exc, McpTransportError)
 
 
-async def process_docs(call, docs, results, *, download_dir, fingerprints, deadline, log=print):
+def _lstat(path):
+    try:
+        return os.lstat(path)
+    except OSError:
+        return None
+
+
+def _unlink_stray_default_download(save_path, before):
+    """grasp ignored ``--download-dir``: remove the file it wrote to its default
+    dir, only if that file did not exist before this call."""
+    path = os.path.join(GRASP_DEFAULT_DOWNLOAD_DIR, save_path)
+    st = _lstat(path)
+    if before is None and st is not None and stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid():
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+async def process_docs(call, docs, results, *, download_dir, fingerprints, deadline, log=print, walker=None):
     """Resolve, change-check, download and extract each ``(name, url, ref)``;
-    fills ``results`` (url -> DocResult) in place. Raises :class:`_Abort` on a
-    session-wide failure (the caller defers what is left)."""
+    fills ``results`` (url -> DocResult) in place. Every grasp call is bounded by
+    ``deadline`` (``reason="budget"``), captured text by ``MAX_RUN_CHARS``. Raises
+    :class:`_Abort` on a session-wide failure (the caller defers what is left)."""
     seen = {}
+    call = bounded_call(call, deadline)
+    walker = walker if walker is not None else SiteWalker(log)
+    captured_chars = 0
     for index, (bookmark_name, url, ref) in enumerate(docs, start=1):
         result = results[url]
         if time.monotonic() >= deadline:
             result.reason = "budget"
             continue
+        if ref.sourcedoc is None and ref.path is None:
+            result.outcome, result.reason = PERMANENT_OUTCOME, "no_guid"   # no call: never resolvable
+            continue
         started = time.monotonic()
         try:
-            resolved = await resolve(call, ref)
+            resolved = await resolve(call, ref, title=bookmark_name, walker=walker)
             ext = _ext(resolved.name) or ref.ext       # a renamed file keeps its own format
             save_path = f"{index:03d}.{ext}"
             result.name, result.size = resolved.name, resolved.size
             result.source_url, result.fingerprint = resolved.source_url, resolved.fingerprint
             if resolved.source_url in seen:
                 result.outcome, result.reason = "duplicate", f"same document as bookmark {seen[resolved.source_url]}"
-            elif fingerprints.get(resolved.source_url) == resolved.fingerprint:
+            elif resolved.change_detectable and fingerprints.get(resolved.source_url) == resolved.fingerprint:
                 result.outcome = "unchanged"
             elif resolved.size is None or resolved.size > MAX_DOWNLOAD_BYTES:
                 result.outcome, result.reason = "too_large", "size unknown" if resolved.size is None else "over 25 MB"
+            elif captured_chars >= MAX_RUN_CHARS:
+                result.reason = "run_char_cap"       # stays deferred: retried next run
             else:
+                before = _lstat(os.path.join(GRASP_DEFAULT_DOWNLOAD_DIR, save_path))
                 await call("download_sharepoint_file", {"fileId": resolved.item_id, "driveId": resolved.drive_id,
                                                         "savePath": save_path, "maxSizeBytes": MAX_DOWNLOAD_BYTES})
                 try:
                     data = _read_download(download_dir, save_path)
                     text = extract_text(data, ext)
+                except UnsafeDocument as exc:
+                    if str(exc) == "download produced no file":
+                        _unlink_stray_default_download(save_path, before)
+                    raise
                 finally:
                     try:
                         os.unlink(os.path.join(download_dir, save_path))
@@ -803,14 +1085,22 @@ async def process_docs(call, docs, results, *, download_dir, fingerprints, deadl
                 result.chars = len(text)
                 if len(text) < MIN_TEXT_CHARS:
                     result.outcome, result.reason = "empty", "no text extracted"
+                elif captured_chars and captured_chars + len(text) > MAX_RUN_CHARS:
+                    result.reason = "run_char_cap"
                 else:
+                    captured_chars += len(text)
                     result.outcome = "captured"
                     result.markdown = render_markdown(resolved, ref, text, ext)
             seen.setdefault(resolved.source_url, index)
         except Unresolved as exc:
-            result.outcome, result.reason = "unresolved", exc.reason
+            if exc.reason in PERMANENT_REASONS:
+                result.outcome, result.reason = PERMANENT_OUTCOME, exc.reason
+            else:
+                result.outcome, result.reason = "unresolved", exc.reason
         except UnsafeDocument as exc:
             result.outcome, result.reason = "failed", str(exc)
+        except _BudgetExceeded:
+            result.outcome, result.reason = "deferred", "budget"
         except Exception as exc:  # noqa: BLE001 - one document never aborts the pass
             if _is_session_failure(exc):
                 result.reason = f"session: {type(exc).__name__}"
@@ -818,21 +1108,28 @@ async def process_docs(call, docs, results, *, download_dir, fingerprints, deadl
             result.outcome, result.reason = "failed", type(exc).__name__
         finally:
             result.seconds = time.monotonic() - started
-            log(f"  SharePoint [{index}/{len(docs)}] {result.name[:60]} ({ref.host}): {result.outcome}"
-                f"{f' ({result.reason})' if result.reason else ''} size={result.size} chars={result.chars} "
-                f"{result.seconds:.1f}s")
+            if result.outcome != PERMANENT_OUTCOME:
+                log(f"  SharePoint [{index}/{len(docs)}] {result.name[:60]} ({ref.host}): {result.outcome}"
+                    f"{f' ({result.reason})' if result.reason else ''} size={result.size} chars={result.chars} "
+                    f"{result.seconds:.1f}s")
 
 
-def _install_sigterm():
-    if threading.current_thread() is not threading.main_thread():
-        return None
+def _main_thread():
+    return threading.current_thread() is threading.main_thread()
 
-    def handler(signum, frame):
+
+def _install_sigterm(handler=None):
+    """SIGTERM -> ``_Terminated`` (or ``handler``); main thread only. True when installed."""
+    if not _main_thread():
+        return False
+
+    def terminate(signum, frame):
         raise _Terminated()
     try:
-        return signal.signal(signal.SIGTERM, handler)
+        signal.signal(signal.SIGTERM, handler or terminate)
+        return True
     except (ValueError, OSError):
-        return None
+        return False
 
 
 def capture_bookmarked_docs(bookmarks, *, session_left, save=True, budget_s=None, client_factory=None,
@@ -850,12 +1147,21 @@ def capture_bookmarked_docs(bookmarks, *, session_left, save=True, budget_s=None
     summary = {"counts": Counter(), "results": results, "cause": None, "ingest": None}
     if not docs:
         return summary
+    # Never resolvable, decided without grasp: no GUID (B1), or no name to match the GUID's item by.
+    for n, u, ref in docs:
+        if ref.sourcedoc is None and ref.path is None:
+            results[u].outcome, results[u].reason = PERMANENT_OUTCOME, "no_guid"
+        elif ref.name is None and not _names(ref, n):
+            results[u].outcome, results[u].reason = PERMANENT_OUTCOME, "no_file_name"
+    pending = [d for d in docs if results[d[1]].outcome != PERMANENT_OUTCOME]
     budget_s = RUN_BUDGET_S if budget_s is None else budget_s
-    if session_left is None or session_left < MIN_SESSION_S:
+    if not pending:
+        pass
+    elif session_left is None or session_left < MIN_SESSION_S:
         summary["cause"] = "Midway session missing or under 30 min — run mwinit"
     elif budget_s <= 0:
         summary["cause"] = "no time left in the job deadline"
-    if fingerprints is None and summary["cause"] is None:
+    if pending and fingerprints is None and summary["cause"] is None:
         if save:
             try:
                 from src.db import get_capture_fingerprints
@@ -865,10 +1171,15 @@ def capture_bookmarked_docs(bookmarks, *, session_left, save=True, budget_s=None
                 summary["cause"] = f"stored fingerprints unreadable ({type(exc).__name__})"
         else:
             fingerprints = {}
-    if summary["cause"] is None:
-        _run_session(docs, results, summary, fingerprints, budget_s, client_factory or default_client, log, tmp_root)
+    deadline = time.monotonic() + max(0.0, budget_s)
+    if pending and summary["cause"] is None:
+        _run_session(pending, results, summary, fingerprints, deadline, client_factory or default_client, log, tmp_root)
     if save and any(r.outcome == "captured" for r in results.values()):
-        summary["ingest"] = _ingest(results, ingest, log)
+        summary["ingest"] = _ingest(results, ingest, log, deadline)
+    skipped = [r for r in results.values() if r.outcome == PERMANENT_OUTCOME]
+    if skipped:
+        log(f"INFO: {len(skipped)} SharePoint bookmark(s) can never resolve, skipped (not an advisory): "
+            + "; ".join(f"{r.name[:60]} ({r.reason})" for r in skipped))
     for r in results.values():
         if r.outcome == "deferred" and r.reason is None:
             r.reason = summary["cause"] or "not reached"
@@ -878,17 +1189,19 @@ def capture_bookmarked_docs(bookmarks, *, session_left, save=True, budget_s=None
     return summary
 
 
-def _run_session(docs, results, summary, fingerprints, budget_s, client_factory, log, tmp_root):
+def _run_session(docs, results, summary, fingerprints, deadline, client_factory, log, tmp_root):
     sweep_stale_dirs(tmp_root)
-    previous = _install_sigterm()
+    previous = signal.getsignal(signal.SIGTERM) if _main_thread() else None
+    installed = False
     tmp = None
     client = None
     terminated = False
+    clean = False
     try:
+        installed = _install_sigterm()     # inside the try: a SIGTERM right after still unwinds here
         tmp = tempfile.mkdtemp(prefix=TMP_PREFIX, dir=tmp_root)
         os.chmod(tmp, 0o700)
         client = client_factory(tmp)
-        deadline = time.monotonic() + budget_s
 
         async def run():
             try:
@@ -902,24 +1215,54 @@ def _run_session(docs, results, summary, fingerprints, budget_s, client_factory,
             except _Abort as exc:
                 summary["cause"] = f"grasp-mcp session failed mid-pass ({exc})"
             finally:
-                await client.__aexit__(None, None, None)
+                try:
+                    await client.__aexit__(None, None, None)
+                except BaseExceptionGroup as group:
+                    # A SIGTERM that landed in an SDK (anyio) task already left the loop as
+                    # SystemExit; its copy in the task group, re-raised here during shutdown, is noise.
+                    if group.subgroup(_Terminated) is None:
+                        raise
         asyncio.run(run())
         if any(r.reason == "budget" for r in results.values()):
             summary["cause"] = summary["cause"] or "the SharePoint time budget ran out"
+        clean = summary["cause"] is None
     except _Terminated:
         terminated = True
     except Exception as exc:  # noqa: BLE001 - advisory: the bookmarks job's exit is unaffected
         summary["cause"] = f"SharePoint pass error ({type(exc).__name__})"
     finally:
-        if terminated or summary["cause"]:
-            _kill_servers(client)
-        if tmp:
-            shutil.rmtree(tmp, ignore_errors=True)
-        if previous is not None:
-            signal.signal(signal.SIGTERM, previous)
+        # A second SIGTERM during cleanup is only recorded: rmtree and the restore always finish.
+        late = []
+        if installed:
+            _install_sigterm(lambda signum, frame: late.append(signum))
+        try:
+            if not clean:
+                _kill_servers(client)     # every abnormal exit (incl. one not caught above)
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+        finally:
+            if installed:
+                signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+        terminated = terminated or bool(late)
     if terminated:
-        os.kill(os.getpid(), signal.SIGTERM)   # the job's own termination semantics, after cleanup
-        raise SystemExit(128 + signal.SIGTERM)
+        summary["cause"] = summary["cause"] or "SIGTERM"
+        _chain_sigterm(previous)
+
+
+def _chain_sigterm(previous):
+    """The job's own SIGTERM semantics, after cleanup: a callable previous handler
+    is called (it owns termination; if it returns, the pass just ends deferred);
+    otherwise flush stdout and ``SystemExit(143)`` (atexit hooks still run)."""
+    if callable(previous):
+        previous(signal.SIGTERM, None)
+        return
+    if previous == signal.SIG_IGN:
+        return
+    try:
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+    raise SystemExit(128 + signal.SIGTERM)
 
 
 def _kill_servers(client):
@@ -930,20 +1273,30 @@ def _kill_servers(client):
             pass
 
 
-def _ingest(results, ingest, log):
-    items, metadata = [], {}
-    for r in results.values():
-        if r.outcome == "captured" and r.markdown:
-            items.append((r.source_url, r.markdown))
-            metadata[r.source_url] = {"source_fingerprint": r.fingerprint, "bookmark_url": r.url}
-    if not items:
+def _ingest(results, ingest, log, deadline=None):
+    """Store the captured documents one at a time; once ``deadline`` has passed
+    the rest are deferred (no fingerprint stored: retried next run)."""
+    captured = [r for r in results.values() if r.outcome == "captured" and r.markdown]
+    if not captured:
         return None
+    stats = {"processed": 0, "skipped": 0, "failed": 0}
     try:
         from src.capture.framework import ingest_with_metadata, run_channel
-        stats = run_channel(SOURCE_TYPE, items, ingest=ingest_with_metadata(metadata, refresh=True, ingest=ingest))
+        for n, r in enumerate(captured):
+            if deadline is not None and time.monotonic() >= deadline:
+                for rest in captured[n:]:
+                    rest.outcome, rest.reason = "deferred", "budget"
+                log(f"  SharePoint: {len(captured) - n} captured document(s) deferred: ingest budget")
+                break
+            metadata = {r.source_url: {"source_fingerprint": r.fingerprint, "bookmark_url": r.url}}
+            one = run_channel(SOURCE_TYPE, [(r.source_url, r.markdown)],
+                              ingest=ingest_with_metadata(metadata, refresh=True, ingest=ingest))
+            for key in stats:
+                stats[key] += int(one.get(key) or 0)
     except Exception as exc:  # noqa: BLE001 - storage failure is per-run advisory, never the job's exit
         log(f"WARNING: SharePoint documents could not be stored ({type(exc).__name__})")
-        stats = {"processed": 0, "skipped": 0, "failed": len(items)}
+        stats = {"processed": stats["processed"], "skipped": stats["skipped"],
+                 "failed": len(captured) - stats["processed"] - stats["skipped"]}
     if stats.get("failed"):
         # No fingerprint was stored for them, so the next run retries them.
         log(f"WARNING: {stats['failed']} SharePoint document(s) failed to store")

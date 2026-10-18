@@ -226,6 +226,18 @@ reason = "Midway sign-in failed at bookmarks run time (cookie missing/expired, o
 consecutive_runs = 3
 reason = "scrape_bookmarks.py: internal host(s) without a Midway sign-in answered a bare 403/sign-in in 3+ consecutive runs (unsupported_auth, no strike, never scraped); the hosts are in 'last run' and in the job log WARNING — pre-route them in NON_MIDWAY_AUTH_HOSTS or add them to MIDWAY_HOSTS"
 
+# SharePoint Office documents (scrape_bookmarks.py -> src/capture/sharepoint_docs.py,
+# read via grasp-mcp): documents not captured this run - unresolved (search and the
+# library walk found no single item with the bookmark's GUID), too_large, failed,
+# empty, deferred (budget / Midway session / grasp down) or not stored - in
+# logs/jobs/bookmarks-sharepoint.backlog.json, "cause" lists names and reasons.
+# Never a ledger strike or the job's exit. Bookmarks that can never resolve
+# (no sourcedoc GUID / no file name: skipped_permanent) are logged once per run and
+# never counted here. A run with every document captured/unchanged resets the streak.
+[backlog.bookmarks-sharepoint]
+consecutive_runs = 3
+reason = "scrape_bookmarks.py: SharePoint Office-document bookmarks were not captured via grasp-mcp in 3+ consecutive runs (unresolved / too_large / failed / empty / deferred: see 'last run'); for deferred run mwinit or check grasp-mcp, for unresolved re-bookmark the document from its library (Doc.aspx?sourcedoc= link)"
+
 # Browser path unavailable or short (scrape_bookmarks.py, 2026-10-13 review): browser
 # URLs (BROWSER_HOSTS + same-run fallbacks) that the midway-playwright pass deferred —
 # detail launch (the server never started: node >= 20 / aim missing from the job PATH),

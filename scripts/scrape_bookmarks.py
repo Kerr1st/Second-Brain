@@ -828,7 +828,11 @@ def sharepoint_doc(url):
 
 
 #: SharePoint documents not captured this run (unresolved / too_large / failed /
-#: empty / deferred): ``<status-dir>/bookmarks-sharepoint.backlog.json``.
+#: empty / deferred): ``<status-dir>/bookmarks-sharepoint.backlog.json``
+#: (``[backlog.bookmarks-sharepoint]`` in config/liveness.toml). Bookmarks that can
+#: never resolve (``skipped_permanent``: no GUID / no name) are counted and logged
+#: once per run by the pass, never fed to the backlog. A SIGTERM during the pass is
+#: a ``SystemExit(143)`` after its cleanup, so it passes the ``except Exception`` below.
 SHAREPOINT_BACKLOG_JOB = "bookmarks-sharepoint"
 
 
