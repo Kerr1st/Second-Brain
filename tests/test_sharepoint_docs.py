@@ -32,6 +32,13 @@ RELS = 'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"'
 RT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
 
 
+@pytest.fixture(autouse=True)
+def _no_walk_pacing_and_private_status_dir(monkeypatch, tmp_path):
+    """Walk pacing is exercised in test_grasp_rate_limit; the walk index sidecar never leaves tmp_path."""
+    monkeypatch.setattr(sp, "WALK_PACE_S", 0.0)
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
+
+
 def doc_link(name, guid, site="CSCOE", kind="x"):
     from urllib.parse import quote
     return (f"{HOST}/:{kind}:/r/sites/{site}/_layouts/15/Doc.aspx?sourcedoc=%7B{guid}%7D"
@@ -884,7 +891,7 @@ def test_guid_only_bookmark_resolves_by_its_office_title(tmp_path):
 
 def test_fallback_walk_is_bounded_and_runs_once_per_site(tmp_path, monkeypatch):
     url = doc_link("Quality engineering Questions.docx", GUID_A, site="AmazonQ-CSS", kind="w")
-    deep = qe_items(folder="Shared Documents/A/B/C/D")                          # depth 4: beyond the walk
+    deep = qe_items(folder="Shared Documents/A/B/C/D/E/F/G")                    # depth 7: beyond the walk
     grasp = SearchMisses(deep)
     summary, _ = run([("x", url), ("y", doc_link("Quality engineering Questions.docx", GUID_C,
                                                  site="AmazonQ-CSS", kind="w"))], grasp, tmp_root=str(tmp_path))

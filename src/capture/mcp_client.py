@@ -79,6 +79,7 @@ DEFAULT_RATE_LIMIT_RETRIES = 0        # retries per call after a throttled reply
 DEFAULT_RATE_LIMIT_MAX_WAIT = 90.0    # cap on one Retry-After sleep (seconds)
 DEFAULT_RATE_LIMIT_WAIT_BUDGET = 600.0  # total Retry-After sleep per session (seconds)
 DEFAULT_RATE_LIMIT_FALLBACK_WAIT = 5.0  # when the server gives no Retry-After
+DEFAULT_RATE_LIMIT_CALL_BUDGET = None   # total Retry-After sleep per call (None: session budget only)
 
 # --------------------------------------------------------------------------- #
 # Exit-code taxonomy for scheduled capture jobs                                #
@@ -173,20 +174,34 @@ _CLOSED_TYPES = (
 # Transport-ish but not worth reconnecting inside the same call (a hung server).
 _HUNG_MARKERS = ("timed out after", "timeout", "exit status")
 # A server-side throttle: wait what it asks for (bounded), then try again.
-_RATE_LIMIT_MARKERS = ("rate_limit_exceeded", "rate limit exceeded", "ratelimiterror", "too many requests")
-_RETRY_AFTER_RE = re.compile(r"retry\s+after\s+(\d+(?:\.\d+)?)\s*(ms|s)?", re.I)
+# slack-mcp: "RATE_LIMIT_EXCEEDED ... Retry after 38s."; grasp-mcp (Microsoft
+# Graph throttling): "Rate limited by Microsoft Graph API (HTTP 429) ... Wait 16
+# seconds ...". Only tool *error* replies are judged, never a successful payload.
+# A bare "rate limited" stays an ordinary tool error (test_capture_exit_contracts):
+# grasp's wording is matched by its "rate limited by" / "HTTP 429" parts.
+_RATE_LIMIT_MARKERS = ("rate_limit_exceeded", "rate limit exceeded", "ratelimiterror", "too many requests",
+                       "rate limited by", "http 429", "status 429", "status code 429")
+_RETRY_AFTER_RE = re.compile(
+    r"(?:retry[\s-]*after|\bwait(?:\s+for)?)\s*:?\s*(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?)?\b",
+    re.I)
 
 
 def rate_limit_retry_after(text: str) -> float | None:
     """Seconds the server asked us to wait, or None when it did not say.
 
-    Understands ``"Retry after 38s."`` and a ``details.timeout`` in milliseconds
-    (slack-mcp emits both for the same error).
+    Understands ``"Retry after 38s."``, ``"Retry-After: 16"``, grasp's
+    ``"Wait 16 seconds"`` and a ``details.timeout`` in milliseconds (slack-mcp
+    emits both for the same error). A bare number is seconds.
     """
     m = _RETRY_AFTER_RE.search(text or "")
     if m:
         value = float(m.group(1))
-        return value / 1000.0 if (m.group(2) or "s").lower() == "ms" else value
+        unit = (m.group(2) or "s").lower()
+        if unit.startswith("ms") or unit.startswith("milli"):
+            return value / 1000.0
+        if unit.startswith("m"):
+            return value * 60.0
+        return value
     m = re.search(r'"timeout"\s*:\s*(\d+)', text or "")
     if m:
         return int(m.group(1)) / 1000.0
@@ -345,6 +360,7 @@ class McpClient:
                  rate_limit_retries: int = DEFAULT_RATE_LIMIT_RETRIES,
                  rate_limit_max_wait: float = DEFAULT_RATE_LIMIT_MAX_WAIT,
                  rate_limit_wait_budget: float = DEFAULT_RATE_LIMIT_WAIT_BUDGET,
+                 rate_limit_call_budget: float | None = DEFAULT_RATE_LIMIT_CALL_BUDGET,
                  env: dict[str, str] | None = None, cwd: str | None = None):
         # ``env``/``cwd`` default to the SDK's (a minimal env, our cwd). The
         # browser fetcher passes the job env and a private scratch cwd, because
@@ -357,6 +373,8 @@ class McpClient:
         self._rate_limit_retries = max(0, int(rate_limit_retries))
         self._rate_limit_max_wait = max(0.0, float(rate_limit_max_wait))
         self._rate_limit_wait_budget = max(0.0, float(rate_limit_wait_budget))
+        self._rate_limit_call_budget = (None if rate_limit_call_budget is None
+                                        else max(0.0, float(rate_limit_call_budget)))
         self.reconnects_used = 0
         self.rate_limit_waited = 0.0   # seconds slept on Retry-After this session
         self.rate_limit_hits = 0       # throttled replies seen (retried or not)
@@ -444,10 +462,13 @@ class McpClient:
         Every throttled reply is counted in ``rate_limit_hits``. A retry waits
         ``min(Retry-After, rate_limit_max_wait)`` (or a small fallback when the
         server gave none) and only while the session's total sleep stays inside
-        ``rate_limit_wait_budget``; otherwise the :class:`McpRateLimited` is
-        re-raised so the caller counts the item as failed instead of dropping it.
+        ``rate_limit_wait_budget`` and this call's inside ``rate_limit_call_budget``
+        (when set); otherwise the :class:`McpRateLimited` is re-raised so the
+        caller counts the item as failed instead of dropping it. Every loop
+        iteration either returns, raises or spends one of the bounded retries.
         """
         attempt = 0
+        call_waited = 0.0
         while True:
             try:
                 return await self._call_once(tool, params, raw=raw)
@@ -455,12 +476,16 @@ class McpClient:
                 self.rate_limit_hits += 1
                 wait = e.retry_after if e.retry_after is not None else DEFAULT_RATE_LIMIT_FALLBACK_WAIT
                 wait = min(max(wait, 0.0), self._rate_limit_max_wait)
-                if attempt >= self._rate_limit_retries \
+                over_call = self._rate_limit_call_budget is not None \
+                    and call_waited + wait > self._rate_limit_call_budget
+                if attempt >= self._rate_limit_retries or over_call \
                         or self.rate_limit_waited + wait > self._rate_limit_wait_budget:
-                    logger.warning("%s: rate limited and out of retry budget (attempt %d, waited %.0fs of %.0fs)",
-                                   tool, attempt, self.rate_limit_waited, self._rate_limit_wait_budget)
+                    logger.warning("%s: rate limited and out of retry budget (attempt %d, waited %.0fs this call, "
+                                   "%.0fs of %.0fs this session)", tool, attempt, call_waited,
+                                   self.rate_limit_waited, self._rate_limit_wait_budget)
                     raise
                 attempt += 1
+                call_waited += wait
                 self.rate_limit_waited += wait
                 logger.info("%s: rate limited — honouring Retry-After, sleeping %.1fs (retry %d/%d)",
                             tool, wait, attempt, self._rate_limit_retries)

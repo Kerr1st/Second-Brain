@@ -20,10 +20,15 @@ link without a ``sourcedoc`` GUID is never resolved by name alone (``no_guid``).
 
 Fallback (search misses an item, or a GUID-only bookmark has no ``file=``): a
 bounded, read-only walk of the bookmark's site libraries (``MAX_WALK_ITEMS``
-items, ``MAX_WALK_DEPTH`` folder levels, once per site per run) looks for the
-bookmark's GUID; the item must also carry one of the bookmark's names (its
-``file=`` or its Chrome title) exactly, and ``get_drive_item`` must confirm the
-GUID. ``no_guid`` / ``no_file_name`` bookmarks that cannot resolve are a
+items, ``MAX_WALK_DEPTH`` folder levels, ``MAX_WALK_CALLS`` listing calls paced
+``WALK_PACE_S`` apart, once per site per run) looks for the bookmark's GUID; the
+item must also carry one of the bookmark's names (its ``file=`` or its Chrome
+title) exactly, and ``get_drive_item`` must confirm the GUID. The walk's index
+(GUID -> driveId, itemId, file name; ids only, never content) is kept across
+runs in a 0600 sidecar (:class:`WalkIndexCache`, ``WALK_INDEX_TTL_S``): a known
+GUID then costs one ``get_drive_item`` (GUID + name confirmed) instead of a
+walk, and a stale hint falls back to a fresh walk. grasp's Graph throttling
+(HTTP 429, "Wait N seconds") is retried by the client within bounded waits. ``no_guid`` / ``no_file_name`` bookmarks that cannot resolve are a
 permanent skip: counted and logged once per run, never an advisory.
 
 Identity and change detection: ``source_url`` is ``sharepoint://<driveId>/<itemId>``
@@ -50,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 import posixpath
 import re
@@ -66,6 +72,7 @@ from xml.parsers import expat
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 from xml.etree import ElementTree as ET
 
@@ -102,13 +109,29 @@ MAX_RUN_CHARS = int(os.environ.get("SHAREPOINT_MAX_RUN_CHARS", str(MAX_TEXT_CHAR
 MIN_TEXT_CHARS = 20
 MAX_CANDIDATES = 10
 SEARCH_MAX_RESULTS = 50
-#: Library-walk fallback bounds (per site, once per run).
-MAX_WALK_ITEMS = 300
-MAX_WALK_DEPTH = 3
+#: Library-walk fallback bounds (per site, once per run). AmazonQ-CSS alone has
+#: 4 libraries and folders 4 levels deep; the walk is also bounded by the pass deadline.
+MAX_WALK_ITEMS = 2000
+MAX_WALK_DEPTH = 6
 WALK_PAGE_SIZE = 100
 #: Hard cap on grasp listing calls per site walk (items alone don't bound calls:
 #: an empty page with a nextPageToken advances nothing).
-MAX_WALK_CALLS = 40
+MAX_WALK_CALLS = 250
+#: Minimum gap between two walk listing calls: a burst trips Graph throttling (HTTP 429).
+WALK_PACE_S = float(os.environ.get("SHAREPOINT_WALK_PACE_S", "0.5"))
+#: grasp rate limits (McpClient): retries per call, cap on one wait, on all waits of
+#: one call and of the whole session (all also bounded by the pass deadline).
+RATE_LIMIT_RETRIES = 3
+RATE_LIMIT_MAX_WAIT_S = 60.0
+RATE_LIMIT_CALL_BUDGET_S = 120.0
+RATE_LIMIT_SESSION_BUDGET_S = 300.0
+#: Cross-run walk index sidecar in the job status dir. Not ``*.json``: liveness
+#: reads every ``logs/jobs/*.json`` as a wrapper status record.
+WALK_INDEX_FILENAME = "sharepoint-walk-index.cache"
+WALK_INDEX_TTL_S = 28 * 86400
+WALK_INDEX_MAX_BYTES = 16 * 1024 * 1024
+WALK_INDEX_MAX_SITES = 20
+_ID_MAX = 1024
 
 
 class _WalkCapped(Exception):
@@ -255,15 +278,17 @@ def _fatal(exc):
 def bounded_call(call, deadline):
     """``call`` with each grasp call capped by the time left before ``deadline``:
     no call starts after it, and one that runs past it is ``_BudgetExceeded``."""
+    cap = CALL_TIMEOUT_S + RATE_LIMIT_CALL_BUDGET_S     # one call incl. its rate-limit waits
+
     async def bounded(tool, params):
         left = deadline - time.monotonic()
         if left <= 0:
             raise _BudgetExceeded(tool)
-        limit = max(1.0, min(CALL_TIMEOUT_S, left))
+        limit = max(1.0, min(cap, left))
         try:
             return await asyncio.wait_for(call(tool, params), timeout=limit)
         except asyncio.TimeoutError:
-            if limit < CALL_TIMEOUT_S:
+            if limit < cap:
                 raise _BudgetExceeded(tool) from None
             raise
     return bounded
@@ -420,21 +445,213 @@ def _site_terms(ref):
     return [name] + ([spaced] if spaced and spaced != name else [])
 
 
+def _cache_key(ref):
+    return f"{ref.host}/{ref.site}"
+
+
+def default_walk_index_path(env=None):
+    from src.operations.backlog import status_dir
+    return status_dir(env) / WALK_INDEX_FILENAME
+
+
+def _valid_id(value):
+    return isinstance(value, str) and 0 < len(value) <= _ID_MAX
+
+
+class WalkIndexCache:
+    """Cross-run sidecar of the library walk: per site, ``GUID -> (driveId,
+    itemId, file name, seen)``. Ids and file names only, never document text.
+
+    Written 0600 by an atomic replace (temp file in the same dir, fsync,
+    ``os.replace``); read without following a symlink, only a regular file of
+    this user under ``WALK_INDEX_MAX_BYTES``; anything malformed is dropped
+    entry by entry (a corrupt file just means a walk). An entry expires
+    ``WALK_INDEX_TTL_S`` after it was last seen by a walk or confirmed by
+    ``get_drive_item``. A hit is a hint: :class:`SiteWalker` confirms it (GUID +
+    name) and walks afresh when it is stale. Never raises on I/O."""
+
+    VERSION = 1
+
+    def __init__(self, path, *, now=time.time, log=print):
+        self.path = Path(path)
+        self._now = now
+        self.log = log
+        self._sites = None
+        self.dirty = False
+
+    def _load(self):
+        if self._sites is not None:
+            return self._sites
+        self._sites = {}
+        try:
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return self._sites
+        except OSError as exc:
+            self.log(f"  SharePoint walk index ignored ({type(exc).__name__})")
+            return self._sites
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                st = os.fstat(handle.fileno())
+                if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > WALK_INDEX_MAX_BYTES:
+                    self.log("  SharePoint walk index ignored (not a private regular file under the cap)")
+                    return self._sites
+                data = json.loads(handle.read(WALK_INDEX_MAX_BYTES + 1).decode("utf-8"))
+        except (OSError, ValueError) as exc:
+            self.log(f"  SharePoint walk index ignored ({type(exc).__name__})")
+            return self._sites
+        if not isinstance(data, dict) or data.get("version") != self.VERSION or not isinstance(data.get("sites"), dict):
+            return self._sites
+        now = self._now()
+        for key, entries in list(data["sites"].items())[:WALK_INDEX_MAX_SITES]:
+            if not isinstance(key, str) or not isinstance(entries, dict):
+                continue
+            clean = {}
+            for guid, entry in list(entries.items())[:MAX_WALK_ITEMS]:
+                guid = _guid(guid) if isinstance(guid, str) else None
+                if guid is None or not isinstance(entry, dict):
+                    continue
+                seen = entry.get("seen")
+                if not all(_valid_id(entry.get(k)) for k in ("drive_id", "item_id", "name")) \
+                        or not isinstance(seen, (int, float)) or isinstance(seen, bool) \
+                        or not now - WALK_INDEX_TTL_S <= seen <= now + 86400:
+                    continue
+                clean[guid] = {"drive_id": entry["drive_id"], "item_id": entry["item_id"],
+                               "name": entry["name"], "seen": int(seen)}
+            if clean:
+                self._sites[key] = clean
+        return self._sites
+
+    def lookup(self, key, guid):
+        """``(drive_id, item_id, name)`` of a fresh entry, else None."""
+        entry = self._load().get(key, {}).get(guid)
+        return (entry["drive_id"], entry["item_id"], entry["name"]) if entry else None
+
+    def remember(self, key, guid, drive_id, item_id, name):
+        """Record (or refresh) one confirmed entry."""
+        if _guid(guid) is None or not all(_valid_id(v) for v in (drive_id, item_id, name)):
+            return
+        self._load().setdefault(key, {})[guid] = {"drive_id": drive_id, "item_id": item_id, "name": name,
+                                                  "seen": int(self._now())}
+        self._trim(key)
+        self.dirty = True
+
+    def forget(self, key, guid):
+        if self._load().get(key, {}).pop(guid, None) is not None:
+            self.dirty = True
+
+    def update(self, key, index, complete):
+        """Merge a walk's ``{GUID: (drive_id, listed item)}``; a complete walk
+        replaces the site (what it did not list is gone)."""
+        sites = self._load()
+        entries = {} if complete else dict(sites.get(key, {}))
+        now = int(self._now())
+        for guid, (drive_id, item) in index.items():
+            values = (str(drive_id), str(item.get("id") or ""), str(item.get("name") or ""))
+            if _guid(guid) is not None and all(_valid_id(v) for v in values):
+                entries[guid] = {"drive_id": values[0], "item_id": values[1], "name": values[2], "seen": now}
+        sites[key] = entries
+        self._trim(key)
+        if not sites[key]:
+            sites.pop(key)
+        self.dirty = True
+
+    def _trim(self, key):
+        sites = self._sites
+        entries = sites.get(key)
+        if entries and len(entries) > MAX_WALK_ITEMS:
+            keep = sorted(entries.items(), key=lambda kv: kv[1]["seen"], reverse=True)[:MAX_WALK_ITEMS]
+            sites[key] = dict(keep)
+        if len(sites) > WALK_INDEX_MAX_SITES:
+            newest = sorted(sites, key=lambda k: max((e["seen"] for e in sites[k].values()), default=0),
+                            reverse=True)
+            for old in newest[WALK_INDEX_MAX_SITES:]:
+                if old != key:
+                    sites.pop(old, None)
+
+    def save(self):
+        """Atomically write the sidecar (0600) when something changed; True when written."""
+        if not self.dirty:
+            return False
+        data = json.dumps({"version": self.VERSION, "contains": "SharePoint ids and file names only",
+                           "sites": self._load()}, sort_keys=True).encode("utf-8")
+        tmp = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd, tmp = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
+            with os.fdopen(fd, "wb") as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.path)
+            tmp = None
+            self.dirty = False
+            return True
+        except OSError as exc:
+            self.log(f"  WARNING: SharePoint walk index not saved ({type(exc).__name__})")
+            return False
+        finally:
+            if tmp is not None:          # failed or interrupted (SIGTERM): no stray temp file
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+
 class SiteWalker:
     """Read-only library walk of a bookmark's site, at most once per site per run.
 
     ``list_sharepoint_sites`` -> the one site whose ``webUrl`` is the bookmark's
     host and ``/sites/<x>``; ``list_sharepoint_site_libraries``; then a
     breadth-first ``list_library_files`` over each library (``MAX_WALK_ITEMS``
-    items in all, folders to ``MAX_WALK_DEPTH``). Listed files are indexed by the
-    ``sourcedoc`` GUID of their ``webUrl``. A tool error ends that site's walk
-    (what was listed is kept); a session failure or the deadline propagates."""
+    items in all, folders to ``MAX_WALK_DEPTH``, ``MAX_WALK_CALLS`` calls, at
+    least ``WALK_PACE_S`` apart). Listed files are indexed by the ``sourcedoc``
+    GUID of their ``webUrl``. A tool error ends that site's walk (what was listed
+    is kept); a session failure or the deadline propagates. With ``cache`` (a
+    :class:`WalkIndexCache`) a GUID known from an earlier run is tried first with
+    one confirming ``get_drive_item``; the walk's index is saved back.
+    ``stats[host/site]`` records how each site was answered (no content)."""
 
-    def __init__(self, log=print):
+    def __init__(self, log=print, cache=None):
         self._index = {}     # (host, site) -> ({GUID: (drive_id, item)}, complete)
         self.calls = 0
         self._site_calls = 0
+        self._last_call = None
         self.log = log
+        self.cache = cache
+        self.stats = {}
+
+    async def _confirm(self, call, ref, names, drive_id, item_id):
+        """The :class:`Resolved` item when ``get_drive_item`` shows the bookmark's GUID and a name of ``names``."""
+        item = await call("get_drive_item", {"driveId": drive_id, "itemId": item_id})
+        if not _item_matches(ref, item, renamed=True) or _norm(item.get("name")) not in names:
+            return None
+        return _to_resolved(drive_id, str(item.get("id") or item_id), item)
+
+    async def _from_cache(self, call, ref, names):
+        key = _cache_key(ref)
+        hint = self.cache.lookup(key, ref.sourcedoc)
+        if hint is None:
+            return None
+        from src.capture.mcp_client import McpRateLimited
+        try:
+            found = await self._confirm(call, ref, names, hint[0], hint[1])
+        except McpRateLimited:
+            raise Unresolved("rate_limited") from None     # keep the hint: retried next run
+        except Exception as exc:  # noqa: BLE001 - a vanished item (404): stale hint, walk afresh
+            if _fatal(exc):
+                raise
+            found = None
+        if found is None:
+            self.cache.forget(key, ref.sourcedoc)
+            self.cache.save()
+            self.stats.setdefault(key, {})["cache"] = "stale"
+            return None
+        self.cache.remember(key, ref.sourcedoc, found.drive_id, found.item_id, found.name)
+        self.cache.save()
+        self.stats.setdefault(key, {})["cache"] = "hit"
+        return found
 
     async def find(self, call, ref, names):
         """The :class:`Resolved` item with the bookmark's GUID and one of ``names``, else None.
@@ -445,8 +662,15 @@ class SiteWalker:
         if ref.sourcedoc is None or not names:
             return None
         key = (ref.host, ref.site)
+        if key not in self._index and self.cache is not None:
+            found = await self._from_cache(call, ref, names)
+            if found is not None:
+                return found
         if key not in self._index:
             self._index[key] = await self._walk(call, ref)
+            if self.cache is not None:
+                self.cache.update(_cache_key(ref), *self._index[key])
+                self.cache.save()
         index, complete = self._index[key]
         hit = index.get(ref.sourcedoc)
         if hit is None:
@@ -457,21 +681,25 @@ class SiteWalker:
             return None
         drive_id, listed = hit
         try:
-            item = await call("get_drive_item", {"driveId": drive_id, "itemId": listed["id"]})
+            return await self._confirm(call, ref, names, drive_id, listed["id"])
         except Exception as exc:  # noqa: BLE001 - a vanished item is just not found
             if _fatal(exc):
                 raise
             return None
-        if not _item_matches(ref, item, renamed=True) or _norm(item.get("name")) not in names:
-            return None
-        return _to_resolved(drive_id, str(item.get("id") or listed["id"]), item)
 
     async def _list(self, call, tool, params):
         if self._site_calls >= MAX_WALK_CALLS:
             raise _WalkCapped()
+        if self._last_call is not None and WALK_PACE_S > 0:
+            gap = min(WALK_PACE_S, WALK_PACE_S - (time.monotonic() - self._last_call))
+            if gap > 0:
+                await asyncio.sleep(gap)
         self.calls += 1
         self._site_calls += 1
-        reply = await call(tool, params)
+        try:
+            reply = await call(tool, params)
+        finally:
+            self._last_call = time.monotonic()
         return reply if isinstance(reply, dict) else {}
 
     async def _pages(self, call, tool, params, key):
@@ -492,6 +720,7 @@ class SiteWalker:
         rate limit stopped the walk before every listed library/folder was seen."""
         index, complete = {}, True
         self._site_calls = 0
+        progress = {"items": 0, "depth": 0, "libraries": 0}
         try:
             site_id = None
             for term in _site_terms(ref):
@@ -508,6 +737,7 @@ class SiteWalker:
             async for page in self._pages(call, "list_sharepoint_site_libraries",
                                           {"siteId": site_id, "maxResults": 100}, "libraries"):
                 libraries += [lib for lib in page if lib.get("id")]
+            progress["libraries"] = len(libraries)
             seen = 0
             for lib in libraries:
                 queue = [("root", 0)]
@@ -516,6 +746,7 @@ class SiteWalker:
                         complete = False
                         break
                     folder, depth = queue.pop(0)
+                    progress["depth"] = max(progress["depth"], depth)
                     params = {"siteId": site_id, "libraryId": lib["id"], "folderId": folder,
                               "maxResults": max(1, min(WALK_PAGE_SIZE, MAX_WALK_ITEMS - seen))}
                     async for page in self._pages(call, "list_library_files", params, "items"):
@@ -526,6 +757,7 @@ class SiteWalker:
                                 complete = False
                                 break
                             seen += 1
+                            progress["items"] = seen
                             if item.get("isFolder"):
                                 if depth + 1 <= MAX_WALK_DEPTH:
                                     queue.append((item["id"], depth + 1))
@@ -544,10 +776,14 @@ class SiteWalker:
             complete = False
             self.log(f"  SharePoint library walk of {ref.site} stopped (call cap {MAX_WALK_CALLS})")
         except Exception as exc:  # noqa: BLE001 - a listing error ends this site's walk
+            complete = False
             if _fatal(exc):
                 raise
-            complete = False
             self.log(f"  SharePoint library walk of {ref.site} stopped ({type(exc).__name__})")
+        finally:
+            self.stats.setdefault(_cache_key(ref), {}).update(
+                walk_calls=self._site_calls, items=progress["items"], depth=progress["depth"],
+                libraries=progress["libraries"], complete=complete)
         return index, complete
 
 
@@ -1012,7 +1248,10 @@ def _grasp_env():
 def default_client(download_dir):
     from src.capture.mcp_client import McpClient
     return McpClient(GRASP_CMD, [*GRASP_ARGS, "--download-dir", download_dir],
-                     call_timeout=CALL_TIMEOUT_S, env=_grasp_env())
+                     call_timeout=CALL_TIMEOUT_S, env=_grasp_env(),
+                     rate_limit_retries=RATE_LIMIT_RETRIES, rate_limit_max_wait=RATE_LIMIT_MAX_WAIT_S,
+                     rate_limit_wait_budget=RATE_LIMIT_SESSION_BUDGET_S,
+                     rate_limit_call_budget=RATE_LIMIT_CALL_BUDGET_S)
 
 
 def sweep_stale_dirs(root=None, now=None):
@@ -1176,7 +1415,7 @@ def _install_sigterm(handler=None):
 
 
 def capture_bookmarked_docs(bookmarks, *, session_left, save=True, budget_s=None, client_factory=None,
-                            fingerprints=None, ingest=None, log=print, tmp_root=None):
+                            fingerprints=None, ingest=None, log=print, tmp_root=None, walk_index=None):
     """One grasp session over the SharePoint Office-document bookmarks.
 
     ``bookmarks`` is ``[(name, url)]`` (non-documents are ignored);
@@ -1184,7 +1423,9 @@ def capture_bookmarked_docs(bookmarks, *, session_left, save=True, budget_s=None
     ``{"counts": Counter(outcome), "results": {url: DocResult}, "cause": str|None,
     "ingest": stats|None}``. Never raises an ``Exception``: grasp launch/auth
     failures defer every document (advisory). ``save=False`` reads the stored
-    fingerprints only when given and writes nothing (no DB, no files kept)."""
+    fingerprints only when given and writes nothing (no DB, no files kept).
+    ``walk_index`` is the cross-run walk index sidecar path; by default the job
+    status dir's ``WALK_INDEX_FILENAME`` when ``save``, none otherwise."""
     docs = [(n, u, ref) for n, u in bookmarks for ref in [doc_ref(u)] if ref is not None]
     results = {u: DocResult(u, ref.name or n or "(unnamed)") for n, u, ref in docs}
     summary = {"counts": Counter(), "results": results, "cause": None, "ingest": None}
@@ -1216,7 +1457,11 @@ def capture_bookmarked_docs(bookmarks, *, session_left, save=True, budget_s=None
             fingerprints = {}
     deadline = time.monotonic() + max(0.0, budget_s)
     if pending and summary["cause"] is None:
-        _run_session(pending, results, summary, fingerprints, deadline, client_factory or default_client, log, tmp_root)
+        if walk_index is None and save:
+            walk_index = default_walk_index_path()
+        cache = WalkIndexCache(walk_index, log=log) if walk_index else None
+        _run_session(pending, results, summary, fingerprints, deadline, client_factory or default_client, log, tmp_root,
+                     walker=SiteWalker(log, cache=cache))
     if save and any(r.outcome == "captured" for r in results.values()):
         summary["ingest"] = _ingest(results, ingest, log, deadline)
     skipped = [r for r in results.values() if r.outcome == PERMANENT_OUTCOME]
@@ -1232,7 +1477,7 @@ def capture_bookmarked_docs(bookmarks, *, session_left, save=True, budget_s=None
     return summary
 
 
-def _run_session(docs, results, summary, fingerprints, deadline, client_factory, log, tmp_root):
+def _run_session(docs, results, summary, fingerprints, deadline, client_factory, log, tmp_root, walker=None):
     sweep_stale_dirs(tmp_root)
     previous = signal.getsignal(signal.SIGTERM) if _main_thread() else None
     installed = False
@@ -1254,7 +1499,7 @@ def _run_session(docs, results, summary, fingerprints, deadline, client_factory,
                 return
             try:
                 await process_docs(client.call_json, docs, results, download_dir=tmp,
-                                   fingerprints=fingerprints, deadline=deadline, log=log)
+                                   fingerprints=fingerprints, deadline=deadline, log=log, walker=walker)
             except _Abort as exc:
                 summary["cause"] = f"grasp-mcp session failed mid-pass ({exc})"
             finally:
