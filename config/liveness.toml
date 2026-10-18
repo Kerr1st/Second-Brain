@@ -34,7 +34,9 @@ severity = "advisory"
 reason = "upstream Quick export stale (knowledge_v1.db unchanged since 2026-09-16); qd-sync runs hourly but has nothing new to capture — re-arm when the export resumes"
 
 [channels.web_articles]
-predicate = "source_type = 'article'"
+# SharePoint documents (bookmarks job, grasp) are also source_type 'article'; a weekly
+# refresh of one must not keep this channel green while Crawlee is dead.
+predicate = "source_type = 'article' AND source_url NOT LIKE 'sharepoint://%'"
 max_age_days = 9
 severity = "required"
 

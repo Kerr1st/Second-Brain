@@ -385,9 +385,11 @@ def fetch_output_history(conn, policy) -> tuple[dict, dict, set]:
             days_seen.setdefault(source_type, []).append(day)
         enumerated = set()
         if predicates and last_seen:
-            columns = ", ".join(f"({p})" for p in predicates)
-            cur.execute(f"SELECT source_type, ARRAY[{columns}]::bool[] FROM "
-                        "(SELECT DISTINCT source_type FROM memories WHERE source_type IS NOT NULL AND source_type <> '') s")
+            # bool_or over real rows, so a predicate may use any memories column
+            # (e.g. web_articles excludes source_url LIKE 'sharepoint://%').
+            columns = ", ".join(f"COALESCE(bool_or({p}), false)" for p in predicates)
+            cur.execute(f"SELECT source_type, ARRAY[{columns}]::bool[] FROM memories "
+                        "WHERE source_type IS NOT NULL AND source_type <> '' GROUP BY source_type")
             for source_type, flags in cur.fetchall():
                 if any(flags):
                     enumerated.add(source_type)
