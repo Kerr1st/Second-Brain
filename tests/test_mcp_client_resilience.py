@@ -28,6 +28,11 @@ from src.capture.mcp_client import (
 # The two errors that actually happened, verbatim in shape.
 SLACK_AUTH_PAYLOAD = ('{"error":"AUTH_ERROR","message":"Failed to refresh authentication token: '
                       'Request to IDP URL https://midway-auth.amazon.com/... failed"}')
+GRASP_SESSION_EXPIRED = ("Authentication failed — your session has expired or no valid tokens are "
+                         "available. To fix this, run the following command in another terminal: "
+                         "grasp-mcp login Then retry this operation. No server restart is needed.")
+GRASP_429 = ("get_emails: Error: Rate limited by Microsoft Graph API (HTTP 429). Too many requests in a "
+             "short period. Wait 16 seconds before retrying this tool.")
 
 
 def closed() -> McpError:
@@ -77,6 +82,29 @@ class TestClassifyError:
 
     def test_expired_graph_token_is_auth_not_transport(self):
         assert classify_error(McpToolError("get_emails: 401 unauthorized, token expired")) == "auth"
+
+    @pytest.mark.parametrize("dash", ["—", "-"])
+    def test_grasp_session_expired_is_auth(self, dash):
+        # Verbatim from logs/capture-outlook-20261026.log (2026-10-12..26 exited 1 "error").
+        exc = McpToolError(f"get_emails: {GRASP_SESSION_EXPIRED.replace('—', dash)}")
+        assert classify_error(exc) == "auth"
+        assert is_connection_closed(exc) is False
+
+    @pytest.mark.parametrize("text", [
+        "get_emails: Authentication failed. Please sign in again.",
+        "get_emails: Your session has expired.",
+        "get_emails: no valid tokens; run `grasp-mcp login` and retry",
+    ])
+    def test_each_grasp_reauth_phrase_alone_is_auth(self, text):
+        assert classify_error(McpToolError(text)) == "auth"
+
+    @pytest.mark.parametrize("text", [
+        GRASP_429,
+        "get_file: HTTP 403 Forbidden: permission denied for this item",
+        "get_emails: request rejected: authorization header too large",
+    ])
+    def test_grasp_non_auth_failures_are_not_auth(self, text):
+        assert classify_error(McpToolError(text)) == "error"
 
     def test_ordinary_bug_is_error(self):
         assert classify_error(ValueError("bad row")) == "error"

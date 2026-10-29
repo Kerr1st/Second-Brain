@@ -319,6 +319,51 @@ def test_a_failed_aws_probe_logs_a_classified_reason(tmp_path: Path, rc, output,
     assert list(_scratch_dir(tmp_path).iterdir()) == []
 
 
+def _grasp_probe_source() -> str:
+    """The graph:grasp-mcp heredoc, verbatim from verify_credentials.sh."""
+    text = CREDENTIALS.read_text(encoding="utf-8")
+    start = text.index('check required "graph:grasp-mcp" "$PYTHON_BIN" - <<\'EOF\'\n')
+    body = text[text.index("\n", start) + 1:]
+    return body[: body.index("\nEOF\n") + 1]
+
+
+@pytest.mark.parametrize("dash", ["—", "-"])
+def test_grasp_probe_exits_with_the_auth_code_on_grasps_session_expired_reply(tmp_path: Path, dash):
+    """2026-10-24: the probe exited 1 ("error") on grasp's expired-session reply.
+
+    Runs the real probe and the real classifier; only McpClient is replaced (via
+    sitecustomize) by one whose get_emails fails with grasp's verbatim text."""
+    message = ("Authentication failed — your session has expired or no valid tokens are available. "
+               "To fix this, run the following command in another terminal: grasp-mcp login "
+               "Then retry this operation. No server restart is needed.").replace("—", dash)
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    (stub / "sitecustomize.py").write_text(
+        "import src.capture.mcp_client as mc\n"
+        "class _Client:\n"
+        "    def __init__(self, *a, **k): pass\n"
+        "    async def __aenter__(self): return self\n"
+        "    async def __aexit__(self, *a): return False\n"
+        "    async def call_json(self, name, args):\n"
+        f"        raise mc.McpToolError('get_emails: ' + {message!r})\n"
+        "mc.McpClient = _Client\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-"],
+        input=_grasp_probe_source(),
+        cwd=REPO,
+        env={**os.environ, "PYTHONPATH": f"{stub}{os.pathsep}{REPO}"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert "McpToolError: get_emails: Authentication failed" in result.stderr, result.stderr
+    assert result.returncode == 3, result.stderr  # KIND_EXIT["auth"], as capture-outlook
+
+
 @pytest.mark.parametrize(
     ("rc", "output", "cls"),
     [
