@@ -132,3 +132,20 @@ def test_update_and_supersede_of_a_chunked_discovery_leave_no_stale_active_chunk
         assert _row(cur, mid)["status"] == "superseded" and _children(cur, mid) == []
         assert not _row(cur, new)["embedded"] and len(_children(cur, new)) >= 3
     assert oversize_vector_rows() == []
+
+
+def test_express_brief_lists_a_chunked_discovery_once_as_its_parent(corpus):
+    """Chunks copy the parent's dream-cycle tag; readers that select by that tag
+    must not list "(chunk i/n)" rows next to their parent."""
+    from src.db.express_queries import _gather_insights
+
+    source, derived, context, run, c, calls = corpus
+    mid = store_accepted(c, run_id=run, verdicts=VOTES, authorized_memories=context)
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        assert len(_children(cur, mid)) >= 3
+        ids = [str(r["id"]) for r in _gather_insights(cur, 7)]
+    assert ids.count(mid) == 1
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM memories WHERE parent_id=%s", (mid,))
+        child_ids_present = cur.fetchone()[0]
+    assert child_ids_present >= 3 and all(i == mid or i == derived for i in ids)

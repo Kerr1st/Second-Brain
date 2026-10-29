@@ -13,7 +13,7 @@ def _gather_insights(cur, window_days: int) -> list[dict]:
         """
         SELECT id, type, title, content, created_at, metadata, project
         FROM memories
-        WHERE tags @> ARRAY['dream-cycle'] AND status = 'active'
+        WHERE tags @> ARRAY['dream-cycle'] AND status = 'active' AND parent_id IS NULL
           AND created_at > now() - (%s || ' days')::interval
         ORDER BY created_at DESC
         LIMIT 8

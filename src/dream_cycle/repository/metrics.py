@@ -153,7 +153,7 @@ def get_tier2_metrics(n_cycles: int=10, *, db: Database) -> dict:
             cur.execute("""
                 SELECT coalesce(avg(access_count), 0) AS avg_access
                 FROM memories
-                WHERE 'dream-cycle' = ANY(tags)
+                WHERE 'dream-cycle' = ANY(tags) AND parent_id IS NULL
                 """)
             insight_citation_rate = float(cur.fetchone()['avg_access'])
         return {'user_rejection_rate': user_rejection_rate, 'rejection_reason_clusters': rejection_reason_clusters, 'insight_citation_rate': insight_citation_rate}
