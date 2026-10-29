@@ -621,8 +621,9 @@ if __name__ == "__main__":
         last searches were lost. Raising SystemExit instead would abort an atexit
         flush already in progress, and while serving it hangs shutdown on the
         anyio worker thread blocked reading stdin. So flush here (bounded by
-        close()'s timeout; SIGKILL still ends it) and leave with os._exit. Writes
-        nothing: stdout is the MCP wire.
+        flush()'s timeout; SIGKILL still ends it) and leave with os._exit. Writes
+        nothing: stdout is the MCP wire. SIGTERM is handled between bytecodes, so
+        a server inside a DB call exits when the call returns (or at SIGKILL).
         """
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         _access_writer.flush()  # not close(): its join can stall 5 s if SIGTERM lands while schedule() holds the lock; os._exit ends the thread
