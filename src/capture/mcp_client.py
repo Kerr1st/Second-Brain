@@ -155,7 +155,9 @@ class CaptureFailure(RuntimeError):
 # Error classification                                                         #
 # --------------------------------------------------------------------------- #
 # Matched case-insensitively against the whole exception chain (plain substring:
-# no space/punctuation folding, so each marker avoids grasp's em dash).
+# no space/punctuation folding, so each marker avoids grasp's em dash). Meant for
+# MCP error text only: phrases such as "authentication failed" also occur in
+# PostgreSQL/TLS/SOCKS errors, so don't route non-MCP failures through these.
 _AUTH_MARKERS = (
     "auth_error", "failed to refresh authentication token", "midway-auth",
     "unauthorized", "invalid_grant", "token expired", "expired token",

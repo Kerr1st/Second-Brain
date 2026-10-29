@@ -263,6 +263,18 @@ class TestReconnect:
             asyncio.run(client.call_json("list_my_channels"))
         assert client.reconnects_used == 0 and len(client.connects) == 1
 
+    @pytest.mark.parametrize("dash", ["—", "-"])
+    def test_grasps_session_expired_iserror_reply_raises_auth_not_a_tool_error(self, dash):
+        # The production path: grasp answers with an isError tool result, so
+        # _call_once raises McpAuthError (not a swallowable McpToolError).
+        text = GRASP_SESSION_EXPIRED.replace("—", dash)
+        client = _client(FakeSession(_reply(text, is_error=True)), FakeSession(_reply('{"ok": 1}')))
+        with pytest.raises(McpAuthError, match="get_emails: Authentication failed") as exc:
+            asyncio.run(client.call_json("get_emails", {"folder": "inbox"}))
+        assert not isinstance(exc.value, McpToolError)
+        assert classify_error(exc.value) == "auth"
+        assert client.reconnects_used == 0 and len(client.connects) == 1
+
     def test_no_reconnect_for_ordinary_tool_errors(self):
         client = _client(FakeSession(_reply("rate limited", is_error=True)))
         with pytest.raises(McpToolError, match="rate limited"):
