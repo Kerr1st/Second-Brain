@@ -12,6 +12,17 @@ from src.dream_cycle.budget import GROUNDING_AUDIT_ROLE  # "grounding_auditor"
 from src.dream_cycle.parsing import _as_str_list, _unwrap_nested_candidate
 logger = logging.getLogger(__name__)
 
+#: Bound on the raw reply kept in a failed-revision capture.
+FAILED_REVISION_CAPTURE_CHARS = 4000
+
+
+class RevisionNoCandidate(ValueError):
+    """The revision reply held no candidate; the panel votes on the original.
+
+    An expected model outcome (seen 10-09 and 10-26), not a code fault: it is
+    logged as one WARNING line and the reply is captured for diagnosis.
+    """
+
 def _ground_candidate(self, candidate: CandidateInsight) -> CandidateInsight:
     """Audit a candidate against its sources and repair it once before the panel.
 
@@ -44,6 +55,9 @@ def _ground_candidate(self, candidate: CandidateInsight) -> CandidateInsight:
         return self._revise_candidate(candidate, audit)
     except SpendCapExceeded:
         raise
+    except RevisionNoCandidate as exc:
+        logger.warning("Revision failed for '%s' (%s); panel votes on the original", candidate.title, exc)
+        return candidate
     except Exception:
         logger.warning("Revision failed for '%s'; panel votes on the original", candidate.title, exc_info=True)
         return candidate
@@ -65,11 +79,21 @@ def _revise_candidate(self, candidate: CandidateInsight, audit: EvaluatorVerdict
         run_id=self._current_run_id,
         **({} if self._role_has_tools("thinker") else {"schema": REVISION_SCHEMA}),
     )
+    capture_name = f"revision_{candidate.title.replace(' ', '_').replace('/', '_')[:40]}"
     out = result.get("output") or {}
     if isinstance(out, list):
         out = out[0] if out else {}
     if not isinstance(out, dict) or "content" not in out:
-        raise ValueError("revision returned no candidate")
+        shape = (f"output {type(out).__name__}"
+                 + (f", keys {sorted(map(str, out))}" if isinstance(out, dict) else ""))
+        raw = result.get("raw")
+        raw = raw if isinstance(raw, str) else json.dumps(result.get("output"), default=str)
+        self._capture(f"{capture_name}_failed",
+                      inputs={"system_prompt": REVISION_PROMPT, "user_message": user_message},
+                      output={"failed": True, "reason": "revision returned no candidate", "shape": shape,
+                              "stop_reason": result.get("stop_reason"), "raw_chars": len(raw),
+                              "raw": raw[:FAILED_REVISION_CAPTURE_CHARS]})
+        raise RevisionNoCandidate(f"revision returned no candidate; {shape}")
     out = _unwrap_nested_candidate(out)
     # Sources may only shrink: the revision must not introduce new citations.
     original_sources = [str(m) for m in candidate.source_memories]
@@ -93,7 +117,7 @@ def _revise_candidate(self, candidate: CandidateInsight, audit: EvaluatorVerdict
            "revision": {"original_title": candidate.title, "audit_score": audit.score,
                         "blocking_issues": audit.blocking_issues, "advisory_issues": audit.advisory_issues}}
     )
-    self._capture(f"revision_{candidate.title.replace(' ', '_').replace('/', '_')[:40]}",
+    self._capture(capture_name,
                   inputs={"system_prompt": REVISION_PROMPT, "user_message": user_message}, output=out)
     logger.info("Revised '%s' -> '%s' (confidence %s, %d/%d sources kept)", candidate.title[:60],
                 revised.title[:60], revised.confidence, len(kept), len(original_sources))

@@ -34,7 +34,7 @@ from src.prompts.skim import PROMPT_VERSION as SKIM_PROMPT_VERSION
 import src.dream_cycle_db as dream_cycle_db
 from src.dream_cycle.repository.runs import verdict_columns
 from src.dream_cycle.consensus import tally_consensus
-from src.dream_cycle.storage import store_accepted, check_duplicate, authorize_candidate, CandidateAuthorizationError, canonical_uuid
+from src.dream_cycle.storage import store_accepted, check_duplicate, authorize_candidate, CandidateAuthorizationError, DiscoveryEmbeddingError, canonical_uuid
 from src.dream_cycle.digest import generate_digest
 from src.dream_cycle.feedback import build_feedback_injection
 from src.dream_cycle import allocation, ledger
@@ -464,8 +464,10 @@ class DreamCycleOrchestrator(AgentRunner):
                     dream_cycle_db.store_candidate(run_id, candidate_dict, verdicts_dict, "REJECTED")
                     rejected.append(candidate)
                     self._run_stats["candidates_rejected"] = len(rejected)
-            except (CandidateAuthorizationError, ValueError, psycopg2.IntegrityError) as exc:
-                # The failed candidate transaction was rolled back in full. Keep
+            except (CandidateAuthorizationError, ValueError, psycopg2.IntegrityError,
+                    DiscoveryEmbeddingError) as exc:
+                # The failed candidate transaction was rolled back in full (an
+                # embedding failure happens before it opens). Keep
                 # prior successes, retain real votes, and distinguish authorization
                 # or storage failure from a quality rejection by the panel.
                 logger.warning("Candidate storage blocked for %s: %s", candidate.title, _failure_message(exc))

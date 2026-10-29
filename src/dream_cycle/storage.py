@@ -11,11 +11,14 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import UUID
 
+from botocore.exceptions import BotoCoreError, ClientError
 from psycopg2.extras import RealDictCursor
 from src.classify import classify_memory
 from src.db import create_memory, create_relationship, search_similar, update_memory, transaction
+from src.db.maintenance import install_chunk_set, purge_superseded_chunks
 from src.depth import compute_depth_score
 from src.embeddings import generate_embedding
+from src.ingest import chunk_by_section
 from src.models import CandidateInsight
 from src.validation import RELATION_TYPES
 
@@ -27,6 +30,10 @@ PROTECTED_MARKERS = frozenset({"source", "capture", "governing", "guidance", "st
 
 class CandidateAuthorizationError(ValueError):
     """A suggested mutation is outside the discovery writer's authority."""
+
+
+class DiscoveryEmbeddingError(RuntimeError):
+    """The embedding provider failed for an accepted discovery; nothing was written."""
 
 
 def canonical_uuid(value) -> str | None:
@@ -42,6 +49,59 @@ def _uuid(value) -> str:
     if canonical is None:
         raise CandidateAuthorizationError("Candidate references must be valid memory UUIDs")
     return canonical
+
+
+#: The corpus chunk bound (``chunk_by_section`` default, ``oversize_vector_rows``):
+#: no stored vector describes more than this many characters. A longer discovery
+#: is stored like ingested long content: a parent row without its own vector and
+#: active chunk children that carry the vectors.
+MAX_CHUNK_CHARS = 4000
+
+
+def _prepare_vectors(content: str):
+    """``(comparison_vector, chunks)`` for ``content``.
+
+    Short content: its own embedding and ``None`` (stored on the row, as before).
+    Long content: one embedding per bounded chunk, ``[(text, vector), ...]``, and
+    their mean as the whole-text comparison vector for the duplicate checks only;
+    the mean is never stored.
+    """
+    if len(content) <= MAX_CHUNK_CHARS:
+        return _embed(content, "text"), None
+    texts = [text for text in chunk_by_section(content, MAX_CHUNK_CHARS) if text.strip()]
+    chunks = [(text, _embed(text, f"chunk {i}/{len(texts)}")) for i, text in enumerate(texts, 1)]
+    mean = [sum(column) / len(chunks) for column in zip(*(vector for _, vector in chunks))]
+    return mean, chunks
+
+
+def _embed(text: str, part: str):
+    """``generate_embedding``, with a provider failure raised as :class:`DiscoveryEmbeddingError`.
+
+    Runs before the write transaction, so a failure on any call writes nothing.
+    """
+    try:
+        return generate_embedding(text)
+    except (BotoCoreError, ClientError) as exc:
+        raise DiscoveryEmbeddingError(f"Embedding provider failed on {part}: {exc}") from exc
+
+
+def _install_chunks(conn, memory_id: str, chunks, candidate: CandidateInsight, metadata: dict) -> None:
+    """Give ``memory_id`` this chunk set (clears the parent's vector), purge uncited old chunks."""
+    install_chunk_set(conn, memory_id, chunks,
+                      fields={"type": candidate.type, "title": candidate.title,
+                              "tags": ["dream-cycle", candidate.schema_operation]},
+                      metadata=metadata, mem_class=lambda text: classify_memory(candidate.type, text))
+    purge_superseded_chunks(conn, memory_id)
+
+
+def _retire_chunks(conn, memory_id: str) -> None:
+    """Supersede a parent's active chunks (they no longer describe it), purge uncited ones."""
+    with conn.cursor() as cur:
+        cur.execute("UPDATE memories SET status='superseded', updated_at=now() WHERE parent_id=%s AND status='active'",
+                    (memory_id,))
+        retired = cur.rowcount
+    if retired:
+        purge_superseded_chunks(conn, memory_id)
 
 
 # Semantic duplicate threshold, as in production before the refactor
@@ -183,13 +243,18 @@ def store_accepted(candidate: CandidateInsight, *, run_id: str, verdicts: dict,
     never an allow-list made from model citations. Row locks are acquired in UUID
     order. A source-set advisory lock serializes CREATE dedup across concurrent
     callers, including the no-existing-row case.
+
+    Content over :data:`MAX_CHUNK_CHARS` is stored as a parent without a vector
+    plus active chunk children (``install_chunk_set``, as ingest and rechunk do).
+    The parent keeps the ID: edges, ``created_memory_id`` and dedup refer to it,
+    and dedup compares a chunked parent by the mean of its chunk vectors.
     """
     from src.dream_cycle_db import store_candidate
     ids = validate_candidate(candidate, authorized_memories)
     source_ids = sorted({_uuid(mid) for mid in candidate.source_memories})
     source_key = json.dumps(source_ids, separators=(",", ":"))
     lock_key = int.from_bytes(hashlib.sha256(source_key.encode()).digest()[:8], "big", signed=True)
-    embedding = generate_embedding(candidate.content)
+    embedding, chunks = _prepare_vectors(candidate.content)
     metadata = {"dream_cycle": True, "strategy": candidate.strategy_that_found_it,
                 "source_memories": source_ids, "source_key": source_key,
                 "confidence": candidate.confidence, "depth_score": compute_depth_score(candidate.content)}
@@ -204,7 +269,8 @@ def store_accepted(candidate: CandidateInsight, *, run_id: str, verdicts: dict,
                             WHERE c.created_memory_id=memories.id AND c.final_verdict='ACCEPTED')
                 AND metadata->'source_memories' @> %s::jsonb
                 AND metadata->'source_memories' <@ %s::jsonb
-                AND 1 - (embedding <=> %s::vector) > 0.85
+                AND 1 - (COALESCE(embedding, (SELECT avg(c.embedding) FROM memories c
+                          WHERE c.parent_id = memories.id AND c.status = 'active')) <=> %s::vector) > 0.85
                 ORDER BY id LIMIT 1"""
             duplicate_params = (json.dumps(source_ids), json.dumps(source_ids), str(embedding))
             duplicate_id = None
@@ -260,16 +326,23 @@ def store_accepted(candidate: CandidateInsight, *, run_id: str, verdicts: dict,
                     memory_id = _uuid(candidate.target_memory_id)
                     metadata = {**_metadata(rows[memory_id]), **metadata,
                                 "last_dream_cycle_update": datetime.now(timezone.utc).isoformat()}
+                    if chunks is None:
+                        _retire_chunks(conn, memory_id)
                     update_memory(memory_id, title=candidate.title, content=candidate.content,
-                        embedding=embedding, metadata=metadata,
+                        embedding=embedding if chunks is None else None, metadata=metadata,
                         mem_class=classify_memory(candidate.type, candidate.content), conn=conn)
+                    if chunks is not None:
+                        _install_chunks(conn, memory_id, chunks, candidate, metadata)
                 else:
                     memory_id = create_memory(type=candidate.type, title=candidate.title,
-                        content=candidate.content, embedding=embedding,
+                        content=candidate.content, embedding=embedding if chunks is None else None,
                         tags=["dream-cycle", candidate.schema_operation], metadata=metadata,
                         mem_class=classify_memory(candidate.type, candidate.content), conn=conn)
+                    if chunks is not None:
+                        _install_chunks(conn, memory_id, chunks, candidate, metadata)
                     if candidate.operation == "SUPERSEDE":
                         update_memory(candidate.target_memory_id, status="superseded", conn=conn)
+                        _retire_chunks(conn, candidate.target_memory_id)
                         create_relationship(candidate.target_memory_id, memory_id, "superseded_by", candidate.supersedes_reason, conn=conn)
                 for source_id in source_ids:
                     if source_id != memory_id:
