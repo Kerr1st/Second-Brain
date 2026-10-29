@@ -186,3 +186,68 @@ def test_citation_rate_credits_a_chunked_discovery_with_its_chunks_accesses(corp
     # Per discovery: long = 0 + 2 + 2, short = 1. Chunks are not discoveries of their own.
     assert get_tier2_metrics(3)["insight_citation_rate"] == pytest.approx(2.5)
 
+
+def _provider_error():
+    from botocore.exceptions import ClientError
+    return ClientError({"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}}, "InvokeModel")
+
+
+@pytest.mark.parametrize("error", ["client", "connection"])
+def test_embedding_provider_error_is_a_discovery_embedding_error(monkeypatch, error):
+    from botocore.exceptions import EndpointConnectionError
+    from src.dream_cycle import storage
+
+    exc = _provider_error() if error == "client" else EndpointConnectionError(endpoint_url="https://bedrock")
+    monkeypatch.setattr(storage, "generate_embedding", lambda text: (_ for _ in ()).throw(exc))
+    with pytest.raises(storage.DiscoveryEmbeddingError, match="chunk 1/") as raised:
+        storage._prepare_vectors(LONG)
+    assert raised.value.__cause__ is exc
+
+
+def test_embedding_provider_error_on_a_chunk_blocks_only_that_candidate(corpus, monkeypatch, mock_embedding):
+    """A provider failure while embedding chunk 2 of an accepted long discovery is
+    that candidate's storage failure: nothing written, the run goes on (review S3)."""
+    from src.dream_cycle import DreamCycleOrchestrator
+    from src.ingest import chunk_by_section
+    from src.models import EvaluatorVerdict, MemorySlice
+
+    source, derived, context, _, long_c, _ = corpus
+    short_c = replace(long_c, title="Short discovery", content="A grounded connection")
+    second_chunk = [t for t in chunk_by_section(LONG, MAX_CHUNK_CHARS) if t.strip()][1]
+
+    def embed(text):
+        if text == second_chunk:
+            raise _provider_error()
+        return mock_embedding(text)
+
+    monkeypatch.setattr("src.dream_cycle.storage.generate_embedding", embed)
+    orch = DreamCycleOrchestrator()
+
+    def think(_):
+        orch._slice_memory_cache = context.copy()
+        return [long_c, short_c]
+
+    monkeypatch.setattr(orch, "_skim_arrivals", lambda *args: None)
+    monkeypatch.setattr(orch, "invoke_explorer",
+                        lambda *args: [MemorySlice("Supplied evidence", "cross_project_collision", [source, derived])])
+    monkeypatch.setattr(orch, "_allocate_attention", lambda run, kind, at, slices: slices)
+    monkeypatch.setattr(orch, "invoke_thinker", think)
+    monkeypatch.setattr(orch, "_ground_candidate", lambda c: c)
+    monkeypatch.setattr(orch, "invoke_evaluator", lambda c, role: EvaluatorVerdict(role, "ACCEPT"))
+    monkeypatch.setattr("src.dream_cycle.orchestrator.generate_digest", lambda *a, **kw: "fixture.md")
+    result = orch.run("user_triggered")
+    assert result.candidates_generated == 2 and result.candidates_accepted == 1
+    assert not result.aborted_early and result.candidates_unjudged == 0
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT final_verdict, created_memory_id, candidate_json FROM dream_cycle_candidates "
+                    "WHERE run_id=%s ORDER BY created_at", (result.run_id,))
+        blocked, accepted = cur.fetchall()
+        assert (blocked["final_verdict"], accepted["final_verdict"]) == ("BLOCKED", "ACCEPTED")
+        assert blocked["created_memory_id"] is None and accepted["created_memory_id"]
+        assert blocked["candidate_json"]["storage_error"] == "DiscoveryEmbeddingError"
+        assert "chunk 2/" in blocked["candidate_json"]["block_reason"]
+        assert "ThrottlingException" in blocked["candidate_json"]["block_reason"]
+        cur.execute("SELECT count(*) AS n FROM memories WHERE title LIKE 'Long discovery%%'")
+        assert cur.fetchone()["n"] == 0
+        cur.execute("SELECT stats FROM dream_cycle_runs WHERE id=%s", (result.run_id,))
+        assert cur.fetchone()["stats"]["candidates_storage_failed"] == 1

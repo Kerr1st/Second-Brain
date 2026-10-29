@@ -11,6 +11,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import UUID
 
+from botocore.exceptions import BotoCoreError, ClientError
 from psycopg2.extras import RealDictCursor
 from src.classify import classify_memory
 from src.db import create_memory, create_relationship, search_similar, update_memory, transaction
@@ -29,6 +30,10 @@ PROTECTED_MARKERS = frozenset({"source", "capture", "governing", "guidance", "st
 
 class CandidateAuthorizationError(ValueError):
     """A suggested mutation is outside the discovery writer's authority."""
+
+
+class DiscoveryEmbeddingError(RuntimeError):
+    """The embedding provider failed for an accepted discovery; nothing was written."""
 
 
 def canonical_uuid(value) -> str | None:
@@ -62,11 +67,22 @@ def _prepare_vectors(content: str):
     the mean is never stored.
     """
     if len(content) <= MAX_CHUNK_CHARS:
-        return generate_embedding(content), None
-    chunks = [(text, generate_embedding(text))
-              for text in chunk_by_section(content, MAX_CHUNK_CHARS) if text.strip()]
+        return _embed(content, "text"), None
+    texts = [text for text in chunk_by_section(content, MAX_CHUNK_CHARS) if text.strip()]
+    chunks = [(text, _embed(text, f"chunk {i}/{len(texts)}")) for i, text in enumerate(texts, 1)]
     mean = [sum(column) / len(chunks) for column in zip(*(vector for _, vector in chunks))]
     return mean, chunks
+
+
+def _embed(text: str, part: str):
+    """``generate_embedding``, with a provider failure raised as :class:`DiscoveryEmbeddingError`.
+
+    Runs before the write transaction, so a failure on any call writes nothing.
+    """
+    try:
+        return generate_embedding(text)
+    except (BotoCoreError, ClientError) as exc:
+        raise DiscoveryEmbeddingError(f"Embedding provider failed on {part}: {exc}") from exc
 
 
 def _install_chunks(conn, memory_id: str, chunks, candidate: CandidateInsight, metadata: dict) -> None:
