@@ -43,9 +43,21 @@ severity = "required"
 [channels.ide_chat]
 # Re-armed in R5: R4's chat-capture job captures native Kiro IDE sessions nightly
 # (the channel had been dark since 2026-05-17 and was excluded from this list).
+# Judged on the producer (2026-10-29): the user moved to Kiro CLI (no IDE session
+# written since 2026-09-30), so a quiet channel is not a capture failure. ❌ only
+# when an IDE session on disk newer than the last capture and older than
+# producer_grace_days (the nightly 02:30 run has had its chance) is one chat-capture
+# would take: same discovery, identity/fingerprint check and parser; a session it
+# filters (e.g. one prompt) or already stores unchanged does not count. ✅ idle only
+# when no IDE session is newer than max_age_days AND Kiro.app's own launch logs /
+# state.vscdb agree it has not run for max_age_days; a missing session store, no app
+# signal, or an app that ran with no new session in the store → the age rule.
+# producer_grace_days defaults to 2 when omitted.
 predicate = "source_type = 'kiro_ide_chat'"
 max_age_days = 7
 severity = "required"
+producer = "kiro_ide_sessions"
+producer_grace_days = 2
 
 [channels.cli_chat]
 predicate = "source_type = 'kiro_cli_chat'"
@@ -96,7 +108,7 @@ reason = "com.second-brain.distill is launchctl-disabled by the operator (since 
 predicate = "source_type = 'weekly_digest'"
 max_age_days = 14
 severity = "advisory"
-reason = "weekly_digest.sh has failed every Monday since 2026-09-07 (Bedrock EndpointConnectionError, exit 1); its wrapper status is swept below"
+reason = "weekly_digest.sh failed every Monday 2026-09-07..2026-10-05 (Bedrock EndpointConnectionError, exit 1); OK again since 2026-10-09 (10-12, 10-19, 10-26) — re-arm (severity = required) once the operator confirms"
 
 # --- generic zero-output predicate ----------------------------------------------
 # Every source_type that has EVER produced a row is checked, enumerated or not:
@@ -178,8 +190,9 @@ youtube = 30
 # refuses an entry without one) so the list cannot silently become a mute button.
 # Mirrors `severity = "advisory"` on channels. Remove the entry when the condition
 # in the reason is met.
+# weekly-digest was listed until 2026-10-29 ("network preflight pending
+# verification; remove after two consecutive OK runs"): OK on 10-12, 10-19, 10-26.
 [jobs.advisory]
-weekly-digest = "network preflight pending verification; remove after two consecutive OK runs"
 
 # --- persistent job backlog --------------------------------------------------------
 # A job that legitimately leaves work for its next run records its own streak in
