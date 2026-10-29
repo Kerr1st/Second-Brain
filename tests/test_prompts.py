@@ -258,6 +258,27 @@ class TestThinkerPromptExplicit:
         assert 'UPDATE and SUPERSEDE may only target a memory marked "may_update": true' in prompt
         assert "use CREATE instead" in prompt
 
+    def test_thinker_prompt_update_content_is_a_complete_revision(self):
+        """Run 3c0ba87e: three UPDATEs wrote their content as a delta that cited
+        their own target ("recorded as unconfirmed in [efa552a4…]") and proposed an
+        `extends` edge to it, but storage replaces the target's content wholesale
+        (review-update-self-edge.md S1). The prompt says UPDATE content replaces the
+        target, so it must be the complete revised memory; it must not cite, describe
+        or relate to its own target; an additive note is a CREATE that extends it."""
+        prompt = get_thinker_prompt()
+        assert "An UPDATE's content REPLACES the target memory's content" in prompt
+        assert "write content as the complete revised memory" in prompt
+        assert "keep everything in the target that is still true" in prompt
+        assert "keep the target's ref in source_memories" in prompt
+        assert "do not cite the target by its ref or id in prose" in prompt
+        assert "describe it in the third person as a separate memory" in prompt
+        assert "do not propose a relationship to the target" in prompt
+        assert 'use CREATE with an "extends" relationship to the target' in prompt
+        # The new rule adds to the existing ones; it does not replace them.
+        assert "The Scope to evidence rules apply to the whole revised text" in prompt
+        assert 'UPDATE and SUPERSEDE may only target a memory marked "may_update": true' in prompt
+        assert "Every fact must be traceable to a cited memory" in prompt
+
 
 # ---------------------------------------------------------------------------
 # Explicit tests for Evaluator prompts

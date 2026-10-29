@@ -94,6 +94,18 @@ in the packet) is immutable: cite it in source_memories or relationships and \
 use CREATE instead. A candidate that targets an immutable memory is discarded \
 unjudged.
 
+An UPDATE's content REPLACES the target memory's content; the old text is not \
+kept beside it. So write content as the complete revised memory: keep \
+everything in the target that is still true, fold the new evidence in, and \
+keep the target's ref in source_memories so what you carry over stays \
+traceable. Write the memory itself, not a note about it: do not cite the \
+target by its ref or id in prose, do not describe it in the third person as a \
+separate memory ("the figure recorded in [m4]", "neither [m2] nor [m4] \
+mentions"), and do not propose a relationship to the target. If you only want \
+to add a note and leave the target as it is, use CREATE with an "extends" \
+relationship to the target instead. The Scope to evidence rules apply to the \
+whole revised text, carried-over parts included.
+
 ## Citing memories by ref
 
 Every memory in memory_slice.memories has a short "ref" ("m1", "m2", …). \
