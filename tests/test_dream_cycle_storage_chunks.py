@@ -134,18 +134,55 @@ def test_update_and_supersede_of_a_chunked_discovery_leave_no_stale_active_chunk
     assert oversize_vector_rows() == []
 
 
-def test_express_brief_lists_a_chunked_discovery_once_as_its_parent(corpus):
-    """Chunks copy the parent's dream-cycle tag; readers that select by that tag
-    must not list "(chunk i/n)" rows next to their parent."""
-    from src.db.express_queries import _gather_insights
+@pytest.mark.parametrize("kind", ["insight", "question"])
+def test_express_brief_lists_a_chunked_discovery_once_as_its_parent(corpus, kind):
+    """Chunks copy the parent's type and dream-cycle tag; readers that select by
+    either must not list "(chunk i/n)" rows next to their parent."""
+    from src.db.express_queries import _gather_insights, _gather_questions
 
     source, derived, context, run, c, calls = corpus
-    mid = store_accepted(c, run_id=run, verdicts=VOTES, authorized_memories=context)
+    mid = store_accepted(replace(c, type=kind), run_id=run, verdicts=VOTES, authorized_memories=context)
     with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        assert len(_children(cur, mid)) >= 3
-        ids = [str(r["id"]) for r in _gather_insights(cur, 7)]
-    assert ids.count(mid) == 1
-    with get_connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM memories WHERE parent_id=%s", (mid,))
-        child_ids_present = cur.fetchone()[0]
-    assert child_ids_present >= 3 and all(i == mid or i == derived for i in ids)
+        chunk_ids = {ch["id"] for ch in _children(cur, mid)}
+        assert len(chunk_ids) >= 3
+        items = _gather_insights(cur, 7) if kind == "insight" else _gather_questions(cur, 10)
+    ids = [i["id"] for i in items]
+    assert ids.count(mid) == 1 and not chunk_ids & set(ids)
+    assert all(i == mid or i == derived for i in ids)
+
+
+def test_resurfacing_skips_untagged_chunks_of_a_dream_cycle_discovery(test_schema):
+    """Maintenance-written chunks of dream-cycle discoveries may carry no tags; the
+    tag filter alone let them resurface (review N5)."""
+    from src.db.express_queries import _gather_resurfaced
+
+    parent = create_memory("insight", "Discovery", "Parent text", tags=["dream-cycle"])
+    chunk = create_memory("insight", "Discovery (chunk 1/2)", "Chunk text", tags=[], parent_id=parent)
+    other_parent = create_memory("insight", "Captured note", "Note text", tags=["work"])
+    other_chunk = create_memory("insight", "Captured note (chunk 1/2)", "Chunk", tags=[], parent_id=other_parent)
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("UPDATE memories SET created_at = now() - interval '60 days'")
+        ids = {i["id"] for i in _gather_resurfaced(cur, 10, 30, 14)}
+    assert chunk not in ids and parent not in ids
+    assert {other_parent, other_chunk} <= ids  # other chunked memories resurface as before
+
+
+def test_citation_rate_credits_a_chunked_discovery_with_its_chunks_accesses(corpus):
+    """Search returns a chunked discovery's chunks, so reinforcement lands on them,
+    not on the vectorless parent (review S1)."""
+    from src.dream_cycle_db import complete_run, get_tier2_metrics
+
+    source, derived, context, run, c, _ = corpus
+    long_id = store_accepted(c, run_id=run, verdicts=VOTES, authorized_memories=context)
+    short_id = store_accepted(replace(c, title="Short", content="A grounded connection",
+                                      source_memories=[source, derived]),
+                              run_id=run, verdicts=VOTES, authorized_memories=context)
+    with get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        chunks = _children(cur, long_id)
+        cur.execute("UPDATE memories SET access_count = 2 WHERE id = ANY(%s::uuid[])", ([ch["id"] for ch in chunks[:2]],))
+        cur.execute("UPDATE memories SET access_count = 1 WHERE id = %s", (short_id,))
+        conn.commit()
+    complete_run(run, {"candidates_generated": 2, "candidates_accepted": 2, "candidates_rejected": 0}, "digest")
+    # Per discovery: long = 0 + 2 + 2, short = 1. Chunks are not discoveries of their own.
+    assert get_tier2_metrics(3)["insight_citation_rate"] == pytest.approx(2.5)
+

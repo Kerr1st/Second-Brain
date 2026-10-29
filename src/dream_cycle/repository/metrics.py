@@ -113,7 +113,8 @@ def get_tier2_metrics(n_cycles: int=10, *, db: Database) -> dict:
     Returns dict with:
       - user_rejection_rate: float (count of user_rejected_at IS NOT NULL / total accepted)
       - rejection_reason_clusters: dict of reason -> count (group by user_rejection_reason)
-      - insight_citation_rate: float (average access_count on memories tagged 'dream-cycle')
+      - insight_citation_rate: float (average, per 'dream-cycle' discovery, of its own
+        access_count plus its chunks': search returns a chunked discovery's chunks)
 
     Requirements: 18.2.
     """
@@ -151,9 +152,10 @@ def get_tier2_metrics(n_cycles: int=10, *, db: Database) -> dict:
                 """, (run_ids,))
             rejection_reason_clusters = {r['user_rejection_reason']: r['cnt'] for r in cur.fetchall()}
             cur.execute("""
-                SELECT coalesce(avg(access_count), 0) AS avg_access
-                FROM memories
-                WHERE 'dream-cycle' = ANY(tags) AND parent_id IS NULL
+                SELECT coalesce(avg(p.access_count + coalesce(
+                           (SELECT sum(c.access_count) FROM memories c WHERE c.parent_id = p.id), 0)), 0) AS avg_access
+                FROM memories p
+                WHERE 'dream-cycle' = ANY(p.tags) AND p.parent_id IS NULL
                 """)
             insight_citation_rate = float(cur.fetchone()['avg_access'])
         return {'user_rejection_rate': user_rejection_rate, 'rejection_reason_clusters': rejection_reason_clusters, 'insight_citation_rate': insight_citation_rate}

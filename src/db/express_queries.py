@@ -129,6 +129,9 @@ def _gather_resurfaced(cur, limit: int, suppress_days: int, min_age_days: int) -
         WHERE status = 'active'
           AND type IN ('insight', 'decision', 'synthesis')
           AND NOT (tags @> ARRAY['dream-cycle'])
+          -- Maintenance chunks of dream-cycle discoveries can lack the tag.
+          AND NOT EXISTS (SELECT 1 FROM memories p WHERE p.id = memories.parent_id
+                          AND p.tags @> ARRAY['dream-cycle'])
           AND created_at < now() - (%s || ' days')::interval
           AND (last_accessed_at IS NULL OR last_accessed_at < now() - (%s || ' days')::interval)
           AND (
@@ -188,7 +191,7 @@ def _gather_questions(cur, limit: int) -> list[dict]:
         """
         SELECT id, title, content, created_at, project
         FROM memories
-        WHERE type = 'question' AND status = 'active'
+        WHERE type = 'question' AND status = 'active' AND parent_id IS NULL
         ORDER BY created_at DESC
         LIMIT %s
         """,
