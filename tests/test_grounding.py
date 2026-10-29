@@ -267,3 +267,70 @@ def _stored(candidate, *, run_id, verdicts, authorized_memories):
     from src.dream_cycle import orchestrator
     orchestrator.dream_cycle_db.store_candidate(run_id, asdict(candidate), verdicts, "ACCEPTED", "mem-1")
     return "mem-1"
+
+
+class TestRevisionReturnsNoCandidate:
+    """Triage 2026-10-29 W6-5 / E14: a revision reply without a candidate is an expected
+    model outcome. One WARNING line (no traceback), the raw reply captured (bounded)
+    beside successful revision captures, and the panel still votes on the original."""
+
+    RAW = '{"title": "only a title"} ' + "x" * 6000
+
+    def _invoker(self):
+        inv = MagicMock()
+        inv.invoke.return_value = {"output": {"title": "only a title"}, "raw": self.RAW,
+                                   "usage": {"input_tokens": 100, "output_tokens": 50}}
+        return inv
+
+    def _grounding_records(self, caplog):
+        return [r for r in caplog.records if r.name == "src.dream_cycle.stages.grounding" and r.levelno >= 30]
+
+    def test_one_warning_without_traceback_and_failed_reply_captured(self, tmp_path, caplog):
+        orch = _orch(); cand = _cand(); orch._capture_dir = str(tmp_path / "capture")
+        with patch.object(orch, "invoke_evaluator", return_value=_audit(blocking=["x"])), \
+             patch.object(orch, "_invoker_for", return_value=self._invoker()), \
+             patch.object(orch, "_role_has_tools", return_value=False), caplog.at_level("INFO"):
+            assert orch._ground_candidate(cand) is cand
+        [record] = self._grounding_records(caplog)
+        assert record.levelname == "WARNING" and record.exc_info is None
+        message = record.getMessage()
+        assert cand.title in message and "revision returned no candidate" in message and "keys ['title']" in message
+        [path] = (tmp_path / "capture").glob("revision_*_failed.json")
+        data = json.loads(path.read_text())
+        assert data["inputs"]["system_prompt"] == REVISION_PROMPT
+        out = data["output"]
+        assert out["failed"] is True and out["reason"] == "revision returned no candidate"
+        assert out["raw_chars"] == len(self.RAW) and out["raw"] == self.RAW[:4000]
+
+    def test_panel_still_votes_on_the_original(self, caplog):
+        orch = _orch(); original = _cand()
+        slice_ = MemorySlice(name="S", strategy="arrivals_synthesis", memory_ids=[SRC_A, SRC_B])
+
+        def evaluate(candidate, role, stage=None, **kw):
+            if stage == "grounding_audit":
+                return _audit(blocking=["x"])
+            return EvaluatorVerdict(role=role, verdict="ACCEPT", reasoning="ok", score=80)
+
+        with patch("src.dream_cycle.orchestrator.dream_cycle_db") as db, \
+             patch.object(orch, "_skim_arrivals", return_value=None), \
+             patch.object(orch, "invoke_explorer", return_value=[slice_]), \
+             patch.object(orch, "_allocate_attention", side_effect=lambda r, t, s, sl: sl), \
+             patch.object(orch, "invoke_thinker", side_effect=lambda s: (orch._slice_memory_cache.update(
+                 {SRC_A: {"id": SRC_A, "content": "a"}, SRC_B: {"id": SRC_B, "content": "b"}}), [original])[1]), \
+             patch.object(orch, "invoke_evaluator", side_effect=evaluate) as ev, \
+             patch.object(orch, "_invoker_for", return_value=self._invoker()), \
+             patch.object(orch, "_role_has_tools", return_value=False), \
+             patch("src.dream_cycle.orchestrator.build_feedback_injection", return_value=""), \
+             patch("src.dream_cycle.orchestrator.generate_digest", return_value=""), \
+             patch("src.dream_cycle.orchestrator.check_duplicate", return_value=None), \
+             patch("src.dream_cycle.orchestrator.authorize_candidate", side_effect=validate_candidate), \
+             patch("src.dream_cycle.orchestrator.store_accepted", side_effect=_stored), caplog.at_level("INFO"):
+            db.create_run.return_value = "run-p"
+            db.get_memory_stats.return_value = {"total_count": 1, "recent_activity": 1, "date_range": {}}
+            result = orch.run("scheduled")
+        panel = [c for c in ev.call_args_list if c.kwargs.get("stage") != "grounding_audit"]
+        assert panel and all(c.args[0] is original for c in panel)
+        stored_candidate = db.store_candidate.call_args.args[1]
+        assert stored_candidate["title"] == original.title and stored_candidate.get("revision") is None
+        assert result.candidates_accepted == 1
+        assert all(r.exc_info is None for r in self._grounding_records(caplog))
