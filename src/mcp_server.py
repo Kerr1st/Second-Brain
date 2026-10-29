@@ -20,6 +20,7 @@ Database failures return a safe message without SQL, credentials or private valu
 Programming errors remain visible to developers.
 """
 
+import atexit
 import json
 from functools import wraps
 from typing import Annotated, Any
@@ -33,7 +34,7 @@ from src.db import (
     create_relationship, get_relationships, find_temporal_neighbors,
     find_schemas_for_memories,
 )
-from src.search import hybrid_search, rerank, increment_access_count
+from src.search import hybrid_search, rerank, increment_access_count, AccessCountWriter
 from src.embeddings import generate_embedding, embed_leaf
 from src.classify import classify_memory
 from src.depth import compute_depth_score
@@ -46,6 +47,12 @@ from src.validation import (
 from src import express
 
 mcp = FastMCP("Second Brain")
+
+#: memory_search reinforcement is written in the background so the response does
+#: not wait on the (non-HOT, every-index) UPDATE; flushed when the server exits.
+#: The lambda resolves ``increment_access_count`` at write time (patchable).
+_access_writer = AccessCountWriter(lambda ids: increment_access_count(ids))
+atexit.register(_access_writer.close)
 
 #: Integer parameters. FastMCP validates arguments with pydantic, which turns
 #: ``true`` into ``1`` for an ``int`` parameter before clamp_limit/clamp_days see
@@ -220,7 +227,7 @@ def memory_search(query: str, type: str | None = None, limit: Int = 10, project:
     except ValidationError as e:
         return {"error": str(e)}
 
-    increment_access_count([str(r["id"]) for r in results])
+    _access_writer.schedule([str(r["id"]) for r in results])
 
     formatted = [format_hit(r) for r in results]
 
