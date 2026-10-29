@@ -5,6 +5,28 @@ from .pool import get_connection
 from .columns import scalar_columns
 from src.retrieval import build_filters,tokenize_query,fts_passes
 
+#: The lexical OR pass leaves out a query term when every lexeme it produces is in
+#: more than this fraction of rows, per the planner statistics ANALYZE keeps for
+#: ``memories.search_vector`` (pg_stats.most_common_elems). On the live corpus
+#: (171k rows) an OR of the full question ("file" 62 %, "get" 29 %, "3" 43 %)
+#: matched 76 % of rows and ranking them took ~3 s of every unfiltered search (M-5).
+OR_PASS_MAX_LEXEME_FREQ = 0.05
+
+_COMMON_TERMS = sql.SQL("""SELECT t.term FROM unnest(%s::text[]) AS t(term)
+    CROSS JOIN LATERAL unnest(tsvector_to_array(to_tsvector('english', t.term))) AS l(lexeme)
+    LEFT JOIN (SELECT unnest(most_common_elems::text::text[]) AS lexeme, unnest(most_common_elem_freqs) AS freq
+               FROM pg_stats WHERE schemaname = current_schema() AND tablename = 'memories'
+               AND attname = 'search_vector') s ON s.lexeme = l.lexeme
+    GROUP BY t.term HAVING bool_and(coalesce(s.freq, 0) > %s)""")
+
+
+def common_terms(cur,terms):
+    """Terms whose lexemes are all above :data:`OR_PASS_MAX_LEXEME_FREQ`. Without
+    statistics (a never-analyzed table) nothing is common."""
+    if len(terms)<2:return set()
+    cur.execute(_COMMON_TERMS,(list(terms),OR_PASS_MAX_LEXEME_FREQ))
+    return {row['term'] for row in cur.fetchall()}
+
 
 def fetch_candidates(query_text,query_embedding,prefetch,**filters):
     where,params=build_filters(**filters)
@@ -23,7 +45,8 @@ def fetch_candidates(query_text,query_embedding,prefetch,**filters):
         # are represented by their chunks, and whole documents of up to 1.3 M chars
         # would otherwise flood the leg with rank ~1.0 (review B N2). ts_rank uses
         # normalisation 1|32: divide by 1+log(document length), then scale to 0..1.
-        for query in fts_passes(tokenize_query(query_text)):
+        terms=list(dict.fromkeys(tokenize_query(query_text)))
+        for query in fts_passes(terms,common_terms(cur,terms)):
             cur.execute(sql.SQL("""SELECT id, ts_rank(search_vector,to_tsquery('english',%s),33) AS rank FROM memories m {}
                 AND search_vector @@ to_tsquery('english',%s)
                 AND NOT EXISTS (SELECT 1 FROM memories c WHERE c.parent_id = m.id AND c.status = 'active')

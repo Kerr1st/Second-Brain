@@ -22,6 +22,8 @@ Programming errors remain visible to developers.
 
 import json
 from functools import wraps
+from typing import Annotated, Any
+from pydantic import WithJsonSchema
 from psycopg2.pool import PoolError
 import psycopg2.errors
 from mcp.server.fastmcp import FastMCP
@@ -44,6 +46,13 @@ from src.validation import (
 from src import express
 
 mcp = FastMCP("Second Brain")
+
+#: Integer parameters. FastMCP validates arguments with pydantic, which turns
+#: ``true`` into ``1`` for an ``int`` parameter before clamp_limit/clamp_days see
+#: it, so booleans were accepted (M-4). These keep the integer schema but pass the
+#: raw JSON value to the validators, which reject booleans in the tool's own shape.
+Int = Annotated[Any, WithJsonSchema({"type": "integer"})]
+OptionalInt = Annotated[Any, WithJsonSchema({"anyOf": [{"type": "integer"}, {"type": "null"}]})]
 
 
 def _guarded(fn, *args, **kwargs):
@@ -145,10 +154,43 @@ def memory_create(
     return result
 
 
+def search_hits(query, type=None, limit=10, project=None, source_type=None, since_days=None, status=None):
+    """Validate, embed, retrieve and rerank; shared by this server and ``src.mcp_readonly``.
+
+    Each result is a distinct parent: the best-fused chunk of a document stands for
+    it (``_other_chunks`` counts the others in the candidate pool) and the next
+    distinct parents fill ``limit``. Raises ValidationError. Returns (results, project)."""
+    query = require_text(query, "query")
+    type = optional_one_of(type, FILTERABLE_TYPES, "type")
+    status = optional_one_of(status, MEMORY_STATUSES, "status")
+    source_type = optional_one_of(source_type, SOURCE_TYPES, "source_type")
+    limit = clamp_limit(limit)
+    since_days = clamp_days(since_days, "since_days")
+    project = normalize_project_tag(project)
+    embedding = generate_embedding(query)
+    created_after = None
+    if since_days is not None and since_days > 0:
+        created_after = datetime.now(timezone.utc) - timedelta(days=since_days)
+    results = hybrid_search(query, embedding, limit=limit, type=type, project=project,
+                            source_type=source_type, created_after=created_after, status=status,
+                            per_parent_cap=1)
+    return rerank(results, query, query_project=project), project
+
+
+def format_hit(r):
+    return {"id": str(r["id"]), "title": r["title"], "type": r["type"],
+            "source_type": r.get("source_type"),
+            "created_at": _iso(r.get("created_at")),
+            "parent_id": str(r["parent_id"]) if r.get("parent_id") else None,
+            "other_matching_chunks": int(r.get("_other_chunks") or 0),
+            "score": round(float(r.get("rerank_score", 0)), 3),
+            "content": r["content"][:500], "tags": r.get("tags") or []}
+
+
 @mcp.tool()
 @_boundary("dict")
-def memory_search(query: str, type: str | None = None, limit: int = 10, project: str | None = None,
-                  source_type: str | None = None, since_days: int | None = None,
+def memory_search(query: str, type: str | None = None, limit: Int = 10, project: str | None = None,
+                  source_type: str | None = None, since_days: OptionalInt = None,
                   status: str | None = None) -> dict:
     """Semantic + keyword search across all memories. Hybrid retrieval (full-text +
     vector + RRF) with utility reranking (recency, type boost, token overlap, access
@@ -162,41 +204,25 @@ def memory_search(query: str, type: str | None = None, limit: int = 10, project:
     - status: e.g. 'active' to exclude superseded items.
     - project: scope to a project tag.
 
-    limit is clamped to 1–100 and since_days to 0–365. An empty query or an unknown
-    type/status filter returns {"error": "..."} instead of results.
+    limit is clamped to 1–100 and since_days to 0–365. An empty query, an unknown
+    type/status filter or a non-integer (e.g. boolean) limit returns {"error": "..."}
+    instead of results.
+
+    Each result is a distinct document: the best-matching chunk stands for its parent
+    (`parent_id`), `other_matching_chunks` says how many more of its chunks matched.
 
     Iterate for best results: if hits are thin or off-target, refine the query or
     filters and search again, then call memory_read(id) for full content or
     memory_graph(id) to follow related memories."""
     try:
-        query = require_text(query, "query")
-        type = optional_one_of(type, FILTERABLE_TYPES, "type")
-        status = optional_one_of(status, MEMORY_STATUSES, "status")
-        source_type = optional_one_of(source_type, SOURCE_TYPES, "source_type")
-        limit = clamp_limit(limit)
-        since_days = clamp_days(since_days, "since_days")
+        results, project = search_hits(query, type=type, limit=limit, project=project,
+                                       source_type=source_type, since_days=since_days, status=status)
     except ValidationError as e:
         return {"error": str(e)}
 
-    embedding = generate_embedding(query)
-    project = normalize_project_tag(project)
-    created_after = None
-    if since_days is not None and since_days > 0:
-        created_after = datetime.now(timezone.utc) - timedelta(days=since_days)
-    results = hybrid_search(query, embedding, limit=limit, type=type, project=project,
-                            source_type=source_type, created_after=created_after, status=status)
-    results = rerank(results, query, query_project=project)
-
     increment_access_count([str(r["id"]) for r in results])
 
-    formatted = [
-        {"id": str(r["id"]), "title": r["title"], "type": r["type"],
-         "source_type": r.get("source_type"),
-         "created_at": _iso(r.get("created_at")),
-         "score": round(float(r.get("rerank_score", 0)), 3),
-         "content": r["content"][:500], "tags": r["tags"]}
-        for r in results
-    ]
+    formatted = [format_hit(r) for r in results]
 
     # Temporal context: find neighbors of the top result, deduplicated
     temporal_context = []
@@ -364,18 +390,22 @@ def memory_list(
     type: str | None = None,
     source_type: str | None = None,
     status: str | None = None,
-    limit: int = 20,
-    since_days: int | None = None,
+    limit: Int = 20,
+    since_days: OptionalInt = None,
 ) -> list[dict]:
     """List/browse recent memories by filter (type, source_type, status, since_days) —
     newest first, no relevance ranking. Use memory_search for relevance; use this to
     enumerate or audit, e.g. memory_list(source_type='slack', since_days=2) to see
     every Slack conversation-day captured since the day before yesterday.
 
+    A chunk whose parent matches the same filters is left out (the parent stands
+    for it); a chunk whose parent is filtered out is listed. Ties on created_at are
+    ordered by id.
+
     limit is clamped to 1–100 and since_days to 0–365. An unknown type/status filter
-    raises ValueError (reported by the server as an error result) rather than
-    returning an empty list — a list has no clean slot for an error object, and a
-    silent [] would look like "nothing matched"."""
+    or a non-integer (e.g. boolean) limit raises ValueError (reported by the server
+    as an error result) rather than returning an empty list — a list has no clean
+    slot for an error object, and a silent [] would look like "nothing matched"."""
     type = optional_one_of(type, FILTERABLE_TYPES, "type")
     status = optional_one_of(status, MEMORY_STATUSES, "status")
     source_type = optional_one_of(source_type, SOURCE_TYPES, "source_type")
@@ -385,7 +415,7 @@ def memory_list(
     if since_days is not None and since_days > 0:
         created_after = datetime.now(timezone.utc) - timedelta(days=since_days)
     results = list_memories(type=type, status=status, source_type=source_type, limit=limit,
-                            created_after=created_after)
+                            created_after=created_after, collapse_chunks=True)
     return [
         {"id": str(r["id"]), "title": r["title"], "type": r["type"],
          "source_type": r["source_type"], "created_at": _iso(r["created_at"]),
@@ -397,7 +427,7 @@ def memory_list(
 
 @mcp.tool()
 @_boundary("dict")
-def memory_recent_activity(days: int = 7, samples_per_source: int = 5) -> dict:
+def memory_recent_activity(days: Int = 7, samples_per_source: Int = 5) -> dict:
     """What arrived in the last N days, by capture channel: document and memory counts
     per source_type plus the newest document titles for each. Channels are the user's
     life streams — slack (one document per conversation-day), outlook_email,
@@ -543,7 +573,7 @@ def memory_learn(
 
 @mcp.tool()
 @_boundary("str")
-def memory_brief(window_days: int = 14, use_llm: bool = False) -> str:
+def memory_brief(window_days: Int = 14, use_llm: bool = False) -> str:
     """Surface what the second brain has synthesized but hasn't told you yet.
 
     Call this at the START of a work session to get oriented: it volunteers recent

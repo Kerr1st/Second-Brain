@@ -18,7 +18,8 @@ class TestHybridSearchBehavioralEquivalence:
 
         sig = inspect.signature(hybrid_search)
         params = list(sig.parameters.keys())
-        assert params == ["query_text", "query_embedding", "limit", "type", "status", "project", "source_type", "created_after"]
+        assert params == ["query_text", "query_embedding", "limit", "type", "status", "project", "source_type", "created_after",
+                          "per_parent_cap"]
 
     def test_hybrid_search_signature_defaults(self):
         """hybrid_search has correct default values for optional params."""

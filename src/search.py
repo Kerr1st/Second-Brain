@@ -33,8 +33,11 @@ from src.db.search_queries import fetch_candidates
 
 
 def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None, project=None,
-                  source_type=None, created_after=None):
-    """Fuse vector/full-text legs, increasing the bounded pool if duplicates crowd it."""
+                  source_type=None, created_after=None, per_parent_cap=2):
+    """Fuse vector/full-text legs, increasing the bounded pool if duplicates crowd it.
+
+    ``per_parent_cap`` bounds the rows one parent (a document and its chunks) may
+    contribute; the MCP search tools pass 1 so each result is a distinct parent."""
     if limit <= 0:
         return []
     prefetch = max(limit * 4, 4)
@@ -43,7 +46,7 @@ def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None,
         vec, fts, rows = fetch_candidates(query_text, query_embedding, prefetch,
             type=type, status=status, project=project, source_type=source_type, created_after=created_after)
         scored = rrf_fuse(vec, fts, absent_rank=prefetch + 1)
-        results = dedup_candidates(scored, rows, limit)
+        results = dedup_candidates(scored, rows, limit, per_parent_cap)
         if len(results) >= limit or max(len(vec), len(fts)) < prefetch or prefetch >= ceiling:
             return results
         prefetch = min(prefetch * 2, ceiling)
