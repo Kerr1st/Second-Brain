@@ -99,40 +99,138 @@ def _finding(check, subject, state, *, healthy, severity, message, **extra) -> d
 # A channel with ``producer = "<name>"`` is judged on what its producer wrote,
 # not on the age of its newest row alone: a producer the user simply stopped
 # using is idle (✅), and only activity newer than the last capture that the
-# nightly job has had ``producer_grace_days`` to pick up is a failure.
+# nightly job has had ``producer_grace_days`` to pick up, and that capture would
+# take, is a failure.  "Idle" needs an independent signal (the app's own launch
+# logs); without one, or when the session store is missing, the age rule applies.
+
+#: Kiro IDE application support dir: ``logs/<YYYYmmddTHHMMSS>/`` per launch (local
+#: time) and ``User/globalStorage/state.vscdb``, written while the app runs.
+KIRO_APP_DIR = Path(os.path.expanduser("~/Library/Application Support/Kiro"))
+#: Sessions newer than the last capture parsed per probe; more fail closed.
+MAX_PROBE_PARSES = 20
+
 
 def _mtime(ns: int) -> datetime:
     return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc)
 
 
-def kiro_ide_activity(now: datetime, grace_days: int) -> dict:
-    """Newest Kiro IDE session activity on disk, classified as chat capture does
-    (src.capture.chats): native sessions from ``find_sessions()`` that have a
-    transcript and are not CLI v2 sessions (``is_cli_v2_session``), plus legacy
-    ``.chat`` files (by creation time).  File stats only (``is_cli_v2_session`` reads a ``sess_*``
-    session.json that has no CLI history); no transcript is parsed.
+def kiro_app_last_run() -> tuple[datetime | None, str]:
+    """When the Kiro IDE app last ran: the newer of its newest launch log dir and
+    the ``state.vscdb`` mtime.  ``(None, why)`` when neither exists."""
+    moments = []
+    logs = KIRO_APP_DIR / "logs"
+    try:
+        names = [entry.name for entry in os.scandir(logs) if entry.is_dir()]
+    except OSError:
+        names = []
+    for name in names:
+        try:  # launch dirs are named in local time; astimezone() reads a naive value as local
+            moments.append(datetime.strptime(name, "%Y%m%dT%H%M%S").astimezone(timezone.utc))
+        except ValueError:
+            continue
+    try:
+        moments.append(_mtime((KIRO_APP_DIR / "User" / "globalStorage" / "state.vscdb").stat().st_mtime_ns))
+    except OSError:
+        pass
+    if not moments:
+        return None, f"no launch log or state.vscdb under {KIRO_APP_DIR}"
+    return max(moments), ""
 
-    ``newest``: the newest activity; ``settled``: the newest activity at least
-    ``grace_days`` old, i.e. one the nightly capture has had its chance at."""
+
+def fetch_kiro_inventory(conn) -> dict:
+    """What chat capture compares against (src.capture.chats ``_inventory``, the
+    src.db.capture_queries reads): kiro_ide_chat identities and parent
+    fingerprints, and kiro_cli_chat identities (the ``owned_by_cli`` rule)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT source_url FROM memories WHERE source_type = 'kiro_ide_chat' AND source_url IS NOT NULL")
+        known = {row[0] for row in cur.fetchall()}
+        cur.execute("SELECT source_url, metadata->>'source_fingerprint' FROM memories WHERE source_type = 'kiro_ide_chat' "
+                    "AND source_url IS NOT NULL AND parent_id IS NULL")
+        stored = {url: fp for url, fp in cur.fetchall()}
+        cur.execute("SELECT DISTINCT source_url FROM memories WHERE source_type = 'kiro_cli_chat' AND source_url IS NOT NULL")
+        cli_owned = {row[0] for row in cur.fetchall()}
+    return {"known": known, "stored": stored, "cli_owned": cli_owned}
+
+
+def kiro_ide_activity(now: datetime, grace_days: int, *, last_capture=None, inventory=None) -> dict:
+    """Kiro IDE session activity on disk, decided as chat capture decides it
+    (src.capture.chats).  Discovery is ``find_sessions()`` (newest first) plus the
+    legacy ``.chat`` files (by creation time: capture only ingests *new* ones).
+
+    ``newest``: the newest IDE activity of any kind (CLI v2 and incomplete
+    sessions excluded).  Every *settled* session (older than ``grace_days``, so
+    the nightly run has had its chance) newer than ``last_capture`` is checked
+    the way capture would treat it, newest first: CLI-owned → skipped; stored
+    with the same fingerprint (``inventory``) → captured; otherwise parsed with
+    the capture parser: filtered (``None``) or incomplete → skipped, a document or
+    a parse error → ``uncaptured``.  At most ``MAX_PROBE_PARSES`` are parsed; any
+    beyond that count as uncaptured (fail closed).  ``inventory=None`` (not
+    readable) treats nothing as stored."""
     from src.parsers import ide_chat, kiro_sessions
+    inventory = inventory or {"known": set(), "stored": {}, "cli_owned": set()}
+    known, stored, cli_owned = inventory["known"], inventory["stored"], inventory["cli_owned"]
     cutoff = int((now - timedelta(days=grace_days)).timestamp() * 1e9)
-    newest = settled = None
+    lower = int(last_capture.timestamp() * 1e9) if last_capture is not None else None
+    out = {"newest": None, "uncaptured": None, "uncaptured_count": 0, "uncaptured_why": "", "filtered": 0,
+           "captured": 0, "parsed": 0}
+    newest = None
+
+    def in_window(ns):
+        return ns <= cutoff and (lower is None or ns > lower)
+
+    def judge(ns, parse):
+        """parse() → document | None (filtered); raises IncompleteSession or another error."""
+        if out["parsed"] >= MAX_PROBE_PARSES:
+            return uncaptured(ns, f"more than {MAX_PROBE_PARSES} sessions since the last capture to check")
+        out["parsed"] += 1
+        try:
+            parsed = parse()
+        except kiro_sessions.IncompleteSession:
+            return
+        except Exception as exc:  # noqa: BLE001 - capture fails on it too
+            return uncaptured(ns, f"capture cannot parse it ({type(exc).__name__})")
+        if parsed:
+            return uncaptured(ns, "capture would ingest it")
+        out["filtered"] += 1
+
+    def uncaptured(ns, why):
+        out["uncaptured_count"] += 1
+        if out["uncaptured"] is None or ns > out["uncaptured"]:
+            out["uncaptured"], out["uncaptured_why"] = ns, why
+
     root = Path(kiro_sessions.SESSIONS_DIR)
-    note = "" if root.is_dir() else f"{root} missing"
+    out["store_missing"] = not root.is_dir()
     for meta in kiro_sessions.find_sessions() if root.is_dir() else []:
-        if newest is not None and settled is not None:
-            break
         try:  # a session without a transcript is incomplete: capture skips it too
             ns = kiro_sessions.transcript_path(meta).stat().st_mtime_ns
         except OSError:
             continue
-        if kiro_sessions.is_cli_v2_session(meta):
+        if newest is not None and lower is not None and ns <= lower:
+            break  # newest first: nothing older is newer than the capture
+        if not in_window(ns):
+            if newest is None and not kiro_sessions.is_cli_v2_session(meta):
+                newest = ns
             continue
+        try:
+            sid = kiro_sessions.session_id(meta)
+        except Exception as exc:  # noqa: BLE001 - capture counts it failed
+            newest = ns if newest is None else newest
+            uncaptured(ns, f"capture cannot read its session.json ({type(exc).__name__})")
+            continue
+        url = next((alias for alias in kiro_sessions.legacy_aliases(sid) if alias in known), kiro_sessions.session_url(sid))
+        if kiro_sessions.is_cli_v2_session(meta) and url not in known:
+            continue  # kiro_cli_chat's
+        if url not in known and url in cli_owned:
+            continue  # owned_by_cli: capture never writes it here
         newest = ns if newest is None else newest
-        settled = ns if settled is None and ns <= cutoff else settled
-    # Legacy store (dead since 2026-02; ~12k files, one stat each). Capture only ever
-    # ingests *new* .chat files, so a file's creation time is the activity that
-    # matters: an old file rewritten in place would never be recaptured.
+        fingerprint = kiro_sessions.fingerprint(meta)
+        if fingerprint is None:
+            continue  # incomplete
+        if url in known and stored.get(url) == fingerprint:
+            out["captured"] += 1
+            continue
+        judge(ns, lambda meta=meta: kiro_sessions.parse_session(meta))
+    # Legacy store (dead since 2026-02; ~12k files, one stat each).
     for path in ide_chat.find_chat_files():
         try:
             st = os.stat(path)
@@ -140,34 +238,60 @@ def kiro_ide_activity(now: datetime, grace_days: int) -> dict:
             continue
         ns = int(st.st_birthtime * 1e9) if hasattr(st, "st_birthtime") else st.st_mtime_ns
         newest = ns if newest is None or ns > newest else newest
-        if ns <= cutoff and (settled is None or ns > settled):
-            settled = ns
-    return {"newest": _mtime(newest) if newest is not None else None,
-            "settled": _mtime(settled) if settled is not None else None,
-            "note": note or ("no Kiro IDE session on disk" if newest is None else "")}
+        if not in_window(ns):
+            continue
+        name = os.path.basename(path).removesuffix(".chat")
+        if any(alias in known for alias in (f"chat://{name}", f"ide_{name}.md")):
+            out["captured"] += 1  # a restored/copied file whose identity is stored: capture skips it
+            continue
+        judge(ns, lambda path=path: ide_chat.parse_chat_file(path, strict=True))
+    out["newest"] = _mtime(newest) if newest is not None else None
+    out["uncaptured"] = _mtime(out["uncaptured"]) if out["uncaptured"] is not None else None
+    out["note"] = (f"session store {root} missing" if out["store_missing"]
+                   else "no Kiro IDE session on disk" if newest is None else "")
+    out["app_last_run"], out["app_note"] = kiro_app_last_run()
+    return out
 
 
-#: producer name (``producer = ...`` in a channel) → (display name, probe(now, grace_days))
-PRODUCERS = {"kiro_ide_sessions": ("Kiro IDE", kiro_ide_activity)}
+#: producer name (``producer = ...`` in a channel) →
+#: (display name, probe(now, grace_days, last_capture=, inventory=), inventory(conn))
+PRODUCERS = {"kiro_ide_sessions": ("Kiro IDE", kiro_ide_activity, fetch_kiro_inventory)}
 
 
-def producer_activity(policy: dict, now: datetime, last_captures: dict) -> dict:
+def producer_activity(policy: dict, now: datetime, last_captures: dict, inventories: dict | None = None) -> dict:
     """label → producer evidence for every non-retired channel with a producer
     whose last capture could be read.  A probe that fails is reported, and the
     channel falls back to its plain age rule."""
     out = {}
+    inventories = inventories or {}
     for label, channel in policy["channels"].items():
         if "producer" not in channel or channel["severity"] == "retired" or label not in last_captures:
             continue
-        title, probe = PRODUCERS[channel["producer"]]
+        title, probe, _ = PRODUCERS[channel["producer"]]
         try:
-            info = probe(now, channel["producer_grace_days"])
+            info = probe(now, channel["producer_grace_days"], last_capture=last_captures[label],
+                         inventory=inventories.get(label))
         except Exception as exc:  # noqa: BLE001 - a broken probe must not kill the sweep
             out[label] = {"producer": title, "error": f"{type(exc).__name__}: {exc}"}
             continue
-        newest = info["newest"]
+        newest, app = info["newest"], info.get("app_last_run")
         out[label] = {**info, "producer": title, "last_capture": last_captures[label],
-                      "newest_age_days": (now.date() - newest.date()).days if newest else NEVER}
+                      "newest_age_days": (now.date() - newest.date()).days if newest else NEVER,
+                      "app_age_days": (now.date() - app.date()).days if app else NEVER}
+    return out
+
+
+def fetch_producer_inventories(conn, policy) -> dict:
+    """label → the producer's stored-capture inventory; a failed read leaves the
+    label out (the probe then treats nothing as stored: stricter, never laxer)."""
+    out = {}
+    for label, channel in policy["channels"].items():
+        if "producer" not in channel or channel["severity"] == "retired":
+            continue
+        try:
+            out[label] = PRODUCERS[channel["producer"]][2](conn)
+        except Exception:  # noqa: BLE001
+            conn.rollback()
     return out
 
 
@@ -176,24 +300,36 @@ def _fmt(moment) -> str:
 
 
 def _producer_finding(label: str, channel: dict, age: int, info: dict):
+    """A finding, or ``str`` (why the producer cannot vouch: the age rule applies)."""
     if info.get("error"):
         return None
     max_age, severity, grace = channel["max_age_days"], channel["severity"], channel["producer_grace_days"]
-    newest, settled, last, title = info["newest"], info["settled"], info["last_capture"], info["producer"]
+    newest, last, title, app = info["newest"], info["last_capture"], info["producer"], info.get("app_last_run")
     extra = {"age_days": age, "max_age_days": max_age, "producer": title, "producer_newest": _fmt(newest),
-             "last_capture": _fmt(last), "producer_grace_days": grace}
-    if settled is not None and (last is None or settled > last):
+             "last_capture": _fmt(last), "producer_grace_days": grace, "producer_app_last_run": _fmt(app),
+             "producer_filtered": info.get("filtered", 0)}
+    if info.get("uncaptured") is not None:
         return _finding("channel", label, "uncaptured", healthy=False, severity=severity,
-                        message=f"{label} UNCAPTURED — {title} wrote sessions up to {_fmt(settled)}, after the last "
-                                f"capture ({_fmt(last)}) and more than {grace}d ago"
+                        message=f"{label} UNCAPTURED — {title} wrote {info['uncaptured_count']} session(s) up to "
+                                f"{_fmt(info['uncaptured'])} ({info['uncaptured_why']}), after the last capture "
+                                f"({_fmt(last)}) and more than {grace}d ago"
                                 + (f" — advisory: {channel['reason']}" if severity == "advisory" else ""), **extra)
+    if info.get("store_missing"):
+        return f"{title} {info['note']}"
+    filtered = f"; {info['filtered']} session(s) since then filtered by capture" if info.get("filtered") else ""
     if info["newest_age_days"] > max_age:
+        if app is None:
+            return f"{title} app activity unknown ({info.get('app_note', '')})"
+        if info["app_age_days"] <= max_age:
+            return f"{title} ran on {app.date()} but no new session found in the store"
         since = f"{title} idle since {newest.date()}" if newest else f"{title} idle ({info['note']})"
         return _finding("channel", label, "producer_idle", healthy=True, severity=severity,
-                        message=f"{label} ok — {since}; nothing to capture (last capture {age}d ago)", **extra)
+                        message=f"{label} ok — {since}, app last ran {app.date()}; nothing to capture "
+                                f"(last capture {age}d ago{filtered})", **extra)
     pending = f"; activity since then is within the {grace}d grace" if last is None or newest > last else ""
     return _finding("channel", label, "healthy", healthy=True, severity=severity,
-                    message=f"{label} ok — {title} last active {newest.date()}, last capture {age}d ago{pending}", **extra)
+                    message=f"{label} ok — {title} last active {newest.date()}, last capture {age}d ago{pending}{filtered}",
+                    **extra)
 
 
 # ------------------------------------------------------------------- channel ages
@@ -201,7 +337,9 @@ def _producer_finding(label: str, channel: dict, age: int, info: dict):
 def evaluate_channels(ages: dict, policy: dict, producers: dict | None = None) -> list[dict]:
     """``ages``: label → days since the channel's newest row (NEVER when none, None
     when the query failed).  ``producers``: label → :func:`producer_activity`
-    evidence; a channel with evidence is judged on it instead of on its age."""
+    evidence; a channel with evidence is judged on it instead of on its age, unless
+    the producer cannot vouch (store missing, app activity unknown or recent with no
+    new session): then the age rule applies and the message says why."""
     findings = []
     producers = producers or {}
     for label, channel in policy["channels"].items():
@@ -210,9 +348,12 @@ def evaluate_channels(ages: dict, policy: dict, producers: dict | None = None) -
             findings.append(_finding("channel", label, "query_failed", healthy=False, severity="required",
                                      message=f"{label} QUERY_FAILED: cannot establish capture liveness"))
             continue
+        fallback = None
         if severity != "retired" and label in producers:
             finding = _producer_finding(label, channel, age, producers[label])
-            if finding is not None:
+            if isinstance(finding, str):
+                fallback = finding
+            elif finding is not None:
                 findings.append(finding)
                 continue
         if severity == "retired":
@@ -235,6 +376,9 @@ def evaluate_channels(ages: dict, policy: dict, producers: dict | None = None) -
         if producers.get(label, {}).get("error"):
             findings[-1]["producer_error"] = producers[label]["error"]
             findings[-1]["message"] += f" (producer check failed, age rule applied: {producers[label]['error']})"
+        if fallback:
+            findings[-1]["producer_fallback"] = fallback
+            findings[-1]["message"] += f" ({fallback}; age rule applied)"
     return findings
 
 
@@ -557,7 +701,8 @@ def run(policy, status_dir, *, conn=None, now=None, skip_db=False) -> list[dict]
         if conn is not None:
             try:
                 ages = fetch_channel_ages(conn, policy)
-                producers = producer_activity(policy, now, fetch_last_captures(conn, policy))
+                producers = producer_activity(policy, now, fetch_last_captures(conn, policy),
+                                              fetch_producer_inventories(conn, policy))
                 findings += evaluate_channels(ages, policy, producers)
                 last_seen, days_seen, enumerated = fetch_output_history(conn, policy)
                 findings += zero_output_findings(now.date(), last_seen, days_seen, enumerated, policy)
