@@ -8,6 +8,7 @@ function and end to end against the disposable test database.
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -50,7 +51,8 @@ def test_known_disabled_producers_are_advisory_by_explicit_config_with_a_reason(
     assert "upstream Quick export stale" in policy["channels"]["quick_desktop_synth"]["reason"]
     for label in advisory:
         assert policy["channels"][label]["reason"].strip()
-    assert policy["channels"]["ide_chat"] == {"predicate": "source_type = 'kiro_ide_chat'", "max_age_days": 7, "severity": "required"}
+    assert policy["channels"]["ide_chat"] == {"predicate": "source_type = 'kiro_ide_chat'", "max_age_days": 7, "severity": "required",
+                                              "producer": "kiro_ide_sessions", "producer_grace_days": 2}
     assert "distilled_chat" in policy["zero_output"]["ignore"] and "weekly_digest" in policy["zero_output"]["ignore"]
 
 
@@ -221,10 +223,16 @@ def test_status_sweep_ignores_its_own_report_and_flags_unreadable_files(tmp_path
 
 # ------------------------------------------------------- [jobs.advisory] (S3-1)
 
-def test_weekly_digest_is_an_advisory_job_by_explicit_config_with_the_verification_reason(policy):
-    assert policy["jobs"]["advisory"] == {
-        "weekly-digest": "network preflight pending verification; remove after two consecutive OK runs"}
+DIGEST_REASON = "network preflight pending verification; remove after two consecutive OK runs"
+
+
+def test_weekly_digest_advisory_was_removed_after_two_consecutive_ok_runs(policy):
+    """Its own rule ("remove after two consecutive OK runs") was met on 2026-10-12/19/26
+    (liveness.md L-6): the job is a plain required job again, and the channel reason
+    no longer claims it fails every Monday."""
+    assert policy["jobs"]["advisory"] == {}
     assert "weekly-digest" in policy["jobs"]["expected_interval_hours"]      # still swept, still expected to run
+    assert "failed every Monday since" not in policy["channels"]["weekly_digest"]["reason"]
     assert policy["jobs"]["network_failures_required"] == 2
 
 
@@ -245,6 +253,7 @@ def test_policy_rejects_an_advisory_job_without_a_reason(tmp_path):
 def test_advisory_job_failure_is_reported_with_its_reason_but_never_fails_the_sweep(tmp_path, policy):
     """S3-1: under failure_days = 0 a Monday failure of the known-failing digest would be
     ❌ every day until the next Monday. Listed in [jobs.advisory] it is ⚠ with the reason."""
+    policy = {**policy, "jobs": {**policy["jobs"], "advisory": {"weekly-digest": DIGEST_REASON}}}
     failed = dict(state="failed", exit_code=1, consecutive_failures=5, first_failure_at=(NOW - timedelta(days=8)).isoformat(),
                   finished_at=(NOW - timedelta(hours=3)).isoformat())
     _status(tmp_path / "weekly-digest.json", job="weekly-digest", **failed)
@@ -254,7 +263,7 @@ def test_advisory_job_failure_is_reported_with_its_reason_but_never_fails_the_sw
     findings = {f["subject"]: f for f in liveness.job_findings(tmp_path, policy, now=NOW)}
     digest, backup = findings["weekly-digest"], findings["backup"]
     assert digest["healthy"] is False and digest["severity"] == "advisory" and not required_failure(digest)
-    assert digest["advisory_reason"] == "network preflight pending verification; remove after two consecutive OK runs"
+    assert digest["advisory_reason"] == DIGEST_REASON
     assert "last exit 1" in digest["message"] and "advisory: network preflight pending verification" in digest["message"]
     assert required_failure(backup) and "advisory" not in backup["message"]
     assert findings["youtube"]["healthy"] and "advisory_reason" not in findings["youtube"]
@@ -485,7 +494,7 @@ def test_deliberately_broken_channels_fail_the_sweep_end_to_end(test_conn, tmp_p
     assert by[("channel", "slack")]["age_days"] == 30 and by[("channel", "slack")]["state"] == "silent"
     assert by[("zero_output", "api_browser")]["enumerated"] is False
     assert by[("dream_cycle", "completed_at")]["state"] == "stalled"
-    assert by[("channel", "ide_chat")]["healthy"] is True                                # R4 revived it
+    assert by[("channel", "ide_chat")]["healthy"] is True                                # no IDE session on disk: idle
     assert by[("channel", "distilled_chat")]["severity"] == "advisory"
 
 
@@ -527,3 +536,155 @@ def test_cli_writes_the_durable_report_and_exits_one_on_a_required_failure(tmp_p
     assert (tmp_path / "liveness-report.json").stat().st_mode & 0o077 == 0
     rc = liveness.main(["--skip-db", "--status-dir", str(tmp_path / "empty"), "--config", str(REPO / "config/liveness.toml")])
     assert rc == 0
+
+
+# ------------------------------------------- ide_chat judged on its producer (2026-10-29)
+# The user moved to Kiro CLI: no IDE session since 2026-09-30, so ide_chat sat ❌
+# "SILENT 8d..17d" from 10-20 while capture was correct (liveness.md). Silence is a
+# failure only when the IDE wrote sessions that the nightly capture did not pick up.
+
+DAY = 86400
+
+
+def _ide_store(monkeypatch, tmp_path, *, sessions=True):
+    from src.parsers import ide_chat, kiro_sessions
+    root = tmp_path / "kiro-sessions"
+    if sessions:
+        root.mkdir()
+    monkeypatch.setattr(kiro_sessions, "SESSIONS_DIR", root)
+    monkeypatch.setattr(ide_chat, "IDE_CHAT_DIRS", [str(tmp_path / "globalStorage" / "kiro.kiroagent")])
+    return root
+
+
+def _session(root, name, at: datetime, *, workspace="afbe86b325c5f24f", cli=False, transcript=True):
+    folder = root / workspace / name
+    folder.mkdir(parents=True)
+    (folder / "session.json").write_text(json.dumps({"id": name, "title": "t"}))
+    stamp = at.timestamp()
+    if transcript:
+        (folder / "messages.jsonl").write_text("{}\n")
+        os.utime(folder / "messages.jsonl", (stamp, stamp))
+    os.utime(folder / "session.json", (stamp, stamp))
+    if cli:  # the Kiro CLI keeps a prompt history next to the tree (is_cli_v2_session)
+        (root / "cli").mkdir(exist_ok=True)
+        (root / "cli" / f"{name}.history").write_text("prompt\n")
+
+
+def _ide_finding(policy, *, last_capture, age, now=NOW):
+    producers = liveness.producer_activity(policy, now, {"ide_chat": last_capture})
+    ages = {label: 0 for label in policy["channels"]} | {"ide_chat": age}
+    return {f["subject"]: f for f in evaluate_channels(ages, policy, producers)}["ide_chat"]
+
+
+def test_idle_ide_producer_is_healthy_not_silent(monkeypatch, tmp_path, policy):
+    """The live case: last IDE session 2026-09-30, last capture 2026-10-12, 17 d silent."""
+    now = datetime(2026, 10, 29, 16, 0, tzinfo=timezone.utc)
+    root = _ide_store(monkeypatch, tmp_path)
+    _session(root, "f0a6eadb-0000-4000-8000-000000000000", datetime(2026, 9, 30, 16, 19, tzinfo=timezone.utc))
+    finding = _ide_finding(policy, last_capture=datetime(2026, 10, 12, 10, 53, tzinfo=timezone.utc), age=17, now=now)
+    assert finding["healthy"] is True and finding["state"] == "producer_idle" and not required_failure(finding)
+    assert finding["message"] == "ide_chat ok — Kiro IDE idle since 2026-09-30; nothing to capture (last capture 17d ago)"
+
+
+def test_ide_sessions_newer_than_the_capture_beyond_the_grace_are_a_required_failure(monkeypatch, tmp_path, policy):
+    root = _ide_store(monkeypatch, tmp_path)
+    _session(root, "sess_ide-written", NOW - timedelta(days=3))        # sess_ prefix without CLI history: IDE
+    finding = _ide_finding(policy, last_capture=NOW - timedelta(days=10), age=10)
+    assert required_failure(finding) and finding["state"] == "uncaptured"
+    assert "ide_chat UNCAPTURED — Kiro IDE wrote sessions up to 2026-10-03 09:00Z" in finding["message"]
+    # an uncaptured session stays ❌ even once the IDE has gone idle again
+    finding = _ide_finding(policy, last_capture=NOW - timedelta(days=10), age=10, now=NOW + timedelta(days=20))
+    assert required_failure(finding) and finding["state"] == "uncaptured"
+    # daily IDE use with a broken capture: the newest session is always inside the
+    # grace, the older ones are not
+    _session(root, "today", NOW - timedelta(hours=6))
+    finding = _ide_finding(policy, last_capture=NOW - timedelta(days=10), age=10)
+    assert required_failure(finding) and finding["state"] == "uncaptured"
+    # captured since: healthy
+    finding = _ide_finding(policy, last_capture=NOW - timedelta(days=2, hours=12), age=2)
+    assert finding["healthy"] is True and finding["state"] == "healthy"
+
+
+def test_ide_sessions_newer_than_the_capture_within_the_grace_are_healthy(monkeypatch, tmp_path, policy):
+    root = _ide_store(monkeypatch, tmp_path)
+    _session(root, "old", NOW - timedelta(days=12))                    # captured on day -11
+    _session(root, "fresh", NOW - timedelta(days=1))                   # the 02:30 run has not had its chance
+    finding = _ide_finding(policy, last_capture=NOW - timedelta(days=11), age=11)
+    assert finding["healthy"] is True and finding["state"] == "healthy"
+    assert "within the 2d grace" in finding["message"]
+
+
+def test_missing_sessions_dir_is_an_idle_producer(monkeypatch, tmp_path, policy):
+    root = _ide_store(monkeypatch, tmp_path, sessions=False)
+    finding = _ide_finding(policy, last_capture=None, age=liveness.NEVER)
+    assert finding["healthy"] is True and finding["state"] == "producer_idle"
+    assert f"Kiro IDE idle ({root} missing)" in finding["message"]
+
+
+def test_cli_only_and_incomplete_sessions_are_not_ide_activity(monkeypatch, tmp_path, policy):
+    root = _ide_store(monkeypatch, tmp_path)
+    _session(root, "sess_cli-1", NOW - timedelta(days=3), workspace="788584e9f1ebfef0", cli=True)
+    _session(root, "cli_0a1b2c3d-0000-4000-8000-000000000000_x", NOW - timedelta(days=4), cli=True)
+    _session(root, "no-transcript-yet", NOW - timedelta(days=3), transcript=False)   # capture skips it (incomplete)
+    _session(root, "ide-old", NOW - timedelta(days=40))
+    finding = _ide_finding(policy, last_capture=NOW - timedelta(days=30), age=30)
+    assert finding["healthy"] is True and finding["state"] == "producer_idle"
+    assert "idle since 2026-08-27" in finding["message"]
+
+
+def test_a_new_legacy_chat_file_is_ide_activity(monkeypatch, tmp_path, policy):
+    _ide_store(monkeypatch, tmp_path)
+    now = datetime.now(timezone.utc)
+    chat = tmp_path / "globalStorage" / "kiro.kiroagent" / "ws" / ("a" * 32 + ".chat")
+    chat.parent.mkdir(parents=True)
+    chat.write_text("{}")
+    stamp = (now - timedelta(days=3)).timestamp()
+    os.utime(chat, (stamp, stamp))      # on APFS this moves the creation time back too
+    finding = _ide_finding(policy, last_capture=now - timedelta(days=10), age=10, now=now)
+    assert required_failure(finding) and finding["state"] == "uncaptured"
+
+
+def test_policy_rejects_an_unknown_producer_or_a_bad_grace(tmp_path):
+    base = '[channels.x]\npredicate = "source_type = \'x\'"\nmax_age_days = 3\nseverity = "required"\n'
+    bad = tmp_path / "liveness.toml"
+    bad.write_text(base + 'producer = "nope"\n')
+    with pytest.raises(ValueError, match="producer"):
+        load_policy(bad)
+    bad.write_text(base + 'producer = "kiro_ide_sessions"\nproducer_grace_days = 0\n')
+    with pytest.raises(ValueError, match="producer_grace_days"):
+        load_policy(bad)
+
+
+def test_a_failing_producer_probe_falls_back_to_the_age_rule(monkeypatch, policy):
+    def broken(now, grace_days):
+        raise PermissionError("denied")
+    monkeypatch.setitem(liveness.PRODUCERS, "kiro_ide_sessions", ("Kiro IDE", broken))
+    finding = _ide_finding(policy, last_capture=NOW - timedelta(days=17), age=17)
+    assert required_failure(finding) and finding["state"] == "silent"
+    assert "producer check failed, age rule applied: PermissionError: denied" in finding["message"]
+
+
+def test_ide_chat_is_judged_on_the_producer_end_to_end(monkeypatch, test_conn, tmp_path, policy):
+    """The live 2026-10-29 report: kiro_ide_chat 17 d old, IDE idle → ✅; a settled IDE
+    session the capture did not take → ❌."""
+    root = _ide_store(monkeypatch, tmp_path)
+    _seed_all_fresh(test_conn)
+    with test_conn.cursor() as cur:
+        cur.execute("DELETE FROM memories WHERE source_type = 'kiro_ide_chat'")
+    _seed(test_conn, "kiro_ide_chat", 17)
+    now = datetime.now(timezone.utc)
+    _session(root, "ide-idle", now - timedelta(days=29))
+    status = tmp_path / "status"
+    status.mkdir()
+    by = {(f["check"], f["subject"]): f for f in liveness.run(policy, status, conn=test_conn, now=now)}
+    ide = by[("channel", "ide_chat")]
+    assert ide["healthy"] is True and ide["state"] == "producer_idle" and ide["age_days"] == 17
+    _session(root, "ide-uncaptured", now - timedelta(days=3))
+    by = {(f["check"], f["subject"]): f for f in liveness.run(policy, status, conn=test_conn, now=now)}
+    assert required_failure(by[("channel", "ide_chat")]) and by[("channel", "ide_chat")]["state"] == "uncaptured"
+    # a refresh that only re-stamped the row (content unchanged) counts as a capture
+    with test_conn.cursor() as cur:
+        cur.execute("UPDATE memories SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object("
+                    "'capture_updated_at', %s::text) WHERE source_type = 'kiro_ide_chat'", ((now - timedelta(days=1)).isoformat(),))
+    by = {(f["check"], f["subject"]): f for f in liveness.run(policy, status, conn=test_conn, now=now)}
+    assert by[("channel", "ide_chat")]["healthy"] is True
