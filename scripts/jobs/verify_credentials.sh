@@ -199,7 +199,8 @@ hints() {  # label list
   case "$1" in *sso-default*) log "   fix: aws sso login --sso-session kiro-admin-session";; esac
   case "$1" in *second-brain-jobs*) log "   fix: IAM Roles Anywhere profile — run the credential_process line from ~/.aws/config by hand to see the error (cert expired? see docs/OPERATIONS.md 'Credentials')";; esac
   case "$1" in *roles-anywhere*) log "   fix: re-issue ~/.aws/rolesanywhere/jobs.pem from the CA before it expires (docs/OPERATIONS.md 'Credentials')";; esac
-  case "$1" in *grasp*|*slack*) log "   fix: open Kiro and use the Outlook/Slack tools once to re-authenticate";; esac
+  case "$1" in *grasp*) log "   fix: run mwinit, then grasp-mcp login in a terminal";; esac
+  case "$1" in *slack*) log "   fix: run mwinit, then open Kiro and use the Slack tools once to re-authenticate";; esac
   case "$1" in *tool-missing*) log "   fix: launchd runs this job with PATH=/usr/bin:/bin:/usr/sbin:/sbin — add the tool's directory to the PATH line at the top of this script";; esac
 }
 

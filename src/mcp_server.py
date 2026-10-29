@@ -625,7 +625,7 @@ if __name__ == "__main__":
         nothing: stdout is the MCP wire.
         """
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        _access_writer.close()
+        _access_writer.flush()  # not close(): its join can stall 5 s if SIGTERM lands while schedule() holds the lock; os._exit ends the thread
         os._exit(128 + signum)
 
     signal.signal(signal.SIGTERM, _flush_then_exit)
