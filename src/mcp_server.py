@@ -166,8 +166,8 @@ def search_hits(query, type=None, limit=10, project=None, source_type=None, sinc
     source_type = optional_one_of(source_type, SOURCE_TYPES, "source_type")
     limit = clamp_limit(limit)
     since_days = clamp_days(since_days, "since_days")
-    embedding = generate_embedding(query)
     project = normalize_project_tag(project)
+    embedding = generate_embedding(query)
     created_after = None
     if since_days is not None and since_days > 0:
         created_after = datetime.now(timezone.utc) - timedelta(days=since_days)
@@ -384,26 +384,6 @@ def memory_relate(
     return f"Related {source_id} → {relation_type} → {target_id}"
 
 
-#: Extra pages memory_list reads to refill a page after collapsing chunks.
-_LIST_REFILL_PAGES = 4
-
-
-def _list_collapsing_chunks(limit, **filters):
-    """Newest-first rows without chunks whose parent is in the page, filled to ``limit``
-    from following rows (bounded: a document with hundreds of same-timestamp chunks
-    can leave a short page)."""
-    rows, offset = [], 0
-    for _ in range(1 + _LIST_REFILL_PAGES):
-        batch = list_memories(limit=limit, offset=offset, **filters)
-        rows.extend(batch)
-        offset += len(batch)
-        ids = {str(r["id"]) for r in rows}
-        kept = [r for r in rows if chunk_parent_id(r) not in ids]
-        if len(kept) >= limit or len(batch) < limit:
-            break
-    return kept[:limit]
-
-
 @mcp.tool()
 @_boundary("list")
 def memory_list(
@@ -418,8 +398,9 @@ def memory_list(
     enumerate or audit, e.g. memory_list(source_type='slack', since_days=2) to see
     every Slack conversation-day captured since the day before yesterday.
 
-    A chunk whose parent document is also in the page is left out (the parent
-    stands for it) and the page is filled with the next rows.
+    A chunk whose parent matches the same filters is left out (the parent stands
+    for it); a chunk whose parent is filtered out is listed. Ties on created_at are
+    ordered by id.
 
     limit is clamped to 1–100 and since_days to 0–365. An unknown type/status filter
     or a non-integer (e.g. boolean) limit raises ValueError (reported by the server
@@ -433,8 +414,8 @@ def memory_list(
     created_after = None
     if since_days is not None and since_days > 0:
         created_after = datetime.now(timezone.utc) - timedelta(days=since_days)
-    results = _list_collapsing_chunks(limit, type=type, status=status, source_type=source_type,
-                                      created_after=created_after)
+    results = list_memories(type=type, status=status, source_type=source_type, limit=limit,
+                            created_after=created_after, collapse_chunks=True)
     return [
         {"id": str(r["id"]), "title": r["title"], "type": r["type"],
          "source_type": r["source_type"], "created_at": _iso(r["created_at"]),

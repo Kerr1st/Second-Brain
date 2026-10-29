@@ -85,23 +85,38 @@ def update_memory(memory_id, *, conn=None, **fields):
     return update_fields(memory_id, {k: v for k, v in fields.items() if k in ALLOWED_UPDATE_FIELDS}, conn=conn)
 
 
-def list_memories(type=None, status=None, source_type=None, limit=50, offset=0, created_after=None):
-    """List memories with optional filters, newest first. Scalar columns only
-    (no embedding / search_vector — a listing never needs a 1024-dim vector per row)."""
-    conditions = []
-    params = []
-    if type:
-        conditions.append("type = %s")
-        params.append(type)
-    if status:
-        conditions.append("status = %s")
-        params.append(status)
-    if source_type:
-        conditions.append("source_type = %s")
-        params.append(source_type)
-    if created_after is not None:
-        conditions.append("created_at >= %s")
-        params.append(created_after)
+#: SQL form of ``chunk_parent_id``: true (never NULL) for an index-only chunk row aliased ``{a}``.
+CHUNK_ROW_SQL = ("({a}.parent_id IS NOT NULL AND ({a}.metadata->>'chunk_index' IS NOT NULL "
+                 "OR coalesce(right({a}.metadata->>'record_kind', 6), '') = '_chunk'))")
+
+
+def list_memories(type=None, status=None, source_type=None, limit=50, offset=0, created_after=None,
+                  collapse_chunks=False):
+    """List memories with optional filters, newest first (ties broken by id, so pages
+    are stable). Scalar columns only (no embedding / search_vector — a listing never
+    needs a 1024-dim vector per row).
+
+    ``collapse_chunks`` leaves out a chunk (``chunk_parent_id``) whose parent matches
+    the same filters: the parent stands for it. A chunk whose parent is filtered out
+    is still listed."""
+    def filters(alias):
+        conditions, params = [], []
+        for column, value in (("type", type), ("status", status), ("source_type", source_type)):
+            if value:
+                conditions.append(f"{alias}.{column} = %s")
+                params.append(value)
+        if created_after is not None:
+            conditions.append(f"{alias}.created_at >= %s")
+            params.append(created_after)
+        return conditions, params
+
+    conditions, params = filters("m")
+    if collapse_chunks:
+        parent_conditions, parent_params = filters("p")
+        conditions.append(
+            f"NOT ({CHUNK_ROW_SQL.format(a='m')} AND EXISTS (SELECT 1 FROM memories p WHERE "
+            + " AND ".join(["p.id = m.parent_id", *parent_conditions]) + "))")
+        params.extend(parent_params)
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     params.extend([limit, offset])
@@ -109,7 +124,8 @@ def list_memories(type=None, status=None, source_type=None, limit=50, offset=0, 
     with get_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                f"SELECT {_LIST_COLUMNS} FROM memories {where} ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                f"SELECT {_LIST_COLUMNS} FROM memories m {where} "
+                "ORDER BY m.created_at DESC, m.id LIMIT %s OFFSET %s",
                 params,
             )
             return cur.fetchall()

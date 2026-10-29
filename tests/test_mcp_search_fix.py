@@ -3,12 +3,14 @@
 M-5: the lexical OR pass must leave out terms that are in most rows (the
      full-corpus OR matched 76 % of memories and took ~3 s to rank).
 M-8: memory_search returns one result per parent on both registries;
-     memory_list leaves out a chunk whose parent is on the same page.
+     memory_list leaves out a chunk whose parent matches the same filters (one
+     query, ordered by created_at then id).
 M-4: booleans are rejected for integer parameters over the protocol, in each
      tool's documented error shape.
 """
 import asyncio
 import json
+from datetime import timedelta
 from unittest.mock import patch
 
 from psycopg2.extras import RealDictCursor
@@ -138,14 +140,88 @@ class TestListCollapsesChunksUnderTheirParent:
         page = memory_list(limit=2)
         assert [r["id"] for r in page] == [str(parent), str(older)]  # refilled after collapsing
 
-    def test_chunk_without_its_parent_on_the_page_is_kept(self, test_db, clean_tables):
+    def test_chunk_whose_parent_does_not_match_the_filters_is_listed(self, test_db, clean_tables):
         from src.mcp_server import memory_list
         parent, chunks = _chunked_doc("Doc", "text", 1)
+        _db.update_memory(parent, status="archived")
+        assert [r["id"] for r in memory_list(status="active")] == [str(chunks[0])]
+        _set_age([parent], days=30)  # outside since_days, its chunk inside
+        _db.update_memory(parent, status="active")
+        assert [r["id"] for r in memory_list(since_days=7)] == [str(chunks[0])]
+        assert [r["id"] for r in memory_list()] == [str(parent)]
+
+    def test_child_that_is_not_a_chunk_is_listed_with_its_parent(self, test_db, clean_tables):
+        from src.mcp_server import memory_list
+        parent = _db.create_memory(type="source", title="P", content="c", source_type="article", source_url="a://p")
+        children = [_db.create_memory(type="insight", title=f"C{i}", content="c", parent_id=parent, metadata=m)
+                    for i, m in enumerate(({"chunk_index": None}, {"record_kind": "chunked_note"}))]
+        _set_age([children[1]], minutes=1)
+        _set_age([parent], days=1)
+        assert [r["id"] for r in memory_list()] == [str(children[0]), str(children[1]), str(parent)]
+
+    def test_document_whose_parent_is_older_than_the_page_is_not_hidden(self, test_db, clean_tables):
+        # Chunks are created after their parent. The old refill read the parent in a
+        # later batch, dropped its chunks and then cut the parent off the page, so the
+        # pages for different limits disagreed and the document was on none of them.
+        from src.mcp_server import memory_list
+        doc, doc_chunks = _chunked_doc("Rechunked", "x", 1)
+        busy, busy_chunks = _chunked_doc("Busy", "y", 1)
+        older = [_db.create_memory(type="source", title=f"Older {i}", content="c", source_type="article",
+                                   source_url=f"a://older{i}") for i in range(2)]
+        _set_age(busy_chunks, minutes=1)
+        _set_age([busy], minutes=2)
+        _set_age([older[0]], minutes=3)
+        _set_age([older[1]], minutes=4)
+        _set_age([doc], minutes=5)
+        full = [r["id"] for r in memory_list(limit=100)]
+        assert full == [str(busy), str(older[0]), str(older[1]), str(doc)]
+        for k in range(1, 5):
+            assert [r["id"] for r in memory_list(limit=k)] == full[:k], k
+
+    def test_tied_created_at_is_ordered_by_id_without_duplicates(self, test_db, clean_tables):
+        from src.mcp_server import memory_list
+        ids = [_db.create_memory(type="source", title=f"T{i}", content="c", source_type="slack",
+                                 source_url=f"s://{i}") for i in range(8)]
         with _db.get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE memories SET created_at = now() - interval '1 day' WHERE id = %s", (parent,))
+                cur.execute("UPDATE memories SET created_at = '2026-10-01T00:00:00Z'")
             conn.commit()
-        assert [r["id"] for r in memory_list(limit=1)] == [str(chunks[0])]
+        assert [r["id"] for r in memory_list(source_type="slack", limit=8)] == sorted(str(i) for i in ids)
+        assert [r["id"] for r in _db.list_memories(limit=8)] == sorted(str(i) for i in ids)
+        batched = [str(r["id"]) for off in (0, 3, 6) for r in _db.list_memories(limit=3, offset=off)]
+        assert batched == sorted(str(i) for i in ids)
+
+    def test_chunk_heavy_documents_fill_the_page(self, test_db, clean_tables):
+        from src.mcp_server import memory_list
+        docs = []
+        for n in range(4):
+            parent, chunks = _chunked_doc(f"Heavy {n}", f"t{n}", 12)
+            _set_age(chunks, minutes=2 * n)
+            _set_age([parent], minutes=2 * n + 1)
+            docs.append(str(parent))
+        assert [r["id"] for r in memory_list(limit=3)] == docs[:3]
+        assert [r["id"] for r in memory_list(limit=20)] == docs
+
+
+def _set_age(ids, **ago):
+    with _db.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE memories SET created_at = now() - %s WHERE id = ANY(%s::uuid[])",
+                        (timedelta(**ago), [str(i) for i in ids]))
+        conn.commit()
+
+
+class TestSearchHitsValidatesBeforeEmbedding:
+    def test_project_is_normalised_before_the_embed_call(self, test_db, clean_tables):
+        from src.mcp_server import search_hits
+        from src.validation import ValidationError
+        with patch("src.mcp_server.normalize_project_tag", side_effect=ValidationError("bad project")), \
+                patch("src.mcp_server.generate_embedding", side_effect=AssertionError("embedded")) as embed:
+            try:
+                search_hits("anything", project="x")
+            except ValidationError:
+                pass
+        embed.assert_not_called()
 
 
 # --------------------------------------------------------------------------- M-4
