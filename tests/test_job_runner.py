@@ -229,6 +229,74 @@ def test_signal_stops_term_ignoring_child_before_job_deadline(job_env, monkeypat
         os.kill(int((job_env / "child.pid").read_text()), 0)
 
 
+def _osascript_calls(monkeypatch):
+    monkeypatch.setenv("SECOND_BRAIN_NOTIFY", "1")
+    calls = []
+    monkeypatch.setattr(jobs.subprocess, "run", lambda *a, **k: calls.append(a[0]))
+    return lambda: [c for c in calls if c[0] == "osascript"]
+
+
+@pytest.mark.parametrize("service", [False, True])
+def test_external_sigterm_is_interrupted_not_a_failure_notification(job_env, monkeypatch, service):
+    """E10: macOS shutdown SIGTERMs the KeepAlive capture-api → exit 143.  That is an
+    interruption: no "failed (exit 143)" notification, a durable "interrupted" status,
+    and a terminal INTERRUPTED line in the job log (it used to end at the child's
+    own shutdown output)."""
+    monkeypatch.setenv("SECOND_BRAIN_HEALTH_INTERVAL", ".01")
+    monkeypatch.setattr(jobs, "_healthy", lambda *_: True)
+    notifications = _osascript_calls(monkeypatch)
+    path = script(job_env, "import os,signal,time; os.kill(os.getppid(), signal.SIGTERM); time.sleep(60)")
+    assert run_job(str(path), "test", repo=job_env, timeout=60, service=service) == 143
+    assert notifications() == []
+    value = status(job_env)
+    assert value["state"] == "interrupted" and value["exit_code"] == 143 and value["interrupted_by"] == signal.SIGTERM
+    assert value["last_notified_at"] is None
+    log = next((job_env / "logs").glob("*.log")).read_text()
+    assert log.rstrip().splitlines()[-1].endswith("INTERRUPTED (signal 15; exit 143)")
+    assert "FAILED" not in log
+
+
+def test_restarted_service_after_interruption_is_healthy_at_its_first_heartbeat(job_env, monkeypatch):
+    """launchd restarts the service after the shutdown/kickstart; the liveness sweep must
+    see it healthy as soon as it answers its probe, not as a lingering failure."""
+    monkeypatch.setenv("SECOND_BRAIN_HEALTH_INTERVAL", ".01")
+    monkeypatch.setattr(jobs, "_healthy", lambda *_: True)
+    path = script(job_env, "import os,signal,time; os.kill(os.getppid(), signal.SIGTERM); time.sleep(60)")
+    assert run_job(str(path), "test", repo=job_env, timeout=60, service=True) == 143
+    assert status(job_env)["consecutive_failures"] == 1 and status(job_env)["first_failure_at"]
+    seen = []
+
+    def healthy_then_stop(*_):
+        seen.append(None)
+        if len(seen) == 2:  # the first healthy probe's status is on disk now
+            seen.append(inspect_statuses(job_env / "status")[0] | {"raw": status(job_env)})
+            os.kill(os.getpid(), signal.SIGTERM)
+        return True
+    monkeypatch.setattr(jobs, "_healthy", healthy_then_stop)
+    path.write_text("import time; time.sleep(60)")
+    assert run_job(str(path), "test", repo=job_env, timeout=60, service=True) == 143
+    sweep = seen[2]
+    assert sweep["healthy"] is True and sweep["state"] == "running"
+    assert sweep["raw"]["consecutive_failures"] == 0 and sweep["raw"]["first_failure_at"] is None
+
+
+def test_deadline_kill_still_notifies(job_env, monkeypatch):
+    notifications = _osascript_calls(monkeypatch)
+    path = script(job_env, "import time; time.sleep(30)")
+    assert run_job(str(path), "test", repo=job_env, timeout=.1) == 124
+    assert len(notifications()) == 1 and "test failed (exit 124)" in notifications()[0][-1]
+    assert status(job_env)["state"] == "failed" and status(job_env)["last_notified_at"]
+
+
+def test_real_nonzero_exit_still_notifies(job_env, monkeypatch):
+    notifications = _osascript_calls(monkeypatch)
+    path = script(job_env, "raise SystemExit(3)")
+    assert run_job(str(path), "test", repo=job_env, timeout=5) == 3
+    assert len(notifications()) == 1 and "test failed (exit 3)" in notifications()[0][-1]
+    assert status(job_env)["state"] == "failed"
+    assert next((job_env / "logs").glob("*.log")).read_text().rstrip().endswith("FAILED (exit 3)")
+
+
 def test_child_cleanup_tolerates_process_exit_race(monkeypatch):
     from unittest.mock import Mock
     child = Mock(pid=123)

@@ -536,6 +536,15 @@ def run_job(script: str, name: str, args=(), *, repo=None, timeout=None, service
         if interrupted:
             code = 128 + interrupted
             status["interrupted_by"] = interrupted
+            # The SIGTERM/SIGINT reached the wrapper itself (launchd at shutdown,
+            # `launchctl kickstart -k`, Ctrl-C): the job did not fail.  The
+            # _JobInterrupted unwind left the `with log` block before its terminal
+            # line, so write one now that the group has been stopped.
+            try:
+                with log_path.open("a") as log:
+                    log.write(f"[{_stamp()}] INTERRUPTED (signal {interrupted}; exit {code})\n")
+            except OSError:
+                pass
         network_unavailable = network_unavailable and code == EXIT_NETWORK_UNAVAILABLE and not interrupted
         status.update(state="interrupted" if interrupted else "network_unavailable" if network_unavailable
                       else "succeeded" if code == 0 else "failed", exit_code=code,
@@ -554,8 +563,12 @@ def run_job(script: str, name: str, args=(), *, repo=None, timeout=None, service
         # Headless status is primary. Optional desktop notification cannot change exit.
         # A network-unavailable start is reported by the liveness sweep (advisory, ❌
         # when it repeats), not by a 06:00 notification nobody is awake for.
+        # An external interruption (state "interrupted": macOS shutdown SIGTERMs the
+        # KeepAlive capture-api) is not a failure either; liveness still flags a batch
+        # job that stays interrupted past failure_days.  The wrapper's own deadline
+        # kill (124) and real non-zero exits notify as before.
         notify_interval = _positive_float(env, "SECOND_BRAIN_NOTIFY_INTERVAL_S", str(DEFAULT_NOTIFY_INTERVAL_S))
-        notify = bool(code) and not network_unavailable and env.get("SECOND_BRAIN_NOTIFY", "1") != "0" and (
+        notify = bool(code) and not interrupted and not network_unavailable and env.get("SECOND_BRAIN_NOTIFY", "1") != "0" and (
             not service or should_notify(previous, datetime.now(timezone.utc), notify_interval))
         if notify:
             status["last_notified_at"] = _stamp()
