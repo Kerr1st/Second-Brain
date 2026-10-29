@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import asdict
 from datetime import datetime, timezone
 from uuid import UUID
@@ -26,6 +27,8 @@ DISCOVERY_TYPES = frozenset({"insight", "connection", "question", "synthesis"})
 # Lifecycle and provenance edges are derived by code, never delegated to a model.
 PROPOSED_RELATIONS = RELATION_TYPES - {"superseded_by", "derived_from"}
 PROTECTED_MARKERS = frozenset({"source", "capture", "governing", "guidance", "steering", "correction", "correction_episode"})
+
+logger = logging.getLogger(__name__)
 
 
 class CandidateAuthorizationError(ValueError):
@@ -292,6 +295,7 @@ def store_accepted(candidate: CandidateInsight, *, run_id: str, verdicts: dict,
                 if rows[mid].get("content") != authorized_memories[mid].get("content"):
                     raise CandidateAuthorizationError("Source or target changed since evaluation")
             memory_id = None
+            self_edges_dropped = 0
             if semantic_duplicate is not None:
                 # Record the acceptance against the existing memory without creating
                 # one. created_memory_id stays NULL: an arbitrary matched memory must
@@ -347,11 +351,20 @@ def store_accepted(candidate: CandidateInsight, *, run_id: str, verdicts: dict,
                 for source_id in source_ids:
                     if source_id != memory_id:
                         create_relationship(memory_id, source_id, "derived_from", conn=conn)
-                for rel in candidate.relationships:
+                relationships = candidate.relationships
+                if candidate.operation == "UPDATE":
+                    # The stored memory IS the target: an edge to it is redundant, not forged.
+                    relationships = [rel for rel in relationships if canonical_uuid(rel["target_id"]) != memory_id]
+                    self_edges_dropped = len(candidate.relationships) - len(relationships)
+                    if self_edges_dropped:
+                        logger.info("UPDATE candidate '%s': dropped %d self-edge(s) to its own target %s",
+                                    candidate.title, self_edges_dropped, memory_id)
+                for rel in relationships:
                     if rel["target_id"] == memory_id:
                         raise CandidateAuthorizationError("A discovery cannot relate to itself")
                     create_relationship(memory_id, rel["target_id"], rel["relation_type"], rel.get("note"), conn=conn)
-            store_candidate(run_id, asdict(candidate), verdicts, "ACCEPTED", memory_id, conn=conn)
+            store_candidate(run_id, asdict(candidate) | ({"self_edges_dropped": self_edges_dropped} if self_edges_dropped else {}),
+                            verdicts, "ACCEPTED", memory_id, conn=conn)
     return str(memory_id)
 
 

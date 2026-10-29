@@ -374,3 +374,71 @@ def test_superseded_relationship_target_is_blocked_before_any_paid_call(corpus, 
     assert [r[0] for r in rows] == ["BLOCKED", "ACCEPTED"]
     assert rows[0][1] is None and "exist and be active" in rows[0][2]
     assert stats["candidates_blocked_unjudged"] == 1 and "candidates_storage_failed" not in stats
+
+
+def _edges(mid):
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT target_id::text, relation_type FROM memory_relationships WHERE source_id=%s ORDER BY 1, 2", (mid,))
+        return cur.fetchall()
+
+
+def _ledger_json(run, title):
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT final_verdict, created_memory_id::text, candidate_json FROM dream_cycle_candidates "
+                    "WHERE run_id=%s AND candidate_json->>'title'=%s", (run, title))
+        return cur.fetchone()
+
+
+@pytest.mark.parametrize("self_form", [str, str.upper])
+def test_update_self_edge_is_dropped_and_valid_edge_kept(corpus, caplog, self_form):
+    """Run 3c0ba87e: three panel-ACCEPTED UPDATEs proposed an edge to their own
+    target and were BLOCKED. For an UPDATE the stored memory is the target, so
+    that edge is redundant: it is dropped (logged, counted) and the rest is stored."""
+    source, derived, context, run, c = corpus
+    c = replace(c, operation="UPDATE", target_memory_id=derived,
+                relationships=[{"target_id": self_form(derived), "relation_type": "extends"},
+                               {"target_id": source, "relation_type": "supports"}])
+    with caplog.at_level("INFO", logger="src.dream_cycle.storage"):
+        mid = store_accepted(c, run_id=run, verdicts=VOTES, authorized_memories=context)
+    assert mid == derived and get_memory(derived)["content"] == c.content
+    assert _edges(derived) == [(source, "derived_from"), (source, "supports")]
+    verdict, created, ledger = _ledger_json(run, "New discovery")
+    assert verdict == "ACCEPTED" and created == derived and ledger["self_edges_dropped"] == 1
+    assert [r for r in caplog.records if r.levelname == "INFO" and "New discovery" in r.getMessage()
+            and "1 self-edge" in r.getMessage()]
+
+
+def test_update_with_only_a_self_edge_is_stored_without_proposed_edges(corpus):
+    source, derived, context, run, c = corpus
+    c = replace(c, operation="UPDATE", target_memory_id=derived,
+                relationships=[{"target_id": derived, "relation_type": "related_to"}])
+    assert store_accepted(c, run_id=run, verdicts=VOTES, authorized_memories=context) == derived
+    assert get_memory(derived)["content"] == c.content
+    assert _edges(derived) == [(source, "derived_from")]
+    assert _ledger_json(run, "New discovery")[2]["self_edges_dropped"] == 1
+
+
+def test_update_self_edge_does_not_excuse_an_unauthorized_edge(corpus):
+    _, derived, context, run, c = corpus
+    c = replace(c, operation="UPDATE", target_memory_id=derived,
+                relationships=[{"target_id": derived, "relation_type": "extends"},
+                               {"target_id": "00000000-0000-0000-0000-000000000001", "relation_type": "supports"}])
+    before = _counts()
+    with pytest.raises(CandidateAuthorizationError, match="not in the supplied context"):
+        store_accepted(c, run_id=run, verdicts=VOTES, authorized_memories=context)
+    assert _counts() == before and get_memory(derived)["content"] == context[derived]["content"]
+
+
+def test_create_relationship_handling_is_unchanged(corpus):
+    """CREATE is unchanged: nothing is dropped and a valid edge is written. A CREATE
+    has no self-edge to drop: its new id is unknowable to the Thinker, and a CREATE
+    that dedups onto an existing discovery writes no proposed edges at all."""
+    source, derived, context, run, c = corpus
+    first = store_accepted(replace(c, relationships=[{"target_id": derived, "relation_type": "extends"}]),
+                           run_id=run, verdicts=VOTES, authorized_memories=context)
+    assert _edges(first) == sorted([(source, "derived_from"), (derived, "extends")])
+    assert "self_edges_dropped" not in _ledger_json(run, "New discovery")[2]
+    context = {**context, first: dict(get_memory(first))}
+    again = replace(c, relationships=[{"target_id": first, "relation_type": "extends"}])
+    assert store_accepted(again, run_id=run, verdicts=VOTES, authorized_memories=context) == first
+    assert _edges(first) == sorted([(source, "derived_from"), (derived, "extends")])
