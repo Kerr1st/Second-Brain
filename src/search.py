@@ -19,7 +19,6 @@ from datetime import datetime, timezone
 
 from src.db import get_connection
 
-logger = logging.getLogger(__name__)
 from src.rerank_weights import (
     COEFFICIENTS,
     MEM_CLASS_BOOST,
@@ -36,6 +35,8 @@ from src.rerank_weights import (
 from src.retrieval import (build_filters, tokenize_query, fts_passes, rrf_fuse,
                            normalise_rrf, dedup_candidates)
 from src.db.search_queries import fetch_candidates
+
+logger = logging.getLogger(__name__)
 
 
 def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None, project=None,
