@@ -20,6 +20,7 @@ Database failures return a safe message without SQL, credentials or private valu
 Programming errors remain visible to developers.
 """
 
+import atexit
 import json
 from functools import wraps
 from typing import Annotated, Any
@@ -33,7 +34,7 @@ from src.db import (
     create_relationship, get_relationships, find_temporal_neighbors,
     find_schemas_for_memories,
 )
-from src.search import hybrid_search, rerank, increment_access_count
+from src.search import hybrid_search, rerank, increment_access_count, AccessCountWriter
 from src.embeddings import generate_embedding, embed_leaf
 from src.classify import classify_memory
 from src.depth import compute_depth_score
@@ -46,6 +47,14 @@ from src.validation import (
 from src import express
 
 mcp = FastMCP("Second Brain")
+
+#: memory_search reinforcement is written in the background so the response does
+#: not wait on the (non-HOT, every-index) UPDATE. Pending bumps are flushed on a
+#: clean exit (atexit) or SIGTERM (handler in ``__main__``); bumps still pending
+#: at SIGKILL (the stdio client sends it 2 s after SIGTERM) are lost.
+#: The lambda resolves ``increment_access_count`` at write time (patchable).
+_access_writer = AccessCountWriter(lambda ids: increment_access_count(ids))
+atexit.register(_access_writer.close)
 
 #: Integer parameters. FastMCP validates arguments with pydantic, which turns
 #: ``true`` into ``1`` for an ``int`` parameter before clamp_limit/clamp_days see
@@ -220,7 +229,7 @@ def memory_search(query: str, type: str | None = None, limit: Int = 10, project:
     except ValidationError as e:
         return {"error": str(e)}
 
-    increment_access_count([str(r["id"]) for r in results])
+    _access_writer.schedule([str(r["id"]) for r in results])
 
     formatted = [format_hit(r) for r in results]
 
@@ -601,4 +610,23 @@ def memory_brief(window_days: Int = 14, use_llm: bool = False) -> str:
 
 
 if __name__ == "__main__":
+    import os
+    import signal
+
+    def _flush_then_exit(signum, frame):
+        """SIGTERM: write pending access-count bumps, then exit with status 143.
+
+        The stdio client closes stdin, waits 2 s, sends SIGTERM, then SIGKILL 2 s
+        later. Python's default SIGTERM action skips atexit, so the bumps of the
+        last searches were lost. Raising SystemExit instead would abort an atexit
+        flush already in progress, and while serving it hangs shutdown on the
+        anyio worker thread blocked reading stdin. So flush here (bounded by
+        close()'s timeout; SIGKILL still ends it) and leave with os._exit. Writes
+        nothing: stdout is the MCP wire.
+        """
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        _access_writer.close()
+        os._exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _flush_then_exit)
     mcp.run()

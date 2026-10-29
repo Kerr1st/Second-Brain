@@ -8,12 +8,17 @@ Note: search_similar() stays in the src.db repository — it's a data-access pri
 not a retrieval algorithm.
 """
 
+import logging
 import math
 import re
+import threading
+import time
+from collections import Counter
 from datetime import datetime, timezone
 
 
 from src.db import get_connection
+
 from src.rerank_weights import (
     COEFFICIENTS,
     MEM_CLASS_BOOST,
@@ -30,6 +35,8 @@ from src.rerank_weights import (
 from src.retrieval import (build_filters, tokenize_query, fts_passes, rrf_fuse,
                            normalise_rrf, dedup_candidates)
 from src.db.search_queries import fetch_candidates
+
+logger = logging.getLogger(__name__)
 
 
 def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None, project=None,
@@ -233,3 +240,94 @@ def increment_access_count(memory_ids):
                 (memory_ids,)
             )
         conn.commit()
+
+
+class AccessCountWriter:
+    """Applies retrieval reinforcement off the request path.
+
+    ``schedule(ids)`` only records the ids and returns; one daemon thread writes
+    them with ``write(ids)`` (``increment_access_count`` by default, its own
+    pooled connection). The UPDATE is non-HOT (``last_accessed_at`` is indexed),
+    so every bumped row inserts into every index of ``memories``, including the
+    HNSW index, which kept MCP searches waiting for seconds.
+
+    Ids scheduled while a write runs are coalesced: an id retrieved n times gets
+    n increments in the next write, so counts stay exact. At most ``max_pending``
+    distinct ids wait; further ids are dropped and counted in ``dropped``. A
+    failed write is logged (never raised, never printed to stdout) and its
+    batch is lost. ``close()`` flushes what is pending and stops the thread.
+    """
+
+    def __init__(self, write=None, *, max_pending=10000):
+        self._write = write or increment_access_count
+        self._max_pending = max_pending
+        self._pending = Counter()
+        self._busy = False
+        self._closed = False
+        self._thread = None
+        self._cond = threading.Condition()
+        self.dropped = 0
+
+    def schedule(self, memory_ids):
+        """Record one retrieval of each distinct id; never touches the database."""
+        ids = {str(i) for i in memory_ids or ()}
+        if not ids:
+            return
+        with self._cond:
+            if self._closed:
+                logger.warning("access-count writer closed; %d bumps dropped", len(ids))
+                self.dropped += len(ids)
+                return
+            for mid in ids:
+                if mid in self._pending or len(self._pending) < self._max_pending:
+                    self._pending[mid] += 1
+                else:
+                    self.dropped += 1
+            if self.dropped and len(self._pending) >= self._max_pending:
+                logger.warning("access-count queue full (%d ids); %d bumps dropped so far",
+                               self._max_pending, self.dropped)
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="access-count-writer", daemon=True)
+                self._thread.start()
+            self._cond.notify_all()
+
+    def _run(self):
+        while True:
+            with self._cond:
+                while not self._pending and not self._closed:
+                    self._cond.wait()
+                if not self._pending:
+                    return
+                batch, self._pending = self._pending, Counter()
+                self._busy = True
+            try:
+                for level in range(1, max(batch.values()) + 1):
+                    self._write(sorted(mid for mid, n in batch.items() if n >= level))
+            except Exception:
+                logger.warning("access-count write failed; %d ids not bumped", len(batch), exc_info=True)
+            finally:
+                with self._cond:
+                    self._busy = False
+                    self._cond.notify_all()
+
+    def flush(self, timeout=5.0):
+        """Wait until every scheduled bump has been written (or failed). True if drained."""
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while self._pending or self._busy:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            return True
+
+    def close(self, timeout=5.0):
+        """Flush pending bumps, then stop the writer thread (server shutdown)."""
+        drained = self.flush(timeout)
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout if drained else 0)
+        return drained
