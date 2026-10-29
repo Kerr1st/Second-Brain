@@ -14,8 +14,11 @@ import time
 from unittest.mock import patch
 
 import src.db as db
-from src import mcp_readonly, mcp_server
-from src.search import AccessCountWriter
+from src import mcp_readonly, mcp_server, search
+
+
+def AccessCountWriter(*args, **kwargs):  # resolved per test so the pre-fix run fails per test
+    return search.AccessCountWriter(*args, **kwargs)
 
 SLOW_WRITE_S = 2.0
 
@@ -44,9 +47,8 @@ def test_search_result_does_not_wait_for_slow_access_count_write():
         written.append(list(ids))
 
     hits = [_hit("00000000-0000-0000-0000-00000000000a"), _hit("00000000-0000-0000-0000-00000000000b")]
-    writer = AccessCountWriter(lambda ids: mcp_server.increment_access_count(ids))
-    with patch.object(mcp_server, "_access_writer", writer, create=True), \
-         patch.object(mcp_server, "increment_access_count", slow_increment), \
+    writer = getattr(mcp_server, "_access_writer", None)
+    with patch.object(mcp_server, "increment_access_count", slow_increment), \
          patch.object(mcp_server, "generate_embedding", return_value=[0.0] * 1024), \
          patch.object(mcp_server, "hybrid_search", return_value=hits), \
          patch.object(mcp_server, "rerank", side_effect=lambda rows, *a, **k: rows), \
@@ -57,10 +59,10 @@ def test_search_result_does_not_wait_for_slow_access_count_write():
         elapsed = time.perf_counter() - t0
         returned_before_write = not written
         release.set()
-        assert writer.close(timeout=5)
+        assert returned_before_write and elapsed < SLOW_WRITE_S / 2, f"tool result waited {elapsed:.2f}s on the write"
+        assert writer.flush(timeout=5)
 
     assert [r["id"] for r in payload["results"]] == [h["id"] for h in hits]
-    assert returned_before_write and elapsed < SLOW_WRITE_S / 2, f"tool result waited {elapsed:.2f}s on the write"
     assert started.is_set()
     assert written == [sorted(h["id"] for h in hits)]
 
