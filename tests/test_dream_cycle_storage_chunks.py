@@ -13,7 +13,7 @@ import pytest
 from psycopg2.extras import RealDictCursor
 
 from src.db import create_memory, get_connection, get_memory
-from src.db.maintenance import oversize_vector_rows
+from src.db.maintenance import oversize_vector_rows, plan_rechunk
 from src.dream_cycle.storage import MAX_CHUNK_CHARS, store_accepted
 from src.dream_cycle_db import create_run, store_candidate
 from src.models import CandidateInsight
@@ -81,6 +81,10 @@ def test_long_discovery_is_a_vectorless_parent_with_bounded_embedded_chunks(corp
     # Only bounded texts were embedded, and no stored vector exceeds the bound.
     assert calls and all(len(text) <= MAX_CHUNK_CHARS for text in calls)
     assert oversize_vector_rows() == []
+    # Same shape the rechunk applier writes: the planner has nothing to repair here.
+    # (The unembedded fixture rows are planned; the discovery and its chunks are not.)
+    planned = {op["memory_id"] for op in plan_rechunk()["operations"]}
+    assert planned and not planned & ({mid} | {ch["id"] for ch in chunks})
 
 
 def test_short_discovery_is_stored_exactly_as_before(corpus, mock_embedding):
