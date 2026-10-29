@@ -140,7 +140,9 @@ zero_candidate_runs_required = 2
 # loaded, a copy pointing at a deleted script, or a Mac that was asleep.
 # `failure_days`: a non-zero last exit is ❌ once it has persisted this long.
 # 0 = report it at the next sweep (the job already notified when it failed; the
-# 09:00 sweep is the durable second look for a headless morning). Raise to 1 to
+# 09:00 sweep is the durable second look for a headless morning; an external
+# SIGTERM/SIGINT, state `interrupted`, does not notify, so this sweep is its only
+# report). Raise to 1 to
 # tolerate a single flaky night as ⚠.
 [jobs]
 failure_days = 0

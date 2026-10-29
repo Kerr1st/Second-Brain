@@ -280,6 +280,24 @@ def test_restarted_service_after_interruption_is_healthy_at_its_first_heartbeat(
     assert sweep["raw"]["consecutive_failures"] == 0 and sweep["raw"]["first_failure_at"] is None
 
 
+@pytest.mark.parametrize("failure_days", [0, 1])
+def test_nightly_interrupted_batch_job_surfaces_in_liveness(job_env, monkeypatch, failure_days):
+    """An interrupted run does not notify, so the liveness sweep is its only report:
+    a batch job interrupted every night must still be ❌ required, counted from the
+    first interruption, at failure_days 0 and 1."""
+    notifications = _osascript_calls(monkeypatch)
+    path = script(job_env, "import os,signal,time; os.kill(os.getppid(), signal.SIGTERM); time.sleep(60)")
+    for _ in range(3):
+        assert run_job(str(path), "test", repo=job_env, timeout=60) == 143
+    assert notifications() == []
+    value = status(job_env)
+    assert value["consecutive_failures"] == 3 and value["first_failure_at"]
+    first = datetime.fromisoformat(value["first_failure_at"])
+    [result] = inspect_statuses(job_env / "status", now=first + timedelta(days=failure_days, minutes=1),
+                                failure_days=failure_days)
+    assert result["healthy"] is False and result["severity"] == "required" and result["state"] == "interrupted"
+
+
 def test_deadline_kill_still_notifies(job_env, monkeypatch):
     notifications = _osascript_calls(monkeypatch)
     path = script(job_env, "import time; time.sleep(30)")

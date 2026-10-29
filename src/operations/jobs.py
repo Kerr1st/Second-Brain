@@ -564,9 +564,9 @@ def run_job(script: str, name: str, args=(), *, repo=None, timeout=None, service
         # A network-unavailable start is reported by the liveness sweep (advisory, ❌
         # when it repeats), not by a 06:00 notification nobody is awake for.
         # An external interruption (state "interrupted": macOS shutdown SIGTERMs the
-        # KeepAlive capture-api) is not a failure either; liveness still flags a batch
-        # job that stays interrupted past failure_days.  The wrapper's own deadline
-        # kill (124) and real non-zero exits notify as before.
+        # KeepAlive capture-api) is not notified either; it still counts as a failure,
+        # so the next liveness sweep reports it (❌ at failure_days = 0, no grace).
+        # The wrapper's own deadline kill (124) and real non-zero exits notify as before.
         notify_interval = _positive_float(env, "SECOND_BRAIN_NOTIFY_INTERVAL_S", str(DEFAULT_NOTIFY_INTERVAL_S))
         notify = bool(code) and not interrupted and not network_unavailable and env.get("SECOND_BRAIN_NOTIFY", "1") != "0" and (
             not service or should_notify(previous, datetime.now(timezone.utc), notify_interval))
