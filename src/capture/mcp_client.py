@@ -154,12 +154,18 @@ class CaptureFailure(RuntimeError):
 # --------------------------------------------------------------------------- #
 # Error classification                                                         #
 # --------------------------------------------------------------------------- #
-# Matched case-insensitively against the whole exception chain.
+# Matched case-insensitively against the whole exception chain (plain substring:
+# no space/punctuation folding, so each marker avoids grasp's em dash). Meant for
+# MCP error text only: phrases such as "authentication failed" also occur in
+# PostgreSQL/TLS/SOCKS errors, so don't route non-MCP failures through these.
 _AUTH_MARKERS = (
     "auth_error", "failed to refresh authentication token", "midway-auth",
     "unauthorized", "invalid_grant", "token expired", "expired token",
     "authenticationfailed", "invalid authentication", "not authenticated",
     "re-authenticate", "mwinit",
+    # grasp-mcp: "Authentication failed — your session has expired or no valid
+    # tokens are available. ... run ... grasp-mcp login ..." (2026-10-12..26).
+    "authentication failed", "session has expired", "grasp-mcp login",
 )
 # A connection that is gone: reconnecting once is worth a try.
 _CLOSED_MARKERS = (

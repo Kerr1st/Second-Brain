@@ -54,7 +54,7 @@ GRASP_ARGS = ["serve", "--quiet"]
 # credentials probe is too tight for capture — but it must stay bounded, or a
 # hung server holds the job open until launchd's next run.
 OUTLOOK_CALL_TIMEOUT = float(os.environ.get("OUTLOOK_CALL_TIMEOUT", "180"))
-AUTH_FIX = "open Kiro and use an Outlook tool once to refresh the Microsoft Graph token"
+AUTH_FIX = "run `mwinit`, then `grasp-mcp login` in a terminal, then re-run the job"
 
 MAIL_FOLDERS = ("inbox", "sent")
 PAGE_SIZE = 50

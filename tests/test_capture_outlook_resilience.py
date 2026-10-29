@@ -21,6 +21,10 @@ from src.capture.mcp_client import (
 )
 
 GRAPH_AUTH = "get_emails: 401 unauthorized — token expired"
+# grasp-mcp's reply when its login has lapsed (logs/capture-outlook-20261026.log).
+GRASP_SESSION_EXPIRED = ("Authentication failed — your session has expired or no valid tokens are "
+                         "available. To fix this, run the following command in another terminal: "
+                         "grasp-mcp login Then retry this operation. No server restart is needed.")
 
 
 def closed() -> McpError:
@@ -64,6 +68,11 @@ def _client(*sessions, **kw):
 MAIL_PAGE = '{"emails": [{"id": "m1", "subject": "Hi", "from": {"emailAddress": "a@x.com"}, ' \
             '"toRecipients": [], "receivedDateTime": "2026-09-20T09:00:00Z"}], "hasMore": false}'
 MAIL_BODY = '{"bodyType": "text", "bodyContent": "synthetic body"}'
+TWO_MAIL_PAGE = '{"emails": [' \
+    '{"id": "m1", "subject": "One", "from": {"emailAddress": "a@x.com"}, "toRecipients": [], ' \
+    '"receivedDateTime": "2026-09-20T09:00:00Z"}, ' \
+    '{"id": "m2", "subject": "Two", "from": {"emailAddress": "b@x.com"}, "toRecipients": [], ' \
+    '"receivedDateTime": "2026-09-20T10:00:00Z"}], "hasMore": false}'
 EMPTY_PAGE = '{"emails": [], "hasMore": false}'
 
 START = outlook.datetime(2026, 9, 20, tzinfo=outlook.timezone.utc)
@@ -127,6 +136,18 @@ class TestCollectMailSurvivesOneServerDeath:
             asyncio.run(outlook.collect_mail(client.call_json, START, END, set()))
         assert client.reconnects_used == 0
 
+    def test_grasp_session_expiry_mid_page_propagates_instead_of_skipping_the_rest(self):
+        # m1's body arrives, then grasp's login lapses on m2's get_email_details.
+        # Before markers covered grasp's text this was a McpToolError: m2 was
+        # counted failed and the run went on (exit 1). It must now abort as auth.
+        session = FakeSession(_reply(TWO_MAIL_PAGE), _reply(MAIL_BODY),
+                              _reply(GRASP_SESSION_EXPIRED, is_error=True), _reply(EMPTY_PAGE))
+        client = _client(session)
+        with pytest.raises(McpAuthError, match="get_email_details: Authentication failed"):
+            asyncio.run(outlook.collect_mail(client.call_json, START, END, set()))
+        assert [t for t, _ in session.calls] == ["get_emails", "get_email_details", "get_email_details"]
+        assert client.reconnects_used == 0
+
 
 # --------------------------------------------------------------------------- #
 # The job's exit-code taxonomy                                                 #
@@ -166,7 +187,8 @@ class TestCaptureClassifiesFailures:
         with pytest.raises(CaptureFailure) as exc:
             outlook.capture(days_back=1)
         assert exc.value.exit_code == EXIT_AUTH
-        assert exc.value.needs_reauth and "Graph" in (exc.value.fix or "")
+        assert exc.value.needs_reauth
+        assert "mwinit" in (exc.value.fix or "") and "grasp-mcp login" in (exc.value.fix or "")
 
     def test_a_bug_is_neither(self, monkeypatch):
         _patch(monkeypatch, FailingClient(ValueError("bad row")))
@@ -215,7 +237,28 @@ class TestMainExitCodes:
             code, sent = _run_main(monkeypatch, failure=failure)
         assert code == EXIT_AUTH and len(sent) == 1
         line = caplog.text.strip().splitlines()[-1]
-        assert "FAILED (auth) outlook" in line and "Graph" in line and "\n" not in line
+        assert "FAILED (auth) outlook" in line and "grasp-mcp login" in line and "\n" not in line
+
+    def test_grasp_session_expiry_mid_page_exits_3_with_the_grasp_login_remedy(self, monkeypatch, caplog):
+        # End to end through main(): the real McpClient over a fake grasp session.
+        session = FakeSession(_reply(TWO_MAIL_PAGE), _reply(MAIL_BODY),
+                              _reply(GRASP_SESSION_EXPIRED, is_error=True))
+        client = McpClient(outlook.GRASP_CMD, outlook.GRASP_ARGS, reconnect_backoff=0)
+
+        async def _connect():
+            client._session = session
+
+        client._connect = _connect
+        _patch(monkeypatch, client)
+        sent = []
+        monkeypatch.setattr("src.capture.mcp_client.notify", lambda m, t=None: sent.append((m, t)) or True)
+        monkeypatch.setattr("sys.argv", ["prog", "--no-calendar"])
+        with caplog.at_level("ERROR"):
+            code = outlook.main()
+        assert code == EXIT_AUTH
+        assert len(sent) == 1 and "grasp-mcp login" in sent[0][0]
+        line = caplog.text.strip().splitlines()[-1]
+        assert "FAILED (auth) outlook" in line and "mwinit" in line
 
     def test_success_exits_0(self, monkeypatch):
         code, sent = _run_main(monkeypatch)
