@@ -1,0 +1,270 @@
+# Capture liveness policy — read by `python -m src.operations.liveness`
+# (invoked from scripts/jobs/verify_liveness.sh, launchd label com.second-brain.liveness, 09:00).
+#
+# Severity vocabulary (the job's exit code follows `required` only):
+#   required  ❌  silence beyond max_age_days fails the job and notifies
+#   advisory  ⚠   watched and reported, never fails the job — for channels whose
+#                 producer is KNOWN to be disabled/failing (listed here explicitly,
+#                 with the reason, instead of being hard-coded or silently dropped)
+#   retired   ⚠   dormant upstream; kept visible on purpose, never fails
+#
+# Thresholds are DAYS and were set from observed cadence on 2026-09-23 (see the
+# header of scripts/jobs/verify_liveness.sh); R5 keeps every production threshold
+# unchanged and only ADDS channels/predicates.
+
+[channels.quick_desktop_doc]
+predicate = "source_type = 'quick_desktop_doc'"
+max_age_days = 3
+severity = "retired"
+reason = "upstream Quick doc export dormant since 2026-06-04; re-arm (severity = required) if it resumes"
+
+[channels.quick_desktop_synth]
+predicate = "source_type LIKE 'quick_desktop_%' AND source_type NOT IN ('quick_desktop_doc','quick_desktop_session_event')"
+max_age_days = 21
+# Advisory since R5 (2026-10-06): the upstream Quick export is stale — knowledge_v1.db
+# last written 2026-09-16, eventlog 2026-07-21; every quick_desktop_* type has
+# max(created_at) == max(updated_at) (feed: 20 d). The channel would go ❌ on 10-08
+# for an upstream condition no job of ours can fix. `created_at` stays the column:
+# the hourly qd-sync refresh (R4) leaves unchanged rows untouched (src/ingest.py
+# returns before any UPDATE when content/fields/metadata are equal), and the one
+# metadata patch it does apply on its first run (capture_identity) would make
+# `updated_at` look fresh for a day without any new upstream capture.
+# Re-arm (severity = "required") when the export resumes.
+severity = "advisory"
+reason = "upstream Quick export stale (knowledge_v1.db unchanged since 2026-09-16); qd-sync runs hourly but has nothing new to capture — re-arm when the export resumes"
+
+[channels.web_articles]
+# SharePoint documents (bookmarks job, grasp) are also source_type 'article'; a weekly
+# refresh of one must not keep this channel green while Crawlee is dead.
+predicate = "source_type = 'article' AND COALESCE(source_url, '') NOT LIKE 'sharepoint://%'"
+max_age_days = 9
+severity = "required"
+
+[channels.ide_chat]
+# Re-armed in R5: R4's chat-capture job captures native Kiro IDE sessions nightly
+# (the channel had been dark since 2026-05-17 and was excluded from this list).
+# Judged on the producer (2026-10-29): the user moved to Kiro CLI (no IDE session
+# written since 2026-09-30), so a quiet channel is not a capture failure. ❌ only
+# when an IDE session on disk newer than the last capture and older than
+# producer_grace_days (the nightly 02:30 run has had its chance) is one chat-capture
+# would take: same discovery, identity/fingerprint check and parser; a session it
+# filters (e.g. one prompt) or already stores unchanged does not count. ✅ idle only
+# when no IDE session is newer than max_age_days AND Kiro.app's own launch logs /
+# state.vscdb agree it has not run for max_age_days; a missing session store, no app
+# signal, or an app that ran with no new session in the store → the age rule.
+# producer_grace_days defaults to 2 when omitted.
+predicate = "source_type = 'kiro_ide_chat'"
+max_age_days = 7
+severity = "required"
+producer = "kiro_ide_sessions"
+producer_grace_days = 2
+
+[channels.cli_chat]
+predicate = "source_type = 'kiro_cli_chat'"
+max_age_days = 4
+severity = "required"
+
+[channels.youtube]
+predicate = "source_type = 'youtube'"
+max_age_days = 9
+severity = "required"
+
+[channels.outlook_email]
+predicate = "source_type = 'outlook_email'"
+max_age_days = 3
+severity = "required"
+
+[channels.outlook_calendar]
+predicate = "source_type = 'outlook_calendar'"
+max_age_days = 5
+severity = "required"
+
+[channels.slack]
+predicate = "source_type = 'slack'"
+max_age_days = 4
+severity = "required"
+
+[channels.browser_history]
+predicate = "source_type = 'browser_history'"
+max_age_days = 4
+severity = "required"
+
+[channels.codex_task]
+predicate = "source_type = 'codex_task'"
+max_age_days = 7
+severity = "required"
+
+# --- known-disabled / known-failing producers: watched, advisory (E-N6) -------
+# Flip `severity` to "required" when the producer is re-enabled and has produced
+# once; until then a ❌ here would make the monitor red from day one and unread.
+
+[channels.distilled_chat]
+predicate = "source_type = 'distilled_chat'"
+max_age_days = 7
+severity = "advisory"
+reason = "com.second-brain.distill is launchctl-disabled by the operator (since 2026-09-22); silent since then"
+
+[channels.weekly_digest]
+predicate = "source_type = 'weekly_digest'"
+max_age_days = 14
+severity = "advisory"
+reason = "weekly_digest.sh failed every Monday 2026-09-07..2026-10-05 (Bedrock EndpointConnectionError, exit 1); OK again since 2026-10-09 (10-12, 10-19, 10-26) — re-arm (severity = required) once the operator confirms"
+
+# --- generic zero-output predicate ----------------------------------------------
+# Every source_type that has EVER produced a row is checked, enumerated or not:
+# "produced zero rows for longer than its own cadence tolerates".  The tolerance is
+# learned from history: max observed gap between capture days in the look-back
+# window, plus one day, floored at `min_silent_days_*`.  This is the rule that
+# would have caught kiro_ide_chat's death on 2026-05-17 (not enumerated → nobody
+# looked) and the Slack rate-limit gap of 2026-10-03/04 (enumerated threshold 4 d,
+# daily cadence → zero for 2 days is already abnormal).
+#   enumerated channels  → advisory ⚠ (their fixed threshold above stays the ❌ rule)
+#   unenumerated types   → required ❌ after `min_silent_days_required`
+[zero_output]
+history_days = 90
+min_silent_days_advisory = 2
+min_silent_days_required = 7
+# an enumerated type needs this many capture days in the window before its cadence
+# counts as learned (sparse quick_desktop_* types otherwise flap as ⚠ daily)
+min_history_days_advisory = 10
+# never flagged: retired/one-time/known-disabled producers and synthesis outputs.
+# "quick_desktop" (bare) is a legacy label — 10 rows, last written 2026-06-30; the
+# live QD stages write quick_desktop_<kind>, which the LIKE predicate enumerates.
+ignore = [
+  "quick_desktop_doc", "quick_desktop_session_event", "quick_desktop",
+  "distilled_chat", "distilled_agent_task", "weekly_digest",
+  "dream_cycle", "manual", "file",
+]
+
+# --- dream cycle --------------------------------------------------------------
+[dream_cycle]
+# Runs Mon/Wed/Fri 12:30 (02:00 until 2026-10-09); the longest normal gap is Fri→Mon = 3 d.  7 d means two
+# consecutive scheduled runs never completed (completed_at stays NULL on a crash).
+max_completed_age_days = 7
+# A completed run that generated 0 candidates (observed 2026-09-30) is not healthy
+# output; `zero_candidate_runs_required` consecutive ones fail the job.
+zero_candidate_runs_required = 2
+
+# --- scheduled-job status sweep (logs/jobs/<name>.json written by the wrapper) ---
+# `expected_interval_hours`: the longest normal gap between two status updates for
+# that job (schedule period + its own deadline + slack).  A status file older than
+# that means the job has not even been *started* by launchd — a plist that is not
+# loaded, a copy pointing at a deleted script, or a Mac that was asleep.
+# `failure_days`: a non-zero last exit is ❌ once it has persisted this long.
+# 0 = report it at the next sweep (the job already notified when it failed; the
+# 09:00 sweep is the durable second look for a headless morning; an external
+# SIGTERM/SIGINT, state `interrupted`, does not notify, so this sweep is its only
+# report). Raise to 1 to
+# tolerate a single flaky night as ⚠.
+[jobs]
+failure_days = 0
+# exit 68 / state `network_unavailable`: the wrapper's network preflight never saw
+# DNS come up (launchd started the job in a dark wake) and did not start the job.
+# Infrastructure, not the job: ⚠ with the reason, counted on its own
+# `consecutive_network_failures`; ❌ once it happened this many scheduled runs in a row.
+network_failures_required = 2
+
+[jobs.expected_interval_hours]
+backup = 30            # daily 02:00 (+2 h deadline)
+bookmarks = 192        # Fri 10:00 → 8 d
+capture-browser = 30
+capture-outlook = 30
+capture-slack = 30
+chat-capture = 30
+crawlee-ingest = 30
+codex-capture = 12     # every 6 h
+credentials = 30
+dream-cycle = 96       # Mon/Wed/Fri → Fri→Mon is 72 h, + 6 h deadline + slack
+liveness = 30
+qd-sync = 6            # hourly
+verify = 192           # Sun 03:00
+weekly-digest = 192    # Mon 06:00
+youtube = 30
+# capture-api is a KeepAlive service: judged on its heartbeat, not an interval.
+# distill is launchctl-disabled: no status file is expected; not listed on purpose.
+
+# --- per-job advisory list (S3-1) ------------------------------------------------
+# A job listed here is still swept and reported, but a failed/interrupted/
+# network_unavailable status is ⚠, never ❌, and never fails the sweep — for jobs
+# whose failure is KNOWN and being worked on. The reason is mandatory (the loader
+# refuses an entry without one) so the list cannot silently become a mute button.
+# Mirrors `severity = "advisory"` on channels. Remove the entry when the condition
+# in the reason is met.
+# weekly-digest was listed until 2026-10-29 ("network preflight pending
+# verification; remove after two consecutive OK runs"): OK on 10-12, 10-19, 10-26.
+[jobs.advisory]
+
+# --- persistent job backlog --------------------------------------------------------
+# A job that legitimately leaves work for its next run records its own streak in
+# logs/jobs/<job>.backlog.json (src/operations/backlog.py).  `consecutive_runs`
+# consecutive runs that deferred work → ⚠ with the (mandatory) reason; a backlog is
+# never ❌ and one deferral is never reported.  The job prints a WARNING at the
+# same threshold.
+[backlog.bookmarks]
+consecutive_runs = 3
+reason = "scrape_bookmarks.py: the Crawlee time budget could not start every new public bookmark for 3+ runs in a row (deferred, retried next run); prune bookmarks, extend SECOND_BRAIN_JOB_TIMEOUT_BOOKMARKS or tune CRAWLEE_BATCH_*"
+
+# Codex semantic-contract misses (2026-10-13). A Bedrock answer that fails the
+# evidence contract (SemanticResultError) is a recorded, bounded attempt (3 per
+# frozen batch, then abandoned) and no longer fails the job. So a sudden,
+# systematic contract break stays visible: scripts/capture_codex.py records each
+# scheduled run's `semantic_contract_failed` as the "deferred" count in
+# logs/jobs/codex-capture.backlog.json. 2 consecutive runs with misses (~12 h)
+# → ⚠. A single miss that the next run's retry clears is not reported here
+# (it is still a WARNING in logs/codex-capture.log). The streak resets only on
+# a run with semantic_processed > 0 and no misses; runs with no model call,
+# outages and budget/spend-incomplete runs leave the file untouched, so the ⚠
+# persists until the daily sweep sees it (capture_codex.streak_update).
+[backlog.codex-capture]
+consecutive_runs = 2
+reason = "capture_codex.py: Bedrock answers failed the Codex semantic evidence contract (semantic_contract_failed > 0) in 2+ consecutive runs; the rule broken is in failures[].message of the JSON summary in logs/codex-capture.log — a prompt/model change may have broken the contract"
+
+# Midway-expiry deferrals (scrape_bookmarks.py `deferred_auth`): with no unexpired
+# Midway session cookie the internal path is skipped and its URLs are retried next
+# run without limit — a streak of its own in logs/jobs/bookmarks-midway.backlog.json,
+# separate from the public Crawlee-budget backlog above. A run with a valid cookie
+# (deferred_auth == 0) resets it. A valid cookie whose run reached no page while ≥3
+# fetches hit sign-in is also deferred when the canary page (w.amazon.com/bin/view/Main/)
+# hits sign-in too; the sidecar's "cause" (shown as "last run") says which of the two.
+[backlog.bookmarks-midway]
+consecutive_runs = 3
+reason = "Midway sign-in failed at bookmarks run time (cookie missing/expired, or session rejected: see 'last run') — run mwinit before Friday 10:00 or run the job manually"
+
+# Dynamic unsupported_auth (scrape_bookmarks.py, 2026-10-13 review): an internal host
+# that is neither a verified Midway host nor pre-routed as non-Midway answered a
+# bare 401/403 or a sign-in page with no idp.federate/midway-auth hop. No ledger
+# strike (it is not the bookmark's fault), so without this it would stay unscraped
+# with exit 0 forever. Each run whose internal path ran records the count in
+# logs/jobs/bookmarks-unsupported.backlog.json ("cause" lists the hosts). Pre-routed
+# hosts (sharepoint/atoz/coupa/docs.hub, skipped_unsupported) are expected and do
+# not count. A run with none resets the streak; a run whose internal path was
+# skipped (Midway cookie missing/expired) leaves it untouched.
+[backlog.bookmarks-unsupported]
+consecutive_runs = 3
+reason = "scrape_bookmarks.py: internal host(s) without a Midway sign-in answered a bare 403/sign-in in 3+ consecutive runs (unsupported_auth, no strike, never scraped); the hosts are in 'last run' and in the job log WARNING — pre-route them in NON_MIDWAY_AUTH_HOSTS or add them to MIDWAY_HOSTS"
+
+# SharePoint Office documents (scrape_bookmarks.py -> src/capture/sharepoint_docs.py,
+# read via grasp-mcp): documents not captured this run - unresolved (search and the
+# library walk found no single item with the bookmark's GUID), too_large, failed,
+# empty, deferred (budget / Midway session / grasp down) or not stored - in
+# logs/jobs/bookmarks-sharepoint.backlog.json, "cause" lists names and reasons.
+# Never a ledger strike or the job's exit. Bookmarks that can never resolve
+# (no sourcedoc GUID / no file name: skipped_permanent) are logged once per run and
+# never counted here. A run with every document captured/unchanged resets the streak.
+[backlog.bookmarks-sharepoint]
+consecutive_runs = 3
+reason = "scrape_bookmarks.py: SharePoint Office-document bookmarks were not captured via grasp-mcp in 3+ consecutive runs (unresolved / too_large / failed / empty / deferred: see 'last run'); for deferred run mwinit or check grasp-mcp, for unresolved re-bookmark the document from its library (Doc.aspx?sourcedoc= link)"
+
+# Browser path unavailable or short (scrape_bookmarks.py, 2026-10-13 review): browser
+# URLs (BROWSER_HOSTS + same-run fallbacks) that the midway-playwright pass deferred —
+# detail launch (the server never started: node >= 20 / aim missing from the job PATH),
+# server_down (it died mid-pass), budget (BROWSER_RUN_BUDGET_S / job deadline / Midway
+# session left) or max_pages (BROWSER_MAX_PAGES). Deferred URLs take no ledger strike and
+# are retried without limit, so a browser that never launches would otherwise be silent.
+# Its own streak in logs/jobs/bookmarks-browser.backlog.json, recorded on every run whose
+# browser pass was allowed (a Midway-session deferral is [backlog.bookmarks-midway]);
+# "cause" (shown as "last run") gives the count per detail. The backlog mechanism has
+# no per-cause thresholds, so one run with any browser deferral is reported.
+[backlog.bookmarks-browser]
+consecutive_runs = 1
+reason = "scrape_bookmarks.py: the midway-playwright browser pass deferred URLs (launch / server_down / budget / max_pages: see 'last run'); for launch check node >= 20 and aim on the job PATH, for budget/max_pages raise BROWSER_RUN_BUDGET_S / BROWSER_MAX_PAGES"

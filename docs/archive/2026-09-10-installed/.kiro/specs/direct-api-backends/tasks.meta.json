@@ -1,0 +1,147 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1. Capture the green test baseline": [
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793728663
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793738440
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793972687
+      }
+    ],
+    "2. Hoist the backend-agnostic metrics helper to `base.py`": [
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793728763
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793977314
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781795266111
+      }
+    ],
+    "3. Build the `DirectApiInvoker` base": [
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793728798
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781795270356
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781795818287
+      }
+    ],
+    "4.1 Client + Converse request construction + Invoker conformance": [
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793728829
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781795823211
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781796133779
+      }
+    ],
+    "4.2 Final-text extraction, native structured output, parser reuse": [
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793728885
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781796149504
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781798598656
+      }
+    ],
+    "4.3 Real usage capture, tolerate-and-warn, effort provenance": [
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793728923
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781798607339
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781798989854
+      }
+    ],
+    "4.4 Failure-mode mapping / parity": [
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793729019
+      },
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781798994151
+      }
+    ],
+    "4.5 Mocked-client unit tests for BedrockInvoker and the base": [
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793729046
+      }
+    ],
+    "5. Register the Bedrock adapter in the resolver": [
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793729077
+      }
+    ],
+    "6. Live Bedrock verification + documentation": [
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793729103
+      }
+    ],
+    "7. Final verification and documentation": [
+      {
+        "executionId": "d6df3ffa-629e-412f-86c4-11c7151b0eb3",
+        "chatSessionId": "sess_2e421a17-929b-4a35-8fb2-99ffc00ed404",
+        "timestamp": 1781793729132
+      }
+    ]
+  }
+}

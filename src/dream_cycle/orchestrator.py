@@ -11,13 +11,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
+import threading
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 
 import psycopg2
 
-from src.backends.resolver import VALID_ROLES, default_resolver
+from src.backends.base import BACKEND_CAPABILITIES
+from src.backends.cost import SpendCapExceeded, SpendTracker, kill_switch_engaged, invoke_metered, cap_from_env, UsageUnavailable
+from src.backends.resolver import SKIM_ROLE, DREAM_ROLES, default_resolver
 from src.models import (
     CandidateInsight,
     DreamCycleResult,
@@ -25,11 +29,24 @@ from src.models import (
     MemorySlice,
 )
 from src.prompts import get_evaluator_prompt, get_explorer_prompt, get_thinker_prompt
+from src.prompts.revision import REVISION_PROMPT, REVISION_SCHEMA, build_revision_request
+from src.prompts.skim import PROMPT_VERSION as SKIM_PROMPT_VERSION
 import src.dream_cycle_db as dream_cycle_db
+from src.dream_cycle.repository.runs import verdict_columns
 from src.dream_cycle.consensus import tally_consensus
-from src.dream_cycle.storage import store_accepted, check_duplicate
+from src.dream_cycle.storage import store_accepted, check_duplicate, authorize_candidate, CandidateAuthorizationError, DiscoveryEmbeddingError, canonical_uuid
 from src.dream_cycle.digest import generate_digest
 from src.dream_cycle.feedback import build_feedback_injection
+from src.dream_cycle import allocation, ledger
+from src.dream_cycle.packet import (
+    EVALUATOR_VERDICT_SCHEMA,
+    TOOLED_NOTE,
+    TOOLLESS_NOTE,
+    build_packet,
+    format_sources_for_evaluator,
+    load_memories_by_ids,
+)
+from src.skim.runner import SkimResult
 
 logger = logging.getLogger(__name__)
 
@@ -40,86 +57,85 @@ _ZERO_STATS = {
     "candidates_rejected": 0,
 }
 
-# Evaluator resilience: retry transient evaluator failures before treating the
-# panel as broken. An infra failure (timeout/crash/unparseable output) must never
-# be silently recorded as a quality REJECT vote — retry, then abort loudly.
-EVALUATOR_MAX_ATTEMPTS = 3
-EVALUATOR_BACKOFF_S = 2.0
+
+class RunInterrupted(BaseException):
+    """SIGTERM/SIGINT arrived mid-run: stop paid work, close the run row as aborted.
+
+    Derives from BaseException (like KeyboardInterrupt) so the per-stage
+    ``except Exception`` fallbacks (Thinker skip, grounding, skim) cannot swallow
+    it; only the dedicated arm in ``_run_locked`` handles it.
+    """
+
+    def __init__(self, signum: int):
+        self.signum = signum
+        try:
+            self.signal_name = signal.Signals(signum).name
+        except ValueError:
+            self.signal_name = str(signum)
+        super().__init__(f"run interrupted by {self.signal_name}")
 
 
-class DreamCycleOrchestrator:
+_INTERRUPT_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+
+#: Cap on a storage failure message in the log and the candidate's block_reason.
+MAX_FAILURE_MESSAGE_CHARS = 300
+
+
+def _failure_message(exc: BaseException) -> str:
+    """``Type: message`` on one line, truncated, for a candidate that failed storage."""
+    text = " ".join(f"{type(exc).__name__}: {exc}".split())
+    return text if len(text) <= MAX_FAILURE_MESSAGE_CHARS else text[:MAX_FAILURE_MESSAGE_CHARS - 1] + "…"
+
+from src.dream_cycle.budget import *
+from src.dream_cycle.budget import _skim_cap_usd
+from src.dream_cycle.parsing import _as_int, _as_str_list, _unwrap_nested_candidate
+from src.dream_cycle.agents.runner import AgentRunner
+from src.dream_cycle.agents import explorer, thinker, evaluator
+from src.dream_cycle.stages import grounding, skim_stage
+from src.dream_cycle import run_result
+
+
+class DreamCycleOrchestrator(AgentRunner):
     """Coordinates the four-agent dream cycle pipeline."""
 
-    def __init__(self):
+    def __init__(self, database=None):
+        self._database = database
         self.resolver = default_resolver()
         self._capture_dir: str | None = None
         self._current_run_id: str | None = None
+        self._current_started_at: datetime | None = None
+        # Metered-spend guard (reset per run) and the slice contents delivered to
+        # a tool-less Thinker, kept so evaluators can ground against the same text.
+        self._spend = SpendTracker.from_env()
+        self._run_stats = dict(_ZERO_STATS)
+        self._slice_memory_cache: dict[str, dict] = {}
+        self._candidate_contexts: dict[int, dict[str, dict]] = {}
+        # Skim records for the run's arrivals window (Step 3.5 → Explorer inventory
+        # and the weighted guaranteed slice) and what the Explorer was actually given.
+        self._skim_records: list[dict] = []
+        self._explorer_input: dict = {}
+        self._explorer_pre_budget: dict = {}  # Explorer slices before the budget (ids + counts; I4)
+        # Ledger rows (origin + metrics) aligned with the slices _allocate_attention
+        # returned — the judging order (Phase 4) is derived from them.
+        self._slice_rows: list[dict] = []
 
-    def _invoker_for(self, role: str):
-        """Resolve the Invoker for a role from the active backend profile."""
-        return self.resolver.invoker_for(role)
 
-    def _backend_provenance(self) -> dict:
-        """Snapshot the active profile's (backend, model, effort) per role.
 
-        Persisted on the run record so a run's candidates/verdicts stay auditable
-        across a backend swap or the Mac Mini cutover (Kiro-Opus era vs
-        Claude-Code-on-Bedrock era). Built here from the resolver (read-only)
-        rather than on the Resolver itself, to keep this change out of the
-        backends lane. See docs/MODEL-BACKENDS.md.
-        """
-        provenance: dict[str, dict] = {}
-        for role in VALID_ROLES:
-            spec = self.resolver.spec_for(role)
-            provenance[role] = {
-                "backend": spec.backend,
-                "model": spec.model,
-                "effort": spec.effort,
-            }
-        return provenance
 
-    def _capture(self, name: str, *, inputs: dict | None = None, output: object = None) -> None:
-        """Write agent call inputs/outputs to capture_dir as JSON fixtures.
 
-        No-op when capture_dir is not set. Failures are logged but never
-        propagate — fixture capture must not break the pipeline.
-        """
-        if not self._capture_dir:
-            return
-        try:
-            os.makedirs(self._capture_dir, exist_ok=True)
-            data: dict = {}
-            if inputs is not None:
-                data["inputs"] = inputs
-            if output is not None:
-                data["output"] = output
-            path = os.path.join(self._capture_dir, f"{name}.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, default=str)
-            logger.debug("Captured fixture: %s", path)
-        except Exception:
-            logger.warning("Failed to capture fixture %s", name, exc_info=True)
 
-    def _aborted_result(
-        self,
-        run_id: str,
-        run_type: str,
-        started_at: datetime,
-    ) -> DreamCycleResult:
-        """Build a DreamCycleResult for aborted/failed runs (all counts zero)."""
-        return DreamCycleResult(
-            run_id=run_id,
-            run_type=run_type,
-            started_at=started_at,
-            completed_at=datetime.now(timezone.utc),
-            candidates_generated=0,
-            candidates_accepted=0,
-            candidates_rejected=0,
-            digest_path=None,
-            aborted_early=True,
-        )
+
 
     def run(self, run_type: str, scope: dict | None = None, capture_dir: str | None = None) -> DreamCycleResult:
+        """Hold the database-wide run lock before frequency checks or paid work."""
+        with dream_cycle_db.run_lock() as acquired:
+            if not acquired:
+                self._run_stats = dict(_ZERO_STATS)
+                self._spend = SpendTracker.from_env()
+                return self._aborted_result("", run_type, datetime.now(timezone.utc))
+            return self._run_locked(run_type, scope, capture_dir)
+
+    def _run_locked(self, run_type: str, scope: dict | None = None, capture_dir: str | None = None) -> DreamCycleResult:
         """Execute a full dream cycle pipeline.
 
         Args:
@@ -134,6 +150,22 @@ class DreamCycleOrchestrator:
         self._capture_dir = capture_dir
         started_at = datetime.now(timezone.utc)
         logger.info("Starting dream cycle: run_type=%s, scope=%s", run_type, scope)
+
+        self._run_stats = dict(_ZERO_STATS)
+        # Kill switch: refuse to spend anything, before any record or LLM call.
+        if kill_switch_engaged():
+            logger.warning("SECOND_BRAIN_KILL_SWITCH is set — dream cycle run refused")
+            return self._aborted_result("", run_type, started_at)
+
+        # Fresh per-run spend accounting and slice-content cache.
+        self._spend = SpendTracker.from_env()
+        self._run_stats = dict(_ZERO_STATS)
+        self._slice_memory_cache = {}
+        self._candidate_contexts = {}
+        self._skim_records = []
+        self._explorer_input = {}
+        self._explorer_pre_budget = {}
+        self._slice_rows = []
 
         # Session-start frequency cap: check before creating a run record
         if run_type == "session_start" and not dream_cycle_db.should_run_briefing():
@@ -152,13 +184,41 @@ class DreamCycleOrchestrator:
 
         # Top-level try/except around the entire pipeline to catch unexpected
         # errors (including DB failures mid-run). The run record should always
-        # be completed, even on error paths.
+        # be completed, even on error paths -- including a SIGTERM from the job
+        # wrapper / launchd or a Ctrl-C, which must not leave completed_at NULL.
+        previous_handlers = self._install_interrupt_handlers()
         try:
             return self._run_pipeline(run_id, run_type, scope, started_at)
+        except RunInterrupted as exc:
+            logger.error("Dream cycle interrupted by %s (run_id=%s); closing the run as aborted with real counts",
+                         exc.signal_name, run_id)
+            try:
+                dream_cycle_db.complete_run(run_id, stats=self._run_stats | {
+                    "aborted": True, "interrupted_by": exc.signal_name,
+                    "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd,
+                    "spend_unknown": bool(self._spend.blocked_reason),
+                }, digest="")
+            except Exception:
+                logger.error("Failed to complete run record after %s", exc.signal_name)
+            return self._aborted_result(run_id, run_type, started_at)
         except psycopg2.OperationalError:
-            logger.error(
-                "Database unreachable during pipeline execution (run_id=%s)", run_id
-            )
+            logger.error("Database unreachable during pipeline execution (run_id=%s)", run_id)
+            try:
+                dream_cycle_db.complete_run(run_id, stats=self._run_stats | {
+                    "aborted": True, "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd,
+                    "spend_unknown": bool(self._spend.blocked_reason),
+                }, digest="")
+            except Exception:
+                logger.error("Could not persist aborted run while database unavailable")
+            return self._aborted_result(run_id, run_type, started_at)
+        except SpendCapExceeded as exc:
+            # Hard stop: no more metered calls, no fabricated verdicts. Close the
+            # run record so the abort is auditable, then report aborted_early.
+            logger.error("Dream cycle aborted (run_id=%s): %s", run_id, exc)
+            try:
+                dream_cycle_db.complete_run(run_id, stats=self._run_stats | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd, "spend_unknown": bool(self._spend.blocked_reason)}, digest="")
+            except Exception:
+                logger.error("Failed to complete run record after spend-cap abort")
             return self._aborted_result(run_id, run_type, started_at)
         except Exception:
             logger.exception(
@@ -168,12 +228,37 @@ class DreamCycleOrchestrator:
             try:
                 dream_cycle_db.complete_run(
                     run_id,
-                    stats=_ZERO_STATS,
+                    stats=self._run_stats | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd, "spend_unknown": bool(self._spend.blocked_reason)},
                     digest="",
                 )
             except Exception:
                 logger.error("Failed to complete run record after unexpected error")
             return self._aborted_result(run_id, run_type, started_at)
+        finally:
+            self._restore_interrupt_handlers(previous_handlers)
+
+    def _install_interrupt_handlers(self) -> dict:
+        """Turn SIGTERM/SIGINT into RunInterrupted (main thread only; no-op elsewhere)."""
+        if threading.current_thread() is not threading.main_thread():
+            return {}
+        previous = {}
+
+        def _raise(signum, frame):
+            raise RunInterrupted(signum)
+        for sig in _INTERRUPT_SIGNALS:
+            try:
+                previous[sig] = signal.signal(sig, _raise)
+            except (ValueError, OSError):
+                continue
+        return previous
+
+    @staticmethod
+    def _restore_interrupt_handlers(previous: dict) -> None:
+        for sig, handler in previous.items():
+            try:
+                signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+            except (ValueError, OSError):
+                continue
 
     def _run_pipeline(
         self,
@@ -189,6 +274,7 @@ class DreamCycleOrchestrator:
         """
         # Phase 0: attribute per-call LLM metrics to this run.
         self._current_run_id = run_id
+        self._current_started_at = started_at
 
         # Step 2: Build feedback from historical rejections
         feedback = build_feedback_injection()
@@ -202,52 +288,150 @@ class DreamCycleOrchestrator:
             stats["recent_activity"],
         )
 
-        # Step 4: Invoke Explorer (with crash/timeout handling)
+        # Step 3.5: Skim every arrival in the window (cheap Bedrock model, own sub-cap).
+        # Never aborts the run on its own failure: None means the Explorer gets the
+        # plain arrivals manifest, exactly as before. SpendCapExceeded propagates.
+        skim = self._skim_arrivals(run_id, run_type, started_at)
+        skim_stats = skim.to_stats() if skim is not None else {}
+        self._run_stats.update(skim_stats)
+        # The window's skim records (this run's and earlier runs' — idempotent per
+        # document) feed the Explorer's inventory and the weighted guaranteed slice.
+        self._skim_records = self._load_skim_records(skim, run_id, run_type, started_at)
+
+        # Step 4: Invoke Explorer (with crash/timeout handling). On a scheduled run an
+        # Explorer failure no longer aborts the night: the guaranteed arrivals slice
+        # (built in _allocate_attention) lets the run still examine what arrived.
         try:
             slices = self.invoke_explorer(feedback, run_type, scope, stats)
+            logger.info("Explorer returned %d slices", len(slices))
         except (TimeoutError, RuntimeError):
-            logger.error("Explorer agent crashed or timed out (run_id=%s)", run_id)
-            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
-            return self._aborted_result(run_id, run_type, started_at)
-        logger.info("Explorer returned %d slices", len(slices))
+            if run_type not in ("scheduled", "session_start"):
+                logger.error("Explorer agent crashed or timed out (run_id=%s)", run_id)
+                dream_cycle_db.complete_run(run_id, stats=self._run_stats | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd, "spend_unknown": bool(self._spend.blocked_reason)}, digest="")
+                return self._aborted_result(run_id, run_type, started_at)
+            logger.error("Explorer agent crashed or timed out (run_id=%s); continuing with the "
+                         "guaranteed arrivals slice only", run_id)
+            slices = []
+
+        # Attention allocation + ledger: validate the Explorer's slices against the
+        # breadth budget, add a guaranteed arrivals slice if needed, and persist what
+        # this run will examine (with metrics) before anything downstream can fail.
+        slices = self._allocate_attention(run_id, run_type, started_at, slices)
 
         # Circuit breaker: empty slices → abort early
         if not slices:
-            logger.warning("Circuit breaker: Explorer returned 0 slices, aborting early")
-            dream_cycle_db.complete_run(run_id, stats=_ZERO_STATS, digest="")
+            logger.warning("Circuit breaker: no slices to examine (Explorer returned none and "
+                           "nothing arrived), aborting early")
+            dream_cycle_db.complete_run(run_id, stats=self._run_stats | self._explorer_input | ({"explorer_pre_budget": self._explorer_pre_budget} if self._explorer_pre_budget else {}) | {"aborted": True, "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd, "spend_unknown": bool(self._spend.blocked_reason)}, digest="")
             return self._aborted_result(run_id, run_type, started_at)
 
-        # Step 6: Invoke Thinker for each slice, collect candidates
+        # Judging order (Phase 4): the guaranteed arrivals slice first, then the
+        # Explorer's slices by arrival share — so the spend cap cuts stale material,
+        # not the most recent days. Stable when the ledger has no metrics.
+        ordered = allocation.order_slices(slices, self._slice_rows)
+        slices = [s for s, _ in ordered]
+        logger.info("Slice order for the Thinker and the panel: %s", allocation.describe_slice_order(ordered))
+
+        # Step 6: Invoke Thinker for each slice, collect candidates. Budget-aware:
+        # a slice is skipped when the remaining budget cannot cover the Thinker call,
+        # judging its candidates and judging what is already waiting.
         all_candidates: list[CandidateInsight] = []
-        for s in slices:
+        slices_skipped_for_budget = 0
+        for i, s in enumerate(slices):
+            remaining = self._budget_remaining()
+            if remaining is not None:
+                needed = EST_THINKER_CALL_USD + MAX_CANDIDATES_PER_SLICE * EST_JUDGE_CANDIDATE_USD + EST_JUDGE_CANDIDATE_USD * len(all_candidates)
+                if remaining < needed:
+                    slices_skipped_for_budget = len(slices) - i
+                    logger.warning(
+                        "Budget: $%.2f left of $%.2f, but the next slice needs ~$%.2f (Thinker $%.2f + judging "
+                        "2 new and %d pending candidates at $%.2f each); skipping the Thinker for the remaining "
+                        "%d slice(s): %s",
+                        remaining, self._spend.cap_usd, needed, EST_THINKER_CALL_USD, len(all_candidates),
+                        EST_JUDGE_CANDIDATE_USD, slices_skipped_for_budget,
+                        "; ".join(sl.name for sl in slices[i:]),
+                    )
+                    break
             try:
                 candidates = self.invoke_thinker(s)
+            except SpendCapExceeded:
+                raise
             except Exception:
                 logger.error(
                     "Thinker failed for slice '%s', skipping", s.name, exc_info=True
                 )
                 continue
-            # Session-start mode: limit to 1-2 candidates per slice
-            if run_type == "session_start" and len(candidates) > 2:
+            # Per-slice cap: session-start keeps 2; every other run type keeps
+            # MAX_CANDIDATES_PER_SLICE (the Thinker is asked for at most 2, best first).
+            cap = MAX_CANDIDATES_PER_SLICE
+            if len(candidates) > cap:
                 logger.info(
-                    "Session-start mode: truncating %d candidates to 2 for slice '%s'",
-                    len(candidates),
-                    s.name,
+                    "Truncating %d candidates to %d for slice '%s'", len(candidates), cap, s.name,
                 )
-                candidates = candidates[:2]
+                candidates = candidates[:cap]
+            # Authorized context = the slice snapshots the Thinker actually read.
+            # Slice ids come from the Explorer verbatim; the cache is keyed by the
+            # canonical DB id, so canonicalise before the lookup (review C S3 2.5).
+            authorized = {}
+            for mid in s.memory_ids:
+                key = canonical_uuid(mid)
+                if key is not None and key in self._slice_memory_cache:
+                    authorized[key] = self._slice_memory_cache[key]
+            for candidate in candidates:
+                self._candidate_contexts[id(candidate)] = authorized
             all_candidates.extend(candidates)
-        logger.info("Total candidates from Thinker: %d", len(all_candidates))
+            self._run_stats["candidates_generated"] = len(all_candidates)
+        logger.info("Total candidates from Thinker: %d%s", len(all_candidates),
+                    f" ({slices_skipped_for_budget} slice(s) skipped for budget)" if slices_skipped_for_budget else "")
 
         accepted: list[CandidateInsight] = []
         rejected: list[CandidateInsight] = []
+        candidates_unjudged_for_budget = 0
 
         # Step 7: Consensus Panel — invoke 4 evaluators per candidate.
         # If an evaluator is unrecoverable after retries (the panel is genuinely
         # down), abort the run loudly — but keep the candidates already evaluated
         # so the run record reflects real persisted work (no zeroed-stats lie /
         # orphaned accepted memories). An infra failure never fabricates a verdict.
+        # Soft stop: when the remaining budget cannot cover judging one more
+        # candidate, the rest are left unjudged — no verdict stored, none
+        # fabricated — and the run completes normally instead of tripping the
+        # spend stop threshold mid-candidate.
         panel_aborted = False
-        for candidate in all_candidates:
+        for idx, candidate in enumerate(all_candidates):
+            remaining = self._budget_remaining()
+            if remaining is not None and remaining < EST_JUDGE_CANDIDATE_USD:
+                candidates_unjudged_for_budget = len(all_candidates) - idx
+                logger.warning(
+                    "Budget: $%.2f left of $%.2f is below the ~$%.2f judging one candidate costs; leaving %d "
+                    "candidate(s) unjudged: %s",
+                    remaining, self._spend.cap_usd, EST_JUDGE_CANDIDATE_USD, candidates_unjudged_for_budget,
+                    "; ".join(c.title for c in all_candidates[idx:]),
+                )
+                break
+            # Authorization BEFORE any paid judging (review C S2 2.3): a candidate
+            # that cites outside its slice, proposes a provenance/unknown relation
+            # type, or targets a memory it may not mutate is BLOCKED here for $0.
+            # store_accepted re-validates after the panel as defence in depth.
+            authorized_memories = self._candidate_contexts.get(id(candidate), {})
+            try:
+                authorize_candidate(candidate, authorized_memories)
+            except CandidateAuthorizationError as exc:
+                logger.warning("Candidate '%s' blocked before judging: %s", candidate.title, exc)
+                self._run_stats["candidates_blocked_unjudged"] = self._run_stats.get("candidates_blocked_unjudged", 0) + 1
+                dream_cycle_db.store_candidate(run_id, asdict(candidate) | {"storage_error": type(exc).__name__,
+                                               "block_reason": str(exc)}, {}, "BLOCKED")
+                continue
+            # Grounding audit + one revision before the panel votes (never aborts).
+            candidate = self._ground_candidate(candidate)
+            if not candidate.content.strip():
+                logger.info("Candidate '%s' had nothing supportable after revision; recording as rejected",
+                            candidate.title)
+                dream_cycle_db.store_candidate(run_id,
+                    asdict(candidate) | {"withdrawal_reason": "nothing supportable remained after revision"},
+                    {}, "WITHDRAWN")
+                self._run_stats["candidates_withdrawn"] = self._run_stats.get("candidates_withdrawn", 0) + 1
+                continue
             try:
                 verdict_a = self._invoke_evaluator_safe(candidate, "skeptic")
                 verdict_b = self._invoke_evaluator_safe(candidate, "advocate")
@@ -266,48 +450,49 @@ class DreamCycleOrchestrator:
             evaluator_verdicts = [verdict_a, verdict_b, verdict_c, verdict_d]
             final = tally_consensus(evaluator_verdicts)
 
-            verdicts_dict = {
-                "evaluator_a_verdict": verdict_a.verdict,
-                "evaluator_a_reasoning": verdict_a.reasoning,
-                "evaluator_b_verdict": verdict_b.verdict,
-                "evaluator_b_reasoning": verdict_b.reasoning,
-                "evaluator_c_verdict": verdict_c.verdict,
-                "evaluator_c_reasoning": verdict_c.reasoning,
-                "evaluator_d_verdict": verdict_d.verdict,
-                "evaluator_d_reasoning": verdict_d.reasoning,
-            }
+            verdicts_dict = verdict_columns(evaluator_verdicts)
 
             candidate_dict = asdict(candidate)
 
-            if final == "ACCEPTED":
-                existing = check_duplicate(candidate.content, threshold=0.85)
-                memory_id = None
-                if existing is None:
-                    memory_id = store_accepted(candidate)
+            try:
+                if final == "ACCEPTED":
+                    store_accepted(candidate, run_id=run_id, verdicts=verdicts_dict,
+                                   authorized_memories=authorized_memories)
+                    accepted.append(candidate)
+                    self._run_stats["candidates_accepted"] = len(accepted)
                 else:
-                    logger.info(
-                        "Duplicate detected for '%s', matched memory %s",
-                        candidate.title,
-                        existing,
-                    )
-
-                dream_cycle_db.store_candidate(
-                    run_id, candidate_dict, verdicts_dict, "ACCEPTED", memory_id
-                )
-                accepted.append(candidate)
-            else:  # REJECTED — no DEFERRED branch
-                dream_cycle_db.store_candidate(
-                    run_id, candidate_dict, verdicts_dict, "REJECTED"
-                )
-                rejected.append(candidate)
+                    dream_cycle_db.store_candidate(run_id, candidate_dict, verdicts_dict, "REJECTED")
+                    rejected.append(candidate)
+                    self._run_stats["candidates_rejected"] = len(rejected)
+            except (CandidateAuthorizationError, ValueError, psycopg2.IntegrityError,
+                    DiscoveryEmbeddingError) as exc:
+                # The failed candidate transaction was rolled back in full (an
+                # embedding failure happens before it opens). Keep
+                # prior successes, retain real votes, and distinguish authorization
+                # or storage failure from a quality rejection by the panel.
+                logger.warning("Candidate storage blocked for %s: %s", candidate.title, _failure_message(exc))
+                self._run_stats["candidates_storage_failed"] = self._run_stats.get("candidates_storage_failed", 0) + 1
+                dream_cycle_db.store_candidate(run_id, candidate_dict | {"storage_error": type(exc).__name__,
+                                               "block_reason": _failure_message(exc)},
+                                               verdicts_dict, "BLOCKED")
 
             logger.info(
                 "Candidate '%s': %s", candidate.title, final
             )
 
-        # Step 8: Generate digest and complete run
+        # Step 8: Generate digest and complete run. The digest is a convenience
+        # artifact: if writing it fails (permissions, disk, rendering) the run
+        # still completes with its real counts and digest="" (review C S2).
         completed_at = datetime.now(timezone.utc)
-        digest = generate_digest(run_id, accepted, rejected)
+        try:
+            digest = generate_digest(run_id, accepted, rejected,
+                generated=len(all_candidates), feedback_injected=bool(feedback),
+                cost_usd=self._spend.total_usd, aborted=panel_aborted,
+                storage_failed=self._run_stats.get("candidates_storage_failed", 0))
+        except Exception:
+            logger.error("Digest could not be written for run %s; completing the run without it", run_id,
+                         exc_info=True)
+            digest = ""
 
         # Step 9: Post-run maintenance — expire stale relationships
         try:
@@ -317,12 +502,26 @@ class DreamCycleOrchestrator:
         except Exception:
             logger.debug("Relationship decay skipped (non-critical)", exc_info=True)
 
+        budget_stats = {}
+        if slices_skipped_for_budget:
+            budget_stats["slices_skipped_for_budget"] = slices_skipped_for_budget
+        if candidates_unjudged_for_budget:
+            budget_stats["candidates_unjudged_for_budget"] = candidates_unjudged_for_budget
         dream_cycle_db.complete_run(
             run_id,
             stats={
+                **self._run_stats,
+                "aborted": panel_aborted,
+                "candidates_unjudged": max(0, len(all_candidates) - len(accepted) - len(rejected) - self._run_stats.get("candidates_storage_failed", 0) - self._run_stats.get("candidates_withdrawn", 0) - self._run_stats.get("candidates_blocked_unjudged", 0)),
+                "cost_usd": self._spend.total_usd, "spend_reserved_usd": self._spend.reserved_usd,
+                "spend_unknown": bool(self._spend.blocked_reason),
                 "candidates_generated": len(all_candidates),
                 "candidates_accepted": len(accepted),
                 "candidates_rejected": len(rejected),
+                **skim_stats,
+                **self._explorer_input,
+                **({"explorer_pre_budget": self._explorer_pre_budget} if self._explorer_pre_budget else {}),
+                **budget_stats,
             },
             digest=digest,
             explorer_output=json.dumps([{"name": s.name, "strategy": s.strategy, "memory_count": len(s.memory_ids)} for s in slices]),
@@ -339,291 +538,54 @@ class DreamCycleOrchestrator:
             candidates_rejected=len(rejected),
             digest_path=digest,
             aborted_early=panel_aborted,
+            cost_usd=self._spend.total_usd,
+            spend_unknown=bool(self._spend.blocked_reason),
+            candidates_unjudged=max(0, len(all_candidates) - len(accepted) - len(rejected) - self._run_stats.get("candidates_storage_failed", 0) - self._run_stats.get("candidates_withdrawn", 0) - self._run_stats.get("candidates_blocked_unjudged", 0)),
         )
 
 
-    def _invoke_evaluator_safe(self, candidate: CandidateInsight, role: str) -> EvaluatorVerdict:
-        """Invoke an evaluator, retrying transient failures before giving up.
-
-        Transient infra failures (timeout / subprocess error / unparseable output)
-        are retried up to ``EVALUATOR_MAX_ATTEMPTS`` times with linear backoff. If
-        the evaluator still fails, the exception is raised so the run aborts loudly
-        (the top-level handler sets ``aborted_early`` -> exit 2 + notification)
-        instead of silently recording a REJECT vote.
-
-        An infrastructure failure must never masquerade as a quality verdict: a
-        crashed evaluator is the judging machinery breaking, not a verdict on the
-        insight. (This mirrors how ``invoke_explorer`` already aborts on crash.)
-
-        Args:
-            candidate: The CandidateInsight to evaluate.
-            role: One of 'skeptic', 'advocate', 'epistemologist', 'methodologist'.
-
-        Returns:
-            EvaluatorVerdict — the real verdict once the evaluator succeeds.
-
-        Raises:
-            RuntimeError: If the evaluator fails every attempt (unrecoverable).
-        """
-        last_exc: Exception | None = None
-        for attempt in range(1, EVALUATOR_MAX_ATTEMPTS + 1):
-            try:
-                return self.invoke_evaluator(candidate, role)
-            except (TimeoutError, RuntimeError, ValueError) as exc:
-                last_exc = exc
-                logger.warning(
-                    "Evaluator '%s' failed for '%s' (attempt %d/%d): %s",
-                    role, candidate.title, attempt, EVALUATOR_MAX_ATTEMPTS, exc,
-                )
-                if attempt < EVALUATOR_MAX_ATTEMPTS:
-                    time.sleep(EVALUATOR_BACKOFF_S * attempt)
-        logger.error(
-            "Evaluator '%s' unrecoverable after %d attempts for '%s'; aborting run",
-            role, EVALUATOR_MAX_ATTEMPTS, candidate.title,
-        )
-        raise RuntimeError(
-            f"Evaluator '{role}' unrecoverable after {EVALUATOR_MAX_ATTEMPTS} attempts"
-        ) from last_exc
 
 
 
-    def invoke_explorer(
-        self, feedback: str, run_type: str, scope: dict | None = None,
-        stats: dict | None = None,
-    ) -> list[MemorySlice]:
-        """Invoke Explorer agent and parse memory slices.
 
-        Builds the Explorer prompt, invokes via AgentInvoker with MCP config,
-        and parses the JSON output into MemorySlice objects.
 
-        Args:
-            feedback: Formatted feedback injection text (may be empty).
-            run_type: One of scheduled, post_learn, session_start, user_triggered.
-            scope: Optional scoping dict for non-scheduled runs.
-            stats: Optional pre-fetched memory stats (avoids redundant DB call).
 
-        Returns:
-            List of MemorySlice objects (may be empty for circuit breaker).
-        """
-        if stats is None:
-            stats = dream_cycle_db.get_memory_stats()
-        date_range = stats["date_range"]
 
-        # Build human-readable date range string
-        date_min = date_range.get("min")
-        date_max = date_range.get("max")
-        if date_min and date_max:
-            date_range_str = f"{date_min:%B %Y} to {date_max:%B %Y}"
-        else:
-            date_range_str = "unknown"
 
-        # Build Explorer prompt
-        prompt = get_explorer_prompt(
-            memory_count=stats["total_count"],
-            date_range=date_range_str,
-            feedback_injection=feedback,
-            run_type=run_type,
-            scope=scope,
-            strategy_usage=dream_cycle_db.get_strategy_usage(n_cycles=10),
-        )
 
-        user_message = (
-            f"Run type: {run_type}. "
-            f"Memory count: {stats['total_count']}. "
-            f"Recent activity (7d): {stats['recent_activity']} new memories. "
-            "Please assemble 0-5 memory slices using diverse strategies."
-        )
 
-        logger.info("Invoking Explorer agent (run_type=%s)", run_type)
-        result = self._invoker_for("explorer").invoke(
-            system_prompt=prompt,
-            user_message=user_message,
-            tools=True,
-            timeout=600,
-            effort=self.resolver.spec_for("explorer").effort,
-            stage="explorer",
-            run_id=self._current_run_id,
-        )
 
-        self._capture("explorer", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
 
-        # Parse output into MemorySlice objects
-        raw_slices = result["output"]
-        if not isinstance(raw_slices, list):
-            logger.warning("Explorer output is not a list, wrapping: %s", type(raw_slices))
-            raw_slices = [raw_slices] if raw_slices else []
+    @property
+    def db(self):
+        return self._database if self._database is not None else dream_cycle_db
 
-        slices = []
-        for raw in raw_slices:
-            try:
-                slice_obj = MemorySlice(
-                    name=raw.get("name", ""),
-                    strategy=raw.get("strategy", ""),
-                    memory_ids=raw.get("memory_ids", []),
-                    memory_titles=raw.get("memory_titles", []),
-                    hypothesis=raw.get("hypothesis", ""),
-                )
-                slices.append(slice_obj)
-                logger.debug(
-                    "Parsed slice: name=%s, strategy=%s, memories=%d",
-                    slice_obj.name,
-                    slice_obj.strategy,
-                    len(slice_obj.memory_ids),
-                )
-            except (KeyError, TypeError) as exc:
-                logger.warning("Failed to parse Explorer slice: %s — %s", raw, exc)
+    def invoke_explorer(self, feedback: str, run_type: str, scope: dict | None=None, stats: dict | None=None):
+        return explorer.invoke_explorer(self, feedback, run_type, scope, stats)
 
-        if not slices:
-            # Surface the raw agent output so a scheduled 0-slice abort is diagnosable
-            # (distinguishes a genuine "nothing to do" from a degraded/failed invocation,
-            # e.g. a model call that returned empty when the host woke for the 4am job).
-            raw_head = (result.get("raw") or "")[:1000]
-            logger.warning(
-                "Explorer produced no usable slices (raw_candidates=%s). Raw output head: %r",
-                len(raw_slices) if isinstance(raw_slices, list) else "n/a", raw_head,
-            )
-        return slices
+    def _allocate_attention(self, run_id: str, run_type: str, started_at: datetime, slices: list[MemorySlice]):
+        return explorer._allocate_attention(self, run_id, run_type, started_at, slices)
 
-    def invoke_thinker(
-        self, slice: MemorySlice,
-    ) -> list[CandidateInsight]:
-        """Invoke Thinker agent with a memory slice.
+    def invoke_thinker(self, slice: MemorySlice):
+        return thinker.invoke_thinker(self, slice)
 
-        Builds a JSON user message containing the memory slice data,
-        then invokes the Thinker via AgentInvoker with MCP config.
+    def invoke_evaluator(self, candidate: CandidateInsight, role: str, stage: str | None=None):
+        return evaluator.invoke_evaluator(self, candidate, role, stage)
 
-        Args:
-            slice: A MemorySlice assembled by the Explorer.
+    def _invoke_evaluator_safe(self, candidate: CandidateInsight, role: str):
+        return evaluator._invoke_evaluator_safe(self, candidate, role)
 
-        Returns:
-            List of CandidateInsight objects (may be empty).
-        """
-        # Build the user message payload
-        payload: dict = {
-            "memory_slice": {
-                "name": slice.name,
-                "strategy": slice.strategy,
-                "memory_ids": slice.memory_ids,
-                "memory_titles": slice.memory_titles,
-                "hypothesis": slice.hypothesis,
-            },
-        }
+    def _ground_candidate(self, candidate: CandidateInsight):
+        return grounding._ground_candidate(self, candidate)
 
-        user_message = json.dumps(payload)
+    def _revise_candidate(self, candidate: CandidateInsight, audit: EvaluatorVerdict):
+        return grounding._revise_candidate(self, candidate, audit)
 
-        # Get the static Thinker prompt
-        prompt = get_thinker_prompt()
+    def _load_skim_records(self, skim: SkimResult | None, run_id: str, run_type: str, started_at: datetime):
+        return skim_stage._load_skim_records(self, skim, run_id, run_type, started_at)
 
-        logger.info(
-            "Invoking Thinker agent (slice=%s)",
-            slice.name,
-        )
-        result = self._invoker_for("thinker").invoke(
-            system_prompt=prompt,
-            user_message=user_message,
-            tools=True,
-            timeout=600,
-            effort=self.resolver.spec_for("thinker").effort,
-            stage="thinker",
-            run_id=self._current_run_id,
-        )
+    def _skim_arrivals(self, run_id: str, run_type: str, started_at: datetime):
+        return skim_stage._skim_arrivals(self, run_id, run_type, started_at)
 
-        safe_name = slice.name.replace(" ", "_").replace("/", "_")[:50]
-        self._capture(f"thinker_{safe_name}", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
-
-        # Parse output into CandidateInsight objects
-        raw_candidates = result["output"]
-        if not isinstance(raw_candidates, list):
-            logger.warning(
-                "Thinker output is not a list, wrapping: %s", type(raw_candidates)
-            )
-            raw_candidates = [raw_candidates] if raw_candidates else []
-
-        candidates = []
-        for raw in raw_candidates:
-            try:
-                candidate = CandidateInsight(
-                    title=raw.get("title", ""),
-                    type=raw.get("type", "insight"),
-                    operation=raw.get("operation", "CREATE"),
-                    target_memory_id=raw.get("target_memory_id"),
-                    supersedes_reason=raw.get("supersedes_reason"),
-                    schema_operation=raw.get("schema_operation", "assimilation"),
-                    schema_note=raw.get("schema_note", ""),
-                    confidence=raw.get("confidence", "medium"),
-                    confidence_reasoning=raw.get("confidence_reasoning", ""),
-                    content=raw.get("content", ""),
-                    source_memories=raw.get("source_memories", []),
-                    relationships=raw.get("relationships", []),
-                    strategy_that_found_it=raw.get(
-                        "strategy_that_found_it", slice.strategy
-                    ),
-                )
-                candidates.append(candidate)
-                logger.debug(
-                    "Parsed candidate: title=%s, operation=%s, confidence=%s",
-                    candidate.title,
-                    candidate.operation,
-                    candidate.confidence,
-                )
-            except (KeyError, TypeError) as exc:
-                logger.warning(
-                    "Failed to parse Thinker candidate: %s — %s", raw, exc
-                )
-
-        return candidates
-
-    def invoke_evaluator(
-        self, candidate: CandidateInsight, role: str
-    ) -> EvaluatorVerdict:
-        """Invoke a single evaluator (skeptic/advocate/epistemologist/methodologist).
-
-        Builds the evaluator prompt via template, invokes via AgentInvoker
-        (no MCP config for evaluators), and parses the output into an
-        EvaluatorVerdict.
-
-        Args:
-            candidate: The CandidateInsight to evaluate.
-            role: One of 'skeptic', 'advocate', 'epistemologist', 'methodologist'.
-
-        Returns:
-            EvaluatorVerdict with role, verdict, and reasoning.
-        """
-        candidate_json_str = json.dumps(asdict(candidate), default=str)
-        source_memories_content = (
-            f"Source memories: {candidate.source_memories}"
-        )
-
-        prompt = get_evaluator_prompt(
-            role=role,
-            candidate_json=candidate_json_str,
-            source_memories_content=source_memories_content,
-        )
-
-        user_message = (
-            f"Please evaluate this candidate insight as the {role}. "
-            "Return your verdict as JSON with 'verdict' and 'reasoning' fields."
-        )
-
-        logger.info("Invoking evaluator: role=%s, candidate=%s", role, candidate.title)
-        result = self._invoker_for(role).invoke(
-            system_prompt=prompt,
-            user_message=user_message,
-            effort=self.resolver.spec_for(role).effort,
-            stage=f"evaluator:{role}",
-            run_id=self._current_run_id,
-        )
-
-        safe_title = candidate.title.replace(" ", "_").replace("/", "_")[:40]
-        self._capture(f"evaluator_{role}_{safe_title}", inputs={"system_prompt": prompt, "user_message": user_message}, output=result.get("output"))
-
-        output = result["output"]
-        if isinstance(output, list):
-            output = output[0] if output else {}
-
-        return EvaluatorVerdict(
-            role=role,
-            verdict=output.get("verdict", "REJECT"),
-            reasoning=output.get("reasoning", ""),
-        )
-
+    def _aborted_result(self, run_id: str, run_type: str, started_at: datetime):
+        return run_result._aborted_result(self, run_id, run_type, started_at)

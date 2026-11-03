@@ -2,10 +2,12 @@
 __pycache__/
 *.pyc
 .venv/
-.pytest_cache/
 
 # Hypothesis (property-based testing)
 .hypothesis/
+
+# Golden run fixtures (contain full prompts and real memory content)
+tests/fixtures/golden_run/
 
 # Staging (transient data, not source controlled)
 staging/
@@ -17,6 +19,11 @@ docker/data/
 *.dump
 *.dump.gpg
 *.json.gpg
+*.tar.gpg
+*.receipt.json
+
+# Dream-cycle explorer slice dumps (local, not source controlled)
+/.dream/
 
 # OS
 .DS_Store
@@ -27,23 +34,6 @@ evaluations/results/
 # Secrets
 .backup-key
 .env
-.second-brain-backups/
-.env.*
-!.env.example
-*.pem
-*.key
-*.p12
-*.pfx
 backups/
 logs/
 .coverage
-
-# Local data/export artifacts
-*.sqlite
-*.db
-*.csv
-*.jsonl
-*.log
-
-# Real Codex test fixtures are intentionally versionable.
-!tests/fixtures/**/*.jsonl

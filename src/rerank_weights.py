@@ -31,7 +31,15 @@ REINFORCEMENT_COEFF = 0.03
 # Additive magnitudes — the raw value a signal contributes when its condition holds.
 TYPE_BOOST = 0.06
 TYPE_BOOST_TYPES = ("idea", "synthesis", "insight", "decision")
-MEM_CLASS_BOOST = {"semantic": 0.04, "procedural": 0.02}
+MEM_CLASS_BOOST = {"semantic": 0.04, "procedural": 0.02, "episodic": 0.0, "source": 0.0}
 PROJECT_PENALTY = -0.15
 SUPERSEDED_PENALTY = -0.20
 STALENESS_PENALTY_MAX = -0.05
+
+
+# Token-overlap window — how many leading characters of a memory's content the
+# overlap signal reads. Chunks are up to 4,000 chars (src/ingest.py
+# chunk_by_section) but a long section can push one past that (5.9k seen live); the
+# old 2,000-char window gave such chunks zero overlap when the query terms sat in
+# their tail. 20k covers every chunk and most parent documents at ~1 ms each.
+OVERLAP_WINDOW_CHARS = 20000

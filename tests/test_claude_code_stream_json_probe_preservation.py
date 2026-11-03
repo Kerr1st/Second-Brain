@@ -269,13 +269,13 @@ def test_missing_usage_tolerate_and_warn_no_raise(mock_run, payload):
 
 
 # ===========================================================================
-# Req 3.4 — public flags only / no enterprise-managed-only branch / whole-dict usage copy
+# Req 3.4 — public flags only / no ASBX-only branch / whole-dict usage copy
 # ===========================================================================
 @settings(max_examples=40, deadline=None)
 @given(payload=_payloads, tools=st.booleans())
 @patch("src.backends.claude_code.subprocess.run")
 def test_command_uses_only_public_flags(mock_run, payload, tools):
-    """The constructed command never contains enterprise-managed-wrapper-only flags (Req 3.4)."""
+    """The constructed command never contains ASBX-wrapper-only flags (Req 3.4)."""
     stdout = (
         _envelope_with_tool_result(json.dumps(payload))
         if tools
@@ -304,8 +304,8 @@ def test_command_uses_only_public_flags(mock_run, payload, tools):
 def test_usage_dict_copied_whole_with_no_asbx_branch(
     mock_run, payload, in_tok, out_tok, extra, cost
 ):
-    """The entire ``usage`` dict is copied (enterprise-managed-divergent extra fields ride
-    along) and ``total_cost_usd`` is folded in — no enterprise-managed-only branch (Req 3.4)."""
+    """The entire ``usage`` dict is copied (ASBX-divergent extra fields ride
+    along) and ``total_cost_usd`` is folded in — no ASBX-only branch (Req 3.4)."""
     usage = {"input_tokens": in_tok, "output_tokens": out_tok, **extra}
     mock_run.return_value = _ok(
         _envelope(json.dumps(payload), usage=usage, total_cost_usd=cost)

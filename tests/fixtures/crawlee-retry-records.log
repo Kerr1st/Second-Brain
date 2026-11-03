@@ -1,0 +1,53 @@
+[32mINFO[39m [33m PlaywrightCrawler:[39m Starting the crawler.
+[33mWARN[39m [33m PlaywrightCrawler:[39m Reclaiming failed request back to the list or queue. Request blocked - received 403 status code.
+[90m {"id":"jNn6FE09Nbki3Re","url":"http://127.0.0.1:63707/blocked","retryCount":1}[39m
+[33mWARN[39m [33m PlaywrightCrawler:[39m Reclaiming failed request back to the list or queue. page.goto: Download is starting
+Call log:
+[2m  - navigating to "http://127.0.0.1:63707/download", waiting until "load"[22m
+
+[90m {"id":"XxK6PRinhB92s1j","url":"http://127.0.0.1:63707/download","retryCount":1}[39m
+[31mERROR[39m[33m PlaywrightCrawler:[39m Request failed and reached maximum retries. Error: Request blocked - received 403 status code.
+    at PlaywrightCrawler._throwOnBlockedRequest (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/basic/internals/basic-crawler.js:903:19)
+    at PlaywrightCrawler._responseHandler (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/browser/internals/browser-crawler.js:383:22)
+    at PlaywrightCrawler._runRequestHandler (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/browser/internals/browser-crawler.js:262:24)
+    at async PlaywrightCrawler._runRequestHandler (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/playwright/internals/playwright-crawler.js:114:9)
+    at async wrap (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@apify/timeout/cjs/index.cjs:54:21)[90m {"id":"jNn6FE09Nbki3Re","url":"http://127.0.0.1:63707/blocked","method":"GET","uniqueKey":"http://127.0.0.1:63707/blocked"}[39m
+✗ http://127.0.0.1:63707/blocked
+[31mERROR[39m[33m PlaywrightCrawler:[39m Request failed and reached maximum retries. page.goto: Download is starting
+Call log:
+[2m  - navigating to "http://127.0.0.1:63707/download", waiting until "load"[22m
+
+    at gotoExtended (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/playwright/internals/utils/playwright-utils.js:166:17)
+    at PlaywrightCrawler._navigationHandler (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/playwright/internals/playwright-crawler.js:117:52)
+    at PlaywrightCrawler._handleNavigation (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/browser/internals/browser-crawler.js:334:52)
+    at async PlaywrightCrawler._runRequestHandler (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/browser/internals/browser-crawler.js:260:13)
+    at async PlaywrightCrawler._runRequestHandler (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/playwright/internals/playwright-crawler.js:114:9)
+    at async wrap (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@apify/timeout/cjs/index.cjs:54:21)[90m {"id":"XxK6PRinhB92s1j","url":"http://127.0.0.1:63707/download","method":"GET","uniqueKey":"http://127.0.0.1:63707/download"}[39m
+✗ http://127.0.0.1:63707/download
+[33mWARN[39m [33m PlaywrightCrawler:[39m Reclaiming failed request back to the list or queue. Navigation timed out after 3 seconds.[90m {"id":"LOkRprrG56TK6Vn","url":"http://127.0.0.1:63707/hang","retryCount":1}[39m
+[31mERROR[39m[33m PlaywrightCrawler:[39m Request failed and reached maximum retries. Navigation timed out after 3 seconds.[90m {"id":"LOkRprrG56TK6Vn","url":"http://127.0.0.1:63707/hang","method":"GET","uniqueKey":"http://127.0.0.1:63707/hang"}[39m
+✗ http://127.0.0.1:63707/hang
+[32mINFO[39m [33m PlaywrightCrawler:[39m Crawler reached the maxRequestsPerCrawl limit of 3 requests and will shut down soon. Requests that are in progress will be allowed to finish.
+[32mINFO[39m [33m PlaywrightCrawler:[39m Earlier, the crawler reached the maxRequestsPerCrawl limit of 3 requests and all requests that were in progress at that time have now finished. In total, the crawler processed 3 requests and will shut down.
+[32mINFO[39m [33m PlaywrightCrawler:[39m Final request statistics:[90m {"requestsFinished":0,"requestsFailed":3,"retryHistogram":[null,3],"requestAvgFailedDurationMillis":1470,"requestAvgFinishedDurationMillis":null,"requestsFinishedPerMinute":0,"requestsFailedPerMinute":19,"requestTotalDurationMillis":4409,"requestsTotal":3,"crawlerRuntimeMillis":9173}[39m
+[32mINFO[39m [33m PlaywrightCrawler:[39m Error analysis:[90m {"totalErrors":3,"uniqueErrors":3,"mostCommonErrors":["1x: Request blocked - received 403 status code. (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/basic/internals/basic-crawler.js:903:19)","1x: page.goto: Download is starting (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/playwright/internals/utils/playwright-utils.js:166:17)","1x: Navigation timed out after 3 seconds. (/Users/kerrfir/Work/Tools/Crawlee/node_modules/@crawlee/core/crawlers/crawler_utils.js:13:11)"]}[39m
+[32mINFO[39m [33m PlaywrightCrawler:[39m Finished! Total 3 requests: 0 succeeded, 3 failed.[90m {"terminal":true}[39m
+[32mINFO[39m [33m PlaywrightCrawler:[39m Starting the crawler.
+[33mWARN[39m [33m PlaywrightCrawler:[39m Reclaiming failed request back to the list or queue. page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:59998/refused
+Call log:
+[2m  - navigating to "http://127.0.0.1:59998/refused", waiting until "load"[22m
+
+    at /private/tmp/sb-fixture/gen.mjs:46:39[90m {"id":"wsuL3pbm7T4RUen","url":"http://127.0.0.1:59998/refused","retryCount":1}[39m
+[31mERROR[39m[33m PlaywrightCrawler:[39m Request failed and reached maximum retries. page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:59998/refused
+Call log:
+[2m  - navigating to "http://127.0.0.1:59998/refused", waiting until "load"[22m
+
+    at /private/tmp/sb-fixture/gen.mjs:46:39[90m {"id":"wsuL3pbm7T4RUen","url":"http://127.0.0.1:59998/refused","method":"GET","uniqueKey":"http://127.0.0.1:59998/refused"}[39m
+✗ http://127.0.0.1:59998/refused
+[32mINFO[39m [33m PlaywrightCrawler:[39m All requests from the queue have been processed, the crawler will shut down.
+[32mINFO[39m [33m PlaywrightCrawler:[39m All requests from the queue have been processed, the crawler will shut down.
+[32mINFO[39m [33m PlaywrightCrawler:[39m All requests from the queue have been processed, the crawler will shut down.
+[32mINFO[39m [33m PlaywrightCrawler:[39m Final request statistics:[90m {"requestsFinished":0,"requestsFailed":1,"retryHistogram":[null,1],"requestAvgFailedDurationMillis":1,"requestAvgFinishedDurationMillis":null,"requestsFinishedPerMinute":0,"requestsFailedPerMinute":759,"requestTotalDurationMillis":1,"requestsTotal":1,"crawlerRuntimeMillis":79}[39m
+[32mINFO[39m [33m PlaywrightCrawler:[39m Error analysis:[90m {"totalErrors":1,"uniqueErrors":1,"mostCommonErrors":["1x: page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:59998/refused (at /private/tmp/sb-fixture/gen.mjs:46:39)"]}[39m
+[32mINFO[39m [33m PlaywrightCrawler:[39m Finished! Total 1 requests: 0 succeeded, 1 failed.[90m {"terminal":true}[39m
+PORTS 63707 59998

@@ -7,6 +7,7 @@ See docs/MODEL-BACKENDS.md.
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 from src.backends import (
     BACKEND_CAPABILITIES,
@@ -83,3 +84,34 @@ class TestInvokerProtocol:
             pass
 
         assert not isinstance(NotAnInvoker(), Invoker)
+
+
+class TestRawDebugDumpLocation:
+    """The agentic-CLI adapters dump the raw model output for debugging. That
+    dump must honour the process temp dir (the isolated runner's TMPDIR) or an
+    explicit override — never a hard-coded shared /tmp (R7, task D)."""
+
+    def test_raw_debug_dir_follows_tmpdir_then_override(self, tmp_path, monkeypatch):
+        from src.backends.agentic_cli import AgenticCliInvoker
+        monkeypatch.delenv("SECOND_BRAIN_RAW_DEBUG_DIR", raising=False)
+        monkeypatch.setenv("TMPDIR", str(tmp_path / "t"))
+        (tmp_path / "t").mkdir()
+        import tempfile
+        tempfile.tempdir = None  # make gettempdir() re-read TMPDIR
+        try:
+            assert AgenticCliInvoker.raw_debug_dir() == str(tmp_path / "t")
+            monkeypatch.setenv("SECOND_BRAIN_RAW_DEBUG_DIR", str(tmp_path / "o"))
+            assert AgenticCliInvoker.raw_debug_dir() == str(tmp_path / "o")
+        finally:
+            tempfile.tempdir = None
+
+    def test_dump_lands_in_the_configured_directory_not_tmp(self, tmp_path, monkeypatch):
+        from src.backends.kiro import KiroInvoker
+        target = tmp_path / "dumps"
+        target.mkdir()
+        monkeypatch.setenv("SECOND_BRAIN_RAW_DEBUG_DIR", str(target))
+        inv = KiroInvoker.__new__(KiroInvoker)  # no constructor side effects; only the dump helper is exercised
+        inv._dump_raw_debug("unit", "raw payload")
+        written = target / inv._raw_debug_filename("unit")
+        assert written.read_text() == "raw payload"
+        assert not Path("/tmp", written.name).exists(), "dump leaked into the shared /tmp"

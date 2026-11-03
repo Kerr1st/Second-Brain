@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
-"""Extract Chrome bookmarks and send public pages to Crawlee.
+"""Extract Chrome bookmarks and scrape them via Crawlee (public) or
+direct fetch with Chrome cookies (internal/authenticated).
 
-Authenticated or internal URLs are skipped. This public version deliberately does
-not read browser cookies or scrape private sites.
+Reads Chrome's Bookmarks JSON, filters to scrapable URLs,
+deduplicates against Crawlee's knowledge index, and scrapes new URLs.
+Internal Amazon links use Chrome cookies for authentication.
 """
-import json, os, subprocess, re
-from urllib.parse import urlparse
+import json, os, subprocess, re, sys, tempfile, time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.capture.filters import SKIP_PATTERNS, canonical_url, is_private_host, needs_cookies, \
+    load_indexed_urls as _load_indexed_urls
+from src.capture.render import html_to_text, render_document
+from urllib.parse import parse_qs, urlparse
+from datetime import datetime
 
 BOOKMARKS_PATH = os.path.expanduser(
     "~/Library/Application Support/Google/Chrome/Default/Bookmarks"
 )
 CRAWLEE_DIR = os.path.expanduser("~/Work/Tools/Crawlee")
 INDEX_PATH = os.path.join(CRAWLEE_DIR, "knowledge", "index.md")
-
-SKIP_PATTERNS = re.compile(
-    r"^(chrome|about|javascript|mailto|file|data):|"
-    r"(mail\.google|accounts\.google|"
-    r"localhost|127\.0\.0\.1|\.pdf$|"
-    r"login|signin|/ap/signin)"
-)
-
-AUTHENTICATED_DOMAINS = re.compile(
-    r"(intranet|internal|corp|sso|idp|auth|admin|console)"
-)
+KNOWLEDGE_DIR = os.path.join(CRAWLEE_DIR, "knowledge", "sources")
 
 
 def extract_urls(node):
@@ -35,38 +33,863 @@ def extract_urls(node):
 
 
 def load_indexed_urls():
-    if not os.path.exists(INDEX_PATH):
-        return set()
-    with open(INDEX_PATH) as f:
-        return {m.group(1) for m in re.finditer(r"\((https?://[^)]+)\)", f.read())}
+    return _load_indexed_urls(INDEX_PATH, sources_dir=KNOWLEDGE_DIR)
 
 
-def scrape_with_crawlee(urls):
-    if not urls:
-        return
-    url_file = os.path.join(CRAWLEE_DIR, ".bookmark-urls.txt")
-    with open(url_file, "w") as f:
-        for _, url in urls:
-            f.write(url + "\n")
+def slugify(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:80] or "page"
 
-    print(f"\nScraping {len(urls)} public URLs via Crawlee (batch)...")
+
+#: Crawlee is driven in batches, each with its own timeout, so one slow page
+#: cannot consume the whole run and partial progress is always measured.
+CRAWLEE_BATCH_SIZE = int(os.environ.get("CRAWLEE_BATCH_SIZE", "50"))
+CRAWLEE_BATCH_TIMEOUT_S = float(os.environ.get("CRAWLEE_BATCH_TIMEOUT_S", "1200"))
+#: Do not start a batch with less than this much budget left.
+CRAWLEE_MIN_BATCH_S = 120.0
+#: Headroom kept between the Crawlee budget and the job's wall-clock deadline.
+DEADLINE_MARGIN_S = 900.0
+
+# Internal fetches that land on a sign-in page or are refused for auth reasons
+# are a session problem, not a broken bookmark.
+_AUTH_STATUS = {401, 403, 407}
+_AUTH_URL_RE = re.compile(
+    r"signin|sign-in|sign_in|/login|login\.|midway-auth\.|idp\.federate\.|/sso/|/saml|/oauth2?/|authorize", re.I)
+
+
+def job_deadline_s():
+    """The bookmarks job's wall-clock deadline (plist value, else the runner floor)."""
     try:
-        result = subprocess.run(
-            ["node", "batch-scrape.js", url_file],
-            cwd=CRAWLEE_DIR, timeout=3600, capture_output=True, text=True,
-        )
-        ok = result.stderr.count("✓")
-        fail = result.stderr.count("✗")
-        skip = result.stderr.count("⚠")
-        print(f"  Crawlee batch: {ok} scraped, {fail} failed, {skip} skipped")
-        print(result.stderr[-500:] if len(result.stderr) > 500 else result.stderr)
-    except subprocess.TimeoutExpired:
-        print("  Batch scrape timed out after 1 hour")
+        from src.operations.jobs import resolve_timeout
+        return resolve_timeout("bookmarks", os.environ)[0]
+    except Exception:  # noqa: BLE001 - a bad env value must not stop the scrape; use the floor
+        return 3 * 3600.0
+
+
+#: Hosts that only ever serve sign-in: a final URL there is auth whatever its
+#: path, on the cookie path and the browser route alike. Bookmarks pointing at
+#: them are not content and are pre-skipped as unsupported (``midway_unsupported``).
+#: Single source of truth for the sign-in hosts: ``src.capture.browser_fetch``
+#: (``AUTH_FINAL_HOSTS`` + ``SIGN_IN_FINAL_HOSTS``). This list must match every
+#: host those match (tests/test_ledger_strike_per_night.py checks it) and adds
+#: login.microsoftonline.com. It is a copy, not an import, because browser_fetch
+#: imports the mcp SDK at import time (via ``mcp_client``) and the cookie path
+#: must keep working when that SDK is missing or broken.
+SIGN_IN_HOSTS = re.compile(
+    r"^(midway-auth\.amazon\.com|sentry\.amazon\.com|idp\.federate\.amazon\.com|login\.microsoftonline\.com"
+    r"|atoz-login\.amazon\.work|[a-z0-9-]+\.idprism-auth\.amazon\.com)$", re.I)
+#: OIDC error returns (``?error=``) that mean "not signed in" after a Midway hop.
+_OIDC_AUTH_ERRORS = {"login_required", "interaction_required", "access_denied"}
+#: Only this much of a 200 body is looked at for sign-in markers.
+SIGN_IN_SNIFF_BYTES = 20 * 1024
+_SIGN_IN_BODY_RE = re.compile(
+    r"""action\s*=\s*["']?https?://midway-auth\.amazon\.com|<title[^>]*>[^<]*\b(sign[ -]?in|redirecting)\b""", re.I)
+
+
+def _body_head(resp):
+    """The first ``SIGN_IN_SNIFF_BYTES`` of the body, decoded (never the whole text)."""
+    content = getattr(resp, "content", None)
+    if isinstance(content, (bytes, bytearray)):
+        return bytes(content[:SIGN_IN_SNIFF_BYTES]).decode("utf-8", errors="replace")
+    return (getattr(resp, "text", "") or "")[:SIGN_IN_SNIFF_BYTES]
+
+
+def _chain_urls(resp):
+    return [getattr(r, "url", "") or "" for r in (getattr(resp, "history", None) or [])] + [resp.url or ""]
+
+
+def _is_auth_response(resp, requested_url=None):
+    """Auth when the *final* response is refused for auth or is a sign-in page.
+
+    Intermediate hops are not judged: a Midway-authenticated fetch always passes
+    through idp.federate.amazon.com and midway-auth.amazon.com and then lands,
+    200, back on the requested page (2026-10-13: judging those hops turned every
+    successful w.amazon.com/broadcast fetch into ``auth``).
+
+    * 401/403/407 is auth.
+    * A final URL on a ``SIGN_IN_HOSTS`` host is auth (whatever its path).
+    * The sign-in URL pattern is applied to the final URL only when the fetch
+      ended on another host than requested: a wiki path containing /SSO/ or
+      /Login that was not redirected is content.
+    * A 200 after a Midway hop whose final URL carries an OIDC ``error=``
+      (login_required / interaction_required / access_denied) is auth.
+    * A 200 whose first 20 KB shows a sign-in page (a midway-auth form action,
+      or a ``<title>`` with "Sign in" / "Redirecting") is auth."""
+    if resp.status_code in _AUTH_STATUS:
+        return True
+    final = resp.url or ""
+    requested = requested_url or next(iter(_chain_urls(resp)), final)
+    final_host = _host(final)
+    if SIGN_IN_HOSTS.match(final_host) or (final_host != _host(requested) and _AUTH_URL_RE.search(final)):
+        return True
+    if resp.status_code != 200:
+        return False
+    if any(_MIDWAY_HOP_RE.match(u) for u in _chain_urls(resp)):
+        try:
+            errors = parse_qs(urlparse(final).query).get("error", [])
+        except ValueError:
+            errors = []
+        if any(e.strip().lower() in _OIDC_AUTH_ERRORS for e in errors):
+            return True
+    return bool(_SIGN_IN_BODY_RE.search(_body_head(resp)))
+
+
+#: Hops of the Midway SSO chain; a chain through them means Midway handles the host.
+_MIDWAY_HOP_RE = re.compile(r"^https?://(idp\.federate\.amazon\.com|midway-auth\.amazon\.com)(:\d+)?([/?#]|$)", re.I)
+#: Hosts verified (2026-10-13) to sign in through that chain with ~/.midway/cookie,
+#: so a bare 401/403 there is a real per-URL refusal (a ledger strike).
+MIDWAY_HOSTS = re.compile(r"^(w|broadcast|idp\.federate)\.amazon\.com$", re.I)
+#: Hosts behind a login Midway cookies can never satisfy (checked 2026-10-13):
+#: Microsoft 365 (login.microsoftonline.com), A to Z (atoz-login.amazon.work)
+#: and Coupa SSO. They are not fetched: ``unsupported_auth``, no ledger strike,
+#: no request. (docs.hub, whose auth runs in JavaScript, left this list when the
+#: browser path arrived: it is a ``BROWSER_HOSTS`` host now.)
+NON_MIDWAY_AUTH_HOSTS = re.compile(
+    r"^(([a-z0-9-]+\.)*sharepoint\.com|atoz\.amazon\.work|atoz-login\.amazon\.work|atoz\.amazon\.com|"
+    r"([a-z0-9-]+\.)*coupahost\.com)$", re.I)
+
+#: Internal hosts fetched through the midway-playwright browser
+#: (src/capture/browser_fetch.py) instead of ``requests`` + cookies: their sign-in
+#: runs in JavaScript / CloudFront, or ``requests`` fails TLS there. Chosen from
+#: the 2026-10-13 ledger's ``auth`` / ``error`` classes and the
+#: bookmarks-unsupported advisory (agentspaces, alchemy.solutions, awsinsights,
+#: hyperbadge, instructai, my.day1, sage, docs.hub, help.awsentral, gather,
+#: collaborate-corp). Host-anchored. w.amazon.com and broadcast stay on the
+#: cookie path (it works; w.amazon.com in a browser needs a security key), and
+#: Kerberos-fronted hosts (console.harmony) are not here: no TGT under launchd.
+BROWSER_HOSTS = re.compile(
+    r"^(([a-z0-9-]+\.)*amazon\.dev|([a-z0-9-]+\.)*aws\.dev|gather\.a2z\.com|collaborate-corp\.amazon\.com)$",
+    re.I)
+#: The browser needs this much Midway session left (seconds); less is deferred_auth.
+BROWSER_MIN_SESSION_S = 30 * 60
+#: Recomputed just before the browser pass: its budget is at most the session left
+#: minus this margin, so late pages never meet an expired session (auth strikes).
+BROWSER_SESSION_MARGIN_S = 10 * 60
+#: A browser budget shorter than this is not worth a launch: every browser URL is deferred_auth.
+BROWSER_MIN_BUDGET_S = 60.0
+#: Registrable suffixes Amazon owns (host-anchored, label boundary). Only these
+#: may take the same-run browser *fallback* (a cookie-path unsupported_auth /
+#: tls_error retried in the Midway-cookie browser): needs_cookies() also matches
+#: third-party SaaS (highspot, quip-amazon, chronus, awsapps tenants, sharepoint,
+#: coupahost), which must never see the Midway-injected browser. Chosen from the
+#: internal hosts in the 2026-10-13 bookmarks and unreachable ledger. Bookmarks
+#: only: filters.INTERNAL_DOMAINS (shared with browser.py) is unchanged.
+BROWSER_FALLBACK_SUFFIXES = ("amazon.com", "amazon.dev", "aws.dev", "a2z.com", "amazon.work", "workshops.aws")
+
+#: Pages that are mostly the user's own records (their cases, requests, account
+#: views), not knowledge worth indexing: skipped as ``skipped_personal`` — never
+#: fetched, no ledger strike. Entries are (host, path regex); the query is ignored.
+#:   * help.awsentral.aws.dev home (``/`` or empty path): "my cases" / own activity.
+PERSONAL_PAGES = (
+    ("help.awsentral.aws.dev", re.compile(r"^/?$")),
+)
+
+
+def _host(url):
+    try:
+        return (urlparse(url or "").hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+
+
+def browser_host(url):
+    """True when the URL's host is fetched through the browser (``BROWSER_HOSTS``)."""
+    return bool(BROWSER_HOSTS.match(_host(url)))
+
+
+def browser_fallback_allowed(url):
+    """True when a cookie-path unsupported_auth/tls_error may be retried in the browser:
+    the host is, or is a subdomain of, a ``BROWSER_FALLBACK_SUFFIXES`` entry."""
+    host = _host(url)
+    return bool(host) and any(host == s or host.endswith("." + s) for s in BROWSER_FALLBACK_SUFFIXES)
+
+
+def personal_page(url):
+    """True for ``PERSONAL_PAGES`` (the user's own records): skipped_personal."""
+    host = _host(url)
+    try:
+        path = urlparse(url).path
+    except ValueError:
+        return False
+    return any(host == h and rx.match(path) for h, rx in PERSONAL_PAGES)
+
+
+def midway_unsupported(url):
+    """True for hosts whose sign-in Midway cookies cannot satisfy, and for bookmarks
+    pointing straight at a sign-in host (idp.federate, midway-auth, ...: not content).
+    Never fetched."""
+    host = _host(url)
+    return bool(NON_MIDWAY_AUTH_HOSTS.match(host) or SIGN_IN_HOSTS.match(host))
+
+
+def _midway_handled(url, resp):
+    """True when Midway is the host's sign-in: the host is a verified Midway host,
+    or the redirect chain went through idp.federate / midway-auth."""
+    hops = [getattr(r, "url", "") or "" for r in (getattr(resp, "history", None) or [])]
+    return bool(MIDWAY_HOSTS.match(_host(url))) or any(_MIDWAY_HOP_RE.match(u) for u in [*hops, resp.url or ""])
+
+
+MIDWAY_COOKIE_PATH = os.path.expanduser("~/.midway/cookie")
+MIDWAY_SESSION_DOMAIN = "midway-auth.amazon.com"
+
+
+def _cookie_policy():
+    """Host-only cookies (no Domain attribute) go back to exactly their host,
+    never to subdomains (Python's default policy would send them on)."""
+    import http.cookiejar
+    return http.cookiejar.DefaultCookiePolicy(
+        strict_ns_domain=http.cookiejar.DefaultCookiePolicy.DomainStrictNonDomain)
+
+
+def midway_session_valid(path=None):
+    """True when the Midway cookie file holds an unexpired ``session`` cookie
+    for midway-auth.amazon.com (``load_midway_cookies`` drops expired ones).
+    Only domains/names/expiry are inspected; no value is read out."""
+    return any(c.name == "session" and c.domain.lstrip(".") == MIDWAY_SESSION_DOMAIN
+               for c in load_midway_cookies(path))
+
+
+def midway_session_seconds_left(path=None):
+    """Seconds until the Midway ``session`` cookie expires (``inf`` for a cookie
+    without expiry), or None when there is no unexpired one. Values are not read."""
+    left = [float("inf") if c.expires is None else c.expires - time.time()
+            for c in load_midway_cookies(path)
+            if c.name == "session" and c.domain.lstrip(".") == MIDWAY_SESSION_DOMAIN]
+    return max(left) if left else None
+
+
+def load_midway_cookies(path=None):
+    """Read the Netscape-format Midway cookie file into a CookieJar.
+
+    ``http.cookiejar.MozillaCookieJar`` drops curl-style ``#HttpOnly_<domain>``
+    lines, which is how mwinit writes the session cookies, so the file is parsed
+    here. Expired cookies are skipped. Values never leave the jar (no logging);
+    a missing/unreadable file is an empty jar."""
+    import http.cookiejar
+    jar = http.cookiejar.CookieJar(_cookie_policy())
+    try:
+        lines = Path(path or MIDWAY_COOKIE_PATH).read_text(errors="replace").splitlines()
+    except OSError:
+        return jar
+    now = time.time()
+    for line in lines:
+        http_only = line.startswith("#HttpOnly_")
+        if http_only:
+            line = line[len("#HttpOnly_"):]
+        elif not line.strip() or line.startswith("#"):
+            continue
+        fields = line.rstrip("\r\n").split("\t")
+        if len(fields) != 7:
+            continue
+        domain, subdomains, cpath, secure, expires, name, value = fields
+        if subdomains.upper() == "TRUE" and not domain.startswith("."):
+            domain = "." + domain
+        try:
+            expires = int(expires) or None
+        except ValueError:
+            expires = None
+        if expires is not None and expires < now:
+            continue
+        jar.set_cookie(http.cookiejar.Cookie(
+            version=0, name=name, value=value, port=None, port_specified=False,
+            domain=domain, domain_specified=domain.startswith("."), domain_initial_dot=domain.startswith("."),
+            path=cpath or "/", path_specified=True, secure=secure.upper() == "TRUE", expires=expires,
+            discard=expires is None, comment=None, comment_url=None,
+            rest={"HttpOnly": None} if http_only else {}, rfc2109=False))
+    return jar
+
+
+def internal_cookie_jar(url, midway_path=None):
+    """Chrome's cookies for the target host merged with the Midway jar, so the
+    idp.federate.amazon.com -> midway-auth.amazon.com redirect chain carries
+    the Midway session. Midway cookies win on (domain, path, name) clashes."""
+    import http.cookiejar
+    import browser_cookie3
+    jar = http.cookiejar.CookieJar(_cookie_policy())
+    try:
+        chrome = browser_cookie3.chrome(domain_name=urlparse(url).netloc)
+    except Exception as exc:  # noqa: BLE001 - no Chrome cookies still leaves the Midway jar
+        print(f"    ! Chrome cookies unavailable: {type(exc).__name__}")
+        chrome = None
+    for cookie in chrome or ():
+        jar.set_cookie(cookie)
+    for cookie in load_midway_cookies(midway_path):
+        jar.set_cookie(cookie)
+    return jar
+
+
+def cookie_policy_session(requests):
+    """A ``requests.Session`` whose Cookie headers follow ``_cookie_policy``.
+
+    requests copies the ``cookies=`` jar into a fresh RequestsCookieJar with
+    the default (liberal) policy before building the header, so the jar's own
+    policy would be ignored. The prepared request's jar gets the strict policy
+    and its header is rebuilt; redirects reuse that jar (``copy`` keeps the
+    policy), so every hop of the Midway redirect chain is judged the same way."""
+    session = requests.Session()
+    prepare = session.prepare_request
+
+    def prepare_request(request):
+        prepared = prepare(request)
+        jar = getattr(prepared, "_cookies", None)
+        if jar is not None:
+            jar.set_policy(_cookie_policy())
+            prepared.headers.pop("Cookie", None)
+            prepared.prepare_cookies(jar)
+        return prepared
+    session.prepare_request = prepare_request
+    return session
+
+
+def fetch_internal(url):
+    """GET an internal page with the merged cookie jar. Returns (outcome, resp);
+    outcome is "ok" (200, final response not judged as auth), "auth" (sign-in /
+    refusal on a host Midway handles), "unsupported_auth" (sign-in that is not
+    Midway's: a foreign login page, or a refusal that never touched Midway) or
+    "failed". Writes nothing."""
+    import requests
+    with cookie_policy_session(requests) as session:
+        resp = session.get(url, cookies=internal_cookie_jar(url), timeout=30,
+                           headers={"User-Agent": "Mozilla/5.0"})
+    if _is_auth_response(resp, url):
+        return ("auth" if _midway_handled(url, resp) else "unsupported_auth"), resp
+    if resp.status_code != 200:
+        return "failed", resp
+    return "ok", resp
+
+
+def scrape_with_cookies(name, url):
+    """Fetch an internal page using Chrome + Midway cookies, save as markdown.
+
+    Returns "ok", "auth" (redirected to sign-in / refused for auth on a host
+    Midway handles: counted as skipped_auth — also when the Midway cookie has
+    expired), "unsupported_auth" (a login Midway cannot satisfy: no ledger
+    strike), "too_short" (reached, but too little text to index), "timeout" or
+    "failed" (genuine fetch error)."""
+    try:
+        outcome, resp = fetch_internal(url)
+        if outcome != "ok":
+            return outcome
+
+        text = html_to_text(resp.text)
+
+        if len(text) < 200:
+            return "too_short"
+
+        save_page(name, url, text)
+        return "ok"
+
+    except Exception as e:  # noqa: BLE001 - one bookmark never aborts the batch (and `requests` may be unbound on ImportError)
+        print(f"    ✗ Cookie fetch failed: {type(e).__name__}")
+        if _is_tls_error(e):
+            return "tls_error"         # main() retries it in the browser (same run)
+        return "timeout" if "Timeout" in type(e).__name__ else "failed"
+
+
+def _is_tls_error(exc):
+    """requests' SSLError (or an ssl error anywhere in its cause chain)."""
+    import ssl
+    seen = exc
+    for _ in range(6):
+        if seen is None:
+            return False
+        if isinstance(seen, ssl.SSLError) or "SSLError" in type(seen).__name__:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
+def save_page(name, url, text, fetched_via=None):
+    """Write one page into the Crawlee knowledge store, the format the nightly
+    ingest reads (``Source``/``Type``/``Date`` header). ``fetched_via`` is added
+    only for the browser path (``fetched_via: browser``)."""
+    import hashlib
+    date = datetime.now().strftime("%Y-%m-%d")
+    filename = f"{slugify(name)}-{hashlib.sha256(url.encode()).hexdigest()[:12]}.md"
+    fields = {"Source": url, "Type": "web-page", "Date": date}
+    if fetched_via:
+        fields["fetched_via"] = fetched_via
+    content = render_document(name, fields, text)
+    os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
+    with open(os.path.join(KNOWLEDGE_DIR, filename), "w") as f:
+        f.write(content)
+    return filename
+
+
+#: A browser page whose title says sign-in/redirecting never reached content.
+_SIGN_IN_TITLE_RE = re.compile(r"\b(sign[ -]?in|redirecting)\b", re.I)
+
+
+def _path(url):
+    try:
+        return urlparse(url or "").path or "/"
+    except ValueError:
+        return ""
+
+
+def browser_outcome(url, res):
+    """The bookmarks outcome of a ``browser_fetch.PageResult``: its own class
+    (HTTP 401/403/407 is already auth there, other >= 400 error), with the cookie
+    path's sign-in markers applied to the final URL and title -> auth: a
+    ``SIGN_IN_HOSTS`` host; ``_AUTH_URL_RE`` on a final URL on another host *or*
+    on the same host with another path than requested (a same-host /login); a
+    "Sign in" title."""
+    if res.outcome not in ("ok", "too_short"):
+        return res.outcome
+    requested = getattr(res, "requested_url", "") or url
+    final = res.final_url or requested
+    final_host = _host(final)
+    moved = final_host != _host(requested) or _path(final) != _path(requested)
+    if SIGN_IN_HOSTS.match(final_host) or (moved and _AUTH_URL_RE.search(final)) \
+            or _SIGN_IN_TITLE_RE.search(res.title or ""):
+        return "auth"
+    return res.outcome
+
+
+def browser_midway_login(res):
+    """True when a browser ``auth`` was Midway's own sign-in (final host
+    midway-auth / sentry / idp.federate, or the server's "run mwinit" error);
+    anything else (a foreign login page, a bare 401/403) is a non-Midway login."""
+    from src.capture import browser_fetch
+    final = getattr(res, "final_url", "") or ""
+    return getattr(res, "detail", "") == "server" or browser_fetch.is_auth_host(final) \
+        or bool(_MIDWAY_HOP_RE.match(final))
+
+
+def browser_fetch_pages(urls, budget_s):
+    """One midway-playwright session over ``urls`` (src/capture/browser_fetch.py)."""
+    from src.capture import browser_fetch
+    return browser_fetch.fetch_pages_sync(urls, budget_s=budget_s)
+
+
+def browser_budget_s(started):
+    """The browser pass's time budget: BROWSER_RUN_BUDGET_S, within the job deadline."""
+    from src.capture import browser_fetch
+    left = job_deadline_s() - (time.monotonic() - started) - DEADLINE_MARGIN_S
+    return max(0.0, min(browser_fetch.RUN_BUDGET_S, left))
+
+
+# batch-scrape.js (stderr) prints one line per finished request:
+#   "✓ <title>"   indexed (detected through the index, as before)
+#   "✗ <url>"     failed after Crawlee's retries
+#   "⚠ Skip (too short): <url>"
+# Crawlee's own log records (@apify/log, ANSI-colored even into a file) say why
+# a request failed. A record is one write that may span several lines: Crawlee
+# builds the retry WARN as `[message, userLine].join('\n')`
+# (@crawlee/basic basic-crawler.js:1240/:1287), and Playwright errors carry a
+# "Call log:", so the {"id":..,"url":..} data often lands on a line of its own
+# (tests/fixtures/crawlee-retry-records.log was captured from the real logger).
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_TOO_SHORT_RE = re.compile(r"^\s*⚠ Skip \(too short\):\s*(\S+)\s*$")
+_FAILED_RE = re.compile(r"^\s*✗\s+(\S+)\s*$")
+_RECORD_START_RE = re.compile(r"^\s*(WARN|ERROR|INFO)\b")
+_LOG_URL_RE = re.compile(r'\{"id":"[^"]*","url":"((?:[^"\\]|\\.)+)"')
+_LOG_AUTH_RE = re.compile(r"\b(401|403|407)\b status code|status code:? (401|403|407)\b", re.I)
+_LOG_TIMEOUT_RE = re.compile(r"timed? ?out|TimeoutError", re.I)
+_LOG_ERROR_RE = re.compile(r"Error|fail", re.I)
+#: Stack frames name Crawlee's own timeout wrapper (node_modules/@apify/timeout/...)
+#: on every failed request; those lines say nothing about how the request failed.
+_STACK_PATH_RE = re.compile(r"node_modules|@apify/timeout")
+
+
+def _record_timed_out(record):
+    """True when a non-stack-frame line of the record reports a timeout."""
+    return any(_LOG_TIMEOUT_RE.search(line) for line in record.splitlines()
+               if not _STACK_PATH_RE.search(line))
+
+
+def strip_ansi(text):
+    return _ANSI_RE.sub("", text or "")
+
+
+#: Any of these in a batch's output means the Crawlee install itself is broken
+#: (missing node_modules, node not on PATH), not that a URL failed. The
+#: module/package patterns also need a non-zero exit (a page *title* can say
+#: "Cannot find module"), and per-URL mark lines (✓/⚠/✗ + title/URL) are never
+#: matched.
+_ENV_BROKEN_RE = re.compile(
+    r"node: (command )?not found|No such file or directory.*node|Executable doesn't exist", re.I)
+_ENV_BROKEN_MODULE_RE = re.compile(r"ERR_MODULE_NOT_FOUND|Cannot find (package|module)", re.I)
+_MARK_RE = re.compile(r"^\s*(✓|✗|⚠)", re.M)
+
+
+def _iter_records(text):
+    """Yield ``(level, joined_text, url)`` for each Crawlee log record that names a URL.
+
+    A record opens on a WARN/ERROR/INFO line and closes on the line carrying
+    its ``{"id":..,"url":..}`` data; a mark line or the next record start ends
+    an open record that never named a URL (e.g. "Starting the crawler.")."""
+    level, lines = None, []
+    for line in text.splitlines():
+        start = _RECORD_START_RE.match(line)
+        if start or (level is not None and _MARK_RE.match(line)):
+            level, lines = None, []
+        if start:
+            level = start.group(1)
+        if level is None:
+            continue
+        lines.append(line)
+        match = _LOG_URL_RE.search(line)
+        if match:
+            yield level, "\n".join(lines), match.group(1).replace('\\"', '"')
+            level, lines = None, []
+
+
+def parse_crawlee_output(text):
+    """Map URLs to "too_short" / "auth" / "timeout" / "error" from batch-scrape.js output.
+
+    A URL is mapped only when the output shows it was attempted and did not
+    produce a page: a final ``✗``/``⚠`` line, or (when the batch was killed
+    before Crawlee finished its retries) a Crawlee WARN/ERROR record naming it.
+    ANSI colors are stripped first and records are classified on their joined
+    text. URLs the output never mentions are absent: the caller decides whether
+    they were attempted (finished run) or never reached (killed batch -> deferred)."""
+    text = strip_ansi(text)
+    hints, outcomes = {}, {}
+    for level, record, url in _iter_records(text):
+        if _LOG_AUTH_RE.search(record):
+            hints[url] = "auth"
+        elif _record_timed_out(record):
+            hints.setdefault(url, "timeout")
+        elif level in ("WARN", "ERROR") or _LOG_ERROR_RE.search(record):
+            hints.setdefault(url, "error")
+    for line in text.splitlines():
+        match = _TOO_SHORT_RE.match(line)
+        if match:
+            outcomes[match.group(1)] = "too_short"
+            continue
+        match = _FAILED_RE.match(line)
+        if match and match.group(1).startswith("http"):
+            outcomes[match.group(1)] = "fail"
+    result = {url: (hints.get(url, "error") if cls == "fail" else cls) for url, cls in outcomes.items()}
+    for url, cls in hints.items():   # attempted and erroring when the batch ended
+        result.setdefault(url, cls)
+    return result
+
+
+def crawlee_broken(rc, output):
+    """True when a batch says nothing about the URLs because Crawlee itself broke:
+    its environment is missing, or it exited non-zero without one parseable line."""
+    text = strip_ansi(output)
+    unmarked = "\n".join(line for line in text.splitlines() if not _MARK_RE.match(line))
+    failed_exit = rc not in (0, None)
+    if _ENV_BROKEN_RE.search(unmarked) or (failed_exit and _ENV_BROKEN_MODULE_RE.search(unmarked)):
+        return True
+    return failed_exit and not _MARK_RE.search(text) and not _LOG_URL_RE.search(text)
+
+
+#: Options for batch-scrape.js, read from env only once
+#: second-brain-triage/2026-10-13/crawlee-batch-scrape.patch is applied in
+#: ~/Work/Tools/Crawlee (harmless before; its defaults are Crawlee's, so other
+#: callers are unchanged). What actually bounds a blocked URL is
+#: MAX_REQUEST_RETRIES=1: a 403 "Request blocked" is a plain ``Error``
+#: (basic-crawler.js ``_throwOnBlockedRequest``), not a ``SessionError``, so it
+#: is retried maxRequestRetries times (default 3) and session rotations never
+#: apply to it. MAX_SESSION_ROTATIONS=0 only affects real SessionErrors
+#: (e.g. proxy/session-pool failures). ABORT_DOWNLOADS=1 fails a URL that
+#: starts a file download on its first attempt. ``check_batch_scrape_patch``
+#: warns once per run when the patch is missing.
+BATCH_SCRAPE_ENV = {
+    "BATCH_SCRAPE_MAX_REQUEST_RETRIES": "1",
+    "BATCH_SCRAPE_MAX_SESSION_ROTATIONS": "0",
+    "BATCH_SCRAPE_ABORT_DOWNLOADS": "1",
+}
+#: logs/bookmarks-crawlee-<batch>.log
+CRAWLEE_LOG_NAME = "bookmarks-crawlee"
+
+
+def batch_scrape_path():
+    """batch-scrape.js inside ``CRAWLEE_DIR`` (the same place it is run from)."""
+    return os.path.join(CRAWLEE_DIR, "batch-scrape.js")
+
+
+def check_batch_scrape_patch(path=None):
+    """Warn (once per call; main calls it once per run) when batch-scrape.js does
+    not read BATCH_SCRAPE_* options, i.e. the patch is not applied and
+    ``BATCH_SCRAPE_ENV`` has no effect. Returns True when the patch is present."""
+    path = path or batch_scrape_path()
+    try:
+        applied = "BATCH_SCRAPE_" in Path(path).read_text(errors="replace")
+    except OSError:
+        applied = False
+    if not applied:
+        print(f"WARNING: {path} does not read BATCH_SCRAPE_* options (crawlee-batch-scrape.patch "
+              f"not applied): Crawlee keeps its default 3 retries per blocked URL")
+    return applied
+
+
+def log_dir():
+    from src.operations.backlog import REPO
+    return Path(os.environ.get("SECOND_BRAIN_LOG_DIR", str(REPO / "logs")))
+
+
+def _open_kept_log(name, n):
+    """Open logs/<name>-<n>.log read/write (truncated, mode 0600). O_NOFOLLOW:
+    a planted symlink is refused, never truncated or chmod'ed through."""
+    path = log_dir() / f"{name}-{n}.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)
+    return fd, str(path)
+
+
+def _clear_kept_logs(name):
+    for old in log_dir().glob(f"{name}-*.log"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def _run_crawlee_batch(batch, timeout, *, keep_log=None, env=None):
+    """Run one Crawlee batch; returns (returncode or None on timeout, output text).
+
+    Output goes to a file rather than a pipe, so what was printed before a
+    timeout kill is still readable. With ``keep_log=(name, n)`` that file is
+    ``logs/<name>-<n>.log`` (mode 0600, overwritten each run) and kept, so
+    Crawlee's per-request error lines stay inspectable; otherwise a temporary
+    file that is deleted. batch-scrape.js prints titles, URLs and Crawlee's
+    error messages only — never cookies or headers. ``env`` adds variables
+    for batch-scrape.js. A missing ``node`` is rc 127 with a message."""
+    fd, url_file = tempfile.mkstemp(prefix=".sb-urls-", suffix=".txt", dir=CRAWLEE_DIR)
+    if keep_log:
+        log_fd, log_file = _open_kept_log(*keep_log)
+    else:
+        log_fd, log_file = tempfile.mkstemp(prefix=".sb-out-", suffix=".log")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            for _, url in batch:
+                handle.write(url + "\n")
+        with os.fdopen(log_fd, "w+", errors="replace") as log:
+            try:
+                result = subprocess.run(
+                    ["node", "batch-scrape.js", url_file], cwd=CRAWLEE_DIR,
+                    timeout=timeout, stdout=log, stderr=subprocess.STDOUT, text=True,
+                    **({"env": {**os.environ, **env}} if env else {}),
+                )
+                rc = result.returncode
+            except subprocess.TimeoutExpired:
+                rc = None
+            except OSError as exc:  # node missing / not executable
+                log.write(f"node: not found ({type(exc).__name__})\n")
+                rc = 127
+            # Read back through the same fd (not by path): another run's file
+            # at that path after _clear_kept_logs can never be read instead.
+            try:
+                log.flush()
+                log.seek(0)            # lseek(fd, 0, SEEK_SET); node wrote via the fd directly
+                output = log.read()
+            except (OSError, ValueError):
+                output = ""
+        return rc, output
     finally:
-        os.remove(url_file) if os.path.exists(url_file) else None
+        os.unlink(url_file)
+        if not keep_log and os.path.exists(log_file):
+            os.unlink(log_file)
+
+
+def scrape_with_crawlee(urls, timeout=None, batch_size=None, batch_timeout=None, outcomes=None,
+                        log_name=None, env=None, killed_deferred=None):
+    """Scrape public URLs via Crawlee in bounded batches.
+
+    ``timeout`` is the wall-clock budget for the whole call (default: the job
+    deadline less a margin); each batch also has its own ``batch_timeout``.
+    Only verified index additions count as processed, also after a timeout, so
+    partial progress is kept. Pages Crawlee reached but skipped as too short
+    are ``too_short`` (not failed).
+
+    ``deferred`` (not failed, no ledger strike; retried next run because they
+    are still unindexed) counts URLs never started because the budget ran out,
+    and URLs of a killed (timed-out) or crashed batch that the output never
+    shows as attempted. ``failed`` counts only URLs the output shows were
+    attempted and failed (``✗``, or Crawlee error lines when the batch was
+    killed mid-retry), plus unmarked URLs of a batch that finished normally
+    (rc 0: Crawlee attempted all of them). ``crawlee_broken`` counts batches
+    whose output shows Crawlee itself broke (see ``crawlee_broken``).
+
+    When given, ``outcomes`` is filled with url -> "ok" or a ledger class
+    (never for deferred URLs), and ``killed_deferred`` (a set) with the URLs
+    deferred because their batch was killed or crashed (not budget-deferred,
+    not a broken Crawlee): the caller bounds those through the ledger's
+    ``deferred_runs``. ``batches_run`` / ``batches_with_output`` count batches
+    that ran and those whose output showed any mark, Crawlee record or index
+    addition; ``failed_batches`` counts non-zero exits that named no failed URL.
+    ``log_name`` keeps each batch's output as ``logs/<log_name>-<n>.log``;
+    ``env`` is passed to batch-scrape.js.
+    """
+    stats = {"processed": 0, "skipped": 0, "failed": 0, "too_short": 0, "timed_out_batches": 0,
+             "deferred": 0, "crawlee_broken": 0, "batches_run": 0, "batches_with_output": 0,
+             "failed_batches": 0}
+    outcomes = {} if outcomes is None else outcomes
+    if not urls:
+        return stats
+    batch_size = batch_size or CRAWLEE_BATCH_SIZE
+    batch_timeout = batch_timeout or CRAWLEE_BATCH_TIMEOUT_S
+    budget = timeout if timeout is not None else job_deadline_s() - DEADLINE_MARGIN_S
+    started = time.monotonic()
+    before = load_indexed_urls()
+    if log_name:
+        _clear_kept_logs(log_name)
+    batches = [urls[i:i + batch_size] for i in range(0, len(urls), batch_size)]
+    for n, batch in enumerate(batches, start=1):
+        remaining = budget - (time.monotonic() - started)
+        if remaining < min(CRAWLEE_MIN_BATCH_S, batch_timeout):
+            left = sum(len(b) for b in batches[n - 1:])
+            stats["deferred"] += left
+            print(f"Crawlee: budget of {budget:.0f}s exhausted; {left} URL(s) "
+                  f"in {len(batches) - n + 1} batch(es) deferred to the next run")
+            break
+        this_timeout = min(batch_timeout, remaining)
+        requested = {url for _, url in batch}
+        skipped_here = requested & before
+        rc, output = _run_crawlee_batch(batch, this_timeout,
+                                        keep_log=(log_name, n) if log_name else None, env=env)
+        parsed = parse_crawlee_output(output)
+        broken = crawlee_broken(rc, output)
+        # Measure progress from the index whatever happened, so partial
+        # successes in a timed-out or failed batch still count.
+        after = load_indexed_urls()
+        processed = len((requested - before) & after)
+        failed = too_short = deferred = 0
+        for url in requested - before:
+            if url in after:
+                outcomes[url] = "ok"
+            elif url in parsed:
+                outcomes[url] = parsed[url]
+                if parsed[url] == "too_short":
+                    too_short += 1
+                else:
+                    failed += 1
+            elif rc == 0 and not broken:
+                outcomes[url] = "error"    # Crawlee finished the run, so it attempted this URL
+                failed += 1
+            else:
+                deferred += 1              # killed / crashed before the output shows an attempt
+                if killed_deferred is not None and not broken:
+                    killed_deferred.add(url)
+        stats["batches_run"] += 1
+        stats["batches_with_output"] += int(bool(processed or parsed or _MARK_RE.search(strip_ansi(output))))
+        if rc is None:
+            stats["timed_out_batches"] += 1
+            print(f"Crawlee batch {n}/{len(batches)} TIMED OUT after {this_timeout:.0f}s: "
+                  f"{processed} of {len(requested) - len(skipped_here)} new URL(s) indexed, "
+                  f"{failed} failed, {deferred} deferred (not attempted)")
+        elif rc:
+            print(f"Crawlee batch {n}/{len(batches)} exited {rc}"
+                  f"{' (Crawlee itself broke)' if broken else ''}: {processed} indexed, "
+                  f"{failed} failed, {deferred} deferred")
+            if not failed:
+                # A nonzero exit without one failed URL: counted on its own, not as a URL failure.
+                stats["failed_batches"] += 1
+        stats["processed"] += processed
+        stats["skipped"] += len(skipped_here)
+        stats["failed"] += failed
+        stats["too_short"] += too_short
+        stats["deferred"] += deferred
+        stats["crawlee_broken"] += int(broken)
+        before = after
+    return stats
+
+
+#: Known-good internal page fetched once (through ``fetch_internal``) when the
+#: safety net would fire, to tell a rejected session from restricted pages.
+CANARY_URL = "https://w.amazon.com/bin/view/Main/"
+MIDWAY_CAUSE_COOKIE = "the Midway cookie is missing/expired at run time — run mwinit"
+MIDWAY_CAUSE_SHORT = "the Midway session expires within 30 min at run time (browser path) — run mwinit"
+MIDWAY_CAUSE_CANARY = "Midway session rejected at run time (canary page hit sign-in) — run mwinit"
+MIDWAY_CAUSE_BROWSER = "browser sign-in failed for every page (Midway mint) — run mwinit"
+MIDWAY_CAUSE_LATE = ("the Midway session ends before the browser pass could run "
+                     "(< 10 min margin + 60 s budget left) — run mwinit")
+#: Not a Midway cause despite the name: the ``budget`` cause of ``[backlog.bookmarks-browser]``
+#: when the job deadline (not the session) left too little time for the browser pass.
+MIDWAY_CAUSE_DEADLINE = ("the job deadline left < 60 s for the browser pass (the cookie path took the time); "
+                         "browser URLs deferred to the next run")
+#: ``[backlog.bookmarks-browser]`` cause text per browser deferral ``detail``.
+BROWSER_DEFER_CAUSES = {
+    "launch": "the browser (midway-playwright) did not start — check node >= 20 and aim on the job PATH",
+    "server_down": "the browser server died mid-pass",
+    "budget": "the browser time budget ran out (BROWSER_RUN_BUDGET_S / job deadline / Midway session left)",
+    "max_pages": "more browser URLs than BROWSER_MAX_PAGES",
+}
+
+
+def browser_defer_cause(details, overrides=None):
+    """One cause string from a Counter of deferral details, e.g.
+    ``"3 launch: the browser ... did not start ...; 1 budget: ..."``; ``overrides``
+    replaces a detail's text for this run (a job-deadline ``budget``)."""
+    causes = {**BROWSER_DEFER_CAUSES, **(overrides or {})}
+    return "; ".join(f"{n} {d}: {causes.get(d, 'deferred')}"
+                     for d, n in sorted(details.items())) or None
+
+
+def sharepoint_doc(url):
+    """True for a SharePoint Office-document bookmark (src/capture/sharepoint_docs.py)."""
+    from src.capture import sharepoint_docs   # stdlib-only at import time (no mcp SDK)
+    return sharepoint_docs.doc_ref(url) is not None
+
+
+#: SharePoint documents not captured this run (unresolved / too_large / failed /
+#: empty / deferred): ``<status-dir>/bookmarks-sharepoint.backlog.json``
+#: (``[backlog.bookmarks-sharepoint]`` in config/liveness.toml). Bookmarks that can
+#: never resolve (``skipped_permanent``: no GUID / no name) are counted and logged
+#: once per run by the pass, never fed to the backlog. A SIGTERM during the pass is
+#: a ``SystemExit(143)`` after its cleanup, so it passes the ``except Exception`` below.
+SHAREPOINT_BACKLOG_JOB = "bookmarks-sharepoint"
+
+
+def run_sharepoint_docs(docs, started):
+    """The SharePoint pass over ``docs`` ([(name, url)]); a summary even when it breaks."""
+    from collections import Counter
+    if not docs:
+        return {"counts": Counter(), "results": {}, "cause": None, "ingest": None}
+    print(f"\n--- SharePoint documents via grasp-mcp ({len(docs)}) ---")
+    try:
+        from src.capture import sharepoint_docs
+        budget = min(sharepoint_docs.RUN_BUDGET_S,
+                     job_deadline_s() - (time.monotonic() - started) - DEADLINE_MARGIN_S)
+        summary = sharepoint_docs.capture_bookmarked_docs(docs, session_left=midway_session_seconds_left(),
+                                                          budget_s=budget)
+    except Exception as exc:  # noqa: BLE001 - advisory: never changes the bookmarks run
+        summary = {"counts": Counter(deferred=len(docs)), "results": {}, "cause": f"error ({type(exc).__name__})",
+                   "ingest": None}
+    counts = summary["counts"]
+    stored = f", stored {summary['ingest']}" if summary.get("ingest") else ""
+    cause = f" — {summary['cause']}" if summary.get("cause") else ""
+    print(f"SharePoint docs: {dict(sorted(counts.items()))}{stored}{cause}")
+    advisories = sharepoint_advisories(summary)
+    if advisories:
+        print(f"WARNING: {advisories} SharePoint document(s) not captured (advisory, no strike): "
+              + sharepoint_cause(summary))
+    return summary
+
+
+def sharepoint_advisories(summary):
+    from src.capture.sharepoint_docs import ADVISORY_OUTCOMES
+    stored_failed = (summary.get("ingest") or {}).get("failed", 0)
+    return sum(summary["counts"].get(k, 0) for k in ADVISORY_OUTCOMES) + stored_failed
+
+
+def sharepoint_cause(summary):
+    """``"unresolved: <name> (not_found); deferred: ... — <cause>"`` (names and reasons, never text)."""
+    from src.capture.sharepoint_docs import ADVISORY_OUTCOMES
+    parts = [f"{r.outcome}: {r.name[:60]} ({r.reason})" for r in summary.get("results", {}).values()
+             if r.outcome in ADVISORY_OUTCOMES]
+    if summary.get("cause"):
+        parts.append(summary["cause"])
+    return "; ".join(parts) or None
+
+
+def canary_outcome(fetch=None):
+    """``fetch_internal(CANARY_URL)``'s outcome ("ok", "auth", ...); writes nothing.
+    An exception is "failed" (inconclusive)."""
+    try:
+        return (fetch or fetch_internal)(CANARY_URL)[0]
+    except Exception as exc:  # noqa: BLE001 - the canary must never abort the run
+        return "timeout" if "Timeout" in type(exc).__name__ else "failed"
 
 
 def main():
+    from collections import Counter
+    started = time.monotonic()
     with open(BOOKMARKS_PATH) as f:
         data = json.load(f)
 
@@ -75,19 +898,433 @@ def main():
         if isinstance(data["roots"][key], dict):
             all_urls.extend(extract_urls(data["roots"][key]))
 
-    scrapable = [(n, u) for n, u in all_urls if not SKIP_PATTERNS.search(u)]
+    scrapable = [(n, u) for n, u in all_urls if not SKIP_PATTERNS.search(u) and not is_private_host(u)]
     indexed = load_indexed_urls()
     new = [(n, u) for n, u in scrapable if u not in indexed]
 
-    authenticated = [(n, u) for n, u in new if AUTHENTICATED_DOMAINS.search(urlparse(u).netloc)]
-    public = [(n, u) for n, u in new if not AUTHENTICATED_DOMAINS.search(urlparse(u).netloc)]
+    ledger = _load_ledger()
+    unreachable = [(n, u) for n, u in new if ledger is not None and ledger.should_skip(u)]
+    skip = {u for _, u in unreachable}
+    pending = [(n, u) for n, u in new if u not in skip]
+    internal = [(n, u) for n, u in pending if needs_cookies(u)]
+    public = [(n, u) for n, u in pending if not needs_cookies(u)]
+    if ledger is not None:
+        # URLs a killed batch left unattempted go first, so they are attempted
+        # (and bounded by the ledger's deferred_runs) instead of queuing behind
+        # the same hang again. sorted() is stable: bookmark order otherwise.
+        public.sort(key=lambda item: ledger.deferred_runs(item[1]) == 0)
 
     print(f"Total: {len(all_urls)}, Scrapable: {len(scrapable)}, New: {len(new)}")
-    print(f"  Skipped authenticated/internal-looking URLs: {len(authenticated)}")
-    print(f"  Public Crawlee URLs: {len(public)}")
+    print(f"  skipped_unreachable (ledger cool-off): {len(unreachable)}")
+    print(f"  Internal (cookies): {len(internal)}")
+    print(f"  Public (Crawlee): {len(public)}")
 
-    scrape_with_crawlee(public)
+    ok = fail = skipped_auth = too_short = deferred_auth = unsupported_auth = skipped_unsupported = 0
+    skipped_invalid_url = 0
+    outcomes = {}
+    browser = Counter()
+
+    # SharePoint Office documents: read through grasp-mcp (src/capture/sharepoint_docs.py),
+    # never by the cookie/browser paths; every other sharepoint URL stays pre-skipped below.
+    sharepoint = [(n, u) for n, u in internal if sharepoint_doc(u)]
+    internal = [(n, u) for n, u in internal if not sharepoint_doc(u)]
+    # Hosts Midway can never sign in to: not fetched, no ledger strike.
+    skipped_unsupported = sum(1 for _, u in internal if midway_unsupported(u))
+    internal = [(n, u) for n, u in internal if not midway_unsupported(u)]
+    # The user's own records (PERSONAL_PAGES): not fetched, no ledger strike.
+    skipped_personal = sum(1 for _, u in internal if personal_page(u))
+    internal = [(n, u) for n, u in internal if not personal_page(u)]
+    # URLs Python and the browser could route differently (backslash, userinfo,
+    # odd host): never fetched on either path, no ledger strike.
+    skipped_invalid_url = sum(1 for _, u in internal if canonical_url(u) is None)
+    internal = [(n, u) for n, u in internal if canonical_url(u) is not None]
+
+    midway_cause = None
+    internal_ran = bool(internal)
+    browser_allowed = True
+    if internal and not midway_session_valid():
+        # Every internal fetch would be an auth strike for a session problem:
+        # skip the path, no ledger strike, retried next run (still unindexed).
+        deferred_auth = len(internal)
+        midway_cause = MIDWAY_CAUSE_COOKIE
+        print(f"WARNING: Midway cookie missing/expired — run mwinit; {deferred_auth} internal URLs deferred")
+        internal = []
+        internal_ran = False
+    elif internal and (midway_session_seconds_left() or 0) < BROWSER_MIN_SESSION_S:
+        # The browser path needs the session to outlast the pass: defer its URLs
+        # (deferred_auth, no browser launch, no strike); the cookie path still runs.
+        browser_allowed = False
+        late = [(n, u) for n, u in internal if browser_host(u)]
+        if late:
+            deferred_auth = len(late)
+            midway_cause = MIDWAY_CAUSE_SHORT
+            print(f"WARNING: Midway session expires in under {BROWSER_MIN_SESSION_S // 60} min — run mwinit; "
+                  f"{deferred_auth} browser URL(s) deferred")
+            internal = [(n, u) for n, u in internal if not browser_host(u)]
+    unsupported_hosts = Counter()
+    fallback_urls = set()
+    browser_details = Counter()
+    browser_ran = False
+    browser_queue = [(n, u) for n, u in internal if browser_host(u)]
+    internal = [(n, u) for n, u in internal if not browser_host(u)]
+
+    # Internal links with cookies
+    if internal:
+        print(f"\n--- Internal links ({len(internal)}) ---")
+        for i, (name, url) in enumerate(internal):
+            print(f"  [{i+1}/{len(internal)}] {name[:50]}")
+            outcome = scrape_with_cookies(name, url)
+            if browser_allowed and outcome in ("unsupported_auth", "tls_error") and browser_fallback_allowed(url):
+                browser_queue.append((name, url))   # same-run fallback: the browser decides
+                fallback_urls.add(url)
+                browser["fallback"] += 1
+            elif outcome is True or outcome == "ok":
+                ok += 1
+                outcomes[url] = "ok"
+            elif outcome == "auth":
+                skipped_auth += 1
+                outcomes[url] = "auth"
+            elif outcome == "unsupported_auth":
+                unsupported_auth += 1      # attempted; not a ledger outcome (no strike)
+                unsupported_hosts[_host(url)] += 1
+            elif outcome == "too_short":
+                too_short += 1
+                outcomes[url] = "too_short"
+            else:
+                fail += 1
+                outcomes[url] = "timeout" if outcome == "timeout" else "error"
+
+    # Internal links through the midway-playwright browser (one session). The
+    # budget is recomputed now (the cookie path ran first): never past the
+    # Midway session minus a margin, so late pages do not meet an expired session.
+    browser_budget = 0.0
+    browser_deadline_deferred = 0
+    browser_cause_overrides = {}
+    if browser_queue:
+        session_left = midway_session_seconds_left() or 0.0
+        deadline_budget = browser_budget_s(started)
+        browser_budget = min(deadline_budget, session_left - BROWSER_SESSION_MARGIN_S)
+        if browser_budget < BROWSER_MIN_BUDGET_S:
+            session_short = session_left - BROWSER_SESSION_MARGIN_S <= deadline_budget
+            if session_short:
+                # A Midway problem: the midway backlog's (deferred_auth).
+                browser_allowed = False
+                deferred_auth += len(browser_queue)
+                midway_cause = MIDWAY_CAUSE_LATE
+                print(f"WARNING: only {max(0.0, session_left) / 60:.0f} min of Midway session left — run mwinit "
+                      f"before the browser pass; {len(browser_queue)} browser URL(s) deferred_auth "
+                      f"(no launch, no strike)")
+            else:
+                # Out of time, not a Midway problem: a budget deferral of the browser pass,
+                # [backlog.bookmarks-browser] with the deadline cause.
+                browser_deadline_deferred = len(browser_queue)
+                browser["deferred"] += browser_deadline_deferred
+                browser_details["budget"] += browser_deadline_deferred
+                browser_cause_overrides["budget"] = MIDWAY_CAUSE_DEADLINE
+                print(f"WARNING: only {max(0.0, deadline_budget):.0f} s of the job deadline left before the "
+                      f"browser pass; {len(browser_queue)} browser URL(s) deferred (budget; no launch, no strike)")
+            browser_queue = []
+    if browser_queue:
+        print(f"\n--- Internal links via browser ({len(browser_queue)}, "
+              f"{browser['fallback']} cookie-path fallback(s), budget {browser_budget:.0f}s) ---")
+        browser_ran = True
+        results = browser_fetch_pages([u for _, u in browser_queue], browser_budget)
+        browser_auth_urls = []
+        for name, url in browser_queue:
+            res = results.get(url)
+            outcome = browser_outcome(url, res) if res is not None else "deferred"
+            if outcome == "auth" and url in fallback_urls and not browser_midway_login(res):
+                outcome = "unsupported_auth"   # the cookie path's verdict stands: a login Midway can't satisfy
+            if outcome == "ok":
+                try:
+                    save_page(name, url, res.text, fetched_via="browser")
+                except OSError as exc:
+                    print(f"    ✗ Could not store browser page: {type(exc).__name__}")
+                    outcome = "error"
+            if outcome == "ok":
+                ok += 1
+                outcomes[url] = "ok"
+            elif outcome == "auth":
+                skipped_auth += 1
+                outcomes[url] = "auth"
+                if browser_midway_login(res):
+                    browser_auth_urls.append(url)   # Midway's own sign-in: the systemic check's evidence
+            elif outcome == "unsupported_auth":
+                unsupported_auth += 1      # no strike; [backlog.bookmarks-unsupported] sees it
+                unsupported_hosts[_host(url)] += 1
+            elif outcome == "too_short":
+                too_short += 1
+                outcomes[url] = "too_short"
+            elif outcome == "deferred":
+                browser["deferred"] += 1   # not attempted: no strike, retried next run
+                browser_details[getattr(res, "detail", "") or "budget"] += 1
+                continue
+            else:
+                fail += 1
+                outcomes[url] = "timeout" if getattr(res, "detail", "") == "timeout" else "error"
+                outcome = "error"
+            browser[outcome] += 1
+        # Browser-only systemic check, independent of cookie-path results: every
+        # browser page hit Midway's own sign-in (e.g. the Midway mint failing) -> a
+        # session problem, deferred_auth with no strikes. HTTP 401/403 permission
+        # pages and foreign logins are per-URL refusals and keep their strikes.
+        attempts = sum(browser[k] for k in ("ok", "auth", "too_short", "error", "unsupported_auth"))
+        if attempts >= SYSTEMIC_MIN_ATTEMPTS and len(browser_auth_urls) == attempts and not browser["ok"]:
+            print(f"WARNING: all {attempts} browser fetch(es) hit Midway sign-in and none reached a page — "
+                  f"deferred_auth, no ledger strike; {MIDWAY_CAUSE_BROWSER}")
+            for url in browser_auth_urls:
+                outcomes.pop(url, None)
+            skipped_auth -= len(browser_auth_urls)
+            deferred_auth += len(browser_auth_urls)
+            browser["deferred_auth"], browser["auth"] = len(browser_auth_urls), 0
+            midway_cause = MIDWAY_CAUSE_BROWSER
+
+    if internal or browser_queue:
+        if skipped_auth >= SYSTEMIC_MIN_ATTEMPTS and not ok and not too_short:
+            # A valid session that reached no internal page at all is either a session
+            # problem (defer, no strikes) or only restricted pages are left (strike).
+            # One known-good page through the same path tells them apart.
+            canary = canary_outcome()
+            if canary == "ok":
+                print(f"WARNING: all {skipped_auth} Midway-path fetch(es) hit sign-in but the canary page "
+                      f"was reached — the session works; per-URL refusals, ledger strikes recorded")
+            else:
+                midway_cause = MIDWAY_CAUSE_CANARY if canary == "auth" else \
+                    f"Midway-path fetches hit sign-in and the canary page was inconclusive ({canary})"
+                print(f"WARNING: Midway session valid but all {skipped_auth} Midway-path fetch(es) hit "
+                      f"sign-in and none reached a page (canary: {canary}) — deferred_auth, no ledger strike; "
+                      f"{midway_cause}")
+                for url in [u for u, c in outcomes.items() if c == "auth"]:
+                    del outcomes[url]
+                deferred_auth, skipped_auth = deferred_auth + skipped_auth, 0
+    if unsupported_hosts:
+        print(f"WARNING: {unsupported_auth} internal URL(s) on host(s) without a Midway sign-in answered a bare "
+              f"403/sign-in (unsupported_auth, no strike): "
+              + ", ".join(f"{h} ({n})" for h, n in sorted(unsupported_hosts.items())))
+
+    # SharePoint Office documents (one grasp-mcp session): advisory only, never a
+    # ledger strike, never the job's exit.
+    sharepoint_summary = run_sharepoint_docs(sharepoint, started)
+
+    # Public links with Crawlee: bounded batches, total kept under the job deadline.
+    budget = job_deadline_s() - (time.monotonic() - started) - DEADLINE_MARGIN_S
+    killed_deferred = set()
+    if public:
+        check_batch_scrape_patch()
+    public_stats = scrape_with_crawlee(public, timeout=max(0.0, budget), outcomes=outcomes,
+                                       log_name=CRAWLEE_LOG_NAME, env=BATCH_SCRAPE_ENV,
+                                       killed_deferred=killed_deferred) if public else \
+        {"processed": 0, "skipped": 0, "failed": 0, "too_short": 0, "timed_out_batches": 0, "deferred": 0}
+
+    print(f"\nInternal: {ok} scraped, {skipped_auth} skipped_auth, {fail} failed, {too_short} too_short, "
+          f"{deferred_auth} deferred_auth, {unsupported_auth + skipped_unsupported} unsupported_auth "
+          f"({skipped_unsupported} not fetched: non-Midway sign-in), {skipped_personal} skipped_personal, "
+          f"{skipped_invalid_url} skipped_invalid_url")
+    if browser_ran:
+        print(f"Browser: {browser['ok']} ok, {browser['auth']} auth, {browser['too_short']} too_short, "
+              f"{browser['error']} error, {browser['unsupported_auth']} unsupported_auth, "
+              f"{browser['deferred']} deferred ({dict(sorted(browser_details.items()))}), "
+              f"{browser['deferred_auth']} deferred_auth, {browser['fallback']} fallback(s)")
+    print(f"Public: {public_stats}")
+    record_unreachable(ledger, outcomes, len(unreachable), killed_deferred=killed_deferred)
+    report_backlog(public_stats.get("deferred", 0))
+    report_backlog(deferred_auth, job=MIDWAY_BACKLOG_JOB, cause=midway_cause)
+    if internal_ran and browser_allowed:
+        # Every run whose browser pass was allowed (also with nothing queued: that
+        # resets the streak); a Midway-session deferral is the midway backlog's.
+        report_backlog(browser["deferred"], job=BROWSER_BACKLOG_JOB,
+                       cause=browser_defer_cause(browser_details, browser_cause_overrides))
+    if internal_ran:
+        # Only runs whose internal path ran say anything about unknown hosts; the
+        # pre-routed known non-Midway hosts (skipped_unsupported) are expected, not counted.
+        report_backlog(unsupported_auth, job=UNSUPPORTED_BACKLOG_JOB,
+                       cause=("hosts: " + ", ".join(sorted(unsupported_hosts))) if unsupported_hosts else None)
+    if sharepoint:
+        report_backlog(sharepoint_advisories(sharepoint_summary), job=SHAREPOINT_BACKLOG_JOB,
+                       cause=sharepoint_cause(sharepoint_summary))
+    internal_counts = {"ok": ok, "auth": skipped_auth, "too_short": too_short, "failed": fail,
+                       "deferred_auth": deferred_auth, "unsupported_auth": unsupported_auth,
+                       "browser_ok": browser["ok"], "browser_auth": browser["auth"],
+                       "browser_error": browser["error"], "browser_deferred": browser["deferred"],
+                       "skipped_personal": skipped_personal, "skipped_invalid_url": skipped_invalid_url}
+    if sharepoint:
+        internal_counts["sharepoint"] = dict(sharepoint_summary["counts"])
+    internal_auth = {u for u, c in outcomes.items() if c == "auth" and needs_cookies(u)}
+    return run_exit_code(internal_counts, public_stats, outcomes, ledger,
+                         eligible=len(pending) - deferred_auth - skipped_unsupported - skipped_personal
+                         - skipped_invalid_url - browser_deadline_deferred - len(sharepoint),
+                         public_eligible=len(public),
+                         skipped_unreachable=len(unreachable), internal_auth=internal_auth)
+
+
+#: Fewer attempts than this can not show a systemic break by themselves (one
+#: bad bookmark left over is not an outage; network loss is caught by the
+#: wrapper's preflight and a broken Crawlee by ``crawlee_broken``).
+SYSTEMIC_MIN_ATTEMPTS = 3
+
+
+def run_exit_code(internal, public_stats, outcomes, ledger, *, eligible, public_eligible=0,
+                  skipped_unreachable=0, internal_auth=()):
+    """The job's exit code: 0 unless the run as a whole broke.
+
+    Per-URL outcomes (auth, too_short, timeout, error on individual URLs) are
+    the unreachable ledger's business and never fail the job. Exit 1 when:
+
+    * a Crawlee batch shows Crawlee itself broke (``crawlee_broken``: missing
+      node / node_modules, or non-zero exit with no parseable output);
+    * there were eligible URLs (new, not cooling off, not ``deferred_auth``)
+      but none was attempted (budget-deferred URLs are not attempts);
+    * per path, public: public URLs were eligible, at least one Crawlee batch
+      ran, and the batches produced no mark, no Crawlee record naming a URL
+      and no index addition — a hung Chromium/Crawlee is an outage even when
+      internal fetches were attempted in the same run;
+    * systemic: none reached a page (0 ok, 0 too_short) and at least
+      ``SYSTEMIC_MIN_ATTEMPTS`` of the failed URLs (internal skipped_auth
+      excluded — a session issue) are not in ledger cool-off after this run's
+      strikes were recorded. (A few URLs that just reached strike 3 no longer
+      hide an outage of the rest.)
+
+    ``failed_batches`` (non-zero exits that named no failed URL) are reported,
+    not counted as URL failures. This job does not touch the DB (the nightly
+    ingest job ingests Crawlee's index); ledger/backlog bookkeeping errors are
+    warnings, never the exit. Always prints one WARNING summary line with the
+    per-class counts.
+    """
+    from collections import Counter
+    classes = Counter(outcomes.values())
+    pub_ok = public_stats.get("processed", 0)
+    pub_short = public_stats.get("too_short", 0)
+    pub_failed = public_stats.get("failed", 0)
+    deferred = public_stats.get("deferred", 0)
+    broken = public_stats.get("crawlee_broken", 0)
+    batches_run = public_stats.get("batches_run", 0)
+    batches_with_output = public_stats.get("batches_with_output", batches_run)
+    failed_batches = public_stats.get("failed_batches", 0)
+    deferred_auth = internal.get("deferred_auth", 0)
+    reached = internal["ok"] + internal["too_short"] + pub_ok + pub_short
+    failed = internal["failed"] + pub_failed
+    attempted = reached + failed + internal["auth"] + internal.get("unsupported_auth", 0)
+    internal_auth = set(internal_auth or ())
+    failed_urls = [u for u, c in outcomes.items()
+                   if c in ("auth", "timeout", "error") and u not in internal_auth]
+    cooling = sum(1 for u in failed_urls if ledger is not None and ledger.should_skip(u))
+
+    reason = None
+    if broken:
+        reason = f"crawlee_broken ({broken} batch(es))"
+    elif eligible and not attempted:
+        reason = f"0 of {eligible} eligible URL(s) attempted"
+    elif public_eligible and batches_run and not batches_with_output:
+        reason = f"0 of {public_eligible} public URL(s) attempted in {batches_run} Crawlee batch(es)"
+    elif not reached and (failed - cooling) >= SYSTEMIC_MIN_ATTEMPTS:
+        reason = f"systemic: all {failed} attempted URL(s) failed, {failed - cooling} not cooling off"
+    print(f"WARNING: bookmarks summary — eligible={eligible} attempted={attempted} ok={internal['ok'] + pub_ok} "
+          f"auth={classes.get('auth', 0)} too_short={internal['too_short'] + pub_short} "
+          f"timeout={classes.get('timeout', 0)} error={classes.get('error', 0)} failed={failed} "
+          f"deferred={deferred} deferred_auth={deferred_auth} "
+          f"unsupported_auth={internal.get('unsupported_auth', 0)} skipped_unreachable={skipped_unreachable} "
+          f"cooling_off={cooling} failed_batches={failed_batches} "
+          f"crawlee_broken={broken} browser_ok={internal.get('browser_ok', 0)} "
+          f"browser_auth={internal.get('browser_auth', 0)} browser_error={internal.get('browser_error', 0)} "
+          f"browser_deferred={internal.get('browser_deferred', 0)} "
+          f"skipped_personal={internal.get('skipped_personal', 0)} "
+          f"skipped_invalid_url={internal.get('skipped_invalid_url', 0)}"
+          + (f" sharepoint={_counts_text(internal['sharepoint'])}" if "sharepoint" in internal else "")
+          + f" -> exit {1 if reason else 0}"
+          f"{f' ({reason})' if reason else ' (per-URL outcomes are left to the unreachable ledger)'}")
+    return 1 if reason else 0
+
+
+def _counts_text(counts):
+    """``captured:1,unchanged:5`` (sorted), or ``0`` when empty."""
+    return ",".join(f"{k}:{v}" for k, v in sorted(counts.items())) or "0"
+
+
+def _load_ledger():
+    try:
+        from src.capture.unreachable import Ledger
+        return Ledger.load()
+    except Exception as exc:  # noqa: BLE001 - a broken ledger means "retry everything", never a crash
+        print(f"WARNING: could not read the bookmarks unreachable ledger: {type(exc).__name__}")
+        return None
+
+
+def record_unreachable(ledger, outcomes, skipped_unreachable, killed_deferred=()):
+    """Persist this run's per-URL outcomes and print the ledger summary (counts only).
+
+    ``killed_deferred`` URLs (in a killed batch, never shown attempted) get one
+    ``deferred_runs`` count each; at the ledger's ``DEFERRAL_LIMIT`` that is a
+    ``timeout`` strike (``deferral strike(s)`` in the summary)."""
+    if ledger is None:
+        return None
+    from collections import Counter
+    counts = Counter(cls for cls in outcomes.values() if cls != "ok")
+    newly = deferral_strikes = 0
+    try:
+        for url, cls in outcomes.items():
+            was_skipping = ledger.skip_until(url) is not None
+            entry = ledger.record(url, cls)
+            if entry and entry.get("skip_until") and not was_skipping:
+                newly += 1
+        for url in sorted(set(killed_deferred) - set(outcomes)):
+            was_skipping = ledger.skip_until(url) is not None
+            entry = ledger.record_deferred(url)
+            if entry:
+                deferral_strikes += 1
+                if entry.get("skip_until") and not was_skipping:
+                    newly += 1
+        ledger.save()
+    except Exception as exc:  # noqa: BLE001 - ledger bookkeeping must not change the job's outcome
+        print(f"WARNING: could not record the bookmarks unreachable ledger: {type(exc).__name__}")
+        return None
+    print(f"Unreachable: {skipped_unreachable} skipped_unreachable, {newly} newly cooling off, "
+          f"attempt classes {dict(sorted(counts.items()))}, {len(set(killed_deferred))} killed-batch "
+          f"deferral(s), {deferral_strikes} deferral strike(s), ledger {len(ledger.entries)} URL(s)")
+    return counts
+
+
+#: Separate backlog streak for internal URLs deferred because the Midway cookie was
+#: missing/expired (``deferred_auth``): ``<status-dir>/bookmarks-midway.backlog.json``,
+#: ``[backlog.bookmarks-midway]`` in config/liveness.toml.
+MIDWAY_BACKLOG_JOB = "bookmarks-midway"
+#: Per-run count of dynamic ``unsupported_auth`` (an unknown host answered a bare
+#: 403/sign-in with no Midway hop): ``<status-dir>/bookmarks-unsupported.backlog.json``,
+#: ``[backlog.bookmarks-unsupported]``. Pre-routed ``NON_MIDWAY_AUTH_HOSTS`` are not counted.
+UNSUPPORTED_BACKLOG_JOB = "bookmarks-unsupported"
+#: Browser URLs the midway-playwright pass deferred (detail launch / server_down /
+#: budget / max_pages): ``<status-dir>/bookmarks-browser.backlog.json``,
+#: ``[backlog.bookmarks-browser]`` (threshold 1; ``cause`` per detail).
+BROWSER_BACKLOG_JOB = "bookmarks-browser"
+
+
+def report_backlog(deferred, job="bookmarks", cause=None):
+    """Track consecutive runs that deferred URLs; warn once the backlog persists.
+
+    A single deferral is normal (the rest is retried next run) and never fails
+    the job; the liveness sweep turns a persistent streak into an advisory.
+    ``job="bookmarks"`` is the public Crawlee-budget backlog (browser deferrals are
+    ``BROWSER_BACKLOG_JOB``'s, never counted there); ``MIDWAY_BACKLOG_JOB``
+    is the internal path deferred on a Midway problem, ``cause`` saying which
+    (stored in the sidecar for the liveness finding); ``UNSUPPORTED_BACKLOG_JOB``
+    counts unknown hosts answering a bare 403/sign-in (``cause`` names them)."""
+    try:
+        from src.operations import backlog
+        state = backlog.record_run(job, deferred, cause=cause)
+        limit = backlog.threshold(job)
+    except Exception as exc:  # noqa: BLE001 - backlog bookkeeping must not change the job's outcome
+        print(f"WARNING: could not record the {job} backlog state: {type(exc).__name__}")
+        return None
+    streak = state["consecutive_deferred_runs"]
+    if streak >= limit:
+        defaults = {MIDWAY_BACKLOG_JOB: MIDWAY_CAUSE_COOKIE,
+                    UNSUPPORTED_BACKLOG_JOB: "unknown internal hosts answer a bare 403/sign-in",
+                    BROWSER_BACKLOG_JOB: "the browser pass deferred URLs",
+                    SHAREPOINT_BACKLOG_JOB: "SharePoint documents were not captured"}
+        cause = cause or defaults.get(job, "the Crawlee budget is not draining the queue")
+        print(f"WARNING: {job} backlog persists — {deferred} URL(s) deferred, {streak} consecutive "
+              f"run(s) with deferrals (threshold {limit}); {cause}")
+    return state
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -9,7 +9,6 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import src.db as db
-from tests.conftest import _deterministic_embedding
 
 
 class TestCreateAndGetMemory:
@@ -65,7 +64,7 @@ class TestCreateAndGetRelationship:
         rels = db.get_relationships(id_a)
         assert len(rels) >= 1
         assert any(
-            str(r["source_id"]) == id_a and str(r["target_id"]) == id_b
+            {str(r["source_id"]), str(r["target_id"])} == {id_a, id_b} and str(r["neighbor_id"]) == id_b
             for r in rels
         )
 
@@ -116,32 +115,61 @@ class TestCreateMemoryV2FieldsRoundTrip:
             _truncate_tables()
 
 
-class TestEmbeddingMockDeterminism:
-    """Feature: retrieval-quality, Property 1: Embedding Mock Determinism
+class TestFindSchemasForMemories:
+    """find_schemas_for_memories batches find_schemas_for_memory: one query for many
+    constituents, grouped per constituent, newest schema first, and byte-for-byte the
+    same rows the single-id lookup returns."""
 
-    Validates: Requirements 1.3
-    """
+    def test_groups_schemas_by_constituent_newest_first(self, test_db, clean_tables):
+        a = db.create_memory(type="idea", title="A", content="constituent a")
+        b = db.create_memory(type="idea", title="B", content="constituent b")
+        orphan = db.create_memory(type="idea", title="Orphan", content="belongs to no schema")
 
-    @given(text=st.text(min_size=0, max_size=500))
-    @settings(max_examples=25)
-    def test_embedding_mock_determinism(self, text: str):
-        """Feature: retrieval-quality, Property 1: Embedding Mock Determinism
+        older = db.create_memory(type="schema", title="Older schema", content="s1")
+        newer = db.create_memory(type="schema", title="Newer schema", content="s2")
+        not_a_schema = db.create_memory(type="synthesis", title="Synthesis", content="x")
 
-        For any input string, the mock returns a 1024-dim list of floats,
-        and calling it twice with the same input produces the same output.
+        # Schemas point at their constituents via derived_from (schema -> constituent).
+        db.create_relationship(older, a, "derived_from")
+        db.create_relationship(newer, a, "derived_from")
+        db.create_relationship(newer, b, "derived_from")
+        # Wrong relation type / wrong source type must be ignored, as in the single lookup.
+        db.create_relationship(not_a_schema, a, "derived_from")
+        db.create_relationship(older, b, "supports")
 
-        **Validates: Requirements 1.3**
-        """
-        result = _deterministic_embedding(text)
+        # Force a strict created_at ordering between the two schemas.
+        with db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE memories SET created_at = now() - interval '1 day' WHERE id = %s", (older,))
+            conn.commit()
 
-        # Output is a list of exactly 1024 elements
-        assert isinstance(result, list)
-        assert len(result) == 1024
+        grouped = db.find_schemas_for_memories([a, b, orphan])
 
-        # Every element is a float
-        for val in result:
-            assert isinstance(val, float)
+        assert set(grouped) == {a, b}, "only constituents with at least one schema appear"
+        assert [s["title"] for s in grouped[a]] == ["Newer schema", "Older schema"]
+        assert [s["title"] for s in grouped[b]] == ["Newer schema"]
+        assert "constituent_id" not in grouped[a][0], "grouping key is not leaked into rows"
 
-        # Same input produces identical output (determinism)
-        result2 = _deterministic_embedding(text)
-        assert result == result2
+        assert [str(s["id"]) for s in grouped[a]] == [newer, older]
+        assert [str(s["id"]) for s in grouped[b]] == [newer]
+
+    def test_empty_input_short_circuits(self, test_db):
+        assert db.find_schemas_for_memories([]) == {}
+
+
+class TestGetMemoriesByIds:
+    """Batched fetch for context packets: one query, requested order, no vectors."""
+
+    def test_preserves_order_skips_missing_and_omits_vectors(self, test_db, clean_tables):
+        a = db.create_memory(type="idea", title="A", content="alpha", embedding=str([0.1] * 1024))
+        b = db.create_memory(type="idea", title="B", content="beta")
+        missing = str(uuid.uuid4())
+
+        rows = db.get_memories_by_ids([b, missing, a])
+
+        assert [r["title"] for r in rows] == ["B", "A"]
+        assert all("embedding" not in r and "search_vector" not in r for r in rows)
+        assert rows[1]["content"] == "alpha"
+
+    def test_empty_input(self, test_db):
+        assert db.get_memories_by_ids([]) == []

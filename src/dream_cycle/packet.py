@@ -1,0 +1,255 @@
+"""Memory context packets for tool-less model backends.
+
+Agentic-CLI backends (Kiro, Claude Code, Codex) read memories themselves over
+MCP, so the Thinker only receives memory ids and titles. A Direct-API backend
+(Bedrock) has no tools, so the orchestrator must deliver the slice contents in
+the prompt instead — the "B2 context packet" from the original Fable plan.
+
+The same contents are cached per run so evaluators can ground a candidate
+against the *actual text* of its cited source memories (the Skeptic's first
+criterion), instead of a list of UUIDs.
+
+Everything here is bounded and defensive: content is truncated per memory and
+in total, only well-formed UUIDs are looked up, and a database failure degrades
+to an empty packet rather than aborting the run.
+"""
+
+from __future__ import annotations
+
+import logging
+import psycopg2
+import re
+import uuid
+
+from src.db import get_memories_by_ids, iso as _iso
+from src.dream_cycle.storage import canonical_uuid, is_mutable_target
+
+logger = logging.getLogger(__name__)
+
+#: Per-memory content cap (chars). ~1K tokens; enough for grounding, not a dump.
+MAX_CONTENT_CHARS_PER_MEMORY = 4_000
+#: Whole-packet content cap (chars). Cost depends on the selected model and usage.
+MAX_TOTAL_CONTENT_CHARS = 120_000
+
+TOOLLESS_NOTE = (
+    "Tools are not available in this run. The full content of every memory in "
+    "the slice is included above under memory_slice.memories — reason from that "
+    "text only; do not attempt to search or read memories."
+)
+
+TOOLED_NOTE = (
+    "The full content of every memory in the slice is included above under "
+    "memory_slice.memories — do not re-read them with memory_read. Use your tools "
+    "only for what the packet cannot give you: memory_search to find existing "
+    "semantic memories on the same topic (CLS interleaving) or to check whether a "
+    "candidate already exists, and memory_graph to follow a relationship. Budget "
+    "about 6-10 tool calls; each costs ~20 seconds."
+)
+
+#: Schema for an evaluator verdict. Passed as ``schema=`` to Direct-API
+#: backends so the verdict arrives as a tool call rather than JSON-in-prose:
+#: in the first live Bedrock run, Sonnet 5 wrote ~3.5K tokens of markdown
+#: analysis and then a JSON object whose unescaped quotes broke the text
+#: backstop on 4 of 7 Methodologist calls.
+EVALUATOR_VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["ACCEPT", "REJECT"]},
+        "score": {"type": "integer", "minimum": 0, "maximum": 100,
+                  "description": "How far the claim as written meets the Standard (0-100)."},
+        "blocking_issues": {"type": "array", "items": {"type": "string"},
+                            "description": "Blocking defects found (fabrication, contradiction, misattribution, uncited)."},
+        "advisory_issues": {"type": "array", "items": {"type": "string"},
+                            "description": "Advisory defects found (overreach, overlap, timing, depth)."},
+        "reasoning": {"type": "string",
+                      "description": "Name the failing Standard letter(s) or state all four hold, then explain."},
+    },
+    "required": ["verdict", "score", "blocking_issues", "advisory_issues", "reasoning"],
+}
+
+
+def _valid_uuids(ids) -> list[str]:
+    out: list[str] = []
+    for raw in ids or []:
+        try:
+            out.append(str(uuid.UUID(str(raw))))
+        except (ValueError, AttributeError, TypeError):
+            logger.debug("Skipping non-UUID memory id in packet: %r", raw)
+    return out
+
+
+def load_memories_by_ids(memory_ids) -> list[dict]:
+    """Fetch packet memories; expected storage/data errors return no content."""
+    ids = _valid_uuids(memory_ids)
+    if not ids:
+        return []
+    try:
+        return get_memories_by_ids(ids)
+    except (psycopg2.Error, OSError, ValueError, KeyError):
+        logger.exception("Failed to load %d memories for context packet; continuing without contents", len(ids))
+        return []
+
+
+def packet_entry(memory: dict, content_cap: int = MAX_CONTENT_CHARS_PER_MEMORY) -> dict:
+    """The compact, JSON-safe view of one memory carried in a packet."""
+    content = memory.get("content") or ""
+    truncated = len(content) > content_cap
+    return {
+        "id": str(memory.get("id")),
+        "title": memory.get("title"),
+        "type": memory.get("type"),
+        "project": memory.get("project"),
+        "tags": list(memory.get("tags") or []),
+        "created_at": _iso(memory.get("created_at")),
+        "content": content[:content_cap] + (" …[truncated]" if truncated else ""),
+    }
+
+
+def build_packet(memories: list[dict]) -> list[dict]:
+    """Format memories for the prompt, enforcing per-memory and total caps.
+
+    The memory that crosses the total budget is cut to what remains; every
+    memory after it keeps its id/title/metadata but carries no content.
+    ``may_update`` marks the memories an UPDATE/SUPERSEDE may target (the
+    storage authority predicate); everything else is immutable to the Thinker.
+    """
+    entries: list[dict] = []
+    remaining = MAX_TOTAL_CONTENT_CHARS
+    budget_hit = False
+    for memory in memories:
+        entry = packet_entry(memory)
+        entry["may_update"] = is_mutable_target(memory)
+        if budget_hit:
+            entry["content"] = ""
+        elif len(entry["content"]) > remaining:
+            entry["content"] = entry["content"][:remaining] + " …[truncated: packet budget]"
+            budget_hit = True
+            logger.warning(
+                "Context packet hit the %d-char total budget; later memories carry titles only.",
+                MAX_TOTAL_CONTENT_CHARS,
+            )
+        else:
+            remaining -= len(entry["content"])
+        entries.append(entry)
+    return entries
+
+
+#: Short per-packet memory refs ("m1".."mN") the Thinker cites instead of
+#: 36-char UUIDs. On 2026-10-16 the Thinker copied
+#: 1264ac24-b8f6-472c-b5bd-107b793d836a as ...-107b835b5e9c (last 12 hex chars
+#: rewritten) and two otherwise-valid candidates were blocked before judging.
+REF_PREFIX = "m"
+_REF_RE = re.compile(rf"^{REF_PREFIX}[1-9]\d*$")
+#: A bracketed ref group in prose: "[m3]" or "[m3, m5]".
+_TEXT_REF_GROUP_RE = re.compile(rf"\[\s*{REF_PREFIX}\d+(?:\s*[,;]\s*{REF_PREFIX}\d+)*\s*\]", re.IGNORECASE)
+_TEXT_REF_RE = re.compile(rf"{REF_PREFIX}\d+", re.IGNORECASE)
+#: Free-text candidate fields that may cite memories in prose.
+_TEXT_FIELDS = ("title", "content", "confidence_reasoning", "schema_note", "supersedes_reason")
+
+
+def assign_refs(entries: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    """Give each packet entry a short stable ref, in packet order.
+
+    Returns the entries with ``"ref"`` as their first key and the ref -> memory
+    id map used to resolve the Thinker's citations. Refs are per packet: "m3" in
+    one slice's packet means nothing in another's.
+    """
+    ref_map: dict[str, str] = {}
+    out: list[dict] = []
+    for i, entry in enumerate(entries, start=1):
+        ref = f"{REF_PREFIX}{i}"
+        ref_map[ref] = str(entry["id"])
+        out.append({"ref": ref, **{k: v for k, v in entry.items() if k != "ref"}})
+    return out, ref_map
+
+
+def resolve_memory_ref(value, ref_map: dict[str, str]):
+    """Map one cited id to its packet memory id; anything else is returned unchanged.
+
+    A packet ref ("m3", tolerated as "M3" or "[m3]") becomes its memory's id. A
+    full UUID of a packet memory is accepted too (backward compatible) and
+    returned in canonical form. Every other value — an unknown ref, a corrupted
+    or out-of-packet UUID, a non-string — passes through untouched so
+    ``authorize_candidate`` still blocks it. No fuzzy matching, ever.
+    """
+    if not isinstance(value, str):
+        return value
+    key = value.strip().strip("[]").strip().lower()
+    if _REF_RE.match(key) and key in ref_map:
+        return ref_map[key]
+    canonical = canonical_uuid(value.strip())
+    if canonical is not None and canonical in {canonical_uuid(mid) for mid in ref_map.values()}:
+        return canonical
+    return value
+
+
+def _resolve_text_refs(text, ref_map: dict[str, str]):
+    """Replace bracketed in-packet refs in prose ("[m3]" -> "[<uuid>]"); unknown refs stay."""
+    if not isinstance(text, str) or not ref_map:
+        return text
+
+    def group(match: re.Match) -> str:
+        return _TEXT_REF_RE.sub(lambda m: ref_map.get(m.group(0).lower(), m.group(0)), match.group(0))
+
+    return _TEXT_REF_GROUP_RE.sub(group, text)
+
+
+def resolve_candidate_refs(raw, ref_map: dict[str, str]):
+    """Return a copy of one raw Thinker candidate with packet refs mapped to memory ids.
+
+    Id fields: ``source_memories[]``, ``target_memory_id`` and
+    ``relationships[].target_id``. Prose fields (title, content,
+    confidence_reasoning, schema_note, supersedes_reason, relationships[].note)
+    have bracketed refs replaced so a stored candidate or digest never carries a
+    ref. Non-dict input, and fields of an unexpected shape, are returned as-is
+    for the existing parser and gate to handle.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    out = dict(raw)
+    if isinstance(out.get("source_memories"), list):
+        out["source_memories"] = [resolve_memory_ref(m, ref_map) for m in out["source_memories"]]
+    if out.get("target_memory_id") is not None:
+        out["target_memory_id"] = resolve_memory_ref(out["target_memory_id"], ref_map)
+    if isinstance(out.get("relationships"), list):
+        rels = []
+        for rel in out["relationships"]:
+            if isinstance(rel, dict):
+                rel = dict(rel)
+                if "target_id" in rel:
+                    rel["target_id"] = resolve_memory_ref(rel["target_id"], ref_map)
+                if "note" in rel:
+                    rel["note"] = _resolve_text_refs(rel["note"], ref_map)
+            rels.append(rel)
+        out["relationships"] = rels
+    for field in _TEXT_FIELDS:
+        if field in out:
+            out[field] = _resolve_text_refs(out[field], ref_map)
+    return out
+
+
+def format_sources_for_evaluator(cache: dict[str, dict], source_ids) -> str:
+    """Render the cited source memories' text for an evaluator prompt.
+
+    Only sources present in ``cache`` (the current run's slice contents) are
+    rendered; returns "" when none are available so the existing prompt is
+    unchanged on tool-capable runs.
+    """
+    lines: list[str] = []
+    for sid in source_ids or []:
+        memory = cache.get(str(sid))
+        if not memory:
+            continue
+        entry = packet_entry(memory)
+        lines.append(
+            f"- [{entry['id']}] {entry['title']!s} ({entry['type']}, {entry['created_at']}):\n"
+            f"  {entry['content']}"
+        )
+    if not lines:
+        return ""
+    return "Source memory contents:\n" + "\n".join(lines)
+
+
+
+#: Kept for the replay harness and older call sites; identical to the graded schema.
+EVALUATOR_VERDICT_SCHEMA_V2 = EVALUATOR_VERDICT_SCHEMA

@@ -38,12 +38,13 @@ the connection between them is unexplored.
 6. STALE KNOWLEDGE — A synthesis or decision was made based on information \
 that has since been superseded by newer memories.
 
-7. META-COGNITIVE REFLECTION — Examine the dream cycle's own history. Look \
-at rejected candidates from previous cycles. What patterns appear in the \
-rejections? Are there systematic blind spots? Also examine retrieval quality: \
-when searches return poor results, what does that tell us about gaps in the \
-memory space? Meta-cognitive insights are stored with tag "meta-cognitive" \
-and feed back into the Explorer's strategy selection.
+7. META-COGNITIVE REFLECTION — Only when the slice itself is about this \
+system's history (its strategy is retrieval_failure_analysis, or its memories \
+are the dream cycle's own candidates and digests): look at rejected candidates \
+from previous cycles. What patterns appear in the rejections? Are there \
+systematic blind spots? Meta-cognitive insights are stored with tag \
+"meta-cognitive" and feed back into the Explorer's strategy selection. Do not \
+introduce reflection on the dream cycle into slices about anything else.
 
 8. CLS INTERLEAVING — When examining a slice, actively search for existing \
 semantic memories (synthesis, insight, decision) that cover the same topic. \
@@ -60,6 +61,17 @@ the narrative. "We tried three caching approaches and the third worked" is a \
 summary. "Cache invalidation at the application layer is more reliable than \
 TTL-based expiry when data consistency matters more than latency" is a \
 distillation. Distilled memories link back to sources via derived_from.
+
+10. ARRIVALS (slices with strategy "arrivals_synthesis") — These memories are \
+what happened in the user's life since the previous run, across channels: Slack \
+conversation-days, emails, calendar events, browsing days, pages read, \
+AI-assistant sessions. Treat them as a week's evidence, not as a corpus of \
+principles. Look for: echoes between channels (the same account, person or \
+decision appearing in two places); commitments the user made or received and \
+their status; questions asked in one channel and answered in another; a \
+meeting and the reading or conversation that preceded it; anything the user \
+would want pointed out. A grounded, specific observation about this week beats \
+an abstract principle. Cite the episodes.
 """
 
 
@@ -75,12 +87,67 @@ Provide the target_memory_id of the memory to update.
 Provide the target_memory_id and a supersedes_reason explaining why the old \
 memory is being replaced. The old memory is preserved with status "superseded."
 
+UPDATE and SUPERSEDE may only target a memory marked "may_update": true in \
+memory_slice.memories — a discovery this system stored earlier. Every other \
+memory (captured evidence, guidance, anything marked "may_update": false or not \
+in the packet) is immutable: cite it in source_memories or relationships and \
+use CREATE instead. A candidate that targets an immutable memory is discarded \
+unjudged.
+
+An UPDATE's content REPLACES the target memory's content; the old text is not \
+kept beside it. So write content as the complete revised memory: keep \
+everything in the target that is still true, fold the new evidence in, and \
+keep the target's ref in source_memories so what you carry over stays \
+traceable. Write the memory itself, not a note about it: do not cite the \
+target by its ref or id in prose, do not describe it in the third person as a \
+separate memory ("the figure recorded in [m4]", "neither [m2] nor [m4] \
+mentions"), and do not propose a relationship to the target. If you only want \
+to add a note and leave the target as it is, use CREATE with an "extends" \
+relationship to the target instead. The Scope to evidence rules apply to the \
+whole revised text, carried-over parts included.
+
+## Citing memories by ref
+
+Every memory in memory_slice.memories has a short "ref" ("m1", "m2", …). \
+Cite memories by ref, never by copying the 36-character id: in \
+source_memories, in target_memory_id and in every relationships[].target_id \
+write the ref exactly as given (e.g. "m3"). In prose — content, title, \
+schema_note, confidence_reasoning, supersedes_reason and relationship notes — \
+write refs in square brackets, e.g. [m3] or [m3, m5]. Only memories in \
+memory_slice.memories have refs and only they may be cited, targeted or \
+related to. (A memory's full "id" is still given for tool calls such as \
+memory_graph; do not use it in your output.)
+
 ## Depth framework
 
 Every candidate MUST include:
 - WHAT: The insight itself — clear, specific, actionable.
-- EVIDENCE: Which memories support this (IDs and brief quotes).
+- EVIDENCE: Which memories support this (IDs and brief verbatim quotes), \
+ending with a claim_scope sentence.
 - WHY IT MATTERS: What the user should do with this knowledge.
+
+## Scope to evidence
+
+State every claim — title included — at the scope the cited memories support, \
+and no wider. Every fact must be traceable to a cited memory; if a detail (a \
+number, a name, a channel, a date, a fax number, a quotation) is not in the \
+memories you were given, do not state it.
+
+- Quantify instead of generalising: "in the three notifications captured that \
+day", not "every notification".
+- Do not write "every", "never", "always", "the only" or "consistently" unless \
+every cited memory instantiates the claim, and say how many that is.
+- Quote verbatim, and attribute wording to whoever the memory shows produced \
+it. An agent's summary of an email is not the email's author; a Kiro \
+assistant's words are not the user's conclusion.
+- Set confidence by count and independence of sources: 1 source = low; 2 \
+sources, or several from one conversation or one day = medium; 3+ independent \
+sources (different conversations, channels or dates) = high.
+- End the EVIDENCE section with one sentence beginning "claim_scope:" that \
+states exactly which episodes, period and people the claim covers.
+- Return at most 2 candidates per slice — the best-grounded ones. A narrow, \
+correctly scoped observation passes the Panel; an inflated or embellished one \
+does not.
 
 ## Schema classification
 
@@ -97,29 +164,29 @@ answers. These become golden queries for retrieval quality benchmarking.
 
 ## Output format
 
-Return a JSON array of 0-3 CandidateInsight objects per memory slice:
+Return a JSON array of 0-2 CandidateInsight objects per memory slice:
 
 [
   {
     "title": "Concise, specific title",
     "type": "insight | connection | question | synthesis",
     "operation": "CREATE | UPDATE | SUPERSEDE",
-    "target_memory_id": "uuid (for UPDATE/SUPERSEDE only, null for CREATE)",
+    "target_memory_id": "ref, e.g. m4 (for UPDATE/SUPERSEDE only, null for CREATE)",
     "supersedes_reason": "Why the old memory is being replaced (SUPERSEDE only, null otherwise)",
     "schema_operation": "assimilation | accommodation",
     "schema_note": "Which existing principle this reinforces or what needs to change",
     "confidence": "high | medium | low",
     "confidence_reasoning": "Why this confidence level — what would change it?",
     "content": "Full insight text with WHAT, EVIDENCE, WHY IT MATTERS, and Questions this answers",
-    "source_memories": ["uuid1", "uuid2"],
+    "source_memories": ["m1", "m3"],
     "relationships": [
-      {"target_id": "uuid", "relation_type": "extends|contradicts|supports", "note": "..."}
+      {"target_id": "m2", "relation_type": "extends|contradicts|supports", "note": "..."}
     ],
     "strategy_that_found_it": "e.g., cross_project_collision"
   }
 ]
 
-Generate 0-3 candidate insights per memory slice. Quality over quantity. \
+Generate 0-2 candidate insights per memory slice — the best-grounded ones. Quality over quantity. \
 If a slice doesn't yield anything non-obvious, return an empty array — \
 don't force insights.
 

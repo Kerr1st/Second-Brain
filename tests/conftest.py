@@ -1,159 +1,130 @@
-"""Shared test fixtures for the Second Brain test suite.
+"""Synthetic database and fail-closed provider fixtures.
 
-Provides:
-- test_db: session-scoped fixture that creates/migrates the memory_bank_test database
-- clean_tables: function-scoped fixture that truncates test tables between tests
-- mock_embedding: deterministic 1024-dim embedding from input hash (no Bedrock calls)
-- sample_memory_factory: factory fixture for creating memories with known content
+Run via scripts/test_isolated.py; guards load before importing application code.
 """
+from tests._isolation import install
+install()
 
 import hashlib
 import math
 import os
-import subprocess
 from pathlib import Path
+import subprocess
+
+os.environ["SECOND_BRAIN_DIGEST_DIR"] = str(Path(os.environ["SECOND_BRAIN_TEST_MANIFEST"]).parent / "digests")
 
 import psycopg2
-import pytest
 from psycopg2 import sql
+import pytest
 
 import src.db as db
 from src.db import close_pool
 
-
-# ---------------------------------------------------------------------------
-# Database fixtures
-# ---------------------------------------------------------------------------
-
-TEST_DB_NAME = os.environ.get("TEST_DB_NAME", "memory_bank_test")
-
-# Connection params for the admin database (used to CREATE/DROP the test DB)
-_ADMIN_CONFIG = {
-    "host": os.environ.get("DB_HOST", "localhost"),
-    "port": int(os.environ.get("DB_PORT", "5432")),
-    "dbname": "postgres",
-    "user": os.environ.get("DB_USER", "memory_bank"),
-    "password": os.environ.get("DB_PASSWORD", "memory_bank"),
+TEST_DB_NAME = os.environ["TEST_DB_NAME"]
+_TEST_CONFIG = {
+    "host": os.environ["DB_HOST"], "port": int(os.environ["DB_PORT"]),
+    "dbname": TEST_DB_NAME, "user": os.environ["DB_USER"], "password": "",
 }
+# Environment was redirected before pytest imports. Never restore a live target.
+db.DB_CONFIG.update(_TEST_CONFIG)
 
 
-def _admin_connection():
-    """Connect to the default 'postgres' database for admin operations."""
-    conn = psycopg2.connect(**_ADMIN_CONFIG)
-    conn.autocommit = True
-    return conn
+@pytest.fixture(autouse=True)
+def _offline_services(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise RuntimeError("Live service access is disabled in the isolated suite")
+    monkeypatch.setattr("src.skim.store.get_connection", refuse)
+    monkeypatch.setattr("src.embeddings._get_client", refuse)
+    from src.backends.bedrock import BedrockInvoker
+    def injected_client_only(self, timeout):
+        if self._injected_client is None:
+            return refuse()
+        return self._injected_client
+    monkeypatch.setattr(BedrockInvoker, "_get_client", injected_client_only)
 
 
-def _require_disposable_test_database(database: str) -> None:
-    allowed = {"memory_bank_test", "second_brain_codex_test"}
-    if database not in allowed:
-        raise RuntimeError(
-            f"refusing to recreate database {database!r}; expected one of "
-            f"{', '.join(sorted(allowed))}"
-        )
+@pytest.fixture(scope="session", autouse=True)
+def _test_connection_config():
+    close_pool()
+    db.DB_CONFIG.update(_TEST_CONFIG)
+    yield
+    close_pool()
 
 
-def _create_test_db():
-    """Recreate the isolated test database for a clean migration baseline."""
-    _require_disposable_test_database(TEST_DB_NAME)
-    conn = _admin_connection()
+def _apply_migrations():
+    """Exercise the actual transactional runner, including its version ledger."""
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(["/bin/bash", str(root / "migrations/migrate.sh")],
+                            capture_output=True, text=True, timeout=90, check=False)
+    if result.returncode:
+        raise RuntimeError("Test schema migration failed:\n" + result.stdout + result.stderr)
+
+
+@pytest.fixture(scope="session")
+def test_schema(_test_connection_config):
+    _apply_migrations()
+    close_pool()  # reconnect after ALTER DATABASE SET so session GUCs take effect
+    yield _TEST_CONFIG.copy()
+    close_pool()
+
+
+@pytest.fixture(scope="session")
+def test_db(test_schema):
+    """Compatibility alias for existing database unit tests (not shadowable safety)."""
+    return test_schema
+
+
+def owner_connect(dbname=TEST_DB_NAME):
+    """A connection as the OWNER role (DB_MIGRATE_USER), for DDL/TRUNCATE in tests.
+
+    The application role (DB_USER) holds only what migration 017 grants: DML.
+    Anything structural a test needs -- creating a scratch table, truncating
+    between tests, pg_restore -- goes through this connection, exactly as it
+    would in production through memory_bank_owner.
+    """
+    return psycopg2.connect(**{**_TEST_CONFIG, "dbname": dbname, "user": os.environ["DB_MIGRATE_USER"]})
+
+
+def _truncate_test_tables():
+    conn = owner_connect()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = %s AND pid <> pg_backend_pid()",
-                (TEST_DB_NAME,),
-            )
-            cur.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {}").format(
-                    sql.Identifier(TEST_DB_NAME)
-                )
-            )
-            cur.execute(
-                sql.SQL("CREATE DATABASE {}").format(sql.Identifier(TEST_DB_NAME))
-            )
+            cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename <> 'schema_migrations'")
+            tables = [row[0] for row in cur.fetchall()]
+            if tables:
+                cur.execute(sql.SQL("TRUNCATE {} RESTART IDENTITY CASCADE").format(
+                    sql.SQL(", ").join(sql.Identifier("public", table) for table in tables)))
+        conn.commit()
     finally:
         conn.close()
 
 
-def _apply_migrations():
-    """Apply pending migrations through the production migration runner."""
-    repo_root = Path(__file__).resolve().parents[1]
-    runner = repo_root / "migrations" / "migrate.sh"
-    env = os.environ.copy()
-    env.update(
-        {
-            "DB_HOST": str(db.DB_CONFIG["host"]),
-            "DB_PORT": str(db.DB_CONFIG["port"]),
-            "DB_NAME": str(db.DB_CONFIG["dbname"]),
-            "DB_USER": str(db.DB_CONFIG["user"]),
-            "DB_PASSWORD": str(db.DB_CONFIG["password"]),
-            "PGPASSWORD": str(db.DB_CONFIG["password"]),
-        }
-    )
-    result = subprocess.run(
-        ["bash", str(runner)],
-        cwd=repo_root,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            "test database migration failed:\n"
-            f"{result.stdout}{result.stderr}"
-        )
+@pytest.fixture()
+def clean_tables(test_schema, _clean_each_database_test):
+    """Compatibility alias; automatic cleanup surrounds every DB fixture user."""
+    yield
 
 
-@pytest.fixture(scope="session")
-def test_db():
-    """Session-scoped fixture: recreate test DB, apply migrations, override DB_CONFIG.
-
-    Yields the overridden DB_CONFIG dict. On teardown, restores the original config.
-    """
-    # Save original config
-    original_config = db.DB_CONFIG.copy()
-
-    # Create the test database
-    _create_test_db()
-
-    # Override DB_CONFIG to point at the test database
-    db.DB_CONFIG.update({
-        "host": os.environ.get("DB_HOST", "localhost"),
-        "port": int(os.environ.get("DB_PORT", "5432")),
-        "dbname": TEST_DB_NAME,
-        "user": os.environ.get("DB_USER", "memory_bank"),
-        "password": os.environ.get("DB_PASSWORD", "memory_bank"),
-    })
-
-    # Invalidate any pool created with old config
-    close_pool()
-
-    # Apply pending migrations through the same runner used outside tests.
-    _apply_migrations()
-
-    yield db.DB_CONFIG
-
-    # Restore original config
-    db.DB_CONFIG.update(original_config)
-    close_pool()
+@pytest.fixture(autouse=True)
+def _clean_each_database_test(request):
+    uses_database = any(name in request.fixturenames for name in
+                        ("test_db", "test_schema", "test_conn", "sample_memory_factory"))
+    if uses_database:
+        request.getfixturevalue("test_schema")
+        _truncate_test_tables()
+    yield
+    if uses_database:
+        _truncate_test_tables()
 
 
 @pytest.fixture()
-def clean_tables(test_db):
-    """Function-scoped fixture: truncate memories and memory_relationships between tests."""
-    yield
-    with db.get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM context_receipts")
-            cur.execute("DELETE FROM dream_cycle_candidates")
-            cur.execute("DELETE FROM dream_cycle_runs")
-            cur.execute("DELETE FROM memory_relationships")
-            cur.execute("DELETE FROM memories WHERE parent_id IS NOT NULL")
-            cur.execute("DELETE FROM memories")
-        conn.commit()
+def test_conn(test_schema, clean_tables):
+    conn = psycopg2.connect(**test_schema)
+    conn.autocommit = True
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -218,3 +189,36 @@ def sample_memory_factory(test_db, clean_tables, mock_embedding):
             **kwargs,
         )
     return _factory
+
+
+class FakeInvoker:
+    """Scripted provider seam with explicit synthetic usage and recorded prompts."""
+    def __init__(self, outputs=None, usage=(3000, 200), default_output=None):
+        self.outputs = list(outputs or [])
+        self.calls = []
+        self._usage = usage
+        self._default_output = default_output
+
+    def invoke(self, system_prompt, user_message, **kwargs):
+        import json
+        self.calls.append({"system": system_prompt, "user": user_message, **kwargs})
+        output = self.outputs.pop(0) if self.outputs else (
+            self._default_output() if callable(self._default_output) else self._default_output)
+        if isinstance(output, BaseException):
+            raise output
+        return {"output": output, "raw": json.dumps(output), "usage_source": "real",
+                "usage": {"inputTokens": self._usage[0], "outputTokens": self._usage[1], "serviceTier": "flex"}}
+
+
+def mock_conn(rows=(), first=None):
+    """One consistent cursor context for unit tests of provider-independent SQL wiring.
+
+    Data-integrity behavior uses the disposable database, not this mock.
+    """
+    from unittest.mock import MagicMock
+    connection = MagicMock()
+    cursor = connection.cursor.return_value.__enter__.return_value
+    cursor.fetchall.return_value = list(rows)
+    cursor.fetchone.return_value = first
+    connection.__enter__.return_value = connection
+    return connection, cursor

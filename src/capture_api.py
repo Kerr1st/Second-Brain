@@ -7,6 +7,8 @@ the MCP server's memory_create tool.
 Run: python -m src.capture_api
 """
 
+import hashlib
+import json
 import hmac
 import logging
 import os
@@ -16,18 +18,14 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from src.classify import classify_memory
-from src.db import create_memory, is_reachable
-from src.depth import compute_depth_score
-from src.embeddings import generate_embedding
+from src.db import find_captured_source, is_reachable
+from src.ingest import ingest_content
 from src.project import normalize_project_tag
+from src.validation import MEMORY_TYPES, SOURCE_TYPES
 
 logger = logging.getLogger(__name__)
 
-VALID_TYPES = {
-    "idea", "synthesis", "research", "insight", "question",
-    "decision", "priority", "project", "connection", "source",
-}
+VALID_TYPES = MEMORY_TYPES
 
 app = FastAPI(title="Second Brain Capture API")
 
@@ -70,6 +68,20 @@ class CaptureRequest(BaseModel):
             raise ValueError(f"type must be one of: {', '.join(sorted(VALID_TYPES))}")
         return v
 
+    @field_validator("source_type")
+    @classmethod
+    def validate_source_type(cls, value):
+        if value is not None and value not in SOURCE_TYPES:
+            raise ValueError("source_type must use the canonical capture vocabulary")
+        return value
+
+    @field_validator("title", "content")
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("must contain text")
+        return value
+
 
 class SlackCaptureRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=100_000)
@@ -79,6 +91,8 @@ class SlackCaptureRequest(BaseModel):
     tags: list[str] | None = None
     project: str | None = None
 
+    _nonblank = field_validator("text")(CaptureRequest.nonblank.__func__)
+
 
 class BrowserCaptureRequest(BaseModel):
     url: str = Field(..., min_length=1)
@@ -86,6 +100,8 @@ class BrowserCaptureRequest(BaseModel):
     title: str | None = Field(None, max_length=500)
     tags: list[str] | None = None
     project: str | None = None
+
+    _nonblank = field_validator("url", "content")(CaptureRequest.nonblank.__func__)
 
 
 class EmailCaptureRequest(BaseModel):
@@ -95,24 +111,34 @@ class EmailCaptureRequest(BaseModel):
     tags: list[str] | None = None
     project: str | None = None
 
+    _nonblank = field_validator("subject", "body")(CaptureRequest.nonblank.__func__)
+
 
 # --- Shared storage pipeline ---
 
 def _store_memory(title, content, type="research", source_url=None,
                   source_type=None, tags=None, metadata=None, project=None,
                   encoding_context=None):
-    embedding = generate_embedding(content)
-    mem_class = classify_memory(type, content)
-    depth_score = compute_depth_score(content)
+    source_type = source_type or "manual"
+    if source_type not in SOURCE_TYPES:
+        raise ValueError("Unknown source type")
+    if not title.strip() or not content.strip():
+        raise ValueError("Capture title and content must contain text")
     project = normalize_project_tag(project)
-    meta = metadata or {}
-    meta["depth_score"] = depth_score
-    return create_memory(
-        type=type, title=title, content=content, embedding=embedding,
-        tags=tags, source_type=source_type, source_url=source_url,
-        metadata=meta, mem_class=mem_class, project=project,
-        encoding_context=encoding_context,
-    )
+    # Webhook retries without a native ID use a channel-scoped content identity.
+    # Caller-supplied URLs retain their source provenance and can be refreshed.
+    if not source_url:
+        identity = json.dumps({"title":title,"content":content,"metadata":metadata or {}}, sort_keys=True, ensure_ascii=False)
+        source_url = f"capture://{source_type}/{hashlib.sha256(identity.encode()).hexdigest()}"
+    fields = {"type":type,"title":title,"tags":tags or [],"encoding_context":encoding_context}
+    memory_id = ingest_content(content, source_type, source_url, project=project, refresh=True,
+                               source_metadata=metadata or {}, memory_fields=fields, parse_header=False)
+    if memory_id is None:
+        existing = find_captured_source(source_type, source_url, project)
+        if existing is None:
+            raise RuntimeError("Capture produced no stored record")
+        memory_id = str(existing["id"])
+    return memory_id
 
 
 # --- Endpoints ---
@@ -154,7 +180,7 @@ def capture_slack(req: SlackCaptureRequest):
         meta["thread_ts"] = req.thread_ts
     try:
         memory_id = _store_memory(
-            title=title, content=req.text, source_type="slack",
+            title=title, content=req.text, source_type="api_slack",
             tags=req.tags, metadata=meta, project=req.project,
         )
     except Exception:
@@ -168,7 +194,7 @@ def capture_browser(req: BrowserCaptureRequest):
     title = req.title if req.title else req.content[:80]
     try:
         memory_id = _store_memory(
-            title=title, content=req.content, source_type="browser_extension",
+            title=title, content=req.content, source_type="api_browser",
             source_url=req.url, tags=req.tags, project=req.project,
         )
     except Exception:
@@ -184,7 +210,7 @@ def capture_email(req: EmailCaptureRequest):
         meta["email_sender"] = req.sender
     try:
         memory_id = _store_memory(
-            title=req.subject, content=req.body, source_type="email",
+            title=req.subject, content=req.body, source_type="api_email",
             tags=req.tags, metadata=meta, project=req.project,
         )
     except Exception:

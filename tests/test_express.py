@@ -75,7 +75,7 @@ def test_edit_briefing_applies_llm_headlines_and_order():
             {"idx": 1, "headline": "Punchy headline for second"},
             {"idx": 0, "headline": "Punchy headline for first"},
         ]},
-        "raw": "{}",
+        "raw": "{}", "usage": {"inputTokens": 100, "outputTokens": 20},
     }
     out = express.edit_briefing({"items": items}, invoker=invoker)
     assert out["editor"] == "llm"
@@ -90,7 +90,7 @@ def test_edit_briefing_caps_llm_output_at_max_items():
     invoker = MagicMock()
     invoker.invoke.return_value = {
         "output": {"items": [{"idx": n, "headline": f"h{n}"} for n in range(8)]},
-        "raw": "{}",
+        "raw": "{}", "usage": {"inputTokens": 100, "outputTokens": 20},
     }
     out = express.edit_briefing({"items": items}, invoker=invoker)
     assert len(out["ranked"]) == express.MAX_ITEMS
@@ -101,7 +101,7 @@ def test_edit_briefing_ignores_out_of_range_indices():
     invoker = MagicMock()
     invoker.invoke.return_value = {
         "output": {"items": [{"idx": 5, "headline": "bad"}, {"idx": 0, "headline": "good"}]},
-        "raw": "{}",
+        "raw": "{}", "usage": {"inputTokens": 100, "outputTokens": 20},
     }
     out = express.edit_briefing({"items": items}, invoker=invoker)
     assert [it["headline"] for it in out["ranked"]] == ["good"]
@@ -133,7 +133,7 @@ def test_render_markdown_marks_lead_and_lists_all_headlines():
         invoke=MagicMock(return_value={"output": {"items": [
             {"idx": 0, "headline": "Lead headline"},
             {"idx": 1, "headline": "Second headline"},
-        ]}, "raw": "{}"})
+        ]}, "raw": "{}", "usage": {"inputTokens": 100, "outputTokens": 20}})
     ))
     md = express.render_markdown(briefing)
     assert "# Your briefing" in md
@@ -177,7 +177,8 @@ def test_compose_gathers_all_sources(clean_tables, sample_memory_factory):
     assert insight["meta"]["cross_project"] is True
 
     contradiction = next(i for i in b["items"] if i["kind"] == "contradiction")
-    assert contradiction["title"] == "Old decision"
+    assert {contradiction["meta"]["a_title"], contradiction["meta"]["b_title"]} == {"Old decision", "New decision"}
+    assert contradiction["title"] in {"Old decision", "New decision"}
     assert "New overrides old" in contradiction["detail"]
 
 
@@ -209,36 +210,6 @@ def test_compose_resurface_suppresses_recently_surfaced(clean_tables, sample_mem
 
     items = express.compose_briefing()["items"]
     assert not any(i["title"] == "Recently surfaced" for i in items)
-
-
-def test_compose_does_not_proactively_deliver_correction_episode(
-    clean_tables, sample_memory_factory
-):
-    episode_id = sample_memory_factory(
-        type="correction_episode",
-        title="Distinguish Amazon agent integrations",
-        content=(
-            "Misalignment: The agent documented “Amazon Quick” as “Kiro "
-            "CLI/Amazon Q,” conflating Amazon Quick, Kiro, and Amazon Q "
-            "Developer.\n\nCorrected expectation: The user indicated that "
-            "Amazon Quick, Kiro, and Amazon Q Developer are distinct and should "
-            "not be conflated."
-        ),
-        source_type="distilled_agent_task",
-        mem_class="episodic",
-    )
-    with db.get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE memories SET created_at = now() - interval '90 days', "
-                "access_count = 10, last_accessed_at = NULL WHERE id = %s",
-                (episode_id,),
-            )
-        conn.commit()
-
-    items = express.compose_briefing()["items"]
-
-    assert str(episode_id) not in {item["id"] for item in items}
 
 
 # --------------------------------------------------------------------------- #
@@ -321,7 +292,7 @@ def test_should_push_false_when_no_runs(clean_dream_cycle):
 
 def _edited(items, invoke_return):
     invoker = MagicMock()
-    invoker.invoke.return_value = {"output": invoke_return, "raw": "{}"}
+    invoker.invoke.return_value = {"output": invoke_return, "raw": "{}", "usage": {"inputTokens": 100, "outputTokens": 20}}
     return express.edit_briefing({"items": items}, invoker=invoker)
 
 

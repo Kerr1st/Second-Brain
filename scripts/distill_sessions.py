@@ -2,7 +2,7 @@
 """Distill chat sessions into durable decision/insight memories (Refactor P1).
 
 Each chat session's full text lives in its parent memory (parent_id IS NULL).
-For each undistilled session we run ONE LLM pass via AgentInvoker to extract
+For each undistilled session we run ONE metered LLM pass through the policy-checked distill role to extract
 crisp, self-contained decisions/insights and store them as retrievable
 type=decision|insight memories. Raw chat chunks are left untouched.
 
@@ -14,6 +14,7 @@ Usage: .venv/bin/python scripts/distill_sessions.py [--dry-run] [--limit N]
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -24,7 +25,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.db import get_connection, create_memory, get_processed_source_urls, create_relationship
 from src.embeddings import generate_embedding
 from src.search import hybrid_search, rerank
-from src.agent_invoker import AgentInvoker
+from psycopg2 import Error as DatabaseError
+from botocore.exceptions import BotoCoreError, ClientError
+from src.backends.base import ModelRefusalError
+from src.backends.cost import SpendCapExceeded, SpendTracker, cap_from_env, invoke_metered
+from src.backends.resolver import DISTILL_ROLE, resolve_stage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -33,6 +38,15 @@ SOURCE_TYPE = "distilled_chat"
 DISTILL_TYPES = {"decision", "insight"}
 MAX_CHARS = 100000
 DEFAULT_SOURCES = ("kiro_cli_chat", "quick_desktop_chat")
+
+# The active profile supplies the extraction model. Any optional override is
+# validated by resolve_stage before an adapter can be constructed.
+DISTILL_MODEL = os.environ.get("DISTILL_MODEL") or None
+DISTILL_EFFORT = os.environ.get("DISTILL_EFFORT", "medium")
+DISTILL_TIMEOUT = int(os.environ.get("DISTILL_TIMEOUT", "600"))
+# Nightly batch bound: sessions are fetched newest-first, so the backlog drains
+# from the most relevant end without one run holding the machine for hours.
+DEFAULT_LIMIT = int(os.environ.get("DISTILL_LIMIT", "40"))
 
 # Item cap raised 5->8 (2026-06-04): 65% of distilled sessions were hitting the old
 # cap of 5 exactly, i.e. it was binding and truncating durable items. 8 gives headroom
@@ -57,28 +71,63 @@ def build_user_message(content):
 def valid_items(raw):
     """Keep only well-formed distill items: decision/insight with content."""
     return [it for it in (raw or [])
-            if isinstance(it, dict) and it.get("type") in DISTILL_TYPES and it.get("content")]
+            if isinstance(it, dict) and it.get("type") in DISTILL_TYPES
+            and isinstance(it.get("content"), str) and it["content"].strip()
+            and (it.get("title") is None or isinstance(it.get("title"), str))]
 
 
-def fetch_sessions(source_types, limit, already_sessions):
+def fetch_sessions(source_types, limit, already_sessions, refusal_scope=None):
     """Return [(session_id, source_type, content)] for undistilled session parents."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT source_url, source_type, content FROM memories "
+                "SELECT source_url, source_type, content, metadata FROM memories "
                 "WHERE source_type = ANY(%s) AND parent_id IS NULL AND content IS NOT NULL "
                 "ORDER BY created_at DESC",
                 (list(source_types),),
             )
             rows = cur.fetchall()
     out = []
-    for source_url, st, content in rows:
-        if f"distill://{source_url}" in already_sessions:
+    for source_url, st, content, metadata in rows:
+        if refusal_scope and refusal_matches(metadata, refusal_scope, content):
+            continue
+        if not source_url or f"distill://{source_url}" in already_sessions:
             continue
         out.append((source_url, st, content))
         if limit and len(out) >= limit:
             break
     return out
+
+
+def refusal_matches(metadata, scope, content):
+    """Only the explicitly refused input/provider combination is quarantined."""
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError):
+            return False
+    refusal = metadata.get("distill_refusal", {}) if isinstance(metadata, dict) else {}
+    return (isinstance(refusal, dict) and refusal.get("do_not_send") is True
+            and all(refusal.get(k) == v for k, v in scope.items())
+            and refusal.get("input_sha256") == hashlib.sha256(content.encode()).hexdigest())
+
+
+def mark_refused(source_url, source_type, content, spec, *, operation="distill", input_text=None):
+    """Persist a provider-reported refusal, without copying its text or transcript.
+
+    A changed source body or provider/model may be reconsidered. The source body
+    comparison prevents quarantining a newer revision written during the call.
+    """
+    marker = {"do_not_send": True, "role": DISTILL_ROLE, "backend": spec.backend,
+              "model": spec.model, "operation": operation,
+              "input_sha256": hashlib.sha256((content if input_text is None else input_text).encode()).hexdigest()}
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE memories SET metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb "
+                "WHERE source_url=%s AND source_type=%s AND parent_id IS NULL AND content=%s",
+                (json.dumps({"distill_refusal": marker}), source_url, source_type, content))
+        conn.commit()
 
 
 CONTRADICTION_SYSTEM_PROMPT = (
@@ -110,7 +159,7 @@ def _find_prior_decision(new_id, new_session, query_text, query_embedding):
     return None
 
 
-def detect_and_link_contradiction(invoker, new_id, title, content, embedding, new_session):
+def detect_and_link_contradiction(invoker, new_id, title, content, embedding, new_session, *, spec, tracker):
     """Conservatively flag when a NEW decision contradicts a PRIOR active decision.
 
     Creates a `contradicts` relationship (new -> prior) with the LLM's reason as a note.
@@ -124,7 +173,9 @@ def detect_and_link_contradiction(invoker, new_id, title, content, embedding, ne
         f"NEW decision:\nTitle: {title}\n{content[:1500]}\n\n"
         f"PRIOR decision:\nTitle: {cand.get('title') or ''}\n{(cand.get('content') or '')[:1500]}"
     )
-    res = invoker.invoke(CONTRADICTION_SYSTEM_PROMPT, user)
+    res = invoke_metered(invoker, spec, tracker, CONTRADICTION_SYSTEM_PROMPT, user,
+                         tools=False,
+                         timeout=DISTILL_TIMEOUT, effort="low", stage="distill_contradiction")
     out = res.get("output") if isinstance(res, dict) else None
     if isinstance(out, dict) and out.get("contradicts") is True:
         reason = str(out.get("reason") or "").strip()[:300] or "distiller-detected contradiction"
@@ -134,79 +185,121 @@ def detect_and_link_contradiction(invoker, new_id, title, content, embedding, ne
     return None
 
 
-def distill(dry_run=False, limit=0, source_types=DEFAULT_SOURCES, detect_contradictions=True):
-    invoker = AgentInvoker()
-    already = get_processed_source_urls(SOURCE_TYPE)
-    already_sessions = {u.rsplit("#", 1)[0] for u in already}
-    sessions = fetch_sessions(source_types, limit, already_sessions)
-    log.info("Distilling %d sessions (sources=%s, dry_run=%s)", len(sessions), source_types, dry_run)
+_EXPECTED_FAILURES = (RuntimeError, OSError, ValueError, DatabaseError, BotoCoreError, ClientError)
 
-    stats = {"sessions": 0, "memories": 0, "empty": 0, "failed": 0, "contradictions": 0}
+
+def distill(dry_run=False, limit=DEFAULT_LIMIT, source_types=DEFAULT_SOURCES,
+            detect_contradictions=True, *, resolver=None, tracker=None):
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+    already = get_processed_source_urls(SOURCE_TYPE)
+    already_sessions = {u.rsplit("#", 1)[0] for u in already if u}
+    stats = {"sessions": 0, "memories": 0, "empty": 0, "failed": 0,
+             "contradictions": 0, "refused": 0, "aborted": False,
+             "dry_run": dry_run, "planned_sessions": 0, "cost_usd": 0.0}
+    if dry_run:
+        stats["planned_sessions"] = len(fetch_sessions(source_types, limit, already_sessions))
+        log.info("Dry run: %d potentially eligible sessions; no models, embeddings or writes. "
+                 "Provider-scoped refusal filtering happens in execution.", stats["planned_sessions"])
+        return stats
+
+    invoker, spec = resolve_stage(DISTILL_ROLE, resolver=resolver, model_override=DISTILL_MODEL)
+    tracker = tracker if tracker is not None else SpendTracker(
+        cap_usd=cap_from_env("SECOND_BRAIN_DISTILL_CAP_USD", 1.0))
+    scope = {"role": DISTILL_ROLE, "backend": spec.backend, "model": spec.model, "operation": "distill"}
+    sessions = fetch_sessions(source_types, limit, already_sessions, refusal_scope=scope)
+    log.info("Distilling %d sessions (model=%s, stop threshold=$%.2f)",
+             len(sessions), spec.model, tracker.cap_usd)
+
     for source_url, st, content in sessions:
         try:
-            res = invoker.invoke(SYSTEM_PROMPT, build_user_message(content))
-            items = res["output"] if isinstance(res["output"], list) else []
-        except Exception as e:
+            res = invoke_metered(invoker, spec, tracker, SYSTEM_PROMPT, build_user_message(content),
+                                 tools=False, timeout=DISTILL_TIMEOUT, effort=DISTILL_EFFORT, stage="distill")
+            if not isinstance(res.get("output"), list):
+                raise ValueError("Distill response must be an array")
+            items = valid_items(res["output"])
+            if res["output"] and not items:
+                raise ValueError("Distill response contained no valid items")
+        except SpendCapExceeded as exc:
             stats["failed"] += 1
-            log.error("Distill failed %s: %s", source_url, e)
+            stats["aborted"] = True
+            log.error("Distillation stopped (%s)", type(exc).__name__)
+            break
+        except ModelRefusalError:
+            stats["failed"] += 1
+            stats["refused"] += 1
+            mark_refused(source_url, st, content, spec)
+            log.warning("Explicit refusal recorded for the exact session/provider input")
+            continue
+        except _EXPECTED_FAILURES as exc:
+            stats["failed"] += 1
+            log.error("Distillation failed (%s)", type(exc).__name__)
             continue
 
-        items = valid_items(items)
         stats["sessions"] += 1
         if not items:
             stats["empty"] += 1
             continue
-
         for i, it in enumerate(items):
             url = f"distill://{source_url}#{i}"
             if url in already:
                 continue
             body = it["content"]
-            if dry_run:
-                stats["memories"] += 1
-                log.info("[DRY] %s | %s: %s", st, it["type"], (it.get("title") or "")[:70])
-                continue
             try:
                 emb = generate_embedding(body)
                 title = (it.get("title") or body[:80])[:200]
                 new_id = create_memory(
-                    type=it["type"], title=title,
-                    content=body, embedding=emb,
+                    type=it["type"], title=title, content=body, embedding=emb,
                     tags=["distilled", st], source_url=url, source_type=SOURCE_TYPE,
                     confidence=0.8, mem_class="semantic",
                     metadata={"distilled_from": source_url, "origin_source_type": st},
                 )
                 stats["memories"] += 1
-            except Exception as e:
+                already.add(url)
+            except _EXPECTED_FAILURES as exc:
                 stats["failed"] += 1
-                log.error("create failed %s: %s", url, e)
+                log.error("Distilled-memory write failed (%s)", type(exc).__name__)
                 continue
-
-            # Detect-and-link contradictions for decisions (no status change; supersession stays reviewed)
             if detect_contradictions and it["type"] == "decision":
                 try:
-                    if detect_and_link_contradiction(invoker, new_id, title, body, emb, source_url):
+                    if detect_and_link_contradiction(invoker, new_id, title, body, emb, source_url,
+                                                     spec=spec, tracker=tracker):
                         stats["contradictions"] += 1
-                except Exception as e:
-                    log.warning("contradiction check failed %s: %s", new_id, e)
-
-    log.info("Done: sessions=%d memories=%d empty=%d failed=%d contradictions=%d",
-             stats["sessions"], stats["memories"], stats["empty"], stats["failed"], stats["contradictions"])
+                except SpendCapExceeded as exc:
+                    stats["failed"] += 1
+                    stats["aborted"] = True
+                    log.error("Contradiction check stopped (%s)", type(exc).__name__)
+                    break
+                except _EXPECTED_FAILURES as exc:
+                    stats["failed"] += 1
+                    log.error("Contradiction check failed (%s)", type(exc).__name__)
+        if stats["aborted"]:
+            break
+    stats["cost_usd"] = tracker.total_usd
+    stats["spend_unknown"] = bool(tracker.blocked_reason)
+    log.info("Done: %s", stats)
     return stats
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Count potentially eligible sessions; no model calls or writes.")
+    ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
+                    help=f"Max sessions per run, newest first (default {DEFAULT_LIMIT}; 0 = all)")
     ap.add_argument("--source-type", action="append", dest="source_types")
     ap.add_argument("--skip-contradictions", action="store_true",
                     help="Disable distill-time contradiction detection (e.g. for large backfills)")
     args = ap.parse_args()
-    distill(dry_run=args.dry_run, limit=args.limit,
-            source_types=tuple(args.source_types) if args.source_types else DEFAULT_SOURCES,
-            detect_contradictions=not args.skip_contradictions)
+    try:
+        stats = distill(dry_run=args.dry_run, limit=args.limit,
+                       source_types=tuple(args.source_types) if args.source_types else DEFAULT_SOURCES,
+                       detect_contradictions=not args.skip_contradictions)
+    except _EXPECTED_FAILURES as exc:
+        log.error("Distillation could not complete (%s)", type(exc).__name__)
+        return 1
+    return 3 if stats["aborted"] else 1 if stats["failed"] else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

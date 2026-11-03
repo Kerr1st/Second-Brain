@@ -4,21 +4,25 @@ Extracted from db.py. Contains the multi-step hybrid retrieval algorithm
 (vector search + BM25 + RRF fusion), ranking business logic (utility reranking
 with scoring formulas), and retrieval reinforcement (access count bumping).
 
-Note: search_similar() stays in db.py — it's a data-access primitive (single SQL query),
+Note: search_similar() stays in the src.db repository — it's a data-access primitive (single SQL query),
 not a retrieval algorithm.
 """
 
+import logging
 import math
 import re
+import threading
+import time
+from collections import Counter
 from datetime import datetime, timezone
 
-from psycopg2 import sql
-from psycopg2.extras import RealDictCursor
 
 from src.db import get_connection
+
 from src.rerank_weights import (
     COEFFICIENTS,
     MEM_CLASS_BOOST,
+    OVERLAP_WINDOW_CHARS,
     PROJECT_PENALTY,
     REINFORCEMENT_COEFF,
     STALENESS_PENALTY_MAX,
@@ -28,145 +32,31 @@ from src.rerank_weights import (
 )
 
 
-# --- Hybrid Search (BM25 + Vector + RRF) ---
+from src.retrieval import (build_filters, tokenize_query, fts_passes, rrf_fuse,
+                           normalise_rrf, dedup_candidates)
+from src.db.search_queries import fetch_candidates
 
-DEFAULT_CANDIDATE_LIMIT = 100
-DEFAULT_RESULTS_PER_LINEAGE = 2
-
-
-def _hybrid_candidates(query_text, query_embedding, *, candidate_limit, type=None,
-                       status=None, project=None, source_type=None,
-                       created_after=None):
-    """Return one deterministic RRF-fused candidate population."""
-    k = 60  # RRF constant
-
-    conditions = []
-    params_base = []
-    if type:
-        conditions.append(sql.SQL("type = %s"))
-        params_base.append(type)
-    if status:
-        conditions.append(sql.SQL("status = %s"))
-        params_base.append(status)
-    if project:
-        conditions.append(sql.SQL("(project = %s OR project IS NULL)"))
-        params_base.append(project)
-    if source_type:
-        conditions.append(sql.SQL("source_type = %s"))
-        params_base.append(source_type)
-    if created_after:
-        conditions.append(sql.SQL("created_at >= %s"))
-        params_base.append(created_after)
-    vector_conditions = [sql.SQL("embedding IS NOT NULL"), *conditions]
-    vector_where = sql.SQL("WHERE ") + sql.SQL(" AND ").join(vector_conditions)
-    # Any WHERE filter post-filters the HNSW result and can make it under-return;
-    # iterative scan keeps scanning until `limit` rows satisfy the filter (pgvector >=0.8).
-    filtered = bool(type or status or project or source_type or created_after)
-
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if filtered:
-                cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
-            # Vector search
-            emb_str = str(query_embedding)
-            vec_params = [emb_str] + params_base + [emb_str, candidate_limit]
-            vec_query = sql.SQL(
-                "SELECT id, 1 - (embedding <=> %s::vector) AS similarity"
-                " FROM memories {where}"
-                " ORDER BY embedding <=> %s::vector, id LIMIT %s"
-            ).format(where=vector_where)
-            cur.execute(vec_query, vec_params)
-            vec_results = {str(r["id"]): i + 1 for i, r in enumerate(cur.fetchall())}
-
-            # Full-text search
-            ts_query = " | ".join(re.sub(r"[^\w\s]", "", query_text).split())
-            if ts_query.strip():
-                fts_params = [ts_query] + params_base + [candidate_limit]
-                fts_conditions = [*conditions, sql.SQL("search_vector IS NOT NULL")]
-                fts_where = sql.SQL("WHERE ") + sql.SQL(" AND ").join(fts_conditions)
-                fts_query = sql.SQL(
-                    "SELECT id, ts_rank(search_vector, to_tsquery('english', %s)) AS rank"
-                    " FROM memories {where}"
-                    " ORDER BY rank DESC, id LIMIT %s"
-                ).format(where=fts_where)
-                cur.execute(fts_query, fts_params)
-                fts_results = {str(r["id"]): i + 1 for i, r in enumerate(cur.fetchall())}
-            else:
-                fts_results = {}
-
-            # RRF fusion
-            all_ids = set(vec_results) | set(fts_results)
-            scored = []
-            absent_rank = candidate_limit + 1
-            for mid in all_ids:
-                vec_rank = vec_results.get(mid, absent_rank)
-                fts_rank = fts_results.get(mid, absent_rank)
-                rrf = 1.0 / (k + vec_rank) + 1.0 / (k + fts_rank)
-                scored.append((mid, rrf))
-            scored.sort(key=lambda item: (-item[1], item[0]))
-
-            cand_ids = [item[0] for item in scored[:candidate_limit]]
-            if not cand_ids:
-                return []
-            cur.execute("SELECT * FROM memories WHERE id = ANY(%s::uuid[])", (cand_ids,))
-            row_by_id = {str(r["id"]): r for r in cur.fetchall()}
-
-        out = []
-        for mid, score in scored[:candidate_limit]:
-            row = row_by_id.get(mid)
-            if row is not None:
-                row["rrf_score"] = score
-                out.append(row)
-        return out
-
-
-def _content_key(memory):
-    return re.sub(
-        r"\s+", " ", (memory.get("content") or "")
-    ).strip().lower()[:300]
-
-
-def _exact_content_key(memory):
-    return re.sub(
-        r"\s+", " ", (memory.get("content") or "")
-    ).strip().lower()
+logger = logging.getLogger(__name__)
 
 
 def hybrid_search(query_text, query_embedding, limit=10, type=None, status=None, project=None,
-                  source_type=None, created_after=None):
-    """Compatibility search returning fused, deduplicated candidates.
+                  source_type=None, created_after=None, per_parent_cap=2):
+    """Fuse vector/full-text legs, increasing the bounded pool if duplicates crowd it.
 
-    User-facing retrieval uses :func:`retrieve_memories`, which reranks a
-    stable candidate population before applying the requested output size.
-    """
-    candidates = _hybrid_candidates(
-        query_text,
-        query_embedding,
-        candidate_limit=max(limit, limit * 4),
-        type=type,
-        status=status,
-        project=project,
-        source_type=source_type,
-        created_after=created_after,
-    )
-
-    # Preserve established direct-call behavior for evaluation scripts and
-    # older internal callers while memory_search uses the deeper interface.
-    out, seen_content, per_parent = [], set(), {}
-    for row in candidates:
-        ckey = _content_key(row)
-        if ckey and ckey in seen_content:
-            continue
-        pkey = str(row.get("parent_id") or row["id"])
-        if per_parent.get(pkey, 0) >= DEFAULT_RESULTS_PER_LINEAGE:
-            continue
-        if ckey:
-            seen_content.add(ckey)
-        per_parent[pkey] = per_parent.get(pkey, 0) + 1
-        out.append(row)
-        if len(out) >= limit:
-            break
-    return out
+    ``per_parent_cap`` bounds the rows one parent (a document and its chunks) may
+    contribute; the MCP search tools pass 1 so each result is a distinct parent."""
+    if limit <= 0:
+        return []
+    prefetch = max(limit * 4, 4)
+    ceiling = min(max(limit * 64, 512), 4096)
+    while True:
+        vec, fts, rows = fetch_candidates(query_text, query_embedding, prefetch,
+            type=type, status=status, project=project, source_type=source_type, created_after=created_after)
+        scored = rrf_fuse(vec, fts, absent_rank=prefetch + 1)
+        results = dedup_candidates(scored, rows, limit, per_parent_cap)
+        if len(results) >= limit or max(len(vec), len(fts)) < prefetch or prefetch >= ceiling:
+            return results
+        prefetch = min(prefetch * 2, ceiling)
 
 
 def compute_spacing_bonus(last_accessed_at, now=None):
@@ -189,6 +79,36 @@ def compute_spacing_bonus(last_accessed_at, now=None):
     return min(1.0, days_since / 7.0)
 
 
+#: Query tokens at least this long also match content tokens they are a prefix of
+#: (and vice versa), so "skim" matches "skimmed" and "stage" matches "stages".
+OVERLAP_PREFIX_MIN = 4
+
+
+def token_overlap(query_tokens, doc_tokens) -> float:
+    """Fraction of query tokens present in ``doc_tokens``.
+
+    A query token counts as present when an identical token exists, or when a
+    doc token and the query token share a prefix relationship and the shorter
+    of the two is at least ``OVERLAP_PREFIX_MIN`` characters — a cheap,
+    stemmer-free way to tolerate inflection ("skim"/"skimmed", "stage"/"stages")
+    that the full-text leg already tolerates through its stemmer. Exact matches
+    are checked first, so the O(query × doc) prefix scan runs only for tokens
+    that missed.
+    """
+    if not query_tokens:
+        return 0.0
+    hits = 0
+    for q in query_tokens:
+        if q in doc_tokens:
+            hits += 1
+            continue
+        if len(q) >= OVERLAP_PREFIX_MIN and any(
+            (t.startswith(q)) or (len(t) >= OVERLAP_PREFIX_MIN and q.startswith(t)) for t in doc_tokens
+        ):
+            hits += 1
+    return hits / len(query_tokens)
+
+
 def rerank(results, query_text, query_project=None):
     """Utility reranking: recency, type boost, token overlap, access reinforcement.
 
@@ -197,22 +117,22 @@ def rerank(results, query_text, query_project=None):
     if not results:
         return results
 
-    query_tokens = set(re.sub(r"[^\w\s]", "", query_text).lower().split())
+    query_tokens = set(re.sub(r"[^\w\s]", " ", query_text).lower().split())
     now = datetime.now(timezone.utc)
 
     for r in results:
-        # Token overlap
-        content_tokens = set(re.sub(r"[^\w\s]", "", (r.get("content") or "")[:2000]).lower().split())
-        title_tokens = set(re.sub(r"[^\w\s]", "", (r.get("title") or "")).lower().split())
+        # Token overlap (inflection-tolerant: "skim" matches "skimmed", see token_overlap)
+        content_tokens = set(re.sub(r"[^\w\s]", " ", (r.get("content") or "")[:OVERLAP_WINDOW_CHARS]).lower().split())
+        title_tokens = set(re.sub(r"[^\w\s]", " ", (r.get("title") or "")).lower().split())
         all_tokens = content_tokens | title_tokens
-        overlap = len(query_tokens & all_tokens) / max(1, len(query_tokens))
-        title_overlap = len(query_tokens & title_tokens) / max(1, len(query_tokens))
+        overlap = token_overlap(query_tokens, all_tokens)
+        title_overlap = token_overlap(query_tokens, title_tokens)
 
         # Encoding context overlap (Godden & Baddeley 1975: contextual reinstatement)
         encoding_ctx = r.get("encoding_context") or ""
         if encoding_ctx:
-            ctx_tokens = set(re.sub(r"[^\w\s]", "", encoding_ctx).lower().split())
-            context_overlap = len(query_tokens & ctx_tokens) / max(1, len(query_tokens))
+            ctx_tokens = set(re.sub(r"[^\w\s]", " ", encoding_ctx).lower().split())
+            context_overlap = token_overlap(query_tokens, ctx_tokens)
         else:
             context_overlap = 0.0
 
@@ -305,92 +225,8 @@ def rerank(results, query_text, query_project=None):
             + staleness_penalty
         )
 
-    def stable_rank_key(memory):
-        created = memory.get("created_at")
-        created_timestamp = (
-            created.timestamp() if hasattr(created, "timestamp") else 0.0
-        )
-        return (
-            -float(memory.get("rerank_score", 0.0)),
-            -float(memory.get("rrf_score", 0.0)),
-            -created_timestamp,
-            str(memory.get("id", "")),
-        )
-
-    results.sort(key=stable_rank_key)
+    results.sort(key=lambda r: r["rerank_score"], reverse=True)
     return results
-
-
-def _metadata(memory):
-    metadata = memory.get("metadata") or {}
-    if isinstance(metadata, str):
-        try:
-            import json
-
-            metadata = json.loads(metadata)
-        except (TypeError, ValueError):
-            return {}
-    return metadata if isinstance(metadata, dict) else {}
-
-
-def _lineage_key(memory):
-    """Resolve the source evidence family used for result diversity."""
-    metadata = _metadata(memory)
-    return str(
-        metadata.get("task_source_url")
-        or memory.get("parent_id")
-        or memory.get("source_url")
-        or memory["id"]
-    )
-
-
-def _select_diverse_results(ranked, limit):
-    """Deduplicate and prefer two results per lineage, then fill overflow."""
-    if limit <= 0:
-        return []
-
-    unique = []
-    seen_content = set()
-    for memory in ranked:
-        ckey = _exact_content_key(memory)
-        if ckey and ckey in seen_content:
-            continue
-        if ckey:
-            seen_content.add(ckey)
-        unique.append(memory)
-
-    selected = []
-    overflow = []
-    per_lineage = {}
-    for memory in unique:
-        lineage = _lineage_key(memory)
-        if per_lineage.get(lineage, 0) < DEFAULT_RESULTS_PER_LINEAGE:
-            selected.append(memory)
-            per_lineage[lineage] = per_lineage.get(lineage, 0) + 1
-        else:
-            overflow.append(memory)
-        if len(selected) >= limit:
-            return selected[:limit]
-
-    selected.extend(overflow[: max(0, limit - len(selected))])
-    return selected[:limit]
-
-
-def retrieve_memories(query_text, query_embedding, limit=10, type=None, status=None,
-                      project=None, source_type=None, created_after=None):
-    """Retrieve a stable, utility-ranked, provenance-diverse result set."""
-    candidates = _hybrid_candidates(
-        query_text,
-        query_embedding,
-        candidate_limit=max(DEFAULT_CANDIDATE_LIMIT, limit),
-        type=type,
-        status=status,
-        project=project,
-        source_type=source_type,
-        created_after=created_after,
-    )
-    ranked = rerank(candidates, query_text, query_project=project)
-    return _select_diverse_results(ranked, limit)
 
 
 def increment_access_count(memory_ids):
@@ -404,3 +240,94 @@ def increment_access_count(memory_ids):
                 (memory_ids,)
             )
         conn.commit()
+
+
+class AccessCountWriter:
+    """Applies retrieval reinforcement off the request path.
+
+    ``schedule(ids)`` only records the ids and returns; one daemon thread writes
+    them with ``write(ids)`` (``increment_access_count`` by default, its own
+    pooled connection). The UPDATE is non-HOT (``last_accessed_at`` is indexed),
+    so every bumped row inserts into every index of ``memories``, including the
+    HNSW index, which kept MCP searches waiting for seconds.
+
+    Ids scheduled while a write runs are coalesced: an id retrieved n times gets
+    n increments in the next write, so counts stay exact. At most ``max_pending``
+    distinct ids wait; further ids are dropped and counted in ``dropped``. A
+    failed write is logged (never raised, never printed to stdout) and its
+    batch is lost. ``close()`` flushes what is pending and stops the thread.
+    """
+
+    def __init__(self, write=None, *, max_pending=10000):
+        self._write = write or increment_access_count
+        self._max_pending = max_pending
+        self._pending = Counter()
+        self._busy = False
+        self._closed = False
+        self._thread = None
+        self._cond = threading.Condition()
+        self.dropped = 0
+
+    def schedule(self, memory_ids):
+        """Record one retrieval of each distinct id; never touches the database."""
+        ids = {str(i) for i in memory_ids or ()}
+        if not ids:
+            return
+        with self._cond:
+            if self._closed:
+                logger.warning("access-count writer closed; %d bumps dropped", len(ids))
+                self.dropped += len(ids)
+                return
+            for mid in ids:
+                if mid in self._pending or len(self._pending) < self._max_pending:
+                    self._pending[mid] += 1
+                else:
+                    self.dropped += 1
+            if self.dropped and len(self._pending) >= self._max_pending:
+                logger.warning("access-count queue full (%d ids); %d bumps dropped so far",
+                               self._max_pending, self.dropped)
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="access-count-writer", daemon=True)
+                self._thread.start()
+            self._cond.notify_all()
+
+    def _run(self):
+        while True:
+            with self._cond:
+                while not self._pending and not self._closed:
+                    self._cond.wait()
+                if not self._pending:
+                    return
+                batch, self._pending = self._pending, Counter()
+                self._busy = True
+            try:
+                for level in range(1, max(batch.values()) + 1):
+                    self._write(sorted(mid for mid, n in batch.items() if n >= level))
+            except Exception:
+                logger.warning("access-count write failed; %d ids not bumped", len(batch), exc_info=True)
+            finally:
+                with self._cond:
+                    self._busy = False
+                    self._cond.notify_all()
+
+    def flush(self, timeout=5.0):
+        """Wait until every scheduled bump has been written (or failed). True if drained."""
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while self._pending or self._busy:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(remaining)
+            return True
+
+    def close(self, timeout=5.0):
+        """Flush pending bumps, then stop the writer thread (server shutdown)."""
+        drained = self.flush(timeout)
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout if drained else 0)
+        return drained

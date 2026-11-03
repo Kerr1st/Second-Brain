@@ -110,7 +110,7 @@ _short_absolute_paths = st.one_of(
     ).map(lambda t: f"/{t[0]}/{t[1]}"),
     # Well-known short absolute paths
     st.sampled_from([
-        "/", "/Users", "/Users/example", "/home/user", "/tmp",
+        "/", "/Users", "/Users/kerrfir", "/home/user", "/tmp",
     ]),
 )
 
@@ -422,7 +422,7 @@ class TestIngestionProjectResolutionExplicitOverridesHeader:
              patch("src.ingest.compute_depth_score", _INGEST_PATCHES["src.ingest.compute_depth_score"]), \
              patch("src.ingest.search_similar", _INGEST_PATCHES["src.ingest.search_similar"]), \
              patch("src.ingest.get_memory", _INGEST_PATCHES["src.ingest.get_memory"]):
-            ingest_content(content, source_type="test", project=explicit_project)
+            ingest_content(content, source_type="article", project=explicit_project)
 
         expected = normalize_project_tag(explicit_project)
         # Parent record is the first call
@@ -453,7 +453,7 @@ class TestIngestionProjectResolutionExplicitOverridesHeader:
              patch("src.ingest.compute_depth_score", _INGEST_PATCHES["src.ingest.compute_depth_score"]), \
              patch("src.ingest.search_similar", _INGEST_PATCHES["src.ingest.search_similar"]), \
              patch("src.ingest.get_memory", _INGEST_PATCHES["src.ingest.get_memory"]):
-            ingest_content(content, source_type="test", project=None)
+            ingest_content(content, source_type="article", project=None)
 
         expected = normalize_project_tag(header_project)
         assert len(captured_projects) >= 1, "Expected at least one create_memory call"
@@ -479,7 +479,7 @@ class TestIngestionProjectResolutionExplicitOverridesHeader:
              patch("src.ingest.compute_depth_score", _INGEST_PATCHES["src.ingest.compute_depth_score"]), \
              patch("src.ingest.search_similar", _INGEST_PATCHES["src.ingest.search_similar"]), \
              patch("src.ingest.get_memory", _INGEST_PATCHES["src.ingest.get_memory"]):
-            ingest_content(content, source_type="test", project=None)
+            ingest_content(content, source_type="article", project=None)
 
         assert len(captured_projects) >= 1, "Expected at least one create_memory call"
         assert captured_projects[0] is None, (
@@ -547,7 +547,7 @@ class TestParentChildProjectConsistency:
              patch("src.ingest.compute_depth_score", _INGEST_PATCHES["src.ingest.compute_depth_score"]), \
              patch("src.ingest.search_similar", _INGEST_PATCHES["src.ingest.search_similar"]), \
              patch("src.ingest.get_memory", _INGEST_PATCHES["src.ingest.get_memory"]):
-            ingest_content(content, source_type="test", project=project)
+            ingest_content(content, source_type="article", project=project)
 
         expected = normalize_project_tag(project)
 
@@ -583,7 +583,7 @@ class TestParentChildProjectConsistency:
              patch("src.ingest.compute_depth_score", _INGEST_PATCHES["src.ingest.compute_depth_score"]), \
              patch("src.ingest.search_similar", _INGEST_PATCHES["src.ingest.search_similar"]), \
              patch("src.ingest.get_memory", _INGEST_PATCHES["src.ingest.get_memory"]):
-            ingest_content(content, source_type="test", project=None)
+            ingest_content(content, source_type="article", project=None)
 
         assert len(captured_projects) >= 2, (
             f"Expected at least 2 create_memory calls (parent + chunks), "
@@ -776,7 +776,7 @@ class TestNonChatMemoriesRemainNull:
 
     @given(
         source_type=st.sampled_from([
-            "youtube", "manual", "article", "pdf", "notes", "course",
+            "youtube", "manual", "article", "file", "slack", "outlook_email",
         ]),
     )
     @settings(max_examples=25, deadline=None)
@@ -805,7 +805,7 @@ class TestNonChatMemoriesRemainNull:
 
     @given(
         source_type=st.sampled_from([
-            "youtube", "manual", "article", "pdf", "notes", "course",
+            "youtube", "manual", "article", "file", "slack", "outlook_email",
         ]),
     )
     @settings(max_examples=25, deadline=None)

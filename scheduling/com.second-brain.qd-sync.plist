@@ -2,21 +2,31 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key>
-    <string>com.second-brain.qd-sync</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/path/to/second-brain/scripts/jobs/qd_sync.sh</string>
-    </array>
-    <key>StartInterval</key>
-    <integer>3600</integer>
-    <key>StandardOutPath</key>
-    <string>/path/to/second-brain/logs/qd-sync-launchd.log</string>
-    <key>StandardErrorPath</key>
-    <string>/path/to/second-brain/logs/qd-sync-launchd.log</string>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>Nice</key>
-    <integer>10</integer>
+	<key>Label</key>
+	<string>com.second-brain.qd-sync</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh</string>
+		<string>/Users/kerrfir/second-brain/scripts/jobs/qd_sync.sh</string>
+		<string>qd-sync</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>3600</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/kerrfir/second-brain/logs/qd-sync-launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/kerrfir/second-brain/logs/qd-sync-launchd.log</string>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>ExitTimeOut</key>
+	<integer>150</integer>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SECOND_BRAIN_JOB_TIMEOUT_QD_SYNC</key>
+		<string>3600</string>
+	</dict>
 </dict>
 </plist>

@@ -1,0 +1,156 @@
+"""Shared capture URL policies and Crawlee index identity reader."""
+from __future__ import annotations
+import re
+
+# URLs to always skip (not useful content)
+SKIP_PATTERNS = re.compile(
+    r"^(chrome|about|javascript|mailto|file|data):|"
+    r"(mail\.google|accounts\.google|"
+    r"localhost|127\.0\.0\.1|\.pdf$|"
+    r"login|signin|/ap/signin|"
+    r"quicksight\.aws|phonetool|isengard|"
+    r"conduit\.security|sim\.amazon|"
+    r"issues\.amazon|cr\.amazon|code\.amazon)"
+)
+
+# Internal Amazon domains that need cookies
+INTERNAL_DOMAINS = re.compile(
+    r"(w\.amazon\.com|quip-amazon\.com|highspot|"
+    r"broadcast\.amazon|atoz\.amazon|amazon\.awsapps|"
+    r"ivy-help-center|talent\.a2z|docs\.hub\.amazon|"
+    r"meetings\.amazon|inside\.amazon|pathfinder\.legal\.amazon|"
+    r"idp\.federate\.amazon|amazon-mentoring|"
+    r"console\.harmony\.a2z)"
+)
+
+# Corporate sites behind SSO that Crawlee (no session) can only fail on: 403s,
+# sign-in redirects and "Execution context was destroyed" (2026-10-10 run).
+# They take the cookie path (skipped_auth when the session does not carry),
+# never Crawlee. Generic hosts (cloudfront.net, amplifyapp.com — public apps exist there too) are left to the unreachable ledger.
+AUTH_REQUIRED = re.compile(
+    r"^https?://([^/?#]*\.)?("
+    r"sharepoint\.com|"                      # Microsoft 365 SSO
+    r"aws\.dev|"                             # internal AWS apps (awsinsights, awsentral, ...)
+    r"amazon\.dev|"                          # internal apps (hyperbadge, sage, my.day1, agentspaces, ...)
+    r"a2z\.com|"                             # internal (gather, ...)
+    r"([a-z0-9-]+-)?corp\.amazon\.com|"      # corp.amazon.com, collaborate-corp.amazon.com
+    r"coupahost\.com|"                       # Coupa procurement (SSO)
+    r"studio\.[a-z0-9-]+\.prod\.workshops\.aws"  # Workshop Studio (authoring) - catalog is public
+    r")(:\d+)?([/?#]|$)", re.I)
+
+
+def internal_host(url: str) -> bool:
+    """Bookmarks: ``INTERNAL_DOMAINS`` judged on the URL's host only, from a
+    label boundary, so ``https://evil.io/?r=w.amazon.com`` or ``aw.amazon.com``
+    is not internal. browser.py keeps the unanchored ``INTERNAL_DOMAINS.search(url)``
+    (its classification is unchanged)."""
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return bool(host) and any(m.start() == 0 or host[m.start() - 1] == "."
+                              for m in INTERNAL_DOMAINS.finditer(host))
+
+
+def needs_cookies(url: str) -> bool:
+    """Internal or SSO-only: fetched with Chrome cookies, never handed to Crawlee."""
+    return bool(internal_host(url) or AUTH_REQUIRED.search(url))
+
+
+#: Characters a WHATWG parser (Chromium) treats differently from urllib: ``\`` is a
+#: path separator there (``https://evil.io\@docs.hub.amazon.dev/`` goes to evil.io
+#: in Chromium, to docs.hub.amazon.dev in Python) — but only in the scheme,
+#: authority and path: in the query or fragment it is plain data in both (a
+#: CloudWatch / Splunk regex), so it is checked only before the first ``?``/``#``.
+#: Tab/LF/CR/space/C0 are stripped or rejected anywhere.
+_URL_CONTROL_RE = re.compile(r"[\x00-\x20\x7f]")
+_URL_HEAD_RE = re.compile(r"^[^?#]*")
+#: ``host[:port]`` that both parsers read the same way: ASCII LDH labels, no
+#: userinfo, no percent-escapes, no IDNA, no trailing dot.
+_NETLOC_RE = re.compile(
+    r"^(?P<host>[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*)(?::(?P<port>\d{1,5}))?$",
+    re.I)
+#: A last label WHATWG would parse as an IPv4 number (``1.2.3.4``, ``0x7f``, ``evil.0x7f000001``).
+_NUMERIC_LABEL_RE = re.compile(r"^(\d+|0x[0-9a-f]*)$", re.I)
+
+
+def canonical_url(url: str) -> str | None:
+    """``url`` re-serialized by urllib from its parsed parts, or None when Python
+    and a WHATWG parser (the browser) could disagree on where it goes: a
+    backslash before the query/fragment, whitespace/control characters, userinfo (``@`` in the netloc), a
+    non-http(s) scheme, or a host that is not plain ASCII LDH (percent-escapes,
+    IDNA, a numeric last label, a trailing dot). Callers fetch only the returned
+    string; None is ``skipped_invalid_url`` (never fetched, no ledger strike)."""
+    from urllib.parse import urlsplit, urlunsplit
+    if not isinstance(url, str) or not url or _URL_CONTROL_RE.search(url) \
+            or "\\" in _URL_HEAD_RE.match(url).group(0):
+        return None
+    try:
+        parts = urlsplit(url)
+        parts.port                                    # noqa: B018 - raises ValueError on a bad port
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https"):
+        return None
+    m = _NETLOC_RE.match(parts.netloc or "")
+    if not m or _NUMERIC_LABEL_RE.match(m.group("host").rsplit(".", 1)[-1]):
+        return None
+    port = m.group("port")
+    if port is not None and not 0 < int(port) < 65536:
+        return None
+    netloc = m.group("host").lower() + (f":{int(port)}" if port is not None else "")
+    return urlunsplit((parts.scheme.lower(), netloc, parts.path, parts.query, parts.fragment))
+
+
+_PRIVATE_SUFFIXES = (".localhost", ".local", ".lan", ".home.arpa", ".internal")
+
+
+def _numeric_ipv4(host: str):
+    """Integer / hex / octal / short IPv4 forms (``3232235777``, ``0x7f000001``,
+    ``127.1``) as browsers resolve them; None for names like ``10.example.com``."""
+    import ipaddress
+    import socket
+    if not host or not all(part and (part.isdigit() or part.lower().startswith("0x")) for part in host.split(".")):
+        return None
+    try:
+        return ipaddress.IPv4Address(socket.inet_aton(host))
+    except (OSError, ValueError):
+        return None
+
+
+def is_private_host(url: str) -> bool:
+    """Bookmarks only: LAN / loopback hosts (192.168.x, 10.x, 172.16-31.x, 127.x,
+    100.64.0.0/10 CGNAT/Tailscale, link-local, reserved, also in integer/hex
+    form; localhost, *.local, *.lan, *.home.arpa, *.internal) are skipped
+    entirely — nothing to index, and an unreachable LAN IP burns a 30 s
+    navigation timeout per attempt. Kept out of the shared SKIP_PATTERNS, which
+    browser history also uses (it has its own private-host rule)."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if host in ("localhost", "lan", "internal", "home.arpa") or host.endswith(_PRIVATE_SUFFIXES):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = _numeric_ipv4(host)
+        if ip is None:
+            return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+            or ip in ipaddress.ip_network("100.64.0.0/10"))
+
+
+
+def load_indexed_urls(path, *, sources_dir=None) -> set[str]:
+    """Return captured identities from the index and optional source headers."""
+    from src.parsers.crawlee import build_source_map, parse_index
+    urls = {entry["url"] for entry in parse_index(index_path=path)}
+    if sources_dir is not None:
+        urls.update(build_source_map(sources_dir=sources_dir))
+    return urls

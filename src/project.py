@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+import re
+
+# A bare identifier is never a project: session UUIDs leaked into ``project`` for
+# 267 live kiro_cli_chat parents (F-028) because the CLI parser tagged each
+# session with its own filename. Any 8-4-4-4-12 hex id (or a 32-hex blob) is
+# rejected here so no caller can reintroduce the defect.
+_OPAQUE_ID = re.compile(r"^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})$")
+
 
 def normalize_project_tag(raw: str | None) -> str | None:
     """Normalize a raw project tag value.
@@ -16,6 +24,7 @@ def normalize_project_tag(raw: str | None) -> str | None:
     7. If original (stripped) path is absolute (starts with ``/``) and has
        fewer than 3 components → None  (home dir / root guard).
        This rule does NOT apply to relative paths or bare directory names.
+    8. Final component that is a UUID / 32-hex opaque id → None (F-028).
 
     Returns the normalized tag or *None*.
     """
@@ -53,6 +62,10 @@ def normalize_project_tag(raw: str | None) -> str | None:
 
     # Rule 6 – dot-prefixed
     if tag.startswith("."):
+        return None
+
+    # Rule 8 – opaque identifiers are not projects
+    if _OPAQUE_ID.match(tag):
         return None
 
     return tag

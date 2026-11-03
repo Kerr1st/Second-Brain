@@ -3,46 +3,139 @@
 # Each role maps to (backend, model, effort). Select a profile with the
 # SECOND_BRAIN_PROFILE env var; unset => `default_profile` below.
 #
-# The `laptop` profile reproduces today's behavior exactly (all-Kiro / Opus 4.8,
-# $0 metered). The `mini` profile targets the Mac Mini (Claude Code on Bedrock);
-# its adapter lands in a later step, so selecting it errors until then.
+# The `laptop` and `mini` compatibility profiles use Claude Code on Bedrock.
+# `controlled` is the default; corpus roles never use Kiro or Fable.
+# The `bedrock` profile runs the Thinker and all four evaluators on the direct
+# Bedrock Converse API (metered; see the spend cap below).
+#
+# Adapter options. A role may carry `options = { ... }` — an inline table of
+# keyword arguments passed to the adapter's constructor. Only the `bedrock`
+# adapter accepts options (src/backends/resolver.py ADAPTER_OPTIONS):
+#   temperature   float 0.0-1.0   Converse inferenceConfig.temperature
+#   service_tier  "default" | "flex" | "priority" | "reserved"   Converse serviceTier.type
+#   max_tokens    int             Converse inferenceConfig.maxTokens (default 32768)
+# Roles sharing backend+model but not options get separate invokers.
+#
+# The `skim` role (docs/PLAN-skim-stage.md, Step 3.5 of a run) reads every
+# parent-level arrival in the run's window with a cheap, faithful model and is
+# the same in every profile: Amazon Nova 2 Lite on the direct Bedrock API, Flex
+# tier, temperature 0, extended reasoning off (effort = "low"), 4096 output
+# tokens. It is Bedrock-only by rule — the resolver rejects a skim on Kiro /
+# Claude Code / Codex at config load — because it sends full document text to
+# its model, and that text stays inside the AWS account. Its own sub-cap is
+# SKIM_SPEND_CAP_USD ($1.00, env SECOND_BRAIN_SKIM_CAP_USD, at most 15% of the
+# run cap) and it is metered against the run cap like every other stage; any
+# skim failure is non-fatal (the Explorer gets the plain arrivals manifest).
+#
+# The `grounding_auditor` role runs the one pre-panel grounding audit per
+# candidate (src/dream_cycle/stages/grounding.py). It is a corpus role under the
+# same Kiro/Fable guard, metered like every seat, and in every profile below it
+# is a copy of that profile's `skeptic` line, so it shares the skeptic's cached
+# invoker and costs exactly what the audit cost on the skeptic seat. Its output
+# feeds only the Thinker's revision call, never a panel seat.
 #
 # Credentials are NOT stored here — they stay out-of-band / gitignored.
 # See docs/MODEL-BACKENDS.md.
 
-default_profile = "laptop"
+default_profile = "controlled"
 
 [profiles.laptop]
-explorer       = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
-thinker        = { backend = "kiro", model = "claude-opus-4.8", effort = "max" }
-skeptic        = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
-advocate       = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
-epistemologist = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
-methodologist  = { backend = "kiro", model = "claude-opus-4.8", effort = "high" }
+explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+thinker        = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "max" }
+skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+grounding_auditor = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
+distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
+codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
 [profiles.mini]
 # Mac Mini: no Kiro -> Claude Code on Bedrock. The claude_code adapter is
-# implemented and validated end-to-end against the local enterprise-managed `claude` build.
+# implemented and validated end-to-end against the local ASBX `claude` build.
 #
-# Model ids are Bedrock inference-profile ids the Claude Code CLI accepts on
-# this build (confirmed live): `global.anthropic.claude-opus-4-8` is the latest
-# Opus. The short/dotted forms (`claude-opus-4.8`, `claude-opus-4-8`) and the
-# `opus` alias (which resolves to the older 4-6) are NOT used. For a cheaper /
-# faster instance, swap to `global.anthropic.claude-sonnet-4-6`.
-explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-thinker        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "max" }
-skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
-methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-4-8", effort = "high" }
+# Model ids are Bedrock inference-profile ids the Claude Code CLI serves as
+# requested. 2026-10-10 live probe (stream-json system/init.model):
+# `global.anthropic.claude-opus-4-8` is REMAPPED by this Claude Code build to
+# `claude-opus-5-5[1m]` (the served-model check would abort every corpus stage),
+# while `global.anthropic.claude-opus-5` and `global.anthropic.claude-sonnet-5`
+# are served exactly. Re-probe before changing an id here.
+explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+thinker        = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "max" }
+skeptic        = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+grounding_auditor = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+advocate       = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+epistemologist = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+methodologist  = { backend = "claude_code", model = "global.anthropic.claude-opus-5", effort = "high" }
+skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
+distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
+codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
 
-# Opt-in local profile for machines with the Codex CLI. It is used by the
-# bounded Codex Task capture proof without changing the default Dream Cycle
-# backend for existing operations.
-[profiles.codex_local]
-explorer       = { backend = "codex", model = "gpt-5.6-sol", effort = "high" }
-thinker        = { backend = "codex", model = "gpt-5.6-sol", effort = "max" }
-skeptic        = { backend = "codex", model = "gpt-5.6-sol", effort = "high" }
-advocate       = { backend = "codex", model = "gpt-5.6-sol", effort = "high" }
-epistemologist = { backend = "codex", model = "gpt-5.6-sol", effort = "high" }
-methodologist  = { backend = "codex", model = "gpt-5.6-sol", effort = "high" }
+[profiles.bedrock]
+# Direct Bedrock Converse API for every tool-less role; the Explorer needs the
+# live MCP tool-loop, so it stays on Claude Code (also Bedrock-billed).
+#
+# Model ids are cross-region inference profiles, confirmed ACTIVE in the
+# account on 2026-09-14 (us-east-1 and us-west-2). Two model families sit on
+# the evaluator panel on purpose: with the 3-of-4 consensus rule, no insight is
+# accepted unless both Claude and GPT-6 Astra vote for it.
+#
+# All of this is metered. Guardrails (src/backends/cost.py):
+#   SECOND_BRAIN_RUN_COST_CAP_USD  per-run hard stop, default 5.00
+#   SECOND_BRAIN_KILL_SWITCH=1     refuse to start a run
+#   BEDROCK_MAX_TOKENS             output budget per call (default 32768;
+#                                  adaptive thinking is billed as output)
+# Estimated ≈ $1.60/run from the June token counts, before thinking tokens.
+explorer       = { backend = "claude_code", model = "global.anthropic.claude-opus-5",    effort = "high" }
+thinker        = { backend = "bedrock",     model = "global.anthropic.claude-opus-5", effort = "high" }
+skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+grounding_auditor = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
+epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
+skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
+distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
+codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
+
+[profiles.controlled]
+# Every role on a backend that honours the requested model, all inside the AWS
+# account boundary, no Kiro. Added 2026-09-17 after kiro-cli 2.22 started
+# ignoring --model ("failed to set model: Method not found") and its server-side
+# "Auto" routing served claude-fable-5.1 to the Explorer and Thinker — the
+# agents said so themselves in their raw output ("this session is running on
+# claude-fable-5.1, which is not approved for PII") and began self-censoring
+# what to explore. Kiro labels Fable "NOT FOR CUSTOMER DATA, ITAR OR PII"; this
+# corpus is the personal one. Until Kiro honours --model again, do not route
+# the corpus through it.
+#
+# Explorer keeps tools via Claude Code (Bedrock-billed; honours inference-profile
+# ids). Thinker is tool-less on direct Bedrock: every Thinker now receives the
+# slice contents inline (B2 packet), so it no longer needs memory_read. Cost
+# estimate ≈ $3-4/run (Explorer ~$0.5-1, Thinker ~$1, Claude evaluators ~$0.4,
+# Astra ~$1.6) — under the $6/run cap; ~$100/month nightly.
+#
+# Evaluator-seat output budgets (2026-10-05, review S3-3). A failed call with no
+# usage is reserved at input + max_tokens of output (src/backends/cost.py), so
+# the inherited 32,768 default made one throttled Astra seat cost ≈ $1.70 of
+# the $9 run cap and three attempts ≈ $5. Production llm_metrics to date
+# (real_output_tokens, thinking included): Astra skeptic/epistemologist and
+# grounding audit max 2,293; Sonnet-5 advocate/methodologist max 9,581. Budgets
+# are set ≥ 2x the observed maximum, never below 8192: Astra 8192 (≈ $0.48 raw
+# for a 20k-char prompt), Sonnet-5 20480 (≈ $0.22) — both now sit at the $0.70
+# per-seat floor (EST_JUDGE_CANDIDATE_USD), i.e. ≤ $2.10 for three attempts.
+# A max_tokens stop is still a loud error, never a silent truncation.
+explorer       = { backend = "claude_code", model = "global.anthropic.claude-sonnet-5",  effort = "high" }
+thinker        = { backend = "bedrock",     model = "global.anthropic.claude-opus-5",    effort = "high" }
+skeptic        = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+grounding_auditor = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+advocate       = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
+epistemologist = { backend = "bedrock",     model = "global.openai.gpt-6-astra",         effort = "high", options = { max_tokens = 8192 } }
+methodologist  = { backend = "bedrock",     model = "global.anthropic.claude-sonnet-5",  effort = "high", options = { max_tokens = 20480 } }
+skim           = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }
+distill        = { backend = "bedrock", model = "global.anthropic.claude-sonnet-5", effort = "medium", options = { max_tokens = 8192 } }
+codex_semantic = { backend = "bedrock", model = "global.anthropic.claude-opus-5", effort = "high", options = { max_tokens = 8192 } }
+editor         = { backend = "bedrock", model = "us.amazon.nova-2-lite-v1:0", effort = "low", options = { temperature = 0.0, service_tier = "flex", max_tokens = 4096 } }

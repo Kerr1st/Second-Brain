@@ -59,7 +59,87 @@ ALL_STRATEGIES = """\
     NOT to create new insights but to DEEPEN existing ones with new context.
     The operation should be UPDATE, not CREATE. (Pressley et al. 1987: repeated
     elaborative interrogation at increasing intervals produces stronger encoding
-    than one-shot elaboration.)"""
+    than one-shot elaboration.)
+
+12. ARRIVALS SYNTHESIS (cross-channel) — Start from the arrivals inventory (or
+    manifest) in the user message: what was captured since the previous run, by
+    channel. Within that window, find echoes ACROSS channels: a Slack thread and
+    an email about the same account; a calendar meeting and the page read just
+    before it; a question asked in one place and answered in another; a decision
+    made in a Kiro session that shows up as a commitment in Slack. Assemble slices
+    whose memories are mostly new and span at least two channels. Use the
+    inventory lines first (they already carry ids, salience and what each
+    document states; memory_recent_activity shows the same window as counts),
+    then memory_list(source_type=..., since_days=...) to enumerate a channel,
+    then memory_search(..., since_days=...) to find the echo in another. This
+    is the only strategy that guarantees the user's most recent days are
+    examined at all."""
+
+SOURCES_SECTION = """\
+## Where memories come from
+
+The corpus is the user's digital life, captured from channels, plus what this \
+system has synthesized from it. Each channel's documents (parent memories) are \
+split into chunks; search returns chunks, memory_read returns the whole document.
+
+- slack — one document per conversation-day (channel or DM), thread replies inline
+- outlook_email — one per email (inbox and sent); outlook_calendar — one per event
+- browser_history — one per day: pages read with dwell time, searches, AI sessions
+- article / youtube — pages the user read and videos watched, full text
+- kiro_cli_chat / kiro_ide_chat — the user's AI-assistant sessions; distilled_chat — \
+decisions and insights distilled from them
+- quick_desktop_* — documents, chats, decisions, people from the Quick Desktop index
+- source_type null with type insight/synthesis/decision — produced by this system
+
+Search results and listings carry source_type and created_at: read them. A memory \
+with type "source" is an episode — something that happened; insight/synthesis/decision \
+memories are interpretations of episodes. The user's work on this knowledge system is \
+one project among the others — part of their day, neither privileged nor excluded."""
+
+ARRIVALS_SECTION = """\
+## The arrivals inventory (in the user message)
+
+The user message ends with what arrived since the previous run. When the skim stage \
+has read the window, it is an INVENTORY: per-channel counts, then one line per document \
+— `id | channel | S<n> N<n> | flags | summary` — ordered most salient first. A cheap \
+model wrote each line from the document alone; it states what the document says, not \
+what it means.
+- S = salience to the user's own work and life, 0-3 (0 generic web content, 3 addressed \
+to or about the user's own work). N = novelty, 0-3 (3 a surprising fact or a decision with \
+consequences).
+- Flags: D<n> decisions recorded, Q<n> open questions, C the text itself notes a change or \
+reversal, P<n> people named, `!` a quoted passage could not be verified against the text \
+(read that document before relying on it), `[c<k>]` documents whose embeddings cluster \
+together — the same matter seen from several channels.
+- Every id in the inventory is retrievable with memory_read; documents cut for length are \
+still retrievable through memory_list / memory_search.
+- Assemble arrival-anchored slices FROM the inventory, across channels and across salience \
+levels: high salience first but not exclusively — an S1 article the user read right after an \
+S3 meeting is often the echo you are looking for. Do not exclude any channel; this is the \
+user's whole digital day, and the routine channels are where the patterns hide.
+Without skim records the block is the older MANIFEST: counts per channel plus a few sample \
+ids each; enumerate with memory_list from there."""
+
+BUDGET_SECTION = """\
+## Slice budget (enforced by the orchestrator)
+
+- ARRIVAL-ANCHORED: at least half of your slices (minimum one) must be anchored in \
+the arrivals window — at least 60% of their memories created since the previous run, \
+drawn from at least two channels. If you return fewer, the orchestrator adds an \
+arrivals slice of its own and your run has spent attention on stale material.
+- BREADTH: no single channel or cluster may supply every slice. Three or more slices \
+drawn almost entirely from one channel will be cut to two.
+- COMPOSITION: prefer at least 8 episodic memories (type "source") and at most 4 \
+semantic memories (insight/synthesis/decision) per slice, from distinct parent \
+documents. The panel rejects candidates whose sources are several syntheses of the \
+same conversation; independent episodes are what survive review.
+- Slices with memory ids that do not exist are dropped. Copy ids from tool output.
+- TIME: you have about 15 minutes and each tool call costs ~20 seconds. Budget\
+ roughly 20-25 calls: the inventory (or manifest) already lists ids per channel, so\
+ start from those, use memory_list once per channel you want to enumerate, and reserve\
+ memory_search for finding the echo of one channel in another. Do not read every\
+ memory in full before deciding; the inventory lines, titles and the 500-char search\
+ snippets are enough to assemble a slice — the Thinker reads the full text."""
 
 # Session-start mode: restricted to strategies 6, 8, 10 only
 SESSION_START_STRATEGIES = """\
@@ -104,12 +184,13 @@ OUTPUT_FORMAT = """\
 
 Return a JSON array of 0-5 memory slices. Each slice is an object with:
 - "name": A descriptive name for the slice (e.g., "Cross-project database decisions")
-- "strategy": The strategy used (e.g., "cross_project_collision")
+- "strategy": The strategy used (e.g., "cross_project_collision", "arrivals_synthesis")
 - "memory_ids": Array of memory UUIDs included (10-20 per slice)
 - "memory_titles": Array of memory titles for logging
 - "hypothesis": 1-2 sentence hypothesis about what the Thinker might find
 
-Assemble 0-5 memory slices per cycle. Prioritize diversity of strategy.
+Assemble 0-5 memory slices per cycle. Prioritize diversity of strategy and of channel, \
+and meet the slice budget above.
 If no strategies yield interesting slices, return an empty JSON array `[]`
 and explain why. It is better to surface nothing than to force weak slices."""
 
@@ -130,6 +211,7 @@ ALL_STRATEGY_NAMES = [
     "retrieval_failure_analysis",
     "desirable_difficulty_surfacing",
     "elaborative_reinterrogation",
+    "arrivals_synthesis",
 ]
 
 
@@ -226,22 +308,32 @@ def get_explorer_prompt(
 
     prompt = f"""\
 You are the Explorer agent in a personal knowledge system containing {memory_count} \
-memories spanning {date_range}. Your job is to assemble interesting "memory slices" \
-— curated sets of 10-20 memories that, when examined together, might reveal hidden \
-patterns, contradictions, implicit principles, or surprising connections.
+memories spanning {date_range}. The memories are the user's digital life — Slack, \
+email, calendar, reading, browsing, AI-assistant sessions — plus what this system has \
+synthesized from it. Your job is to assemble interesting "memory slices" — curated \
+sets of 10-20 memories that, when examined together, might reveal hidden patterns, \
+contradictions, implicit principles, or surprising connections in that life.
 
 You are NOT looking for obvious connections. You are looking for the non-obvious: \
 memories from different time periods that echo each other, decisions that contradict \
 each other across projects, recurring problems that suggest an unnamed principle, \
-questions that were asked months ago and now have answers elsewhere in the system.
-{feedback_section}
+questions that were asked months ago and now have answers elsewhere in the system — \
+and, every run, what the most recent days contain that the user has not connected yet.
+
+{SOURCES_SECTION}
+
+{ARRIVALS_SECTION}
+
 {strategies}
 {diversity_section}
+{BUDGET_SECTION}
+
 When assembling slices, pay attention to temporal validity of knowledge. A memory \
 that was later superseded is different from one that's still active. Check for \
 superseded/consolidated status. Superseded memories are valuable for contradiction \
 hunting and stale synthesis strategies — they're signals of knowledge evolution.
 {scope_section}
+{feedback_section}
 {OUTPUT_FORMAT}"""
 
     return prompt

@@ -7,10 +7,7 @@ network, or file system dependencies.
 
 import re
 
-SEMANTIC_TYPES = {
-    "idea", "synthesis", "insight", "decision",
-    "connection", "priority", "project", "question",
-}
+from src.validation import SEMANTIC_TYPES
 
 # Matches procedural content:
 #   - "step-by-step" or "step by step" (case-insensitive)

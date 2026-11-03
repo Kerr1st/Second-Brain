@@ -7,18 +7,49 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>/path/to/second-brain/scripts/jobs/job_wrapper.sh</string>
-		<string>/path/to/second-brain/scripts/jobs/dream_cycle_scheduled.sh</string>
+		<string>/Users/kerrfir/second-brain/scripts/jobs/job_wrapper.sh</string>
+		<string>/Users/kerrfir/second-brain/scripts/jobs/dream_cycle_scheduled.sh</string>
 		<string>dream-cycle</string>
 	</array>
 	<key>StartCalendarInterval</key>
-	<dict>
-		<key>Hour</key>
-		<integer>12</integer>
-		<key>Minute</key>
-		<integer>0</integer>
-	</dict>
+	<array>
+		<dict>
+			<key>Weekday</key>
+			<integer>1</integer>
+			<key>Hour</key>
+			<integer>12</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Weekday</key>
+			<integer>3</integer>
+			<key>Hour</key>
+			<integer>12</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+		<dict>
+			<key>Weekday</key>
+			<integer>5</integer>
+			<key>Hour</key>
+			<integer>12</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+		</dict>
+	</array>
 	<key>WorkingDirectory</key>
-	<string>/path/to/second-brain</string>
+	<string>/Users/kerrfir/second-brain</string>
+	<key>ExitTimeOut</key>
+	<integer>150</integer>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SECOND_BRAIN_JOB_NEEDS_NETWORK</key>
+		<string>1</string>
+		<key>SECOND_BRAIN_JOB_TIMEOUT_DREAM_CYCLE</key>
+		<string>21600</string>
+		<key>SECOND_BRAIN_JOB_GRACE_S</key>
+		<string>120</string>
+	</dict>
 </dict>
 </plist>

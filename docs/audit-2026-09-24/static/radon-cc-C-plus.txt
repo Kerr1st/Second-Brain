@@ -1,0 +1,105 @@
+src/ingest.py
+    F 63:0 chunk_by_section - C (12)
+    F 105:0 _discover_relationships - C (12)
+src/dream_cycle_db.py
+    F 520:0 get_tier1_metrics - C (16)
+    F 869:0 record_slices - C (11)
+src/search.py
+    F 45:0 hybrid_search - E (31)
+    F 217:0 rerank - D (21)
+src/express.py
+    F 165:0 _gather_insights - C (17)
+    F 584:0 should_push - C (15)
+    F 519:0 render_markdown - C (13)
+    F 462:0 edit_briefing - C (12)
+    F 638:0 render_email - C (12)
+    F 126:0 _apply_prefs - C (11)
+src/project.py
+    F 6:0 normalize_project_tag - C (12)
+src/mcp_server.py
+    F 121:0 memory_search - C (19)
+    F 240:0 memory_update - C (16)
+    F 411:0 memory_learn - C (11)
+src/capture/youtube.py
+    F 161:0 capture - C (14)
+    F 57:0 list_playlist - C (12)
+src/capture/codex.py
+    F 264:0 _run - C (20)
+    F 450:0 _metadata_for_snapshot - C (17)
+    F 845:0 _validate_semantic_result - C (16)
+    F 519:0 _capture_snapshot - C (12)
+    F 899:0 _store_semantic_result - C (12)
+src/capture/agent_tasks.py
+    C 135:0 DerivedMemory - C (15)
+    M 142:4 DerivedMemory.__post_init__ - C (14)
+src/capture/browser.py
+    F 286:0 capture - C (16)
+    F 127:0 classify - C (14)
+    F 237:0 render_day - C (14)
+    F 201:0 summarize_day - C (11)
+src/capture/outlook.py
+    F 154:0 render_event - C (19)
+    F 119:0 render_email - C (16)
+    F 195:0 collect_mail - C (15)
+src/capture/slack.py
+    F 201:0 list_conversations - C (20)
+    F 115:0 render_day - C (17)
+    F 275:0 collect - C (14)
+src/capture/sources/codex.py
+    M 492:4 CodexDesktopSource.fetch_task - F (79)
+    C 367:0 CodexDesktopSource - E (32)
+    F 293:0 _explicit_codex_project - C (17)
+    F 168:0 _load_sidebar_titles - C (15)
+    F 130:0 _authored_text_message - C (14)
+    M 380:4 CodexDesktopSource.enumerate_tasks - C (13)
+src/parsers/ide_chat.py
+    F 66:0 strip_messages - C (13)
+src/parsers/cli_chat.py
+    F 41:0 extract_session_messages - C (13)
+src/parsers/crawlee.py
+    F 257:0 parse_all - C (12)
+src/dream_cycle/digest.py
+    F 16:0 generate_digest - D (27)
+src/dream_cycle/feedback.py
+    F 24:0 build_feedback_injection - D (24)
+src/dream_cycle/ledger.py
+    F 54:0 slice_metrics - D (23)
+src/dream_cycle/orchestrator.py
+    M 349:4 DreamCycleOrchestrator._run_pipeline - E (31)
+    M 1151:4 DreamCycleOrchestrator._revise_candidate - D (22)
+    M 651:4 DreamCycleOrchestrator.invoke_explorer - C (19)
+    M 782:4 DreamCycleOrchestrator._allocate_attention - C (11)
+src/dream_cycle/allocation.py
+    F 297:0 enforce_budget - C (19)
+    F 342:0 allocate_stratified - C (17)
+    F 161:0 _record_flags - C (14)
+    F 380:0 _stratified_rows - C (14)
+    F 233:0 render_arrivals_inventory - C (13)
+    F 95:0 build_arrivals_manifest - C (12)
+    F 448:0 select_arrivals - C (12)
+    F 406:0 _fill_capped - C (11)
+src/backends/codex.py
+    M 582:4 CodexInvoker._agent_message_text - C (13)
+src/backends/cost.py
+    F 135:0 estimate_cost_usd - C (14)
+src/backends/base.py
+    F 231:0 _balanced_json_spans - C (13)
+src/backends/bedrock.py
+    M 394:4 BedrockInvoker._map_effort_to_model_fields - C (14)
+    M 509:4 BedrockInvoker._extract_raw - C (13)
+    M 132:4 BedrockInvoker.__init__ - C (11)
+    M 573:4 BedrockInvoker._extract_usage - C (11)
+src/skim/runner.py
+    F 136:0 skim_window - D (26)
+src/skim/cluster.py
+    F 38:0 greedy_clusters - C (17)
+    F 82:0 cluster_window - C (12)
+src/skim/schema.py
+    F 335:0 validate_record - C (11)
+src/prompts/skim.py
+    F 102:0 render_identity_block - C (11)
+src/prompts/explorer.py
+    F 259:0 get_explorer_prompt - C (11)
+
+605 blocks (classes, functions, methods) analyzed.
+Average complexity: A (4.985123966942148)

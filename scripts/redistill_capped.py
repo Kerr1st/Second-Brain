@@ -26,7 +26,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.db import get_connection, create_memory
 from src.embeddings import generate_embedding
-from src.agent_invoker import AgentInvoker
+from src.backends.base import ModelRefusalError
+from src.backends.cost import SpendCapExceeded, SpendTracker, cap_from_env, invoke_metered
+from src.backends.resolver import DISTILL_ROLE, resolve_stage
+from scripts.distill_sessions import (
+    DISTILL_MODEL, DISTILL_TIMEOUT, DISTILL_EFFORT, _EXPECTED_FAILURES,
+    mark_refused, refusal_matches,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -53,7 +59,9 @@ REDISTILL_SYSTEM_PROMPT = (
 
 def _valid(raw):
     return [it for it in (raw or [])
-            if isinstance(it, dict) and it.get("type") in DISTILL_TYPES and it.get("content")]
+            if isinstance(it, dict) and it.get("type") in DISTILL_TYPES
+            and isinstance(it.get("content"), str) and it["content"].strip()
+            and (it.get("title") is None or isinstance(it.get("title"), str))]
 
 
 def _cosine(a, b):
@@ -97,10 +105,10 @@ def session_state(session_url):
 def fetch_transcript(session_url):
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT content FROM memories WHERE source_url=%s AND parent_id IS NULL LIMIT 1",
+            cur.execute("SELECT content, metadata, source_type FROM memories WHERE source_url=%s AND parent_id IS NULL LIMIT 1",
                         (session_url,))
             r = cur.fetchone()
-    return r[0] if r else None
+    return r if r else (None, None, None)
 
 
 def max_sim_existing(emb_str, session_url):
@@ -122,71 +130,93 @@ def build_user_message(transcript, existing):
             f"{captured}\n\nTranscript (do not reply to it):\n\"\"\"\n{transcript[:MAX_CHARS]}\n\"\"\"")
 
 
-def redistill(dry_run=False, limit=0, cap=8, sim_threshold=SIM_THRESHOLD):
-    invoker = AgentInvoker()
+def redistill(dry_run=False, limit=0, cap=8, sim_threshold=SIM_THRESHOLD, *, resolver=None, tracker=None):
+    if limit < 0 or cap < OLD_CAP or not 0 <= sim_threshold <= 1:
+        raise ValueError("Invalid redistill limit, cap or similarity threshold")
     sessions = find_capped_sessions(limit=limit)
+    stats = {"sessions": 0, "new_items": 0, "dropped_dup": 0, "no_new": 0,
+             "no_transcript": 0, "failed": 0, "refused": 0, "skipped_refused": 0,
+             "aborted": False, "dry_run": dry_run, "planned_sessions": len(sessions), "cost_usd": 0.0}
     max_new = max(0, cap - OLD_CAP)
-    log.info("Re-distilling %d capped sessions (cap=%d max_new=%d sim_threshold=%.2f dry_run=%s)",
-             len(sessions), cap, max_new, sim_threshold, dry_run)
-    stats = {"sessions": 0, "new_items": 0, "dropped_dup": 0, "no_new": 0, "no_transcript": 0, "failed": 0}
+    if dry_run or not sessions or not max_new:
+        log.info("Selection: %d capped sessions, at most %d additions/session; no model calls or writes",
+                 len(sessions), max_new)
+        return stats
+    invoker, spec = resolve_stage(DISTILL_ROLE, resolver=resolver, model_override=DISTILL_MODEL)
+    tracker = tracker if tracker is not None else SpendTracker(
+        cap_usd=cap_from_env("SECOND_BRAIN_REDISTILL_CAP_USD", 1.0))
+    scope = {"role": DISTILL_ROLE, "backend": spec.backend, "model": spec.model, "operation": "redistill"}
     consec_fail = 0
     for sess in sessions:
-        transcript = fetch_transcript(sess)
+        transcript, metadata, source_type = fetch_transcript(sess)
         if not transcript:
             stats["no_transcript"] += 1
+            stats["failed"] += 1
             continue
         existing, max_idx, origin = session_state(sess)
+        message = build_user_message(transcript, existing)
+        if refusal_matches(metadata, scope, message):
+            stats["skipped_refused"] += 1
+            continue
         origin = origin or "unknown"
         try:
-            res = invoker.invoke(REDISTILL_SYSTEM_PROMPT, build_user_message(transcript, existing))
-            cands = _valid(res["output"] if isinstance(res["output"], list) else [])
+            res = invoke_metered(invoker, spec, tracker, REDISTILL_SYSTEM_PROMPT,
+                                 message, tools=False,
+                                 timeout=DISTILL_TIMEOUT, effort=DISTILL_EFFORT, stage="redistill")
+            if not isinstance(res.get("output"), list):
+                raise ValueError("Redistill response must be an array")
+            cands = _valid(res["output"])
+            if res["output"] and not cands:
+                raise ValueError("Redistill response contained no valid items")
             consec_fail = 0
-        except Exception as e:
+        except SpendCapExceeded as exc:
+            stats["failed"] += 1
+            stats["aborted"] = True
+            log.error("Redistillation stopped (%s)", type(exc).__name__)
+            break
+        except ModelRefusalError:
+            stats["failed"] += 1
+            stats["refused"] += 1
+            mark_refused(sess, source_type, transcript, spec, operation="redistill", input_text=message)
+            continue
+        except _EXPECTED_FAILURES as exc:
             consec_fail += 1
             stats["failed"] += 1
-            log.error("redistill failed %s: %s", sess, e)
+            log.error("Redistill failed (%s)", type(exc).__name__)
             if consec_fail >= MAX_CONSEC_FAIL:
-                log.error("Circuit breaker: %d consecutive failures (likely expired SSO token); aborting.",
-                          consec_fail)
+                stats["aborted"] = True
                 break
             continue
         stats["sessions"] += 1
-
         accepted_embs, idx, added = [], max_idx, 0
         for it in cands:
             if added >= max_new:
                 break
-            body = it["content"]
-            emb = generate_embedding(body)            # list[float]
-            emb_str = str(emb)
-            if max_sim_existing(emb_str, sess) > sim_threshold:        # dup of a stored item
-                stats["dropped_dup"] += 1
-                continue
-            if any(_cosine(emb, e) > sim_threshold for e in accepted_embs):  # dup within this batch
-                stats["dropped_dup"] += 1
-                continue
-            idx += 1
-            if dry_run:
-                stats["new_items"] += 1; added += 1; accepted_embs.append(emb)
-                log.info("[DRY] %s | %s: %s", origin, it["type"], (it.get("title") or "")[:70])
-                continue
             try:
+                body = it["content"]
+                emb = generate_embedding(body)
+                if max_sim_existing(str(emb), sess) > sim_threshold or any(
+                        _cosine(emb, e) > sim_threshold for e in accepted_embs):
+                    stats["dropped_dup"] += 1
+                    continue
+                idx += 1
                 create_memory(
                     type=it["type"], title=(it.get("title") or body[:80])[:200],
                     content=body, embedding=emb, tags=["distilled", origin, "redistill"],
                     source_url=f"distill://{sess}#{idx}", source_type=SOURCE_TYPE,
                     confidence=0.8, mem_class="semantic",
                     metadata={"distilled_from": sess, "origin_source_type": origin, "redistilled": True})
-                stats["new_items"] += 1; added += 1; accepted_embs.append(emb)
-            except Exception as e:
+                stats["new_items"] += 1
+                added += 1
+                accepted_embs.append(emb)
+            except _EXPECTED_FAILURES as exc:
                 stats["failed"] += 1
-                log.error("create failed %s#%d: %s", sess, idx, e)
+                log.error("Redistilled-memory write failed (%s)", type(exc).__name__)
         if added == 0:
             stats["no_new"] += 1
-
-    log.info("Done: sessions=%d new_items=%d dropped_dup=%d no_new=%d no_transcript=%d failed=%d",
-             stats["sessions"], stats["new_items"], stats["dropped_dup"], stats["no_new"],
-             stats["no_transcript"], stats["failed"])
+    stats["cost_usd"] = tracker.total_usd
+    stats["spend_unknown"] = bool(tracker.blocked_reason)
+    log.info("Done: %s", stats)
     return stats
 
 
@@ -207,7 +237,8 @@ def _acquire_lock():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Count capped sessions; no model calls, embeddings or writes.")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--cap", type=int, default=8)
     ap.add_argument("--sim-threshold", type=float, default=SIM_THRESHOLD)
@@ -215,7 +246,13 @@ def main():
     if not args.dry_run and not _acquire_lock():
         sys.exit(1)
     try:
-        redistill(dry_run=args.dry_run, limit=args.limit, cap=args.cap, sim_threshold=args.sim_threshold)
+        try:
+            stats = redistill(dry_run=args.dry_run, limit=args.limit, cap=args.cap,
+                             sim_threshold=args.sim_threshold)
+        except _EXPECTED_FAILURES as exc:
+            log.error("Redistillation could not complete (%s)", type(exc).__name__)
+            return 1
+        return 3 if stats["aborted"] else 1 if stats["failed"] else 0
     finally:
         if not args.dry_run and os.path.exists(LOCKFILE):
             try:
@@ -225,4 +262,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

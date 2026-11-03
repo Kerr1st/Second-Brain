@@ -9,7 +9,7 @@ feeds them through the standard pipeline (``src.ingest.ingest_content``) as
 Engagement signal: each memory records which playlist it came from
 (``Engagement:`` header -> metadata) so later phases can weight by interest.
 
-Requires (venv): yt-dlp==2026.3.17, curl_cffi==0.13.0.
+Requires (venv): yt-dlp==2026.8.19, curl_cffi==0.13.0.
 Run: python -m src.capture.youtube [--limit N] [--dry-run] [--min-duration 300]
 
 Validated recipe (see docs / session notes): one subtitle track + a request
@@ -30,7 +30,14 @@ import tempfile
 from src.db import get_processed_source_urls, is_reachable
 from src.ingest import ingest_content
 
+from src.capture.common import exit_code
+from src.capture.framework import run_channel
+from src.capture.render import render_document
+
 logger = logging.getLogger(__name__)
+
+# Playlists whose last enumeration returned entries but a non-zero yt-dlp exit.
+last_enumeration_partial: set = set()
 
 # Intentional-interest playlists -> engagement-tier label stored on each memory.
 PLAYLISTS = {
@@ -40,6 +47,51 @@ PLAYLISTS = {
 MIN_DURATION_DEFAULT = 300  # seconds; skip shorts/clips
 IMPERSONATE = "chrome"
 BROWSER = "chrome"
+
+
+STDERR_TAIL_CHARS = 300
+# yt-dlp errors that mean "this video will never have a fetchable transcript".
+# Network errors, HTTP 5xx, timeouts, the "not a bot" sign-in check (an IP/rate
+# block) and anything unknown are NOT here: they stay failures so the video is
+# retried.
+# HTTP 429 is split by WHERE it happens. A 429 on the webpage, player/API or
+# playlist request is a real IP rate limit and stays a failure, so the job exits
+# non-zero. A 429 on the subtitle track itself ("Unable to download video
+# subtitles for 'en': HTTP Error 429") is per-track: the same few videos get it
+# every night, at any hour, while fetches seconds before and after succeed, and
+# a newer yt-dlp (nightly 2026.10.10) gets the same 429 (probed 2026-10-13).
+# It is treated as no_transcript. Nothing is persisted, so the video is still
+# retried each night and is picked up if YouTube starts serving the track.
+# fetch_transcript raises SubtitleRateLimited for it (not None) so capture can
+# count it separately: YouTube rate-limits the timedtext endpoint apart from
+# watch/player, and an IP-wide timedtext block would give EVERY video this error.
+# capture turns "every fetched video got it" (and at least
+# SUBTITLE_429_ALL_FAILED_MIN of them) into a failure instead of a silent zero.
+_SUBTITLE_429_RE = re.compile(r"unable to download video subtitles for '[^']*': http error 429", re.I)
+SUBTITLE_429_ALL_FAILED_MIN = 3  # the known chronic few must not trip it
+
+
+class SubtitleRateLimited(Exception):
+    """The subtitle (timedtext) request got HTTP 429 after the page/player succeeded.
+
+    Deliberately NOT a RuntimeError: callers count it as no_transcript, not failed.
+    """
+
+
+_PERMANENT_NO_TRANSCRIPT_RE = re.compile(
+    r"video unavailable|this video is unavailable|private video|video is private|"
+    r"(has been|was) removed|video has been terminated|account associated with this video|"
+    r"age[- ]restricted|confirm your age|inappropriate for some users|"
+    r"members[- ]only|join this channel|sign in to confirm (?!you.?re not a bot)|"
+    r"no subtitles|there are no subtitles|no (automatic )?captions", re.I)
+# "Requested format is not available" is deliberately NOT permanent: it comes from
+# the yt-dlp player client / JS-challenge setup (see fetch_transcript), and is the
+# usual symptom when an extractor change breaks every video at once. It stays a
+# failure so a total yt-dlp outage exits non-zero instead of a quiet no_transcript.
+
+
+def _stderr_tail(stderr: str | None, limit: int = STDERR_TAIL_CHARS) -> str:
+    return re.sub(r"\s+", " ", (stderr or "")[-limit:]).strip()
 
 
 def _ytdlp(args: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
@@ -87,8 +139,18 @@ def list_playlist(playlist_id: str) -> list[dict]:
             "duration": e.get("duration"),
             "channel": e.get("channel") or e.get("uploader") or "",
         })
-    if not entries and proc.returncode != 0:
-        logger.warning("Enumeration failed for %s: %s", playlist_id, (proc.stderr or "").strip()[:300])
+    if proc.returncode != 0:
+        if not entries:
+            # Nothing enumerated and yt-dlp unhappy: that is a failed playlist,
+            # never an empty success (F-032).
+            raise RuntimeError(f"YouTube enumeration failed (exit {proc.returncode})")
+        # yt-dlp exits non-zero when *some* entries of a playlist cannot be
+        # extracted (private/removed videos) while still listing the rest. Keep
+        # what it listed and say so; discarding the whole playlist would make a
+        # single dead liked video hide every other new one, nightly (D N-8).
+        logger.warning("YouTube enumeration of %s was partial (yt-dlp exit %d); %d entries kept",
+                       playlist_id, proc.returncode, len(entries))
+        last_enumeration_partial.add(playlist_id)
     return entries
 
 
@@ -114,13 +176,17 @@ def vtt_to_text(vtt: str) -> str:
 
 
 def fetch_transcript(video_url: str) -> str | None:
-    """Fetch ONE English transcript track (manual preferred, else auto). None if absent."""
+    """Fetch ONE English transcript track (manual preferred, else auto). None if absent.
+
+    Raises SubtitleRateLimited for a subtitle-track 429 and RuntimeError for
+    transient/unknown yt-dlp failures.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         # NOTE: no --cookies-from-browser here. Subtitles are public, and passing
         # cookies makes yt-dlp use the authenticated web_creator/tv player client,
         # which (without the deno JS-challenge solver) returns "Requested format is
         # not available". The anonymous android_vr client still serves subtitles.
-        _ytdlp([
+        proc = _ytdlp([
             "--impersonate", IMPERSONATE,
             "--skip-download",
             "--write-subs", "--write-auto-subs",
@@ -133,7 +199,22 @@ def fetch_transcript(video_url: str) -> str | None:
         ], timeout=120)
         vtts = [f for f in os.listdir(tmp) if f.endswith(".vtt")]
         if not vtts:
-            return None
+            if proc.returncode == 0:
+                return None
+            tail = _stderr_tail(proc.stderr)
+            if _SUBTITLE_429_RE.search(tail):
+                raise SubtitleRateLimited(f"subtitle track HTTP 429 (yt-dlp exit {proc.returncode})")
+            if _PERMANENT_NO_TRANSCRIPT_RE.search(tail):
+                # The video will never yield a transcript: count it as
+                # no_transcript, not as a nightly failure retried forever.
+                logger.info("No transcript for %s (yt-dlp exit %d, permanent): %s",
+                            video_url, proc.returncode, tail)
+                return None
+            logger.warning("yt-dlp transcript fetch failed for %s (exit %d): %s",
+                           video_url, proc.returncode, tail)
+            raise RuntimeError(f"YouTube transcript fetch failed (exit {proc.returncode})")
+        # A subtitle file was written: use it even if yt-dlp exited non-zero
+        # (e.g. one of several requested tracks failed).
         vtts.sort(key=lambda f: (".en.vtt" not in f, len(f)))  # prefer plain ".en.vtt"
         with open(os.path.join(tmp, vtts[0]), encoding="utf-8", errors="replace") as fh:
             text = vtt_to_text(fh.read())
@@ -142,40 +223,47 @@ def fetch_transcript(video_url: str) -> str | None:
 
 def build_markdown(entry: dict, engagement: str, transcript: str) -> str:
     """Build a metadata-headed markdown doc for ingest_content."""
-    return "\n".join([
-        f"# {entry['title']}",
-        "",
-        f"Source: {entry['url']}",
-        "Type: youtube-transcript",
-        f"Video ID: {entry['id']}",
-        f"Channel: {entry['channel']}",
-        f"Duration: {entry.get('duration') or ''}",
-        f"Engagement: {engagement}",
-        "",
-        "---",
-        "",
-        transcript,
-    ])
+    return render_document(entry["title"], {
+        "Source": entry["url"], "Type": "youtube-transcript",
+        "Video_ID": entry["id"], "Channel": entry["channel"],
+        "Duration": entry.get("duration") or "", "Engagement": engagement,
+    }, transcript)
 
 
 def capture(playlists=None, min_duration: int = MIN_DURATION_DEFAULT,
             limit: int | None = None, dry_run: bool = False) -> dict:
     """Enumerate playlists, fetch transcripts for NEW videos, ingest them."""
     playlists = playlists or list(PLAYLISTS)
-    stats = {"processed": 0, "skipped": 0, "failed": 0, "no_transcript": 0}
+    stats = {"processed": 0, "skipped": 0, "failed": 0, "no_transcript": 0, "planned": 0,
+             "partial_enumeration": 0, "subtitle_429": 0}
+    last_enumeration_partial.clear()
 
     if not is_reachable():
         logger.error("Database unreachable; aborting.")
+        stats["failed"] = 1
         return stats
 
     already = get_processed_source_urls("youtube")
 
+    attempted = 0  # candidates past the skip filters (includes dry-run planned); drives --limit
+    # fetched: videos whose transcript fetch_transcript was actually called for
+    # this run. Excludes skipped (already processed / too short), dry-run planned
+    # and anything past --limit; includes every outcome of the call (transcript,
+    # no_transcript, subtitle 429, failed).
+    fetched = 0
     for pid in playlists:
         engagement = PLAYLISTS.get(pid, pid)
-        entries = list_playlist(pid)
+        try:
+            entries = list_playlist(pid)
+        except (OSError, RuntimeError, ValueError):
+            logger.exception("YouTube enumeration failed")
+            stats["failed"] += 1
+            continue
         logger.info("Playlist %s (%s): %d videos enumerated", pid, engagement, len(entries))
+        if pid in last_enumeration_partial:
+            stats["partial_enumeration"] += 1
         for e in entries:
-            if limit is not None and stats["processed"] >= limit:
+            if limit is not None and attempted >= limit:
                 break
             if e["url"] in already:
                 stats["skipped"] += 1
@@ -184,29 +272,48 @@ def capture(playlists=None, min_duration: int = MIN_DURATION_DEFAULT,
             if dur is not None and dur < min_duration:
                 stats["skipped"] += 1
                 continue
+            attempted += 1
             if dry_run:
-                logger.info("[dry-run] would capture: %s (%s)", e["title"][:70], engagement)
-                stats["processed"] += 1
+                stats["planned"] += 1
                 continue
+            fetched += 1
             try:
                 transcript = fetch_transcript(e["url"])
-            except Exception:
+            except SubtitleRateLimited as exc:
+                logger.warning("No transcript for %s (%s); retried next run", e["url"], exc)
+                stats["subtitle_429"] += 1
+                stats["no_transcript"] += 1
+                continue
+            except (OSError, RuntimeError, ValueError):
                 logger.exception("Fetch failed: %s", e["url"])
                 stats["failed"] += 1
                 continue
             if not transcript:
                 stats["no_transcript"] += 1
                 continue
-            try:
-                ingest_content(build_markdown(e, engagement, transcript),
-                               source_type="youtube", source_url=e["url"])
+            # The shared pipeline accounts for falsy ingest results and failures.
+            def store(items, source_type):
+                result = {"processed": 0, "skipped": 0, "failed": 0}
+                for url, md in items:
+                    try:
+                        saved = ingest_content(md, source_type=source_type, source_url=url)
+                    except Exception:  # noqa: BLE001 - one video never aborts the channel (R3 S3-8)
+                        logger.exception("YouTube ingest failed")
+                        result["failed"] += 1
+                    else:
+                        result["processed" if saved else "skipped"] += 1
+                return result
+            outcome = run_channel("youtube", [(e["url"], build_markdown(e, engagement, transcript))], ingest=store)
+            for key in ("processed", "skipped", "failed"):
+                stats[key] += outcome[key]
+            if not outcome["failed"]:
                 already.add(e["url"])
-                stats["processed"] += 1
-                logger.info("Captured: %s (%s)", e["title"][:70], engagement)
-            except Exception:
-                logger.exception("Ingest failed: %s", e["url"])
-                stats["failed"] += 1
 
+    if (stats["processed"] == 0 and stats["subtitle_429"] >= SUBTITLE_429_ALL_FAILED_MIN
+            and stats["subtitle_429"] == fetched):
+        logger.error("YouTube subtitle endpoint rate-limited for every candidate "
+                     "(%d of %d fetched videos got a subtitle HTTP 429)", stats["subtitle_429"], fetched)
+        stats["failed"] += 1
     logger.info("Done: %s", stats)
     return stats
 
@@ -219,9 +326,10 @@ def main():
     ap.add_argument("--playlists", nargs="*", default=None, help="playlist IDs (default: LL WL)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    capture(playlists=args.playlists, min_duration=args.min_duration,
+    stats = capture(playlists=args.playlists, min_duration=args.min_duration,
             limit=args.limit, dry_run=args.dry_run)
+    return exit_code(stats)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

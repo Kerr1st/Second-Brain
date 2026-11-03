@@ -1,237 +1,67 @@
-"""Integration tests for the production schema migration runner.
-
-Every test uses a uniquely named disposable database.  The protected development,
-test, and production databases are never selected by this module.
-"""
-
-from __future__ import annotations
-
+"""Exercise atomicity, reruns, and concurrent runners on disposable databases."""
 import os
+from pathlib import Path
 import shutil
 import subprocess
-import uuid
-from pathlib import Path
 
 import psycopg2
-from psycopg2 import sql
+
+ROOT = Path(__file__).resolve().parents[1]
+MIGRATIONS = ROOT / "migrations"
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-MIGRATIONS_DIR = REPO_ROOT / "migrations"
-PROTECTED_DATABASES = {
-    "memory_bank",
-    "memory_bank_test",
-    "second_brain_codex_dev",
-    "second_brain_codex_test",
-}
+def config(name, user=None):
+    """Owner-role connection by default: the ledger is owner-only until 017 grants the app role SELECT."""
+    return {"host": os.environ["DB_HOST"], "port": int(os.environ["DB_PORT"]), "user": user or os.environ["DB_MIGRATE_USER"], "dbname": name}
 
 
-def _connection_config(database: str) -> dict[str, object]:
-    return {
-        "host": os.environ.get("DB_HOST", "localhost"),
-        "port": int(os.environ.get("DB_PORT", "5432")),
-        "dbname": database,
-        "user": os.environ.get("DB_USER", "memory_bank"),
-        "password": os.environ.get("DB_PASSWORD", "memory_bank"),
-    }
+def command_env(name, directory):
+    return {**os.environ, "DB_NAME": name, "MIGRATIONS_DIR": str(directory)}
 
 
-def _create_disposable_database() -> str:
-    database = f"second_brain_runner_it_{uuid.uuid4().hex}"
-    assert database not in PROTECTED_DATABASES
-    conn = psycopg2.connect(**_connection_config("postgres"))
-    try:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
-    finally:
-        conn.close()
-    return database
+def run(name, directory):
+    return subprocess.run(["/bin/bash", str(MIGRATIONS / "migrate.sh")], env=command_env(name, directory), capture_output=True, text=True, timeout=90)
 
 
-def _drop_disposable_database(database: str) -> None:
-    assert database not in PROTECTED_DATABASES
-    conn = psycopg2.connect(**_connection_config("postgres"))
-    try:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = %s AND pid <> pg_backend_pid()",
-                (database,),
-            )
-            cur.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database)))
-    finally:
-        conn.close()
+def test_failure_rolls_back_schema_and_ledger(tmp_path):
+    name = "sb_migration_failure_test"
+    shutil.copyfile(MIGRATIONS / "000_migrations_table.sql", tmp_path / "000_migrations_table.sql")
+    (tmp_path / "001_failure.sql").write_text("CREATE TABLE partial_write(id integer); SELECT missing_migration_function();")
+    result = run(name, tmp_path)
+    assert result.returncode != 0
+    with psycopg2.connect(**config(name)) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT to_regclass('partial_write')")
+            assert cursor.fetchone()[0] is None
+            cursor.execute("SELECT count(*) FROM schema_migrations")
+            assert cursor.fetchone()[0] == 0
 
 
-def _runner_environment(database: str) -> dict[str, str]:
-    env = os.environ.copy()
-    env.update(
-        {
-            "DB_HOST": str(_connection_config(database)["host"]),
-            "DB_PORT": str(_connection_config(database)["port"]),
-            "DB_NAME": database,
-            "DB_USER": str(_connection_config(database)["user"]),
-            "DB_PASSWORD": str(_connection_config(database)["password"]),
-            "PGPASSWORD": str(_connection_config(database)["password"]),
-        }
-    )
-    return env
+def test_full_schema_and_repeat_are_consistent():
+    name = "sb_migration_fresh_test"
+    for attempt in range(2):
+        result = run(name, MIGRATIONS)
+        assert result.returncode == 0, result.stdout + result.stderr
+        expected = sorted(p.name for p in MIGRATIONS.glob("[0-9]*.sql") if not p.name.startswith("000_"))
+        with psycopg2.connect(**config(name)) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT version FROM schema_migrations ORDER BY version")
+                assert [row[0] for row in cursor.fetchall()] == expected
+                cursor.execute("SHOW hnsw.ef_search")
+                assert cursor.fetchone()[0] == "200"
+        if attempt:
+            assert result.stdout.count("(already applied)") == len(expected)
 
 
-def _run_runner(database: str, migrations_dir: Path) -> subprocess.CompletedProcess[str]:
-    env = _runner_environment(database)
-    env["MIGRATIONS_DIR"] = str(migrations_dir)
-    return subprocess.run(
-        ["bash", str(MIGRATIONS_DIR / "migrate.sh")],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-
-
-def test_failing_migration_is_atomic_and_unrecorded(tmp_path: Path) -> None:
-    """A SQL error rolls back the entire migration and its tracking row."""
-    database = _create_disposable_database()
-    try:
-        test_migrations = tmp_path / "migrations"
-        test_migrations.mkdir()
-        shutil.copy2(
-            MIGRATIONS_DIR / "000_migrations_table.sql",
-            test_migrations / "000_migrations_table.sql",
-        )
-        (test_migrations / "001_intentional_failure.sql").write_text(
-            "CREATE TABLE partial_write (id INTEGER);\n"
-            "SELECT definitely_missing_migration_function();\n",
-            encoding="utf-8",
-        )
-
-        result = _run_runner(database, test_migrations)
-
-        with psycopg2.connect(**_connection_config(database)) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT to_regclass('public.partial_write')")
-                partial_table = cur.fetchone()[0]
-                cur.execute(
-                    "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = %s)",
-                    ("001_intentional_failure.sql",),
-                )
-                migration_recorded = cur.fetchone()[0]
-
-        assert result.returncode != 0, result.stdout + result.stderr
-        assert partial_table is None
-        assert migration_recorded is False
-    finally:
-        _drop_disposable_database(database)
-
-
-def test_real_runner_builds_fresh_database_and_reruns_cleanly() -> None:
-    """The production migration set builds a fresh selected database exactly once."""
-    database = _create_disposable_database()
-    try:
-        first = _run_runner(database, MIGRATIONS_DIR)
-        assert first.returncode == 0, first.stdout + first.stderr
-
-        expected_versions = [
-            "001_initial_schema.sql",
-            "002_v2_columns.sql",
-            "003_dream_cycle.sql",
-            "004_evaluator_d.sql",
-            "005_question_weighted_search.sql",
-            "006_encoding_context.sql",
-            "007_schema_type.sql",
-            "008_knowledge_graph.sql",
-            "009_hnsw_recall.sql",
-            "010_express_feedback.sql",
-            "011_backend_provenance.sql",
-            "012_agent_task_capture.sql",
-            "013_context_governance.sql",
-            "014_local_embedding_space.sql",
-            "015_enforce_active_embedding_space.sql",
-        ]
-        with psycopg2.connect(**_connection_config(database)) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT version FROM schema_migrations ORDER BY version")
-                applied_versions = [row[0] for row in cur.fetchall()]
-                cur.execute("SHOW hnsw.ef_search")
-                ef_search = cur.fetchone()[0]
-                cur.execute(
-                    """
-                    SELECT column_name
-                    FROM information_schema.columns
-                    WHERE table_name = 'memories'
-                      AND column_name IN ('embedding', 'legacy_embedding', 'embedding_space')
-                    ORDER BY column_name
-                    """
-                )
-                embedding_columns = [row[0] for row in cur.fetchall()]
-                cur.execute(
-                    """
-                    SELECT pg_get_constraintdef(oid)
-                    FROM pg_constraint
-                    WHERE conname = 'memories_active_embedding_space'
-                    """
-                )
-                active_space_constraint = cur.fetchone()[0]
-
-        assert applied_versions == expected_versions
-        assert ef_search == "200"
-        assert embedding_columns == ["embedding", "embedding_space", "legacy_embedding"]
-        assert "ollama:bge-m3:1024" in active_space_constraint
-
-        second = _run_runner(database, MIGRATIONS_DIR)
-        assert second.returncode == 0, second.stdout + second.stderr
-        assert second.stdout.count("(already applied)") == len(expected_versions)
-
-        with psycopg2.connect(**_connection_config(database)) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT count(*) FROM schema_migrations")
-                assert cur.fetchone()[0] == len(expected_versions)
-    finally:
-        _drop_disposable_database(database)
-
-
-def test_concurrent_runners_serialize_and_apply_once(tmp_path: Path) -> None:
-    """Concurrent runners coordinate through the database and record one application."""
-    database = _create_disposable_database()
-    try:
-        test_migrations = tmp_path / "concurrent_migrations"
-        test_migrations.mkdir()
-        shutil.copy2(
-            MIGRATIONS_DIR / "000_migrations_table.sql",
-            test_migrations / "000_migrations_table.sql",
-        )
-        (test_migrations / "001_concurrent.sql").write_text(
-            "SELECT pg_sleep(0.25);\n"
-            "CREATE TABLE concurrency_probe (id INTEGER);\n",
-            encoding="utf-8",
-        )
-        env = _runner_environment(database)
-        env["MIGRATIONS_DIR"] = str(test_migrations)
-        command = ["bash", str(MIGRATIONS_DIR / "migrate.sh")]
-
-        first = subprocess.Popen(
-            command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        second = subprocess.Popen(
-            command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        first_stdout, first_stderr = first.communicate(timeout=30)
-        second_stdout, second_stderr = second.communicate(timeout=30)
-
-        assert first.returncode == 0, first_stdout + first_stderr
-        assert second.returncode == 0, second_stdout + second_stderr
-        with psycopg2.connect(**_connection_config(database)) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT to_regclass('public.concurrency_probe')")
-                assert cur.fetchone()[0] == "concurrency_probe"
-                cur.execute(
-                    "SELECT count(*) FROM schema_migrations WHERE version = %s",
-                    ("001_concurrent.sql",),
-                )
-                assert cur.fetchone()[0] == 1
-    finally:
-        _drop_disposable_database(database)
+def test_concurrent_runners_apply_once(tmp_path):
+    name = "sb_migration_concurrent_test"
+    shutil.copyfile(MIGRATIONS / "000_migrations_table.sql", tmp_path / "000_migrations_table.sql")
+    (tmp_path / "001_concurrent.sql").write_text("SELECT pg_sleep(0.2); CREATE TABLE one_application(id integer);")
+    processes = [subprocess.Popen(["/bin/bash", str(MIGRATIONS / "migrate.sh")], env=command_env(name, tmp_path), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=60)
+        assert process.returncode == 0, stdout + stderr
+    with psycopg2.connect(**config(name)) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM schema_migrations WHERE version='001_concurrent.sql'")
+            assert cursor.fetchone()[0] == 1

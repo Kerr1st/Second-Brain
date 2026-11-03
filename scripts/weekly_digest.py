@@ -6,6 +6,23 @@ This is the proactive half of the system's purpose — it answers questions that
 point retrieval cannot (e.g. "what am I spending most of my time on"). Idempotent
 via source_url digest://{ISO-year}-W{week}.
 
+Backend (rewritten 2026-09-23). This job used to construct ``KiroInvoker`` directly
+with ``model="claude-sonnet-5"``. That was wrong twice over:
+
+  1. Policy. kiro-cli 2.22 ignores ``--model`` (see config/backends.toml
+     [profiles.controlled] and ``AgenticCliInvoker._note_model_honored``), so its
+     server-side "Auto" routing served ``claude-fable-5.1`` — labelled "NOT FOR
+     CUSTOMER DATA, ITAR OR PII" — while this job summarises the user's own
+     corpus. The standing rule (docs/PLAN-panel-acceptance.md §3, pinned by
+     tests/test_resolver.py) is that the corpus never runs on Kiro/Fable.
+  2. It failed anyway: ``TimeoutError: Agent subprocess timed out after 600s``
+     (logs/weekly-digest-*.log), so there was no digest after ~2026-09-16.
+
+The digest now resolves its model through the active profile exactly like the rest
+of the system (``default_resolver()`` -> ``spec_for``/``invoker_for``) and refuses
+to run on an MCP-capable/agentic backend. See :data:`DIGEST_ROLE` for why it
+borrows the ``skim`` seat, and ``digest_cap_usd`` for the spend guard.
+
 Usage: .venv/bin/python scripts/weekly_digest.py [--days N] [--dry-run]
 """
 
@@ -19,7 +36,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.db import get_connection, create_memory, get_processed_source_urls
 from src.embeddings import generate_embedding
-from src.agent_invoker import AgentInvoker
+from src.backends.cost import SpendCapExceeded, SpendTracker, cap_from_env, invoke_metered
+from src.backends.resolver import SKIM_ROLE, default_resolver, resolve_stage
+
+#: The digest uses the faithful-summarisation seat. Shared profile validation
+#: and resolve_stage enforce direct Bedrock and reject forbidden model overrides;
+#: invoke_metered applies one digest-specific spend threshold.
+DIGEST_ROLE = SKIM_ROLE
+
+#: Optional model override (same backend as the resolved role — the backend, and
+#: therefore the Kiro/Fable prohibition, is never overridable). Unset by default:
+#: the model comes from the profile.
+DIGEST_MODEL = os.environ.get("DIGEST_MODEL") or None
+
+#: Timeout for one direct Bedrock Converse call. The old 600s was sized for
+#: kiro-cli's ~35s startup plus an agentic tool loop; a single tool-less call with
+#: a ~2-5k-token prompt answers in seconds. The headroom here is for the Flex
+#: service tier, which is best-effort and may queue. A timeout is a hard failure
+#: (non-zero exit), never a silent skip.
+DIGEST_TIMEOUT = int(os.environ.get("DIGEST_TIMEOUT", "180"))
+
+#: The digest's own spend cap, in USD. It is a single call on a cheap model
+#: (~$0.002), so $0.25 is ~100x headroom while still stopping a runaway — e.g. a
+#: DIGEST_MODEL override onto an unpriced model, which cost.py bills at the
+#: $10/$50 ceiling. Override with SECOND_BRAIN_DIGEST_CAP_USD. Deliberately tiny
+#: next to the nightly run cap ($9, scripts/jobs/dream_cycle_scheduled.sh) so the
+#: digest can never eat the day's budget.
+DEFAULT_DIGEST_CAP_USD = 0.25
+DIGEST_CAP_ENV = "SECOND_BRAIN_DIGEST_CAP_USD"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -36,6 +80,26 @@ SYSTEM_PROMPT = (
     "directly answer 'what am I working on and learning'\"}. Use only the provided "
     "data; do not invent."
 )
+
+
+class DigestBackendError(RuntimeError):
+    """The digest cannot run on the backend the active profile resolves to."""
+
+
+def digest_cap_usd():
+    return cap_from_env(DIGEST_CAP_ENV, DEFAULT_DIGEST_CAP_USD)
+
+
+def resolve_digest_backend(resolver=None, model_override=None):
+    """Resolve the digest through shared routing, including override validation."""
+    resolver = resolver or default_resolver()
+    try:
+        return resolve_stage(DIGEST_ROLE, resolver=resolver, model_override=model_override)
+    except ValueError as exc:
+        raise DigestBackendError(
+            f"Refusing weekly digest backend {resolver.spec_for(DIGEST_ROLE).backend!r}/model: " + str(exc)
+            + ". Use SECOND_BRAIN_PROFILE=controlled; Kiro/Fable are forbidden."
+        ) from exc
 
 
 def aggregate(days):
@@ -76,7 +140,7 @@ def build_user_message(days, tags, projects, sources, decisions):
     return "\n".join(parts)
 
 
-def run(days=7, dry_run=False):
+def run(days=7, dry_run=False, resolver=None, tracker=None):
     y, w, _ = datetime.date.today().isocalendar()
     url = f"digest://{y}-W{w:02d}"
     if url in get_processed_source_urls(SOURCE_TYPE):
@@ -87,13 +151,25 @@ def run(days=7, dry_run=False):
         log.info("No activity in window, nothing to digest")
         return None
 
-    res = AgentInvoker().invoke(SYSTEM_PROMPT, build_user_message(days, tags, projects, sources, decisions))
+    invoker, spec = resolve_digest_backend(resolver, model_override=DIGEST_MODEL)
+    if tracker is None:
+        tracker = SpendTracker(cap_usd=digest_cap_usd())
+    log.info("Digest backend: profile role %r -> %s / %s (effort=%s), timeout %ds, cap $%.2f",
+             DIGEST_ROLE, spec.backend, spec.model, spec.effort or "low",
+             DIGEST_TIMEOUT, tracker.cap_usd)
+
+    res = invoke_metered(
+        invoker, spec, tracker, SYSTEM_PROMPT, build_user_message(days, tags, projects, sources, decisions),
+        tools=False, timeout=DIGEST_TIMEOUT, effort=spec.effort or "low",
+        stage="weekly_digest")
+    log.info("Digest running cost $%.4f of $%.2f stop threshold",
+             tracker.total_usd, tracker.cap_usd)
+
     out = res["output"] if isinstance(res["output"], dict) else {}
     summary = (out.get("summary") or "").strip()
     title = (out.get("title") or f"Weekly digest {url}").strip()[:200]
     if not summary:
-        log.error("Digest LLM returned no summary; raw=%.200s", res.get("raw", ""))
-        return None
+        raise ValueError("Digest model returned no summary")
     # Anchor to the question it answers so it is retrievable for meta-queries
     # like "what am I spending my time on" (the summary alone is object-level).
     body = (f"What I've been spending my time working on and learning "
@@ -123,10 +199,28 @@ def run(days=7, dry_run=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=7)
-    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Metered model preview; does not store or deliver the digest.")
     args = ap.parse_args()
-    run(days=args.days, dry_run=args.dry_run)
+    # Every failure mode below is loud and non-zero: the job is monitored by
+    # com.second-brain.liveness, and a silent skip is how the digest went missing
+    # for a week in the first place.
+    try:
+        run(days=args.days, dry_run=args.dry_run)
+    except DigestBackendError as exc:
+        log.error("Weekly digest refused: %s", exc)
+        return 2
+    except SpendCapExceeded as exc:
+        log.error("Weekly digest aborted on its spend cap: %s", exc)
+        return 3
+    except TimeoutError as exc:
+        log.error("Weekly digest timed out after %ds: %s", DIGEST_TIMEOUT, exc)
+        return 4
+    except (ValueError, RuntimeError, OSError) as exc:
+        log.error("Weekly digest failed (%s)", type(exc).__name__)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

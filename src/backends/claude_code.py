@@ -15,7 +15,7 @@ system-prompt delivery, and ``.result`` extraction**:
 * Command surface (Req 2): ``claude -p <user_message> --model <id>
   --output-format json``, ``[--effort <level>]``, ``[--json-schema <file>]``,
   built from the **public** Claude Code CLI flag surface only — it depends on
-  none of the enterprise-managed provider wrapper's surface (``--aws-profile``, Bedrock
+  none of the ASBX Cecelia wrapper's surface (``--aws-profile``, Bedrock
   routing, ``--claude-help``). The ``claude`` binary path is configurable via
   ``CLAUDE_CLI`` (default ``claude``), mirroring ``KIRO_CLI`` (Req 2.7), and
   auth/provider routing is left to out-of-band environment (Req 2.8).
@@ -67,12 +67,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess  # noqa: F401 — kept so tests can patch src.backends.claude_code.subprocess.run
 import sys
 import tempfile
 from typing import Optional
 
 from src.backends.agentic_cli import AgenticCliInvoker
+from src.backends.base import CorpusRoutingError, corpus_role_for_stage
 from src.backends.base import parse_json_output as _parse_json_output
 from src.backends.mcp_probe import MCPStartupProbe
 
@@ -80,8 +82,10 @@ logger = logging.getLogger(__name__)
 
 # Configurable binary path, mirroring KiroInvoker's KIRO_CLI (Req 2.7). Defaults
 # to the bare ``claude`` on PATH so the adapter runs against a public Claude Code
-# install or the enterprise-managed wrapper without code changes.
-CLAUDE_CLI = os.environ.get("CLAUDE_CLI", "claude")
+# install or the ASBX wrapper without code changes.
+# Absolute default: under launchd PATH lacks ~/.toolbox/bin, and a bare "claude"
+# raised FileNotFoundError at 02:00 (2026-09-17). Same convention as KIRO_CLI.
+CLAUDE_CLI = os.environ.get("CLAUDE_CLI", os.path.expanduser("~/.toolbox/bin/claude"))
 
 # How the system prompt is delivered to the CLI. "file" (preferred) writes the
 # prompt to a temp file and passes --system-prompt-file; "append" passes it
@@ -110,7 +114,54 @@ _SECOND_BRAIN_MCP = {
     }
 }
 
-__all__ = ["ClaudeCodeInvoker", "CLAUDE_CLI"]
+# Read-only discovery surface for the Explorer (F-145): ``python -m
+# src.mcp_readonly`` registers no mutating tool. The server key stays
+# ``second-brain`` so tool names are unchanged (``mcp__second-brain__<tool>``).
+_SECOND_BRAIN_READONLY_MCP = {
+    "second-brain": {
+        "command": sys.executable,
+        "args": ["-m", "src.mcp_readonly"],
+        "cwd": _REPO_ROOT,
+    }
+}
+
+#: Exact tool grants per stage that runs on the read-only server. Only the
+#: tools the Explorer prompt (src/prompts/explorer.py) and the MCP startup
+#: probe actually use; ``memory_graph`` is served read-only but not granted.
+#: Built-in tools (Bash, Read, Write, WebFetch, ...) are disabled via
+#: ``--tools ""``; MCP tools outside the list are not pre-approved and so are
+#: denied in non-interactive ``-p`` mode.
+READONLY_TOOL_GRANTS: dict[str, tuple[str, ...]] = {
+    "explorer": ("memory_search", "memory_list", "memory_read", "memory_recent_activity"),
+}
+
+_GEO_PREFIXES = ("global.", "us.", "eu.", "apac.", "jp.", "au.", "ca.", "us-gov.")
+
+
+def canonical_model_id(model: str | None) -> str:
+    """Canonical form of a Claude model id for requested-vs-served comparison.
+
+    Accepts the documented Bedrock spellings of one model as equal:
+    ``global.anthropic.claude-sonnet-5``, ``us.anthropic.claude-sonnet-5``,
+    ``anthropic.claude-sonnet-5-v1:0``, an inference-profile ARN ending in one
+    of those, the bare ``claude-sonnet-5``, dotted versions (``4.8`` = ``4-8``)
+    and a ``[1m]`` context tag. Different families or versions stay different.
+    """
+    m = (model or "").strip().lower()
+    m = m.rsplit("/", 1)[-1]                      # ...:inference-profile/<id>
+    m = re.sub(r"\[[^\]]*\]$", "", m)            # claude-...[1m]
+    for prefix in _GEO_PREFIXES:
+        if m.startswith(prefix):
+            m = m[len(prefix):]
+            break
+    if m.startswith("anthropic."):
+        m = m[len("anthropic."):]
+    m = re.sub(r"-v\d+(?::\d+)?$", "", m)          # -v1:0
+    m = re.sub(r"-\d{8}$", "", m)                  # -20260101 snapshot date
+    return m.replace(".", "-")
+
+
+__all__ = ["ClaudeCodeInvoker", "CLAUDE_CLI", "READONLY_TOOL_GRANTS", "canonical_model_id"]
 
 
 class ClaudeCodeInvoker(AgenticCliInvoker):
@@ -166,9 +217,13 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         practice; it is cleared on entry to be safe against a prior partial run.
         """
         self._pending_mcp_configs.clear()
+        # The stage selects the MCP surface (read-only server + exact grants
+        # for the Explorer); the base command builder does not receive it.
+        self._current_stage = kwargs.get("stage")
         try:
             return super().invoke(*args, **kwargs)
         finally:
+            self._current_stage = None
             self._cleanup_mcp_configs()
 
     # --- Claude-Code-specific hooks ----------------------------------------
@@ -271,6 +326,13 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         """
         if not needs_tools:
             return ["--strict-mcp-config", "--tools", ""]
+        grants = READONLY_TOOL_GRANTS.get(getattr(self, "_current_stage", None) or "")
+        if grants is not None:
+            # Read-only server, no built-ins, and only the granted MCP tools.
+            config_path = self._write_mcp_config(name, servers=_SECOND_BRAIN_READONLY_MCP)
+            allowed = ",".join(f"mcp__second-brain__{tool}" for tool in grants)
+            return ["--mcp-config", config_path, "--strict-mcp-config",
+                    "--tools", "", "--allowedTools", allowed]
         config_path = self._write_mcp_config(name)
         return ["--mcp-config", config_path, "--strict-mcp-config"]
 
@@ -278,7 +340,7 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         """Filesystem path for the temp ``--mcp-config`` JSON file."""
         return os.path.join(tempfile.gettempdir(), f"{name}_mcp_config.json")
 
-    def _write_mcp_config(self, name: str) -> str:
+    def _write_mcp_config(self, name: str, servers: dict | None = None) -> str:
         """Write the Second Brain MCP server config and track it for cleanup.
 
         Claude Code's ``--mcp-config`` consumes the standard ``{"mcpServers":
@@ -289,7 +351,7 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
         """
         path = self._mcp_config_path(name)
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"mcpServers": _SECOND_BRAIN_MCP}, f)
+            json.dump({"mcpServers": servers or _SECOND_BRAIN_MCP}, f)
         self._pending_mcp_configs.append(path)
         return path
 
@@ -301,6 +363,54 @@ class ClaudeCodeInvoker(AgenticCliInvoker):
                 os.remove(path)
             except OSError:
                 pass
+
+    def _note_model_honored(self, result, metrics: dict) -> None:
+        """Compare the model Claude Code reports serving with the one requested.
+
+        The served id is read from the ``system``/``init`` event's ``model`` and,
+        failing that, the terminal result event's ``modelUsage`` keys (Claude
+        Code may also bill a small helper model there, so extra keys are
+        tolerated as long as the requested model is among them). Ids are
+        compared in canonical form (:func:`canonical_model_id`), so documented
+        Bedrock inference-profile spellings match. Records ``served_model`` and
+        ``model_honored`` (``True``/``False``, or ``None`` when the stream
+        reports no model). A mismatch on a corpus stage raises
+        :class:`CorpusRoutingError` before the result is parsed or used.
+        """
+        super()._note_model_honored(result, metrics)
+        events = self._events_from(getattr(result, "stdout", "") or "") or []
+        served = None
+        for event in events:
+            if (isinstance(event, dict) and event.get("type") == "system"
+                    and event.get("subtype") == "init"
+                    and isinstance(event.get("model"), str) and event["model"].strip()):
+                served = event["model"]
+        billed: list[str] = []
+        envelope = self._envelope_from(result)
+        if isinstance(envelope, dict) and isinstance(envelope.get("modelUsage"), dict):
+            billed = [k for k in envelope["modelUsage"] if isinstance(k, str)]
+        want = canonical_model_id(self.model)
+        if served is not None:
+            honored = canonical_model_id(served) == want
+        elif billed:
+            matching = [k for k in billed if canonical_model_id(k) == want]
+            honored = bool(matching)
+            served = matching[0] if matching else billed[0]
+        else:
+            honored = None
+        metrics["served_model"] = served
+        if billed:
+            metrics["billed_models"] = billed
+        metrics["model_honored"] = honored
+        if honored is None:
+            logger.warning("claude_code: stream-json reported no served model for requested %r", self.model)
+        elif not honored:
+            logger.warning("claude_code: requested model %r but the CLI reports serving %r",
+                           self.model, served)
+            if corpus_role_for_stage(metrics.get("stage")):
+                metrics["error"] = "model_not_honored"
+                raise CorpusRoutingError(
+                    f"Requested corpus model {self.model!r} was not honored (served {served!r})")
 
     def _run_probe(self, *, name, needs_tools, result, parsed, raw) -> None:
         """Fail-loud MCP enforcement for tool-using calls (Req 5, 8.3).

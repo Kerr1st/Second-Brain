@@ -30,9 +30,11 @@ import uuid
 
 from src.backends.agentic_cli import (
     AgenticCliInvoker,
-    _write_metrics_line,
 )
-from src.backends.base import parse_json_output as _parse_json_output
+from src.backends.base import (
+    _write_metrics_line,
+    parse_json_output as _parse_json_output,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +90,7 @@ _SECOND_BRAIN_MCP = {
 class KiroInvoker(AgenticCliInvoker):
     """Invoke ``kiro-cli chat --no-interactive`` as isolated subprocesses.
 
-    The Kiro backend adapter — invokes Kiro CLI under the configured Kiro plan. Implements the
+    The Kiro backend adapter — routes to Amazon Q ($0 metered). Implements the
     :class:`src.backends.base.Invoker` contract via
     :class:`src.backends.agentic_cli.AgenticCliInvoker`; returns ``usage=None``
     because kiro-cli exposes no real token usage (only char/4 estimates in the

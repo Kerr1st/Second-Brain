@@ -28,20 +28,20 @@ from src.dream_cycle.storage import check_duplicate
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "codex"
-MANIFEST = json.loads((FIXTURE_DIR / "real_task.json").read_text())
+MANIFEST = json.loads((FIXTURE_DIR / "sanitized_task.json").read_text())
 RECORDS = tuple(
     json.loads(line)
-    for line in (FIXTURE_DIR / "real_task.jsonl").read_text().splitlines()
+    for line in (FIXTURE_DIR / "sanitized_task.jsonl").read_text().splitlines()
 )
 CORRECTION_MANIFEST = json.loads(
-    (FIXTURE_DIR / "real_correction_task.json").read_text()
+    (FIXTURE_DIR / "sanitized_correction_task.json").read_text()
 )
 CORRECTION_RECORDS = tuple(
     json.loads(line)
-    for line in (FIXTURE_DIR / "real_correction_task.jsonl").read_text().splitlines()
+    for line in (FIXTURE_DIR / "sanitized_correction_task.jsonl").read_text().splitlines()
 )
 LEGACY_DELEGATED_MANIFEST = json.loads(
-    (FIXTURE_DIR / "real_legacy_delegated_task.json").read_text()
+    (FIXTURE_DIR / "sanitized_legacy_delegated_task.json").read_text()
 )
 TASK_ID = MANIFEST["id"]
 CORRECTION_TASK_ID = CORRECTION_MANIFEST["id"]
@@ -556,7 +556,7 @@ def test_source_provenance_refreshes_without_new_turns(
             """,
             (
                 "Renamed Codex task",
-                "/Users/kerrclaw/repositories/Github Repos/Second-Brain-renamed",
+                "/Users/example/projects/Second-Brain-renamed",
                 "codex/codex-task-capture",
                 MANIFEST["updated_at"] + 60,
                 MANIFEST["updated_at_ms"] + 60_000,
@@ -709,9 +709,9 @@ def test_semantic_failure_is_atomic_and_retries_the_same_unprocessed_tail(
     assert retried.unchanged == 1
     assert retried.semantic_processed == 1
     assert retried.failed == 0
-    assert tuple(turn.turn_id for turn in semantic.calls[0][1]) == tuple(
-        turn.turn_id for turn in semantic.calls[1][1]
-    )
+    assert len(semantic.calls) == 1  # Validated output survives the embedding outage.
+    assert "semantic_pending" in metadata
+    assert "semantic_attempts" not in metadata
 
 
 def test_combined_pass_persists_searchable_segments_memories_and_exact_provenance(
@@ -844,8 +844,8 @@ def test_real_user_correction_persists_neutral_episode_with_exact_provenance(
     )
     assert episode[3] == "episodic"
     assert episode[4]["supporting_turn_ids"] == [
-        "ee442a21-8919-4145-b3df-b454fd987cd7",
-        "b0a21672-118f-433e-a1e7-3b206baed324",
+        "41da4414-e236-5e2d-9b6c-d2631108039f",
+        "35b9b72c-2685-56fa-b408-6ecaf55e0e3f",
     ]
     assert episode[6] is None
     assert str(episode[0]) in {str(item["id"]) for item in retrieved}
@@ -947,8 +947,8 @@ def test_resumed_task_extends_adjacent_segment_to_capture_correction(
     assert (resumed.refreshed, resumed.semantic_processed) == (1, 1)
     assert segment_id == original_segment_id
     assert segment_turn_ids == [
-        "ee442a21-8919-4145-b3df-b454fd987cd7",
-        "b0a21672-118f-433e-a1e7-3b206baed324",
+        "41da4414-e236-5e2d-9b6c-d2631108039f",
+        "35b9b72c-2685-56fa-b408-6ecaf55e0e3f",
     ]
     assert episode_count == 1
     assert target_id == str(original_segment_id)
@@ -983,10 +983,10 @@ def test_zero_memory_segment_is_searchable_but_dream_cycle_ignores_child_source(
         assert check_duplicate("Codex task capture project attribution") is None
 
 
-CURRENT_MANIFEST = json.loads((FIXTURE_DIR / "real_current_task.json").read_text())
+CURRENT_MANIFEST = json.loads((FIXTURE_DIR / "sanitized_current_task.json").read_text())
 CURRENT_RECORDS = tuple(
     json.loads(line)
-    for line in (FIXTURE_DIR / "real_current_task.jsonl").read_text().splitlines()
+    for line in (FIXTURE_DIR / "sanitized_current_task.jsonl").read_text().splitlines()
 )
 CURRENT_NOW = datetime(2026, 9, 10, tzinfo=UTC)
 
@@ -1106,16 +1106,31 @@ def test_current_incomplete_execution_does_not_attach_to_later_final(tmp_path):
     assert len(turn.prompt_parts) == 1
 
 
-def test_current_and_legacy_mirrors_keep_legacy_identity(tmp_path):
+def test_current_and_legacy_mirrors_keep_native_identity(tmp_path):
+    """F-086: a legacy ``user_message`` mirror never re-keys a native turn.
+
+    Every stored Codex turn id is the native message id; a rollout that also
+    carries the legacy event must produce the same turns as the native-only
+    rollout, and the ignored mirror is counted, not silent. A legacy-only
+    rollout still captures under its legacy key.
+    """
     legacy = deepcopy(_turn_pairs()[0][0])
     legacy["payload"]["message"] = CURRENT_RECORDS[1]["payload"]["content"][0]["text"]
     records = (*CURRENT_RECORDS[:2], legacy, *CURRENT_RECORDS[2:])
     home = _current_home(tmp_path, records)
     with_mirror = _current_snapshot(home)
+    _write_excerpt(home, CURRENT_MANIFEST, CURRENT_RECORDS)
+    native_only = _current_snapshot(home)
     _write_excerpt(home, CURRENT_MANIFEST, (CURRENT_RECORDS[0], legacy, *CURRENT_RECORDS[2:]))
     legacy_only = _current_snapshot(home)
-    assert with_mirror.turns == legacy_only.turns
+    assert with_mirror.turns == native_only.turns
     assert len(with_mirror.turns) == 1
+    assert with_mirror.turns[0].turn_id == CURRENT_RECORDS[1]["payload"]["id"]
+    drops = json.loads(dict((f.key, f.value) for f in with_mirror.provenance)["capture_drop_counts"])
+    assert drops["legacy_mirror_ignored"] == 1
+    assert len(legacy_only.turns) == 1
+    assert legacy_only.turns[0].turn_id != CURRENT_RECORDS[1]["payload"]["id"]
+    assert legacy_only.turns[0].visible_outcome == native_only.turns[0].visible_outcome
 
 
 def test_old_history_resumed_in_current_format_preserves_turns(tmp_path):
@@ -1160,3 +1175,559 @@ def test_current_unsupported_followup_does_not_capture_partial_prompt(tmp_path):
     unsupported["payload"]["content"] = [{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]
     records = (*CURRENT_RECORDS[:2], unsupported, *CURRENT_RECORDS[2:])
     assert _current_snapshot(_current_home(tmp_path, records)).turns == ()
+
+
+
+class _AlwaysFailingSemanticPass:
+    """A Thinker whose output never satisfies the evidence contract."""
+
+    def __init__(self):
+        self.calls = []
+
+    def run(self, *, previous_segment, turns):
+        self.calls.append((previous_segment, turns))
+        raise codex_capture.SemanticResultError(
+            "Topic Segments must cover every new Agent Turn exactly once and in order"
+        )
+
+
+def _semantic_children(task_id):
+    with db.get_connection() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM memories WHERE parent_id = %s",
+            (task_id,),
+        )
+        segments = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT count(*) FROM memories WHERE source_type = 'distilled_agent_task'"
+        )
+        memories = cursor.fetchone()[0]
+    return segments, memories
+
+
+def test_permanently_failing_semantic_pass_is_bounded_then_never_retried(
+    test_db, clean_tables, tmp_path, monkeypatch, caplog
+):
+    home = _real_codex_home(tmp_path)
+    semantic = _AlwaysFailingSemanticPass()
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock"),
+    )
+    bound = codex_capture.SEMANTIC_MAX_ATTEMPTS
+
+    with caplog.at_level("WARNING", logger="src.capture.codex"):
+        reports = [
+            codex_capture.run_codex_capture(NOW, backfill=True) for _ in range(bound + 3)
+        ]
+    task_id, content, metadata, _, _ = _task_row()
+    segments, memories = _semantic_children(task_id)
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelname == "WARNING" and TASK_ID in record.getMessage()
+    ]
+
+    # The model is called exactly `bound` times across all simulated runs.
+    assert len(semantic.calls) == bound == 3
+    assert [report.failed for report in reports] == [1] * bound + [0, 0, 0]
+    assert [report.semantic_abandoned for report in reports] == [0] * (bound - 1) + [
+        1
+    ] * 4
+    assert all(report.semantic_processed == 0 for report in reports)
+    # Policy change 2026-10-13 (triage codex-capture.md, "Alert noise"): every
+    # contract miss is a semantic-contract failure, retrying or abandoning, so
+    # no attempt fails the run (before: [1] * (bound - 1) + [0]). The liveness
+    # advisory [backlog.codex-capture] is the backstop for a systematic break.
+    assert [report.semantic_contract_failed for report in reports] == (
+        [1] * bound + [0, 0, 0]
+    )
+    assert [report.semantic_contract_retrying for report in reports] == (
+        [1] * (bound - 1) + [0] + [0, 0, 0]
+    )
+    assert [report.semantic_contract_abandoned for report in reports] == (
+        [0] * (bound - 1) + [1] + [0, 0, 0]
+    )
+    assert [report.infrastructure_failed for report in reports] == [0] * (bound + 3)
+    # The broken rule survives into the failure record (it used to be lost).
+    rule = "Topic Segments must cover every new Agent Turn exactly once and in order"
+    for report in reports[:bound]:
+        (failure,) = report.failures
+        assert (failure.stage, failure.error_type) == ("semantic", "SemanticResultError")
+        assert failure.message == rule
+    assert reports[-1].failures == ()
+    # The verbatim Captured Task survives untouched and stays unprocessed.
+    assert len(metadata["turns"]) == 3
+    assert metadata["semantic_cursor"] is None
+    assert content.startswith(f"# {MANIFEST['title']}")
+    assert (segments, memories) == (0, 0)
+    # The abandonment is recorded with its reason, and warned about once.
+    assert metadata["semantic_abandoned"]["attempts"] == bound
+    assert metadata["semantic_abandoned"]["error_type"] == "SemanticResultError"
+    assert metadata["semantic_abandoned"]["reason"] == (
+        codex_capture.SEMANTIC_ABANDON_REASON
+    )
+    # One WARNING per contract miss, naming attempt/bound and the broken rule;
+    # only the last one abandons.
+    assert len(warnings) == bound
+    for attempt, warning in enumerate(warnings, start=1):
+        assert f"attempt {attempt}/{bound}" in warning.getMessage()
+        assert rule in warning.getMessage()
+    assert ["abandoned" in w.getMessage() for w in warnings] == [False] * (bound - 1) + [True]
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected_calls"),
+    [("1", 1), ("2", 2), ("not-a-number", 3), ("0", 3)],
+)
+def test_attempt_bound_honours_its_environment_override(
+    test_db, clean_tables, tmp_path, monkeypatch, env_value, expected_calls
+):
+    home = _real_codex_home(tmp_path)
+    semantic = _AlwaysFailingSemanticPass()
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock"),
+    )
+    monkeypatch.setenv(codex_capture.SEMANTIC_MAX_ATTEMPTS_ENV, env_value)
+
+    reports = [codex_capture.run_codex_capture(NOW, backfill=True) for _ in range(5)]
+    _, _, metadata, _, _ = _task_row()
+
+    assert len(semantic.calls) == expected_calls
+    assert sum(report.failed for report in reports) == expected_calls
+    assert reports[-1].semantic_abandoned == 1
+    assert metadata["semantic_abandoned"]["attempts"] == expected_calls
+
+
+def test_new_turns_do_not_revive_an_abandoned_semantic_batch(
+    test_db, clean_tables, tmp_path, monkeypatch
+):
+    home = _real_codex_home(tmp_path, turn_indexes=(0, 1))
+    semantic = _AlwaysFailingSemanticPass()
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock"),
+    )
+    bound = codex_capture.SEMANTIC_MAX_ATTEMPTS
+
+    for _ in range(bound + 1):
+        codex_capture.run_codex_capture(NOW, backfill=True)
+    _, _, abandoned_metadata, _, _ = _task_row()
+
+    # Later arrivals cannot revive the same failed batch and its paid retries.
+    _write_rollout(home, turn_indexes=(0, 1, 2))
+    resumed = codex_capture.run_codex_capture(NOW, backfill=True)
+    _, _, resumed_metadata, _, _ = _task_row()
+
+    assert len(semantic.calls) == bound
+    assert (resumed.refreshed, resumed.failed, resumed.semantic_abandoned) == (1, 0, 1)
+    assert abandoned_metadata["semantic_abandoned"]["attempts"] == bound
+    assert resumed_metadata["semantic_abandoned"] == abandoned_metadata["semantic_abandoned"]
+    assert resumed_metadata["semantic_attempts"]["count"] == bound
+    assert len(resumed_metadata["turns"]) == 3
+    assert resumed_metadata["semantic_cursor"] is None
+
+
+def test_second_attempt_success_processes_and_leaves_no_abandonment_mark(
+    test_db, clean_tables, tmp_path, monkeypatch
+):
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(
+        codex_capture.SemanticResultError("a segment referenced an unknown Agent Turn"),
+        lambda previous, turns: _one_segment(previous, turns),
+    )
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock"),
+    )
+
+    failed = codex_capture.run_codex_capture(NOW, backfill=True)
+    _, _, failed_metadata, _, _ = _task_row()
+    succeeded = codex_capture.run_codex_capture(NOW, backfill=True)
+    task_id, _, metadata, _, _ = _task_row()
+    segments, memories = _semantic_children(task_id)
+
+    assert (failed.failed, failed.semantic_abandoned) == (1, 0)
+    assert failed_metadata["semantic_attempts"]["count"] == 1
+    assert (succeeded.semantic_processed, succeeded.semantic_retried) == (1, 1)
+    assert (succeeded.failed, succeeded.semantic_abandoned) == (0, 0)
+    assert len(semantic.calls) == 2
+    assert metadata["semantic_cursor"] == metadata["turns"][-1]["turn_id"]
+    assert "semantic_attempts" not in metadata
+    assert "semantic_abandoned" not in metadata
+    assert (segments, memories) == (1, 1)
+
+
+def test_run_summary_json_reports_semantic_abandonment(
+    test_db, clean_tables, tmp_path, monkeypatch, capsys
+):
+    from scripts.capture_codex import main
+
+    home = _real_codex_home(tmp_path)
+    _install_services(
+        monkeypatch,
+        _services(home, _AlwaysFailingSemanticPass(), tmp_path / "capture.lock"),
+    )
+    monkeypatch.setenv(codex_capture.SEMANTIC_MAX_ATTEMPTS_ENV, "1")
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
+
+    # The abandoning run is recorded, the verbatim task kept: a semantic-contract
+    # failure, not an infrastructure failure, so the command exits 0.
+    assert main(["--backfill"], now=NOW) == 0
+    abandoning_run = json.loads(capsys.readouterr().out)
+    assert main(["--backfill"], now=NOW) == 0
+    later_run = json.loads(capsys.readouterr().out)
+
+    assert abandoning_run["semantic_abandoned"] == 1
+    assert abandoning_run["failed"] == 1                      # backward compatible total
+    assert abandoning_run["semantic_contract_failed"] == 1
+    assert abandoning_run["semantic_contract_abandoned"] == 1
+    assert abandoning_run["semantic_contract_retrying"] == 0
+    assert abandoning_run["failures"][0]["stage"] == "semantic"
+    assert abandoning_run["failures"][0]["message"] == (
+        "Topic Segments must cover every new Agent Turn exactly once and in order"
+    )
+    assert later_run["semantic_abandoned"] == 1
+    assert later_run["failed"] == 0
+    assert later_run["semantic_contract_failed"] == 0
+
+
+def test_retryable_contract_miss_exits_zero_with_its_rule_and_feeds_liveness(
+    test_db, clean_tables, tmp_path, monkeypatch, capsys
+):
+    """2026-10-13: a miss with attempts left no longer fails the run, but its
+    rule reaches the summary and the codex-capture backlog sidecar counts it."""
+    from scripts.capture_codex import main
+    from src.operations import backlog
+
+    status_dir = tmp_path / "jobs"
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(status_dir))
+    home = _real_codex_home(tmp_path)
+    cause = ValueError("RAW MODEL OUTPUT {\"segments\": [...]} turn text")
+    miss = codex_capture.SemanticResultError(
+        "a segment referenced\n  an unknown   Agent Turn"
+    )
+    miss.__cause__ = cause
+    semantic = _SemanticScript(
+        miss,
+        codex_capture.SemanticResultError("memory fields have invalid types"),
+        lambda previous, turns: _one_segment(previous, turns),
+    )
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+
+    runs, streaks = [], []
+    for _ in range(3):
+        assert main(["--backfill"], now=NOW) == 0
+        runs.append(json.loads(capsys.readouterr().out))
+        streaks.append(backlog.read_state("codex-capture", status_dir)["consecutive_deferred_runs"])
+    first, second, third = runs
+
+    assert (first["failed"], first["semantic_contract_failed"]) == (1, 1)
+    assert (first["semantic_contract_retrying"], first["semantic_contract_abandoned"]) == (1, 0)
+    assert first["semantic_abandoned"] == 0
+    (failure,) = first["failures"]
+    # Whitespace collapsed; the wrapped cause (model output) never leaks.
+    assert failure == {
+        "error_type": "SemanticResultError",
+        "message": "a segment referenced an unknown Agent Turn",
+        "stage": "semantic",
+        "task_id": TASK_ID,
+    }
+    assert "RAW MODEL OUTPUT" not in json.dumps(runs)
+    assert second["failures"][0]["message"] == "memory fields have invalid types"
+    # The retry and its success are unchanged by the exit policy.
+    assert third["semantic_processed"] == 1 and third["failed"] == 0
+    assert len(semantic.calls) == 3
+    # Sidecar: two runs with misses, then the streak resets on a clean run.
+    assert streaks == [1, 2, 0]
+    state = backlog.read_state("codex-capture", status_dir)
+    assert state["deferred"] == 0 and state["first_deferred_at"] is None
+
+
+def test_infrastructure_failure_in_the_semantic_pass_still_exits_one(
+    test_db, clean_tables, tmp_path, monkeypatch, capsys
+):
+    from scripts.capture_codex import main
+
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(ConnectionError("endpoint unreachable"))
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+
+    assert main(["--backfill"], now=NOW) == 1
+    run = json.loads(capsys.readouterr().out)
+    _, _, metadata, _, _ = _task_row()
+
+    assert (run["failed"], run["semantic_contract_failed"]) == (1, 0)
+    assert run["failures"][0]["error_type"] == "ConnectionError"
+    # Only a SemanticResultError carries a message (review E2).
+    assert run["failures"][0]["message"] == ""
+    # An outage does not consume the contract attempt budget.
+    assert "semantic_attempts" not in metadata
+
+
+def test_embedding_failure_after_a_valid_result_still_exits_one(
+    test_db, clean_tables, tmp_path, monkeypatch, capsys
+):
+    from scripts.capture_codex import main
+
+    monkeypatch.setenv("SECOND_BRAIN_STATUS_DIR", str(tmp_path / "jobs"))
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(lambda previous, turns: _one_segment(previous, turns))
+
+    def broken_embed(text):
+        raise RuntimeError("embedding service down")
+
+    _install_services(
+        monkeypatch,
+        _services(home, semantic, tmp_path / "capture.lock", embed=broken_embed),
+    )
+
+    assert main(["--backfill"], now=NOW) == 1
+    run = json.loads(capsys.readouterr().out)
+    assert (run["failed"], run["semantic_contract_failed"]) == (1, 0)
+    assert run["failures"][0]["error_type"] == "RuntimeError"
+    assert run["failures"][0]["message"] == ""          # review E2: no DB/embedding text
+
+
+def test_failure_message_is_one_line_and_bounded():
+    long = codex_capture.SemanticResultError("rule\t\n" + "x" * 500)
+    message = codex_capture._failure_message(long)
+
+    assert "\n" not in message and "\t" not in message
+    assert message.startswith("rule x")
+    assert len(message) == codex_capture.FAILURE_MESSAGE_CHARS
+    assert message.endswith("…")
+    assert codex_capture._failure_message(RuntimeError()) == ""
+
+
+def test_every_semantic_contract_raise_site_uses_a_fixed_sentence():
+    """No contract message may interpolate model output or turn text."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(codex_capture))
+    raised = [
+        node.exc for node in ast.walk(tree)
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+        and getattr(node.exc.func, "id", None) == "SemanticResultError"
+    ]
+    assert len(raised) >= 10
+
+    def _cause_type_name(node):
+        # Exactly ``type(<name>).__name__`` -- a class name, never a message.
+        return (isinstance(node, ast.FormattedValue) and node.format_spec is None
+                and isinstance(node.value, ast.Attribute) and node.value.attr == "__name__"
+                and isinstance(node.value.value, ast.Call)
+                and getattr(node.value.value.func, "id", None) == "type")
+
+    for call in raised:
+        assert not call.keywords and len(call.args) == 1, ast.unparse(call)
+        (arg,) = call.args
+        if isinstance(arg, ast.JoinedStr):
+            # Only the backend-wrapped miss appends its cause's type name.
+            assert all(isinstance(v, ast.Constant) or _cause_type_name(v) for v in arg.values), ast.unparse(call)
+        else:
+            assert isinstance(arg, ast.Constant), ast.unparse(call)
+
+def test_task_failure_message_is_empty_for_every_non_contract_failure():
+    """Review E2: DB (psycopg DETAIL: Key (...)=(...)), embedding and CLI stderr
+    text can carry row values and turn text; only SemanticResultError keeps one."""
+    class UniqueViolation(Exception):
+        pass
+
+    counts, failures = {"failed": 0}, []
+    errors = [
+        ("capture", UniqueViolation('duplicate key value violates unique constraint "memories_source_url_key"\n'
+                                    "DETAIL:  Key (source_url)=(codex://secret-row-value) already exists.")),
+        ("embedding", RuntimeError("embedding failed for: private turn text")),
+        ("semantic", RuntimeError("claude exited 1: stderr quotes the prompt: private turn text")),
+        ("semantic_input", codex_capture.SemanticBatchTooLarge("turn too large")),
+        ("source_read", OSError("cannot read /Users/someone/.codex/sessions/x.jsonl")),
+    ]
+    for stage, error in errors:
+        codex_capture._record_failure(counts, failures, "t", stage, error)
+    codex_capture._record_failure(counts, failures, "t", "semantic",
+                                  codex_capture.SemanticResultError("memory fields have invalid types"))
+    assert counts["failed"] == len(errors) + 1
+    assert [f.message for f in failures[:-1]] == [""] * len(errors)
+    assert [f.error_type for f in failures[:-1]] == [
+        "UniqueViolation", "RuntimeError", "RuntimeError", "SemanticBatchTooLarge", "OSError"]
+    assert failures[-1].message == "memory fields have invalid types"
+
+
+def _backend_pass_raising(monkeypatch, error):
+    monkeypatch.setattr(codex_capture, "resolve_stage",
+                        lambda role: (object(), SimpleNamespace(effort=None, model="m")))
+
+    def invoke(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(codex_capture, "invoke_metered", invoke)
+    return codex_capture._BackendSemanticPass()
+
+
+def test_backend_wrapped_contract_miss_names_only_the_cause_type(monkeypatch):
+    """Review E3: a response-bearing backend error (bad JSON, refusal, truncation)
+    says which kind it was, never what the model wrote."""
+    raw = '{"segments": [ PRIVATE MODEL OUTPUT turn text'
+    cause = json.JSONDecodeError("Expecting value", raw, 15)
+    cause.model_response_received = True
+    semantic = _backend_pass_raising(monkeypatch, cause)
+    with pytest.raises(codex_capture.SemanticResultError) as raised:
+        semantic.run(previous_segment=None, turns=())
+    assert raised.value.__cause__ is cause
+    message = codex_capture._failure_message(raised.value)
+    assert message == "model response failed the semantic contract; cause=JSONDecodeError"
+    assert "PRIVATE" not in message and "Expecting value" not in message
+
+    class ModelRefusalError(RuntimeError):
+        pass
+
+    refusal = ModelRefusalError("I can't help with: private turn text")
+    refusal.model_response_received = True
+    with pytest.raises(codex_capture.SemanticResultError) as raised:
+        _backend_pass_raising(monkeypatch, refusal).run(previous_segment=None, turns=())
+    assert str(raised.value).endswith("; cause=ModelRefusalError")
+    assert "private" not in str(raised.value)
+
+
+def test_backend_error_without_a_model_response_is_not_wrapped(monkeypatch):
+    outage = ConnectionError("endpoint unreachable")
+    with pytest.raises(ConnectionError):
+        _backend_pass_raising(monkeypatch, outage).run(previous_segment=None, turns=())
+
+
+def test_semantic_contract_identity_includes_prompt_version_and_model():
+    pass_with_model = codex_capture._BackendSemanticPass()
+    with patch.object(
+        codex_capture,
+        "default_resolver",
+        return_value=SimpleNamespace(
+            spec_for=lambda role: SimpleNamespace(model="anthropic.opus-5")
+        ),
+    ):
+        contract = pass_with_model.contract_id
+    with patch.object(
+        codex_capture, "default_resolver", side_effect=RuntimeError("no profile")
+    ):
+        fallback = pass_with_model.contract_id
+
+    assert contract == f"{codex_capture.SEMANTIC_PROMPT_VERSION}:anthropic.opus-5"
+    assert fallback == codex_capture.SEMANTIC_PROMPT_VERSION
+
+
+def test_semantic_batches_commit_incremental_progress(test_db, clean_tables, tmp_path, monkeypatch):
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(*([lambda previous, turns: _one_segment(previous, turns)] * 3))
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+    monkeypatch.setattr(codex_capture, "SEMANTIC_BATCH_TURNS", 1)
+    for index in range(3):
+        report = codex_capture.run_codex_capture(NOW, backfill=True)
+        _, _, metadata, _, _ = _task_row()
+        assert report.semantic_processed == 1
+        assert metadata["semantic_cursor"] == metadata["turns"][index]["turn_id"]
+        assert "semantic_pending" not in metadata
+    assert [len(call[1]) for call in semantic.calls] == [1, 1, 1]
+
+
+def test_provider_outages_never_abandon_evidence(test_db, clean_tables, tmp_path, monkeypatch):
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(*([TimeoutError("provider unavailable")] * 4))
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+    for _ in range(4):
+        report = codex_capture.run_codex_capture(NOW, backfill=True)
+        assert report.failed == 1
+        assert report.semantic_abandoned == 0
+    _, _, metadata, _, _ = _task_row()
+    assert "semantic_attempts" not in metadata
+    assert metadata["semantic_cursor"] is None
+
+
+def test_oversized_turn_is_retained_without_model_call(test_db, clean_tables, tmp_path, monkeypatch):
+    home = _real_codex_home(tmp_path)
+    semantic = _AlwaysFailingSemanticPass()
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+    monkeypatch.setattr(codex_capture, "SEMANTIC_BATCH_CHARS", 1)
+    report = codex_capture.run_codex_capture(NOW, backfill=True)
+    assert report.captured == 1
+    assert report.failures[0].stage == "semantic_input"
+    assert semantic.calls == []
+    assert len(_task_row()[2]["turns"]) == 3
+
+
+def test_budget_stop_does_not_consume_contract_attempt(test_db, clean_tables, tmp_path, monkeypatch):
+    from src.backends.cost import SpendCapExceeded
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(SpendCapExceeded("batch cost exhausted"))
+    _install_services(monkeypatch, _services(home, semantic, tmp_path / "capture.lock"))
+    report = codex_capture.run_codex_capture(NOW, backfill=True)
+    assert report.failed == 1
+    assert report.failures[0].stage == "semantic_budget"
+    assert "semantic_attempts" not in _task_row()[2]
+
+
+def test_semantic_backend_resolves_dedicated_role_and_uses_one_tracker(monkeypatch):
+    from src.backends.resolver import CODEX_SEMANTIC_ROLE
+    calls = []
+    spec = SimpleNamespace(effort=None, model="test-model")
+    invoker = object()
+    def resolve(role):
+        assert role == CODEX_SEMANTIC_ROLE
+        return invoker, spec
+    def invoke(actual, actual_spec, tracker, *args, **kwargs):
+        assert actual is invoker and actual_spec is spec
+        calls.append(tracker)
+        return {"output": {"segments": [{"title": "Synthetic", "turn_ids": ["turn-1"]}], "memories": []}}
+    monkeypatch.setattr(codex_capture, "resolve_stage", resolve)
+    monkeypatch.setattr(codex_capture, "invoke_metered", invoke)
+    semantic = codex_capture._BackendSemanticPass()
+    semantic.run(previous_segment=None, turns=())
+    semantic.run(previous_segment=None, turns=())
+    assert calls == [semantic.tracker, semantic.tracker]
+
+
+def test_malformed_empty_semantic_result_is_a_contract_failure():
+    with pytest.raises(codex_capture.SemanticResultError):
+        codex_capture._parse_semantic_output({"segments": [], "memories": []})
+
+
+@pytest.mark.parametrize("output", [
+    {"segments": [{"title": None, "turn_ids": ["t"]}], "memories": []},
+    {"segments": [{"title": 12, "turn_ids": ["t"]}], "memories": []},
+    {"segments": [{"title": "Title", "turn_ids": "t"}], "memories": []},
+    {"segments": [{"title": "Title", "turn_ids": ["t"]}],
+     "memories": [{"segment": 0, "kind": "insight", "title": "Title", "content": None, "supporting_turn_ids": ["t"]}]},
+])
+def test_wrong_field_types_consume_contract_budget(output):
+    with pytest.raises(codex_capture.SemanticResultError):
+        codex_capture._parse_semantic_output(output)
+
+
+def test_semantic_cap_does_not_starve_later_raw_capture(test_db, clean_tables, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from src.backends.cost import SpendCapExceeded
+    home = _real_codex_home(tmp_path)
+    semantic = _SemanticScript(SpendCapExceeded("threshold reached"))
+    services = _services(home, semantic, tmp_path / "capture.lock")
+    reference = next(iter(services.source.enumerate_tasks(NOW)))
+    snapshot = services.source.fetch_task(reference)
+    later = replace(reference, native_task_id="synthetic-later-task", source_identity="synthetic://later")
+    later_snapshot = replace(snapshot, native_task_id=later.native_task_id, source_identity=later.source_identity)
+    services.source = SimpleNamespace(
+        enumerate_tasks=lambda now: (reference, later),
+        fetch_task=lambda ref: later_snapshot if ref is later else snapshot,
+        skipped_delegated=0, skipped_unknown_ownership=0,
+    )
+    _install_services(monkeypatch, services)
+    report = codex_capture.run_codex_capture(NOW, backfill=True)
+    assert report.captured == 2
+    assert report.failed == 1
+    assert report.semantic_skipped_budget == 1
+    assert len(semantic.calls) == 1
+    with db.get_connection() as conn, conn.cursor() as cursor:
+        cursor.execute("SELECT metadata FROM memories WHERE metadata->>'record_kind' = 'captured_task'")
+        rows = cursor.fetchall()
+    assert len(rows) == 2
+    assert all(row[0]["semantic_cursor"] is None and len(row[0]["turns"]) == 3 for row in rows)

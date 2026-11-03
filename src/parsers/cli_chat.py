@@ -9,7 +9,7 @@ Each .jsonl line is {version, kind, data}:
   - kind=AssistantMessage -> assistant message (text parts; toolUse skipped)
   - kind=ToolResults      -> skipped
 
-See docs/HYBRID-CHAT-EXTRACTION.md for stripping rules and filter thresholds.
+See docs/CAPTURE-COMPONENTS.md for stripping rules and filter thresholds.
 """
 
 import glob
@@ -38,7 +38,7 @@ def _text_from_content(content):
     return "\n\n".join(parts)
 
 
-def extract_session_messages(path):
+def extract_session_messages(path, *, strict=False):
     """Read a Kiro CLI session .jsonl. Returns (messages, created_at_ms).
 
     messages: list of (role, text) with role in {human, bot}.
@@ -54,6 +54,8 @@ def extract_session_messages(path):
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
+                if strict:
+                    raise
                 continue
             data = entry.get("data") or {}
             if first_ts is None:
@@ -175,7 +177,12 @@ def parse_conversation(conversation_id, messages, created_at):
     if not passes_content_filter(messages):
         return None
 
-    project = normalize_project_tag(conversation_id)
+    # F-028: in the current session store the conversation id is the opaque
+    # UUID filename, never a project. Only a path-shaped id (the legacy store
+    # keyed conversations by workspace path) carries a project signal; a bare
+    # id of any shape yields None. Identity does not depend on the project
+    # (see src.db.capture_queries.find_captured_source).
+    project = normalize_project_tag(conversation_id) if "/" in str(conversation_id) else None
     markdown = format_as_markdown(conversation_id, messages, created_at, project=project)
     return conversation_id, markdown, project
 

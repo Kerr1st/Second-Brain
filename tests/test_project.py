@@ -27,11 +27,11 @@ class TestNormalizeProjectTagExactExamples:
         assert normalize_project_tag("  RetailStore  ") == "retailstore"
 
     def test_absolute_path_extracts_leaf(self):
-        assert normalize_project_tag("/Users/example/Projects/RetailStore") == "retailstore"
+        assert normalize_project_tag("/Users/kerrfir/Projects/RetailStore") == "retailstore"
 
     def test_absolute_short_path_home_dir_returns_none(self):
         # absolute, < 3 components
-        assert normalize_project_tag("/Users/example") is None
+        assert normalize_project_tag("/Users/kerrfir") is None
 
     def test_absolute_root_returns_none(self):
         # absolute, < 3 components
@@ -202,7 +202,7 @@ class TestParseConversationProjectExtraction:
     def test_workspace_path_extracts_project(self):
         """Real workspace path → project is the lowercased leaf directory.
         Validates: Requirements 2.1, 2.2"""
-        conv_id = "/Users/example/Projects/RetailStore"
+        conv_id = "/Users/kerrfir/AmplifyG2 Workshops/RetailStore"
         messages = _valid_messages()
         result = parse_conversation(conv_id, messages, 1700000000000)
 
@@ -214,7 +214,7 @@ class TestParseConversationProjectExtraction:
     def test_home_dir_returns_none_project(self):
         """Home directory (absolute, < 3 components) → project is None.
         Validates: Requirements 2.3, 2.4"""
-        conv_id = "/Users/example"
+        conv_id = "/Users/kerrfir"
         messages = _valid_messages()
         result = parse_conversation(conv_id, messages, 1700000000000)
 
@@ -324,27 +324,34 @@ class TestMcpMemoryCreateNormalizesProject:
 
 
 class TestMcpMemorySearchNormalizesProject:
-    """memory_search normalizes project before the retrieval boundary.
+    """memory_search normalizes the project parameter before passing to hybrid_search and rerank.
 
     Validates: Requirement 8.8
     """
 
     @patch("src.mcp_server.get_memory", return_value=None)
     @patch("src.mcp_server.increment_access_count")
-    @patch("src.mcp_server.retrieve_memories", return_value=[])
+    @patch("src.mcp_server.rerank", return_value=[])
+    @patch("src.mcp_server.hybrid_search", return_value=[])
     @patch("src.mcp_server.generate_embedding", return_value=[0.0] * 1024)
     def test_memory_search_normalizes_project(
-        self, mock_embed, mock_search, mock_inc, mock_get
+        self, mock_embed, mock_search, mock_rerank, mock_inc, mock_get
     ):
         from src.mcp_server import memory_search
 
         memory_search(query="test", project="  RetailStore  ")
 
-        # Verify the deep retrieval interface received normalized project.
+        # Verify hybrid_search received normalized project
         mock_search.assert_called_once()
         search_kwargs = mock_search.call_args
         assert search_kwargs.kwargs.get("project") == "retailstore" or \
             (search_kwargs[1].get("project") == "retailstore")
+
+        # Verify rerank received normalized project
+        mock_rerank.assert_called_once()
+        rerank_kwargs = mock_rerank.call_args
+        assert rerank_kwargs.kwargs.get("query_project") == "retailstore" or \
+            (rerank_kwargs[1].get("query_project") == "retailstore")
 
 
 # ---------------------------------------------------------------------------

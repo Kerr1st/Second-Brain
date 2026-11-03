@@ -18,18 +18,30 @@ QD_ROOT = os.path.expanduser("~/.quickwork")
 _PROFILES_JSON = os.path.join(QD_ROOT, "profiles.json")
 
 
-def profile_base():
-    """Return the active profile's data dir, or QD_ROOT for the legacy layout."""
+def resolve_profile_base():
+    """Return ``(base, fallback)``: the active profile's data dir, or the legacy QD_ROOT.
+
+    ``fallback`` is ``None`` when profiles.json named the active profile, else a
+    short reason (``"profiles_unreadable"`` or ``"active_profile_not_found"``) for
+    returning the legacy top-level layout. A fallback base may hold another
+    (older) store whose numeric IDs collide with the active profile's, so callers
+    that mirror a source's selection must not trust it (F-090).
+    """
     try:
         with open(_PROFILES_JSON) as f:
             data = json.load(f)
         active = data.get("last_active")
         for e in data.get("entries", []):
             if e.get("id") == active:
-                return os.path.join(QD_ROOT, e["data_path"])
-    except (OSError, ValueError, KeyError):
-        pass
-    return QD_ROOT
+                return os.path.join(QD_ROOT, e["data_path"]), None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return QD_ROOT, "profiles_unreadable"
+    return QD_ROOT, "active_profile_not_found"
+
+
+def profile_base():
+    """Return the active profile's data dir, or QD_ROOT for the legacy layout."""
+    return resolve_profile_base()[0]
 
 
 def qd_path(*parts):

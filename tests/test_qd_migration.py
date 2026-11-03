@@ -9,9 +9,9 @@ import pytest
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.migrate.migrate_quick_desktop import (
+from src.capture.quick_desktop import (
     map_memory, map_decision, fetch_memories, fetch_kg_decisions,
-    CATEGORY_MAP, PROCEDURE_MAP, load_sync_state, save_sync_state,
+    CATEGORY_MAP, PROCEDURE_MAP,
 )
 
 
@@ -67,9 +67,9 @@ def qd_db():
         VALUES (4, 4, 'fact', 'people', NULL, 'Low confidence fact', 0.3, 0.3, 0, 'trace')""")
 
     # Insert test decision entity
-    conn.execute("INSERT INTO entities VALUES (10, 10, 'Decision', 'Acme Auth Priority', NULL)")
+    conn.execute("INSERT INTO entities VALUES (10, 10, 'Decision', 'Boeing DSE Auth Priority', NULL)")
     conn.execute("""INSERT INTO search_content VALUES (10, 'entity', 'Decision', NULL, NULL, NULL,
-        NULL, NULL, 'Acme auth was deprioritized in favor of firewall work.')""")
+        NULL, NULL, 'Boeing DSE auth was deprioritized in favor of firewall work.')""")
 
     conn.commit()
     yield conn
@@ -133,32 +133,11 @@ class TestMapDecision:
         rows = fetch_kg_decisions(qd_db, since_id=0)
         mapped = map_decision(rows[0])
         assert mapped["type"] == "decision"
-        assert mapped["title"] == "Acme Auth Priority"
+        assert mapped["title"] == "Boeing DSE Auth Priority"
         assert mapped["source_url"] == "qd://entity/10"
-        assert "Acme auth" in mapped["content"]
+        assert "Boeing DSE auth" in mapped["content"]
         assert mapped["confidence"] == 0.8
 
     def test_since_id_filter(self, qd_db):
         rows = fetch_kg_decisions(qd_db, since_id=10)
         assert len(rows) == 0
-
-
-class TestSyncState:
-    def test_roundtrip(self, tmp_path):
-        import scripts.migrate.migrate_quick_desktop as mod
-        orig_path = mod.SYNC_STATE_PATH
-        mod.SYNC_STATE_PATH = str(tmp_path / "state.json")
-        try:
-            state = load_sync_state()
-            assert state["last_memory_id"] == 0
-
-            state["last_memory_id"] = 42
-            state["last_entity_id"] = 99
-            save_sync_state(state)
-
-            reloaded = load_sync_state()
-            assert reloaded["last_memory_id"] == 42
-            assert reloaded["last_entity_id"] == 99
-            assert reloaded["last_sync"] is not None
-        finally:
-            mod.SYNC_STATE_PATH = orig_path

@@ -1,15 +1,13 @@
 """Property-based tests for digest dissent annotation.
 
-Property 8 from the Byzantine Consensus Panel design document.
+Rendering preserves all four votes and any dissent.
 """
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 from hypothesis import given, settings, strategies as st
 
-from src.dream_cycle.digest import generate_digest
+from src.dream_cycle.digest import render_digest
 from src.models import CandidateInsight
 
 
@@ -89,7 +87,7 @@ three_of_four_strategy = st.tuples(
 
 class TestDigestAnnotatesNonUnanimousAccepts:
     """Property 8: For any accepted candidate with 3/4 verdicts (one dissenter),
-    generate_digest() includes 'Accepted (3/4)' with the dissenter's role and
+    render_digest() includes 'Accepted (3/4)' with the dissenter's role and
     reasoning. For any accepted candidate with 4/4 verdicts, the digest includes
     'Accepted (4/4 — unanimous)'.
 
@@ -108,25 +106,8 @@ class TestDigestAnnotatesNonUnanimousAccepts:
         candidate = _make_candidate(title)
         verdicts = _make_verdicts_unanimous(title, reasonings)
 
-        with patch("src.dream_cycle.digest.dream_cycle_db") as mock_db, \
-             patch("src.dream_cycle.digest.Path") as mock_path_cls:
-            mock_db.get_evaluator_verdicts_for_run.return_value = verdicts
-            mock_db.was_feedback_injected.return_value = False
-
-            # Capture the written content instead of writing to disk
-            written_content = {}
-
-            mock_file = mock_path_cls.return_value.__truediv__.return_value
-            mock_file.write_text = lambda text, **kw: written_content.update({"text": text})
-            mock_path_cls.return_value.mkdir = lambda **kw: None
-
-            generate_digest(
-                run_id="test-run",
-                accepted=[candidate],
-                rejected=[],
-            )
-
-        digest_text = written_content.get("text", "")
+        digest_text = render_digest("test-run", [candidate], [], date="2026-09-26",
+                                    verdicts_by_title=verdicts)
         assert "Accepted (4/4 — unanimous)" in digest_text, (
             f"'Accepted (4/4 — unanimous)' not found in digest for unanimous accept"
         )
@@ -146,24 +127,8 @@ class TestDigestAnnotatesNonUnanimousAccepts:
         dissenter_role = ROLES[dissenter_idx]
         dissent_reasoning = reasonings[dissenter_idx]
 
-        with patch("src.dream_cycle.digest.dream_cycle_db") as mock_db, \
-             patch("src.dream_cycle.digest.Path") as mock_path_cls:
-            mock_db.get_evaluator_verdicts_for_run.return_value = verdicts
-            mock_db.was_feedback_injected.return_value = False
-
-            written_content = {}
-
-            mock_file = mock_path_cls.return_value.__truediv__.return_value
-            mock_file.write_text = lambda text, **kw: written_content.update({"text": text})
-            mock_path_cls.return_value.mkdir = lambda **kw: None
-
-            generate_digest(
-                run_id="test-run",
-                accepted=[candidate],
-                rejected=[],
-            )
-
-        digest_text = written_content.get("text", "")
+        digest_text = render_digest("test-run", [candidate], [], date="2026-09-26",
+                                    verdicts_by_title=verdicts)
         assert "Accepted (3/4)" in digest_text, (
             f"'Accepted (3/4)' not found in digest for 3/4 accept"
         )
@@ -186,24 +151,8 @@ class TestDigestAnnotatesNonUnanimousAccepts:
         candidate = _make_candidate(title)
         verdicts = _make_verdicts_unanimous(title, reasonings)
 
-        with patch("src.dream_cycle.digest.dream_cycle_db") as mock_db, \
-             patch("src.dream_cycle.digest.Path") as mock_path_cls:
-            mock_db.get_evaluator_verdicts_for_run.return_value = verdicts
-            mock_db.was_feedback_injected.return_value = False
-
-            written_content = {}
-
-            mock_file = mock_path_cls.return_value.__truediv__.return_value
-            mock_file.write_text = lambda text, **kw: written_content.update({"text": text})
-            mock_path_cls.return_value.mkdir = lambda **kw: None
-
-            generate_digest(
-                run_id="test-run",
-                accepted=[candidate],
-                rejected=[],
-            )
-
-        digest_text = written_content.get("text", "")
+        digest_text = render_digest("test-run", [candidate], [], date="2026-09-26",
+                                    verdicts_by_title=verdicts)
         assert "Methodologist" in digest_text, (
             f"'Methodologist' not found in evaluator reasoning section"
         )

@@ -1,321 +1,83 @@
-# Second Brain — Operations
+# Operations
 
-> Last updated: 2026-08-29
+Read [START-HERE.md](START-HERE.md) and record the actual host, checkout, schema ledger and loaded labels before acting. A schedule template does not establish installed state; a change to the source tree the launchd jobs execute is deployment. Which release is installed, and the per-release runbooks with their hard gates and rollbacks, are in [RELEASES.md](RELEASES.md) and the private notes it names.
 
-## Model Backend Profile
+## Development
 
-The dream cycle's LLM execution path is selected by a named profile in `config/backends.toml` via the `SECOND_BRAIN_PROFILE` environment variable. **Unset (the default) = the `laptop` profile**, which runs every role through Kiro CLI with Claude Opus 4.8 under the current Kiro plan — i.e. today's behavior. Other profiles (e.g. `mini`) select an alternative backend; selecting a profile whose adapter isn't built yet fails fast with a clear error. Credentials never live in the TOML. See `docs/MODEL-BACKENDS.md`.
+Install `requirements.lock` into the checkout's `.venv` and run only
 
-## Scheduled Jobs
-
-All jobs use macOS launchd. Plists live in `scheduling/`. Most use `scripts/jobs/job_wrapper.sh` which sends a macOS notification on failure. (The list below is the primary set; `scheduling/` also holds `distill`, `weekly-digest`, and `liveness` jobs — see that directory for the authoritative set and exact schedules.)
-
-| Schedule | Job | Script | Plist | Status |
-|---|---|---|---|---|
-| Sat 1:00 AM | Bookmark scrape | `scrape_bookmarks.py` | `com.second-brain.bookmarks` | Working |
-| Daily 1:30 AM | YouTube capture | `youtube_scrape.sh` → `src/capture/youtube.py` | `com.second-brain.youtube` | Working (self-contained yt-dlp) |
-| Daily 2:00 AM | Backup | `backup.sh` | `com.second-brain.backup` | Working |
-| Daily 2:30 AM | Chat extraction | `chat_extract.py` | `com.second-brain.chat-extract` | Working |
-| Daily 3:00 AM | Staged ingestion | `ingest_staged.sh` | `com.second-brain.ingest` | Working |
-| Hourly | QD sync | `qd_sync.sh` | `com.second-brain.qd-sync` | Working |
-| Hourly | Codex Task capture | `codex_capture.sh` | `com.second-brain.codex-capture` | Working; active User-Owned Tasks only |
-| Hourly | Local vector fill | `reembed_local.sh` | `com.second-brain.reembed-local` | Temporary; resumable backfill |
-| Sun 3:00 AM | Backup verify | `verify_backup.sh` | `com.second-brain.verify` | Working |
-| (see plist) | Dream cycle | `dream_cycle_scheduled.sh` | `com.second-brain.dream-cycle` | Working |
-| Removed | Capture API | `capture_api.sh` | Not installed | Deprecated endpoint retained only for historical reference |
-
-### Installing a LaunchAgent
-
-```bash
-# Symlink and load
-ln -s ~/second-brain/scheduling/com.second-brain.<name>.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.second-brain.<name>.plist
-
-# Verify
-launchctl list | grep second-brain
+```sh
+SECOND_BRAIN_PROFILE=controlled .venv/bin/python scripts/test_isolated.py -- -q
 ```
 
-### Checking Job Health
-
-```bash
-# All loaded jobs and exit codes (0 = success)
-launchctl list | grep second-brain
+The runner creates a fresh socket-only PostgreSQL cluster under `/private/tmp` with an owner role, a NOSUPERUSER application role and a legacy superuser role, applies the real migrations through `migrations/migrate.sh`, isolates HOME, metrics and credentials before import, denies outbound network to the process and its shell descendants, stops the cluster even on failure and keeps a dated evidence directory. Direct `pytest` refuses. Never point tests, migrations or maintenance scripts at the installed database as a development step.
 
-# Recent logs
-cat ~/second-brain/logs/<job-name>-$(date +%Y%m%d).log
+## Database roles (migration 017)
 
-# QD sync state
-cat ~/.quickwork/.second_brain_sync_state.json
-```
+| Role | Attributes | Owns | Used by |
+|---|---|---|---|
+| `memory_bank_owner` | LOGIN, NOSUPERUSER, NOCREATEDB, NOCREATEROLE; no password while `pg_hba.conf` is `trust` for local connections | the database, every relation, index and function in `public`, the `vector` extension; default privileges grant the app role DML on future owner-created objects | `migrations/migrate.sh` (`DB_MIGRATE_USER`, the default), `scripts/jobs/reindex_embedding.sh`, `scripts/jobs/dedup_ide_backfill.sh` (VACUUM step), `scripts/cleanup_duplicate_sources.py --apply`, restore-based rollback and disaster recovery |
+| `memory_bank` | after the operator step: NOSUPERUSER, NOCREATEDB, NOCREATEROLE | nothing | every job, the MCP servers, capture-api, `pg_dump` in the backup, the graph export and the smoke script |
+| cluster superuser (the Homebrew account) | SUPERUSER | `postgres`, templates | `ALTER ROLE memory_bank NOSUPERUSER` and its reversal; `CREATE EXTENSION vector` on a brand-new database |
 
-## Backup
+The app role holds `SELECT, INSERT, UPDATE, DELETE` on every table, `USAGE, SELECT` on sequences, `EXECUTE` on the trigger functions and `USAGE` on the schema — and nothing structural: no `TRUNCATE`, `REFERENCES`, `TRIGGER`, `MAINTAIN`, `CREATE`, no `ALTER DATABASE … SET`, no membership of the owner. Session GUCs (`statement_timeout`, `lock_timeout`, `hnsw.iterative_scan`), read-only transactions and advisory locks need no privilege, so every application path works unchanged; the suite proves it by running every application test as the NOSUPERUSER role. `MAINTAIN` is deliberately not granted; autovacuum covers the app and the post-bulk-delete rebuild is the owner's `reindex_embedding.sh`.
 
-Daily at 2 AM. Full details in [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md).
+`migrate.sh` connects as `DB_MIGRATE_USER` (default `memory_bank_owner`; `DB_MIGRATE_PASSWORD` if authentication is ever tightened), takes `DB_OWNER_ROLE` and `DB_APP_ROLE` from the environment (role names are never in the SQL files), and exits 2 before touching anything when the connected role is not the database owner, when owner and app role are the same name, or — inside 017 — when the app role is a member of the owner or lacks DML afterwards. `MIGRATE_UNTIL=<version file>` stops after a given file; it exists for one purpose: the **bootstrap** run on an installation whose `memory_bank` is still the superuser owner, `DB_MIGRATE_USER=memory_bank DB_OWNER_ROLE=memory_bank_owner MIGRATE_UNTIL=017_role_separation.sql bash migrations/migrate.sh`, the only `migrate.sh` run ever made as the app role. 017 creates the owner, `REASSIGN OWNED BY memory_bank`, grants DML and default privileges and verifies them; it does **not** demote `memory_bank` — a migration cannot safely demote its own session, and until `ALTER ROLE memory_bank NOSUPERUSER NOCREATEDB NOCREATEROLE` is run by the cluster superuser the grants are inert (017 says so with a NOTICE). The demotion is the one step that changes what running services may do; its reversal is `ALTER ROLE memory_bank SUPERUSER`, immediate, no data involved. `REASSIGN OWNED` also moves ownership of any other databases the app role owned (stale test databases on the installed cluster).
 
-| What | Where | Retention |
-|---|---|---|
-| pg_dump (all tables) | Google Drive + local | 30 days cloud, 7 days local |
-| JSON exports (memories, entities, edges, memory_entities) | Google Drive + local | 30 days cloud, 7 days local |
-| KB source docs | Google Drive + local | Current only |
-| Config (all docs, migrations, docker-compose, requirements.txt) | Google Drive + local | Current only |
+Verification tools: `scripts/maintenance/prepare_release.py --roles-and-indexes --output <file>` writes a read-only role audit (`currently_superuser`, `structural_privileges`, `objects_not_owned_by_owner`, `remaining_steps`); `scripts/maintenance/smoke_app_role.py` connects as the configured role, exercises the read paths (list, read, graph, search legs, dream-cycle stats, feedback, briefing, run lock, capture lookups), does one write round trip inside a rolled-back transaction and probes the structural statements expecting refusal, and prints a JSON report (exit 0 only when every application step is ok). `psql -U memory_bank` is for DML; schema work is `psql -U memory_bank_owner`. Disaster recovery into a fresh database needs the 017 re-grant step ([DISASTER-RECOVERY.md](DISASTER-RECOVERY.md)).
 
-**AWS S3 was de-scoped on 2026-06-01** (brittle overnight SSO). Durable copies are now Google Drive + local (code/config also in git on `origin`/`mini`). `scripts/jobs/backup.sh` no longer uploads to S3. The JSON exports still include `entities`/`edges`/`memory_entities` (the now-dormant KG tables) pending cleanup.
+## Scheduling and truthful health
 
-## Local Embedding Runtime
+[scheduling/README.md](../scheduling/README.md) is the job table (17 plists, 16 labels loaded on the installed Mac, `distill` disabled by the operator) and the environment contract; [the generated inventory](generated/runtime-inventory.md) is the cadence table derived from the plists. Calendar entries are host local time; the dream cycle's Weekday 1/3/5 at 12:30 is Monday/Wednesday/Friday. It moved from 02:00 to 12:30 on 2026-10-09: the Mac sleeps with the lid closed and dark-wake runs lose the network (the 2026-10-09 02:00 run failed on DNS), so it now runs midday while the machine is in use. Plists are installed as **symlinks**, so a checkout changes the job definitions in place, effective at the next `launchctl bootout` + `bootstrap`; a copied plist silently keeps an old definition (the R5 runbook replaces the last two copies).
 
-The active embedding space is local Ollama BGE-M3 (`ollama:bge-m3:1024`). Install and verify it
-once on each machine:
+Every job runs `scripts/jobs/job_wrapper.sh` → `python -m src.operations.jobs <script> <job-name>`: PATH, `AWS_PROFILE=second-brain-jobs`, `SECOND_BRAIN_PROFILE=controlled`, `umask 077`, `caffeinate`, one `flock` per job, a committed per-job deadline with floors the runner never undercuts (dream-cycle 6 h, bookmarks 3 h, backup/verify/weekly-digest/codex-capture/distill 2 h, others 1 h), SIGTERM → 120 s grace → SIGKILL, the per-day log `logs/<job>-YYYYMMDD.log` and the durable status `logs/jobs/<job>.json` (state, exit code, timings, timeout source, last success, consecutive failures, first failure, last notification). Capture-api runs in service mode: bounded startup, `/health` probes, no deadline while healthy, back-off and at most one notification per 30 minutes during an outage. Jobs that need the network wait for DNS first (`SECOND_BRAIN_JOB_NEEDS_NETWORK=1`, up to 15 minutes under a sleep assertion) and exit 68 without starting if it never comes — dark-wake launches were the root cause of the chronic Monday weekly-digest failure. PostgreSQL is never auto-started by a job: `scripts/jobs/_preflight.sh` exits 69 with a named cause. Exit-code taxonomy and every variable: [scheduling/README.md](../scheduling/README.md).
 
-```bash
-brew install ollama
-brew services start ollama
-ollama pull bge-m3
+Liveness (`com.second-brain.liveness`, 09:00, `config/liveness.toml`): required channels with freshness thresholds; advisory channels with a mandatory reason (`distilled_chat` while distill is disabled, `weekly_digest` until two consecutive OK Mondays, `quick_desktop_synth` while the upstream Quick export is stale); a generic "produced zero rows for longer than its own cadence tolerates" rule over every `source_type`; `dream_cycle_runs.completed_at` ≤ 7 days and zero-candidate-run detection; a sweep of `logs/jobs/*.json` for non-zero last exits, overdue runs, stale service heartbeats and repeated `network_unavailable`; and persistent job backlogs (`[backlog.<job>]`, mandatory reason): `scrape_bookmarks.py` defers the public URLs its Crawlee time budget cannot start (exit 0, retried next run) and keeps the streak in `logs/jobs/bookmarks.backlog.json`; three consecutive deferring runs print a `WARNING` in the job log and make liveness report a ⚠ advisory — never ❌, and one deferral is never reported. Four more backlogs use the same sidecar mechanism: `[backlog.codex-capture]` (2 consecutive runs with semantic contract misses; [CAPTURE-COMPONENTS.md](CAPTURE-COMPONENTS.md)), `[backlog.bookmarks-midway]` (3 consecutive runs whose internal URLs were deferred on a Midway problem: the cookie was missing or expired, or the cookie was valid but ≥3 internal fetches hit sign-in, none reached a page and the canary page `w.amazon.com/bin/view/Main/` hit sign-in too or was inconclusive) and `[backlog.bookmarks-unsupported]` (3 consecutive runs in which internal hosts without a Midway sign-in answered a bare 401/403 or a sign-in page, `unsupported_auth`), and `[backlog.bookmarks-browser]` (`logs/jobs/bookmarks-browser.backlog.json`, threshold 1: the midway-playwright browser pass deferred URLs because it did not launch, its server died, or it ran out of budget (cause per detail; `budget` includes a job deadline that left under 60 s for the pass, cause "the job deadline left < 60 s for the browser pass") or `BROWSER_MAX_PAGES`; browser deferrals are not counted in `[backlog.bookmarks]`). The Midway backlog also covers the browser's own Midway causes: a session expiring within 30 min at job start, too little session left at the browser pass, or every browser page (≥ 3) ending on Midway's own sign-in (HTTP 401/403 permission pages take normal ledger strikes). A job deadline too short for the browser pass is not a Midway cause. The sidecar keeps the last run's cause, and the finding shows it as "(last run: …)": which Midway cause applied, the unsupported hosts, or the count per browser deferral detail. Every finding lands in `logs/jobs/liveness-report.json`; the desktop notification is a supplement. A running process with no useful output is unhealthy.
 
-# Verify runtime, model, dimension, and active space
-curl -sS http://127.0.0.1:11434/api/version
-ollama list
-.venv/bin/python -c \
-  'from src.embeddings import generate_embedding, active_embedding_space; v=generate_embedding("health check"); print(active_embedding_space(), len(v))'
-```
+Backups and restore: [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md).
 
-Expected final output is `ollama:bge-m3:1024 1024`. The Titan Adapter is retained in code for
-explicit legacy diagnostics but cannot be selected through the active embedding Interface; this
-fails closed before incompatible vectors can enter the local space.
+## Release sequence
 
-After migration 014, Titan vectors remain in `memories.legacy_embedding`; active local vectors use
-`memories.embedding` with `memories.embedding_space`. Fill the local space incrementally:
+Each release has a private runbook with a hard gate, a quiesce, a backup, the switch, $0 smoke checks, bootstrap and rollback; the shape is always:
 
-```bash
-# Count eligible preserved rows without writes
-.venv/bin/python scripts/reembed_memories.py --dry-run
+1. **Gate.** Installed `HEAD` equals the expected previous release, the working tree is clean, the migration ledger's count and `max(version)` are exactly what the release expects, the release branch contains the installed head, the backup key is 0600, required tools are on PATH. Any failure stops the window before anything changes.
+2. **Quiesce.** `launchctl bootout` every label (never `disable`/`enable`: `distill` must stay disabled), check `pgrep` for job processes and `src.mcp_server` processes started by editor sessions (they keep the old code loaded and hold connections), and check `pg_stat_activity` for `memory_bank` until only this session remains. Quiesce comes **before** the backup so the backup is the exact rollback point.
+3. **Backup.** Run the backup through the wrapper and verify the receipt (`remote_verified`, `payload_verified`) or `pg_restore --list` the dump. Record the file name.
+4. **Switch.** `git merge --ff-only release/<name>` in the installed checkout; verify `HEAD` and that the expected files appeared or disappeared; reinstall changed plists as symlinks.
+5. **Migrate**, when the release has one, as the owner role, recording the output; a lock-timeout failure rolls back the whole file and is re-run after the holder is found, not a rollback situation.
+6. **$0 smoke.** Imports, profile, ledger count, a list/graph read, `bash -n` of the job scripts, the wrapper with a trivial script, the role audit and app-role smoke after 017 — no model calls, no writes.
+7. **Bootstrap** the 16 labels, watch capture-api come up healthy, run liveness by hand, restart editor sessions so their MCP servers load the new code, and check the next scheduled runs.
+8. **Rollback** = `git checkout -B main <previous head>` plus the previous plists; when a migration committed, restore the pre-window backup as the owner first. Git restores source; it cannot recover deleted data.
 
-# Prove a small resumable batch, then continue in bounded runs
-.venv/bin/python scripts/reembed_memories.py --limit 100 --batch-size 32
-.venv/bin/python scripts/reembed_memories.py --limit 5000 --batch-size 32
-```
+Nothing in this sequence resumes the disabled distiller or enables e-mail delivery. Do not run a window between 01:30 and 05:00, within five minutes of the hour (qd-sync) or on Monday/Wednesday/Friday 12:30–16:30 (the dream cycle).
 
-Each batch commits independently. Re-running skips completed rows. Do not drop
-`legacy_embedding` until the retrieval evaluation passes and retirement is explicitly approved.
-The command prioritizes decisions, insights, syntheses, and other derived memories before raw
-`source` rows so useful semantic recall recovers early in a gradual migration.
+## Corpus maintenance (R6, applied 2026-10-09)
 
-## AWS SSO Management
-
-AWS SSO is no longer required for embeddings or backups. It remains relevant only for a model
-execution profile explicitly configured to call Bedrock.
+`scripts/maintenance/dedup_corpus.py --output <manifest>`, `rechunk_and_embed.py --output <manifest>` and `prepare_release.py` are dry-run planners. Apply modes take the manifest and its SHA-256; the manifest binds the database incarnation and row hashes and rejects stale plans; paid embedding additionally requires `--allow-paid-embedding`. Order: metadata normalization (historical UUID project tags) → dedup of proven duplicate captured-source identities, remapping every foreign key, JSON/array id, slice/skim reference and lineage → rechunk and re-embed of the remaining necessary rows, with validated vectors cached for resume and old cited chunks kept as superseded history. Keep manifests private; they identify corpus records. R6 applied this sequence to production on 2026-10-09 (metadata 2,832 operations, dedup 70 operations; rechunk applied 2026-10-09, 8,240 operations / 96,331 Titan calls; record `R6-DEPLOYMENT.md` in the operator's private review folder). Any later pass regenerates and re-prices its manifests first; never install a global source-URL uniqueness constraint (derived Codex task memories share URLs). The `corpus_maintenance` table is the ledger of applied operations (including the graph export marker).
 
-```bash
-aws sts get-caller-identity
-aws sso login --profile default
-
-# Profile: default → SSO session <sso-session-name>
-# Start URL: <aws-sso-start-url>
-# Account: <aws-account-id>, AdministratorAccess role
-```
-
-SSO tokens expire after 8-12 hours. When expired:
-- Bedrock-backed model generation fails for profiles that select it
-- local embedding, ingestion, and `memory_search` remain available through Ollama
-- Backups are unaffected (Google Drive + local; S3 de-scoped)
+## Knowledge-graph retirement (R7)
 
-## Quick Desktop Sync
+`scripts/maintenance/export_graph_tables.py --dry-run` prints the counts; without the flag it writes `backups/graph-export/graph-export_<UTC>.dump.gpg` (AES-256 with the backup key), verifies it by decrypting and listing, writes a receipt and inserts the `graph-export` marker into `corpus_maintenance`; a count change during the export aborts it. Migration 018 (owner) drops `entities`, `entity_edges`, `memory_entities` only when the newest marker's counts match the live tables. The archive is local-only until copied off-site; the nightly dumps that still contain the tables age out of Drive after 30 days. Recovery: [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md).
 
-Hourly incremental sync from Quick Desktop's SQLite databases into PostgreSQL. The `qd_sync.sh` orchestrator runs 5 scripts in sequence:
-
-| Script | What it syncs | Source |
-|---|---|---|
-| `migrate_quick_desktop.py` | Memories + KG entities/edges | `knowledge_v1.db` |
-| `enrich_qd_tags.py` | Tags (2,506) + domains (95) onto memories | `knowledge_v1.db` |
-| `ingest_eventlog.py` | Feed events (304) + interaction metadata (175) | `eventlog/` |
-| `import_slack_graph.py` | Channels (330) + users (699) → KG entities | `slack_cache/` |
-| `ingest_qd_chats.py` | Chat sessions (2+ messages) | `sessions.db` |
-
-**Databases:**
-- `~/.quickwork/knowledge_storage/knowledge_v1.db` — memories, KG, tags, domains
-- `~/.quickwork/sessions/sessions.db` — chat sessions
-- `~/.quickwork/eventlog/events.jsonl` — curated feed events
-- `~/.quickwork/eventlog/interactions.jsonl` — user engagement signals
-- `~/.quickwork/slack_cache/` — channels and users
-
-**Dedup schemes:** `qd://memory/{id}`, `qd://entity/{id}`, `qd-chat://{id}`, `qd-feed://{id}`
-
-**State file:** `~/.quickwork/.second_brain_sync_state.json`
-
-All scripts are idempotent — safe to run repeatedly. See [QUICK-DESKTOP-INTEGRATION.md](QUICK-DESKTOP-INTEGRATION.md) for design details.
-
-## Codex Desktop Task Capture
-
-Codex capture has one command and one implementation path. The hourly
-`com.second-brain.codex-capture` LaunchAgent runs it for every active User-Owned Task. Delegated
-Tasks and Unknown-Ownership Tasks are skipped and reported. Archived history remains excluded, and
-the full historical backfill has not been run:
-
-```bash
-# Read and count eligible active Tasks without database, model, or embedding writes
-.venv/bin/python scripts/capture_codex.py --dry-run
-
-# Inspect one Task, including an archived Task, without writes
-.venv/bin/python scripts/capture_codex.py --dry-run --task-id <thread-id>
-
-# Run the narrowest real-data proof against the isolated test database
-set -a
-source .env.codex-dev
-set +a
-DB_NAME="$TEST_DB_NAME" .venv/bin/python scripts/capture_codex.py \
-  --task-id <thread-id>
-```
-
-On a machine using the bundled Codex executable for the semantic pass, add:
-
-```bash
-SECOND_BRAIN_PROFILE=codex_local \
-CODEX_CLI=/Applications/ChatGPT.app/Contents/Resources/codex \
-DB_NAME="$TEST_DB_NAME" .venv/bin/python scripts/capture_codex.py \
-  --task-id <thread-id>
-```
-
-The command applies the six-hour inactivity threshold, performs a stable rollout read, captures
-only user prompts and visible final answers, and runs the combined Task Semantic Pass immediately
-after source capture. Its JSON report contains counts plus Task IDs, failure stages, and exception
-class names when failures occur; it does not print captured prompt or answer content.
-
-`--backfill` includes archived eligible Tasks through this same path. Do not invoke an unbounded
-`--backfill` until explicit user approval. Task-bounded proof runs still use `--task-id` with
-`DB_NAME="$TEST_DB_NAME"`; there is no separate pilot application. See
-[CODEX-TASK-CAPTURE-BUILD-PLAN.md](CODEX-TASK-CAPTURE-BUILD-PLAN.md).
-
-### Hourly active-task capture
-
-The production job uses `scheduling/com.second-brain.codex-capture.plist`. It passes neither
-`--task-id` nor `--backfill`, so the normal six-hour and Task Ownership policies select all and only
-eligible active Tasks.
-
-```bash
-# Install the repository template for this checkout, then load it
-sed "s|/path/to/second-brain|$PWD|g" \
-  scheduling/com.second-brain.codex-capture.plist \
-  > "$HOME/Library/LaunchAgents/com.second-brain.codex-capture.plist"
-launchctl bootstrap "gui/$UID" \
-  "$HOME/Library/LaunchAgents/com.second-brain.codex-capture.plist"
-
-# Inspect status and the append-only local log
-launchctl print "gui/$UID/com.second-brain.codex-capture"
-tail -50 logs/codex-capture.log
-```
+## Authentication and credentials
 
-The job checks the local Ollama runtime and required BGE-M3 model. If either is unavailable it
-records `waiting_for_local_embedding` and exits successfully. Once the local runtime returns, the
-next hourly run retries eligible captures and unchanged semantic tails. The former one-task canary
-is retained as proof evidence but is not loaded alongside the production job.
+Jobs use the AWS profile `second-brain-jobs` for Bedrock; interactive shells use SSO. Since 2026-10-10 that profile has **no static key**: it is a `credential_process` that runs the IAM Roles Anywhere signing helper (`~/.aws/rolesanywhere/aws_signing_helper`, v1.8.5, SHA-256 checked) with a client certificate, and receives 1-hour credentials for the IAM role `second-brain-jobs-ra` (inline policy `BedrockInvokeOnly`: `bedrock:InvokeModel*` on foundation models and inference profiles only). The role trusts only the Roles Anywhere trust anchor `second-brain-jobs-ca` and only certificates with `CN=second-brain-jobs, O=kerrfir-personal`. The IAM user `second-brain-jobs` still exists with zero access keys.
 
-## Memory Context Broker and Steering Governance
+Files in `~/.aws/rolesanywhere/` (all 0600, directory 0700): `jobs.pem`/`jobs.key` (workload certificate, valid to 2027-10-10), `ca.pem` (local CA, valid to 2031), `ca.key.gpg` (CA private key, encrypted with the backup key; off-site copy at `gdrive:memory-bank-backups/rolesanywhere/`), and the three ARNs. The daily credentials job warns 30 days before `jobs.pem` expires. Each failed check adds one line, `reason: <auth|timeout|transport|tool-missing|other>: <redacted line>` (class from the exit code first — the Graph and Slack MCP probes exit 3 for auth and 4 for transport — then from keywords; full probe output is never printed). To re-issue: decrypt `ca.key.gpg` to a 0600 temp file, sign a new CSR for the same subject with `openssl x509 -req … -days 365` (extensions `clientAuth`, `digitalSignature`), replace `jobs.pem`/`jobs.key`, run `aws sts get-caller-identity --profile second-brain-jobs`, then `rm -P` the decrypted CA key. To revoke everything at once: disable the trust anchor (`aws rolesanywhere disable-trust-anchor`). Never print credential contents; `~/.aws` residue files must be 0600 like the active ones. The capture-api token lives only in `.env` (0600). Google Drive (`rclone`), Gmail and model credentials are separate dependencies. Open items are listed in [PLAN-refactor.md](PLAN-refactor.md).
 
-Agents request a bounded pack through `memory_context` and close its receipt through
-`memory_context_outcome`. Receipt outcomes are `followed`, `corrected`, `not_used`, or `unknown`;
-`corrected` requires a Correction Episode ID.
+## Database basics
 
-Steering changes use a review-before-write command sequence:
+PostgreSQL 17 + pgvector run natively via Homebrew (`postgresql@17`, keg-only: `/opt/homebrew/opt/postgresql@17/bin` must be on PATH), serving `127.0.0.1:5432`. `brew services start|restart postgresql@17`; `pg_isready -h 127.0.0.1 -p 5432 -U memory_bank`; `psql -h 127.0.0.1 -U memory_bank -d memory_bank` for DML and `-U memory_bank_owner` for schema work; `bash migrations/migrate.sh` as the owner is idempotent (`skip: … (already applied)` for every file). Session-level `PGOPTIONS='-c maintenance_work_mem=1GB'` speeds a restore's HNSW build without a server restart.
 
-```bash
-# Four independent evaluators; acceptance retains an inactive candidate
-.venv/bin/python scripts/steering.py review \
-  --title "<candidate title>" \
-  --wording "<proposed rule>" \
-  --source-memory-id <evidence-id> \
-  --proposed-scope project \
-  --applicability '{"semantic_projects":["second-brain"]}'
-
-# Explicit user approval creates a versioned active rule
-.venv/bin/python scripts/steering.py approve <candidate-id> \
-  --wording "<approved rule>" \
-  --scope project \
-  --applicability '{"semantic_projects":["second-brain"]}'
-
-# Preview first; the first output line is the current-file digest
-.venv/bin/python scripts/steering.py preview-agents <rule-id> --path AGENTS.md
-
-# Publish only the exact reviewed version
-.venv/bin/python scripts/steering.py publish-agents <rule-id> --path AGENTS.md \
-  --expected-current-digest <reviewed-digest>
-```
-
-Publication accepts only an active approved Steering Rule, rejects symlinks and non-`AGENTS.md`
-targets, writes atomically, and keeps an ignored local rollback copy under
-`.second-brain-backups/`. It never installs hooks, skills, tests, or CI automatically.
-
-The 2026-08-29 Codex-first proof created context receipt
-`c15a25c2-6a0b-4304-89a7-63be33667939`, delivered four items to follow-up Codex Task
-`01a04e4c-4a73-7611-ade6-ad828caaf87b`, and recorded all four as used with outcome `followed`.
-No rule correction was proposed.
-
-## Capture API — DEPRECATED
-
-**Status: unused, slated for removal.** The HTTP capture endpoint (`src/capture_api.py`; Slack/browser/mobile/email on port 8100) has captured **0 memories** in its lifetime. Its launchd job has been removed; remaining code is retained only for historical reference. In-session capture goes through the MCP `memory_create` tool; new ingestion follows the capture component (`docs/CAPTURE-COMPONENTS.md`).
-
-## Express (briefing & feedback)
-
-The delivery layer that surfaces what the system has synthesized. The on-demand
-`brief` is the pull surface; a high-bar Gmail push (`express_push.py`) is chained
-after the noon dream cycle; the `memory_brief` MCP tool surfaces it in-session.
-
-```bash
-# Read the briefing
-.venv/bin/python scripts/brief.py                # LLM-edited headlines
-.venv/bin/python scripts/brief.py --no-llm       # fast deterministic ranking
-.venv/bin/python scripts/brief.py --window-days 30
-
-# Shape what it surfaces (delivery preferences — gradient)
-.venv/bin/python scripts/brief.py --useful <target>   # boost
-.venv/bin/python scripts/brief.py --less   <target>   # soft down-weight
-.venv/bin/python scripts/brief.py --mute   <target>   # hard hide
-.venv/bin/python scripts/brief.py --unmute <target>   # clear a preference
-.venv/bin/python scripts/brief.py --prefs             # list preferences
-
-# Proactive email (gated; sends only on a cross-project synthesis or contradiction)
-.venv/bin/python scripts/express_push.py --dry-run    # compose + print, never send
-```
-
-`<target>` is an item id (the `#abcd1234` shown by `brief`), a kind
-(`insight|contradiction|resurface|digest|question`), or a topic/project name.
-Run `scripts/brief.py --help` for the full reference.
-
-Email config (never committed) — set for the LaunchAgent that runs the chained push:
-`EXPRESS_EMAIL_TO`, `EXPRESS_EMAIL_FROM`, `GMAIL_APP_PASSWORD`. Until set, the push
-composes but skips sending (benign exit 0).
-
-## Database
-
-PostgreSQL 17 + pgvector runs **natively** via Homebrew (`postgresql@17`), serving `127.0.0.1:5432` (localhost-only), auto-started at login by `brew services`.
-
-```bash
-# Start / restart (auto-starts at login)
-brew services start postgresql@17
-brew services restart postgresql@17
-
-# Check health
-pg_isready -h 127.0.0.1 -p 5432 -U memory_bank
-
-# Connect
-psql -h 127.0.0.1 -U memory_bank -d memory_bank
-
-# Apply migrations
-./migrations/migrate.sh
-
-# Data dir
-/opt/homebrew/var/postgresql@17
-```
-
-> `postgresql@17` is keg-only — add `/opt/homebrew/opt/postgresql@17/bin` to `PATH` (or use full paths) for `psql`/`pg_dump`/`pg_isready`.
->
-> The former Docker container (`second-brain-db`, `pgvector/pgvector:pg17`) is **stopped but retained as a migration rollback** until Phase 5 decommission; its bind-mount data is at `docker/data/` (~2.5 GB). See `docs/MIGRATION-native-postgres.md`.
-
-## Monitoring Checklist
+## Monitoring checklist
 
 | Check | Command | Expected |
 |---|---|---|
-| All jobs loaded | `launchctl list \| grep second-brain` | jobs present, exit code 0 |
-| Backup ran today | `cat logs/backup-$(date +%Y%m%d).log` | "Backup complete" |
-| QD sync running | `cat logs/qd-sync-$(date +%Y%m%d).log` | Hourly entries |
-| AWS SSO valid | `aws sts get-caller-identity` | Returns account info |
-| PostgreSQL up | `pg_isready -h 127.0.0.1 -p 5432 -U memory_bank` | "accepting connections" |
-| Memory count | `psql -h 127.0.0.1 -U memory_bank -d memory_bank -c "SELECT count(*) FROM memories"` | ~122K |
+| Labels loaded | `launchctl list \| grep -c second-brain`; `launchctl print-disabled gui/$(id -u) \| grep distill` | 16; `disabled` |
+| Every job's last run | `for f in logs/jobs/*.json; do python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['job'], d['state'], d.get('exit_code'), d.get('timeout_s'))" "$f"; done` | `succeeded 0` (capture-api `running`) |
+| Liveness | `python3 -c "import json; r=json.load(open('logs/jobs/liveness-report.json')); print(r['healthy'], r['required_failures'], r['advisories'])"` | `True [] [...]` |
+| Backup | `tail -2 logs/backup-$(date +%Y%m%d).log`; `ls -t backups/*.receipt.json \| head -1 \| xargs cat` | `OK (exit 0)`; `"remote_verified": true` |
+| Dream cycle | `psql … -c "SELECT started_at, completed_at, candidates_generated, candidates_accepted, cost_usd FROM dream_cycle_runs ORDER BY started_at DESC LIMIT 1"` | `completed_at` set after Mon/Wed/Fri 12:30 |
+| Roles | `.venv/bin/python scripts/maintenance/prepare_release.py --roles-and-indexes --output /tmp/audit.json` | `remaining_steps: []`, `currently_superuser: false` after R7 |
+| PostgreSQL | `pg_isready -h 127.0.0.1 -p 5432 -U memory_bank` | accepting connections |
+| Ledger | `psql … -tAc "SELECT count(*), max(version) FROM schema_migrations"` | matches [RELEASES.md](RELEASES.md) for the installed release |

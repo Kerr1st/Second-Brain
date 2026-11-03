@@ -31,6 +31,11 @@ insight_titles = st.text(
     alphabet=st.characters(whitelist_categories=("L", "N", "Z")),
 )
 
+def _norm(text):
+    """The feedback block normalizes whitespace and keeps the first sentence of each reasoning."""
+    return " ".join(text.split())
+
+
 EVALUATOR_PREFIXES = ["evaluator_a", "evaluator_b", "evaluator_c", "evaluator_d"]
 
 
@@ -125,7 +130,7 @@ class TestFeedbackInjectionMethodologistAndDissents:
             f"Methodologist not found in feedback output: {result!r}"
         )
         # The Methodologist's reasoning should appear
-        methodologist_reasoning = verdicts_tuple[3][1]
+        methodologist_reasoning = _norm(verdicts_tuple[3][1])
         assert methodologist_reasoning in result, (
             f"Methodologist reasoning {methodologist_reasoning!r} not in output"
         )
@@ -166,7 +171,7 @@ class TestFeedbackInjectionMethodologistAndDissents:
                 assert role_name in result, (
                     f"{role_name} dissent not found in output for REJECT verdict"
                 )
-                assert reasoning in result, (
+                assert _norm(reasoning) in result, (
                     f"Dissent reasoning {reasoning!r} not found in output"
                 )
 

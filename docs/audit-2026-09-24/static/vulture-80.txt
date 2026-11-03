@@ -1,0 +1,3 @@
+Installed 1 package in 170ms
+scripts/scrape_bookmarks.py:66: unused import 'HTMLParser' (90% confidence, 1 line)
+src/mcp_server.py:25: unused import 'get_schema_with_constituents' (90% confidence, 5 lines)

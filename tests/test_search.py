@@ -34,21 +34,6 @@ class TestHybridSearchReturnsResults:
         assert len(results) >= 1
         assert any(r["title"] == "Quantum Cryptography" for r in results)
 
-    def test_full_text_search_covers_rows_awaiting_local_embedding(
-        self, test_db, clean_tables, mock_embedding
-    ):
-        content = "monotonic codex capture provenance sentinel"
-        db.create_memory(
-            type="source",
-            title="Unembedded source evidence",
-            content=content,
-            embedding=None,
-        )
-
-        results = hybrid_search(content, mock_embedding(content), limit=5)
-
-        assert any(r["title"] == "Unembedded source evidence" for r in results)
-
 
 class TestRerankPreservesOrderForExactMatch:
     """Exact title match ranks first after reranking."""
@@ -282,12 +267,12 @@ class TestHybridSearchSourceTypeProperty:
     channel leaks through the filter.
     """
 
-    @given(source_type=st.sampled_from(["distilled_chat", "cli_chat", "kiro_ide_chat", "article"]))
+    @given(source_type=st.sampled_from(["distilled_chat", "kiro_cli_chat", "kiro_ide_chat", "article"]))
     @settings(max_examples=20, deadline=None)
     def test_only_matching_source_type_in_results(self, source_type, test_db):
         from tests.conftest import _deterministic_embedding
 
-        other_type = "other_" + source_type
+        other_type = "manual"
         base = "Event sourcing and CQRS tradeoffs in distributed systems"
         try:
             tgt = base + " target " + source_type
@@ -427,3 +412,132 @@ class TestHybridSearchEmptyFtsQuery:
         # "!!! ??? ..." strips to an empty FTS query -> exercises the vector-only branch
         results = hybrid_search("!!! ??? ...", mock_embedding(content), limit=5)
         assert isinstance(results, list)  # no crash; vector side still returns candidates
+
+
+class TestFtsOnlyRanksLexicalMatches:
+    """The full-text leg of hybrid search must only rank rows whose search_vector
+    actually matches the query. Without a `@@` predicate every row is returned with
+    ts_rank = 0 and fused as if it had matched, and the GIN index is never used."""
+
+    @staticmethod
+    def _rebuild_vector_index():
+        """The shared test DB's HNSW graph degrades after a suite's worth of
+        insert/delete churn and can under-return on approximate scans. This test
+        needs the vector leg to see both rows, so rebuild the (tiny) index first."""
+        from tests.conftest import owner_connect
+        conn = owner_connect()  # REINDEX needs ownership; the app role (017) holds DML only
+        try:
+            with conn.cursor() as cur:
+                cur.execute("REINDEX INDEX idx_memories_embedding")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_lexical_match_outranks_vector_only_neighbor(self, test_db, clean_tables, mock_embedding):
+        self._rebuild_vector_index()
+        lexical = "Zebrafish regeneration of cardiac tissue after injury"
+        unrelated = "Granite countertop installation and sealing guide"
+
+        db.create_memory(type="idea", title="Zebrafish hearts", content=lexical,
+                         embedding=str(mock_embedding(lexical)))
+        db.create_memory(type="idea", title="Countertops", content=unrelated,
+                         embedding=str(mock_embedding(unrelated)))
+
+        # The query embedding IS the unrelated memory's vector, so it wins the vector
+        # leg outright (rank 1) while only the zebrafish memory matches the query text.
+        results = hybrid_search("zebrafish", mock_embedding(unrelated), limit=10)
+        by_title = {r["title"]: r for r in results}
+        assert {"Zebrafish hearts", "Countertops"} <= set(by_title)
+
+        # The unrelated row must be ABSENT from the FTS leg (absent-rank penalty), so
+        # the lexical match fuses strictly higher instead of tying on mirrored ranks.
+        assert by_title["Zebrafish hearts"]["rrf_score"] > by_title["Countertops"]["rrf_score"]
+        assert results[0]["title"] == "Zebrafish hearts"
+
+
+class TestSearchRowsExcludeVectorColumns:
+    """Candidate rows carry the memory's scalar columns but not the 1024-dim
+    embedding or the tsvector: nothing downstream of hybrid_search reads them and
+    they dominate the per-search payload."""
+
+    def test_rows_omit_embedding_and_search_vector(self, test_db, clean_tables, mock_embedding):
+        content = "Photosynthesis light-dependent reactions in the thylakoid membrane"
+        db.create_memory(type="idea", title="Photosynthesis", content=content,
+                         embedding=str(mock_embedding(content)), tags=["bio"],
+                         project="biology", encoding_context="reading textbook")
+
+        results = hybrid_search(content, mock_embedding(content), limit=5)
+        assert len(results) == 1
+        row = results[0]
+
+        assert "embedding" not in row
+        assert "search_vector" not in row
+        # Everything rerank() and memory_search read must still be present.
+        for key in ("id", "type", "title", "content", "tags", "source_type", "metadata",
+                    "status", "parent_id", "created_at", "access_count", "mem_class",
+                    "project", "last_accessed_at", "encoding_context", "rrf_score"):
+            assert key in row, key
+
+
+class TestFullTextWithoutEmbedding:
+    def test_unembedded_source_is_reachable_and_filters_still_apply(
+        self, test_db, clean_tables, mock_embedding,
+    ):
+        target = db.create_memory(
+            type="source", title="Synthetic zephyr migration decision",
+            content="Zephyr migration approval requires regional evidence.",
+            source_type="codex_task", project="adoption", status="active",
+        )
+        db.create_memory(
+            type="source", title="Other project zephyr",
+            content="Zephyr migration in another project.",
+            source_type="codex_task", project="unrelated", status="active",
+        )
+        results = hybrid_search(
+            "zephyr migration", mock_embedding("zephyr migration"), limit=5,
+            source_type="codex_task", project="adoption", status="active",
+        )
+        assert [str(row["id"]) for row in results] == [str(target)]
+
+    def test_fts_leg_skips_parents_represented_by_active_chunks(self, test_db, clean_tables, mock_embedding):
+        """Fix 6 (review B N2): a chunked parent is reachable through its chunks only;
+        a parent whose chunks are all superseded (childless again) and an unembedded
+        leaf stay reachable. Ranks are normalised to 0..1."""
+        from src.db.search_queries import fetch_candidates
+        term = "quokka"
+        parent = db.create_memory(type="source", title="Chunked doc", content=f"{term} appears here. " * 400,
+                                  source_type="article", source_url="a://1")
+        chunk = db.create_memory(type="source", title="Chunked doc (chunk 1/1)", content=f"{term} appears here.",
+                                 source_type="article", source_url="a://1", parent_id=parent,
+                                 embedding=str(mock_embedding("chunk")))
+        orphaned_parent = db.create_memory(type="source", title="Rechunked doc", content=f"{term} once more.",
+                                           source_type="article", source_url="a://2")
+        db.create_memory(type="source", title="old chunk", content=f"{term} once more.", source_type="article",
+                         source_url="a://2", parent_id=orphaned_parent, status="superseded")
+        leaf = db.create_memory(type="source", title="Leaf", content=f"A {term} leaf without embedding.",
+                                source_type="article", source_url="a://3")
+        _, fts, rows = fetch_candidates(term, mock_embedding(term), 20)
+        assert str(parent) not in fts
+        assert {str(chunk), str(orphaned_parent), str(leaf)} <= set(fts)
+        results = hybrid_search(term, mock_embedding(term), limit=10)
+        ids = [str(r["id"]) for r in results]
+        assert str(parent) not in ids and str(chunk) in ids and str(leaf) in ids
+        # Normalised rank: the lexical scores are in [0, 1) and a short document is
+        # not out-ranked by a long one merely for repeating the term.
+        with db.get_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id::text, ts_rank(search_vector, to_tsquery('english', %s), 33) FROM memories WHERE id IN (%s, %s)",
+                        (term, str(leaf), str(parent)))
+            ranks = dict(cur.fetchall())
+        assert all(0 <= v < 1 for v in ranks.values())
+        assert ranks[str(leaf)] >= ranks[str(parent)]
+
+    def test_fts_and_vector_match_yields_one_result(
+        self, test_db, clean_tables, mock_embedding,
+    ):
+        query = "Synthetic zephyr migration evidence"
+        target = db.create_memory(
+            type="idea", title=query, content=query,
+            embedding=str(mock_embedding(query)),
+        )
+        results = hybrid_search(query, mock_embedding(query), limit=5)
+        assert [str(row["id"]) for row in results] == [str(target)]

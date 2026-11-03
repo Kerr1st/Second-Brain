@@ -1,0 +1,603 @@
+scripts/backfill_attention_ledger.py:26:45: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/backfill_attention_ledger.py:28:8: PLR0402 [*] Use `from src import dream_cycle_db` in lieu of alias
+scripts/backfill_attention_ledger.py:28:30: F401 [*] `src.dream_cycle_db` imported but unused
+scripts/backfill_attention_ledger.py:28:46: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/backfill_attention_ledger.py:29:36: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/backfill_attention_ledger.py:30:37: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/backfill_attention_ledger.py:37:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/backfill_attention_ledger.py:54:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/backfill_projects.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/backfill_projects.py:45:16: DTZ005 `datetime.datetime.now()` called without a `tz` argument
+scripts/backfill_projects.py:101:5: FURB188 [*] Prefer `str.removeprefix()` over conditionally replacing with slice.
+scripts/backfill_projects.py:103:5: FURB188 [*] Prefer `str.removesuffix()` over conditionally replacing with slice.
+scripts/backfill_projects.py:119:12: BLE001 Do not catch blind exception: `Exception`
+scripts/backfill_projects.py:193:16: BLE001 Do not catch blind exception: `Exception`
+scripts/backfill_projects.py:274:16: BLE001 Do not catch blind exception: `Exception`
+scripts/batch_ingest_parallel.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/batch_ingest_parallel.py:21:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/batch_ingest_parallel.py:24:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/batch_ingest_parallel.py:61:12: BLE001 Do not catch blind exception: `Exception`
+scripts/batch_ingest_parallel.py:96:13: SIM113 Use `enumerate()` for index variable `done_count` in `for` loop
+scripts/batch_ingest_staged.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/batch_ingest_staged.py:13:8: F401 [*] `os` imported but unused
+scripts/batch_ingest_staged.py:20:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/batch_ingest_staged.py:86:16: BLE001 Do not catch blind exception: `Exception`
+scripts/brief.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/capture_codex.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/capture_codex.py:4:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/chat_extract.py:12:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/chat_extract.py:20:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/chat_extract.py:20:64: F401 [*] `src.parsers.ide_chat.find_chat_files` imported but unused
+scripts/chat_extract.py:30:16: DTZ005 `datetime.datetime.now()` called without a `tz` argument
+scripts/chat_extract.py:64:12: BLE001 Do not catch blind exception: `Exception`
+scripts/chat_extract.py:86:12: BLE001 Do not catch blind exception: `Exception`
+scripts/chat_extract.py:103:12: BLE001 Do not catch blind exception: `Exception`
+scripts/cleanup_duplicate_sources.py:36:36: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/crawlee_ingest.py:13:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/crawlee_ingest.py:20:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/crawlee_ingest.py:29:16: DTZ005 `datetime.datetime.now()` called without a `tz` argument
+scripts/crawlee_ingest.py:71:16: BLE001 Do not catch blind exception: `Exception`
+scripts/distill_sessions.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/distill_sessions.py:24:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/distill_sessions.py:76:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/distill_sessions.py:163:16: BLE001 Do not catch blind exception: `Exception`
+scripts/distill_sessions.py:194:20: BLE001 Do not catch blind exception: `Exception`
+scripts/distill_sessions.py:204:24: BLE001 Do not catch blind exception: `Exception`
+scripts/dream_cycle_run.py:76:12: BLE001 Do not catch blind exception: `Exception`
+scripts/eval/eval_ablation.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/eval/eval_cold_warm.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/eval/eval_common.py:14:8: F401 [*] `os` imported but unused
+scripts/eval/eval_common.py:123:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/eval/eval_common.py:274:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/eval/eval_common.py:285:5: S110 `try`-`except`-`pass` detected, consider logging the exception
+scripts/eval/eval_common.py:285:12: BLE001 Do not catch blind exception: `Exception`
+scripts/eval/eval_consolidation.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/eval/eval_consolidation.py:35:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/eval/eval_curated.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/eval/eval_depth_experiment.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/eval/eval_optimize.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/eval/eval_optimize.py:19:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/eval/eval_optimize.py:20:8: F401 [*] `json` imported but unused
+scripts/eval/eval_optimize.py:24:22: F401 [*] `datetime.datetime` imported but unused
+scripts/eval/eval_optimize.py:24:32: F401 [*] `datetime.timezone` imported but unused
+scripts/eval/eval_trends.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/eval/golden_queries.py:197:12: BLE001 Do not catch blind exception: `Exception`
+scripts/eval/recall_check.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/eval/recall_check.py:17:8: PLR0402 [*] Use `from src import db` in lieu of alias
+scripts/eval/recall_check.py:46:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/eval/refactor_probe.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/eval/run_evaluation.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/eval/run_evaluation.py:103:16: BLE001 Do not catch blind exception: `Exception`
+scripts/express_push.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/ingest_chats.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/ingest_chats.py:8:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/ingest_chats.py:8:17: F401 [*] `time` imported but unused
+scripts/ingest_chats.py:8:23: F401 [*] `json` imported but unused
+scripts/ingest_chats.py:53:16: BLE001 Do not catch blind exception: `Exception`
+scripts/ingest_chats.py:57:13: E722 Do not use bare `except`
+scripts/ingest_chats.py:57:13: S110 `try`-`except`-`pass` detected, consider logging the exception
+scripts/ingest_qd_chats.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/ingest_qd_chats.py:21:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/ingest_qd_chats.py:60:9: SIM102 Use a single `if` statement instead of nested `if` statements
+scripts/ingest_qd_chats.py:134:16: BLE001 Do not catch blind exception: `Exception`
+scripts/migrate/enrich_qd_tags.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/migrate/enrich_qd_tags.py:89:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/migrate/enrich_qd_tags.py:199:5: F841 Local variable `stats` is assigned to but never used
+scripts/migrate/import_slack_graph.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/migrate/ingest_doc_chunks.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/migrate/ingest_doc_chunks.py:150:16: BLE001 Do not catch blind exception: `Exception`
+scripts/migrate/ingest_eventlog.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/migrate/ingest_eventlog.py:20:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/migrate/ingest_eventlog.py:143:16: BLE001 Do not catch blind exception: `Exception`
+scripts/migrate/migrate_chatgpt.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/migrate/migrate_chatgpt.py:20:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/migrate/migrate_chatgpt.py:100:9: F841 Local variable `metadata` is assigned to but never used
+scripts/migrate/migrate_chatgpt.py:142:9: LOG015 `error()` call on root logger
+scripts/migrate/migrate_claude.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/migrate/migrate_claude.py:19:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/migrate/migrate_claude.py:72:9: F841 Local variable `metadata` is assigned to but never used
+scripts/migrate/migrate_claude.py:109:9: LOG015 `error()` call on root logger
+scripts/migrate/migrate_notion.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/migrate/migrate_notion.py:21:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/migrate/migrate_notion.py:133:5: F841 Local variable `mtime_iso` is assigned to but never used
+scripts/migrate/migrate_notion.py:163:13: F841 Local variable `mtime_iso` is assigned to but never used
+scripts/migrate/migrate_notion.py:212:9: LOG015 `error()` call on root logger
+scripts/migrate/migrate_quick_desktop.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/migrate/migrate_quick_desktop.py:24:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/migrate/migrate_quick_desktop.py:34:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/migrate/migrate_quick_desktop.py:281:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/migrate/migrate_quick_desktop.py:311:20: BLE001 Do not catch blind exception: `Exception`
+scripts/migrate/migrate_quick_desktop.py:337:24: BLE001 Do not catch blind exception: `Exception`
+scripts/migrate/migrate_quick_desktop.py:357:11: F541 [*] f-string without any placeholders
+scripts/migrate/migration_utils.py:143:24: G201 Logging `.exception(...)` should be used instead of `.error(..., exc_info=True)`
+scripts/panel_replay.py:32:1: UP035 [*] Import from `collections.abc` instead: `Callable`
+scripts/panel_replay.py:36:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/panel_replay.py:36:63: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/panel_replay.py:37:53: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/panel_replay.py:38:84: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/panel_replay.py:39:56: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/panel_replay.py:40:39: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/panel_replay.py:46:60: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/panel_replay.py:47:47: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/panel_replay.py:61:5: I001 [*] Import block is un-sorted or un-formatted
+scripts/panel_replay.py:75:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/panel_replay.py:239:27: PERF102 When using only the values of a dict use the `values()` method
+scripts/panel_replay.py:293:27: SIM115 Use a context manager for opening files
+scripts/redistill_capped.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/redistill_capped.py:27:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/redistill_capped.py:67:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/redistill_capped.py:79:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/redistill_capped.py:98:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/redistill_capped.py:108:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/redistill_capped.py:144:16: BLE001 Do not catch blind exception: `Exception`
+scripts/redistill_capped.py:181:20: BLE001 Do not catch blind exception: `Exception`
+scripts/redistill_capped.py:197:23: SIM115 Use a context manager for opening files
+scripts/revise_probe.py:23:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/revise_probe.py:23:90: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/revise_probe.py:24:53: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/revise_probe.py:68:17: SIM115 Use a context manager for opening files
+scripts/revise_probe.py:118:24: SIM115 Use a context manager for opening files
+scripts/run_golden_capture.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/run_golden_capture.py:11:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/scrape_bookmarks.py:9:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/scrape_bookmarks.py:9:34: F401 [*] `sys` imported but unused
+scripts/scrape_bookmarks.py:65:9: I001 [*] Import block is un-sorted or un-formatted
+scripts/scrape_bookmarks.py:66:33: F401 [*] `html.parser.HTMLParser` imported but unused
+scripts/scrape_bookmarks.py:85:16: DTZ005 `datetime.datetime.now()` called without a `tz` argument
+scripts/scrape_bookmarks.py:94:12: BLE001 Do not catch blind exception: `Exception`
+scripts/scrape_bookmarks.py:105:9: FURB122 [*] Use of `f.write` in a for loop
+scripts/scrape_bookmarks.py:110:18: PLW1510 `subprocess.run` without explicit `check` argument
+scripts/skim_probe.py:34:1: UP035 [*] Import from `collections.abc` instead: `Callable`
+scripts/skim_probe.py:38:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/skim_probe.py:38:65: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/skim_probe.py:39:74: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/skim_probe.py:40:86: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/skim_probe.py:41:49: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/skim_probe.py:42:80: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+scripts/skim_probe.py:57:5: I001 [*] Import block is un-sorted or un-formatted
+scripts/skim_probe.py:71:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/weekly_digest.py:1:1: EXE001 Shebang is present but file is not executable
+scripts/weekly_digest.py:38:1: I001 [*] Import block is un-sorted or un-formatted
+scripts/weekly_digest.py:172:10: UP031 Use format specifiers instead of percent format
+scripts/weekly_digest.py:173:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+scripts/weekly_digest.py:209:15: DTZ011 `datetime.date.today()` used
+scripts/weekly_digest.py:261:25: UP031 Use format specifiers instead of percent format
+scripts/weekly_digest.py:263:5: S110 `try`-`except`-`pass` detected, consider logging the exception
+scripts/weekly_digest.py:263:12: BLE001 Do not catch blind exception: `Exception`
+src/agent_invoker.py:14:1: I001 [*] Import block is un-sorted or un-formatted
+src/agent_invoker.py:14:34: RUF100 [*] Unused `noqa` directive (unused: `F401`)
+src/agent_invoker.py:25:11: RUF022 [*] `__all__` is not sorted
+src/backends/agentic_cli.py:28:1: I001 [*] Import block is un-sorted or un-formatted
+src/backends/agentic_cli.py:41:5: PLC0414 Import alias does not rename original package
+src/backends/agentic_cli.py:42:5: PLC0414 Import alias does not rename original package
+src/backends/agentic_cli.py:209:60: UP045 [*] Use `X | None` for type annotations
+src/backends/agentic_cli.py:216:18: C408 Unnecessary `dict()` call (rewrite as a literal)
+src/backends/agentic_cli.py:226:20: PLW1510 `subprocess.run` without explicit `check` argument
+src/backends/agentic_cli.py:237:74: FURB167 [*] Use of regular expression alias `re.I`
+src/backends/agentic_cli.py:346:9: RET501 [*] Do not explicitly `return None` in function if it is the only possible return value
+src/backends/agentic_cli.py:356:22: UP045 [*] Use `X | None` for type annotations
+src/backends/agentic_cli.py:373:10: UP045 [*] Use `X | None` for type annotations
+src/backends/agentic_cli.py:387:9: RET501 [*] Do not explicitly `return None` in function if it is the only possible return value
+src/backends/base.py:74:12: UP045 [*] Use `X | None` for type annotations
+src/backends/base.py:94:17: UP045 [*] Use `X | None` for type annotations
+src/backends/base.py:95:16: UP045 [*] Use `X | None` for type annotations
+src/backends/base.py:96:17: UP045 [*] Use `X | None` for type annotations
+src/backends/bedrock.py:68:5: TC005 [*] Found empty type-checking block
+src/backends/bedrock.py:240:59: UP045 [*] Use `X | None` for type annotations
+src/backends/bedrock.py:312:28: UP045 [*] Use `X | None` for type annotations
+src/backends/bedrock.py:460:9: RET501 [*] Do not explicitly `return None` in function if it is the only possible return value
+src/backends/bedrock.py:460:9: PLR1711 [*] Useless `return` statement at end of function
+src/backends/bedrock.py:575:16: UP045 [*] Use `X | None` for type annotations
+src/backends/claude_code.py:115:11: RUF022 [*] `__all__` is not sorted
+src/backends/claude_code.py:443:38: UP045 [*] Use `X | None` for type annotations
+src/backends/codex.py:132:11: RUF022 [*] `__all__` is not sorted
+src/backends/codex.py:197:37: UP045 [*] Use `X | None` for type annotations
+src/backends/codex.py:303:48: UP045 [*] Use `X | None` for type annotations
+src/backends/codex.py:428:42: UP045 [*] Use `X | None` for type annotations
+src/backends/codex.py:428:61: UP045 [*] Use `X | None` for type annotations
+src/backends/codex.py:438:16: UP045 [*] Use `X | None` for type annotations
+src/backends/codex.py:446:40: UP045 [*] Use `X | None` for type annotations
+src/backends/codex.py:515:38: UP045 [*] Use `X | None` for type annotations
+src/backends/codex.py:560:55: UP045 [*] Use `X | None` for type annotations
+src/backends/codex.py:567:16: UP045 [*] Use `X | None` for type annotations
+src/backends/codex.py:582:37: UP045 [*] Use `X | None` for type annotations
+src/backends/cost.py:177:26: UP037 [*] Remove quotes from type annotation
+src/backends/direct_api.py:250:28: UP045 [*] Use `X | None` for type annotations
+src/backends/direct_api.py:271:16: UP045 [*] Use `X | None` for type annotations
+src/backends/direct_api.py:289:59: UP045 [*] Use `X | None` for type annotations
+src/backends/kiro.py:22:1: I001 [*] Import block is un-sorted or un-formatted
+src/backends/kiro.py:69:11: RUF022 [*] `__all__` is not sorted
+src/backends/mcp_probe.py:144:10: UP045 [*] Use `X | None` for type annotations
+src/backends/mcp_probe.py:157:5: SIM103 Return the condition `bool(raw and _scan_text(raw))` directly
+src/backends/mcp_probe.py:211:14: UP045 [*] Use `X | None` for type annotations
+src/backends/resolver.py:21:1: I001 [*] Import block is un-sorted or un-formatted
+src/backends/resolver.py:74:54: UP037 [*] Remove quotes from type annotation
+src/backends/resolver.py:108:48: UP037 [*] Remove quotes from type annotation
+src/capture/browser.py:23:1: I001 [*] Import block is un-sorted or un-formatted
+src/capture/browser.py:67:70: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/browser.py:73:62: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/browser.py:74:85: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/browser.py:75:103: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/browser.py:79:47: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/browser.py:83:28: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/browser.py:86:125: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/browser.py:88:120: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/browser.py:92:68: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/browser.py:100:9: I001 [*] Import block is un-sorted or un-formatted
+src/capture/browser.py:102:12: BLE001 Do not catch blind exception: `Exception`
+src/capture/browser.py:320:9: I001 [*] Import block is un-sorted or un-formatted
+src/capture/codex.py:21:1: I001 [*] Import block is un-sorted or un-formatted
+src/capture/codex.py:32:1: UP035 [*] Import from `collections.abc` instead: `Callable`
+src/capture/codex.py:34:8: PLR0402 [*] Use `from src import db` in lieu of alias
+src/capture/codex.py:185:16: BLE001 Do not catch blind exception: `Exception`
+src/capture/codex.py:302:16: BLE001 Do not catch blind exception: `Exception`
+src/capture/codex.py:318:16: BLE001 Do not catch blind exception: `Exception`
+src/capture/codex.py:358:16: BLE001 Do not catch blind exception: `Exception`
+src/capture/mcp_client.py:204:33: ISC004 Unparenthesized implicit string concatenation in collection
+src/capture/mcp_client.py:294:15: PYI034 `__aenter__` methods in classes like `McpClient` usually return `self` at runtime
+src/capture/mcp_client.py:294:35: UP037 [*] Remove quotes from type annotation
+src/capture/outlook.py:24:1: I001 [*] Import block is un-sorted or un-formatted
+src/capture/outlook.py:35:1: UP035 [*] Import from `collections.abc` instead: `Awaitable`, `Callable`
+src/capture/outlook.py:65:66: FURB167 [*] Use of regular expression alias `re.S`
+src/capture/outlook.py:65:73: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/outlook.py:70:86: FURB167 [*] Use of regular expression alias `re.S`
+src/capture/outlook.py:71:71: FURB167 [*] Use of regular expression alias `re.S`
+src/capture/outlook.py:88:71: FURB167 [*] Use of regular expression alias `re.S`
+src/capture/outlook.py:88:78: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/outlook.py:89:86: FURB167 [*] Use of regular expression alias `re.I`
+src/capture/outlook.py:292:29: RUF100 [*] Unused `noqa` directive (unused: `BLE001`)
+src/capture/slack.py:24:1: I001 [*] Import block is un-sorted or un-formatted
+src/capture/slack.py:33:1: UP035 [*] Import from `collections.abc` instead: `Awaitable`, `Callable`
+src/capture/slack.py:321:29: RUF100 [*] Unused `noqa` directive (unused: `BLE001`)
+src/capture/sources/codex.py:8:1: I001 [*] Import block is un-sorted or un-formatted
+src/capture/sources/codex.py:19:1: UP035 [*] Import from `collections.abc` instead: `Iterable`
+src/capture/sources/codex.py:126:16: UP012 [*] Unnecessary UTF-8 `encoding` argument to `encode`
+src/capture/youtube.py:48:16: PLW1510 `subprocess.run` without explicit `check` argument
+src/db.py:8:1: I001 [*] Import block is un-sorted or un-formatted
+src/db.py:78:34: F841 Local variable `conn` is assigned to but never used
+src/db.py:81:12: BLE001 Do not catch blind exception: `Exception`
+src/db.py:111:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/db.py:126:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/db.py:191:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/db.py:211:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/db.py:264:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/db.py:291:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/db.py:306:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/db.py:355:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/db.py:374:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/db.py:396:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/db.py:429:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/depth.py:107:13: SIM114 [*] Combine `if` branches using logical `or` operator
+src/dream_cycle/allocation.py:255:9: ISC004 Unparenthesized implicit string concatenation in collection
+src/dream_cycle/digest.py:9:8: PLR0402 [*] Use `from src import dream_cycle_db` in lieu of alias
+src/dream_cycle/digest.py:45:12: BLE001 Do not catch blind exception: `Exception`
+src/dream_cycle/digest.py:61:5: S110 `try`-`except`-`pass` detected, consider logging the exception
+src/dream_cycle/digest.py:61:12: BLE001 Do not catch blind exception: `Exception`
+src/dream_cycle/feedback.py:13:8: PLR0402 [*] Use `from src import dream_cycle_db` in lieu of alias
+src/dream_cycle/feedback.py:66:30: PERF102 When using only the values of a dict use the `values()` method
+src/dream_cycle/ledger.py:33:1: UP035 [*] Import from `collections.abc` instead: `Iterable`
+src/dream_cycle/ledger.py:167:12: PLR0402 [*] Use `from src import dream_cycle_db` in lieu of alias
+src/dream_cycle/orchestrator.py:9:1: I001 [*] Import block is un-sorted or un-formatted
+src/dream_cycle/orchestrator.py:32:8: PLR0402 [*] Use `from src import dream_cycle_db` in lieu of alias
+src/dream_cycle/orchestrator.py:331:20: BLE001 Do not catch blind exception: `Exception`
+src/dream_cycle/orchestrator.py:338:13: F841 Local variable `completed_at` is assigned to but never used
+src/dream_cycle/orchestrator.py:345:20: BLE001 Do not catch blind exception: `Exception`
+src/dream_cycle/orchestrator.py:443:24: G201 Logging `.exception(...)` should be used instead of `.error(..., exc_info=True)`
+src/dream_cycle/orchestrator.py:806:23: RUF059 Unpacked variable `kept_metrics` is never used
+src/dream_cycle/storage.py:2:1: I001 [*] Import block is un-sorted or un-formatted
+src/dream_cycle_db.py:157:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:205:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:240:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:283:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:321:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:504:13: SIM114 [*] Combine `if` branches using logical `or` operator
+src/dream_cycle_db.py:722:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:765:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:786:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:811:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:908:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:931:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:951:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/dream_cycle_db.py:981:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/embeddings.py:7:1: I001 [*] Import block is un-sorted or un-formatted
+src/express.py:102:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/express.py:375:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/express.py:597:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/express.py:656:9: ISC004 Unparenthesized implicit string concatenation in collection
+src/express.py:731:9: S110 `try`-`except`-`pass` detected, consider logging the exception
+src/ingest.py:9:1: I001 [*] Import block is un-sorted or un-formatted
+src/ingest.py:125:17: S110 `try`-`except`-`pass` detected, consider logging the exception
+src/ingest.py:125:24: BLE001 Do not catch blind exception: `Exception`
+src/ingest.py:127:5: S110 `try`-`except`-`pass` detected, consider logging the exception
+src/ingest.py:127:12: BLE001 Do not catch blind exception: `Exception`
+src/ingest.py:143:17: S110 `try`-`except`-`pass` detected, consider logging the exception
+src/ingest.py:143:24: BLE001 Do not catch blind exception: `Exception`
+src/ingest.py:145:5: S110 `try`-`except`-`pass` detected, consider logging the exception
+src/ingest.py:145:12: BLE001 Do not catch blind exception: `Exception`
+src/ingest.py:237:20: G201 Logging `.exception(...)` should be used instead of `.error(..., exc_info=True)`
+src/mcp_server.py:22:1: I001 [*] Import block is un-sorted or un-formatted
+src/mcp_server.py:28:32: F401 [*] `src.db.get_schema_with_constituents` imported but unused
+src/parsers/cli_chat.py:97:5: SIM103 Return the condition `not total_chars < MIN_CONTENT_CHARS` directly
+src/parsers/crawlee.py:306:16: DTZ005 `datetime.datetime.now()` called without a `tz` argument
+src/parsers/ide_chat.py:13:1: I001 [*] Import block is un-sorted or un-formatted
+src/parsers/ide_chat.py:79:9: SIM102 Use a single `if` statement instead of nested `if` statements
+src/parsers/ide_chat.py:80:16: PIE810 Call `startswith` once with a `tuple`
+src/parsers/ide_chat.py:114:5: SIM103 Return the condition `not total_chars < MIN_CONTENT_CHARS` directly
+src/prompts/__init__.py:6:1: I001 [*] Import block is un-sorted or un-formatted
+src/prompts/__init__.py:10:11: RUF022 [*] `__all__` is not sorted
+src/prompts/explorer.py:198:1: I001 [*] Import block is un-sorted or un-formatted
+src/prompts/panel.py:241:9: ISC004 Unparenthesized implicit string concatenation in collection
+src/search.py:11:1: I001 [*] Import block is un-sorted or un-formatted
+src/skim/__init__.py:11:1: I001 [*] Import block is un-sorted or un-formatted
+src/skim/__init__.py:11:32: RUF100 [*] Unused `noqa` directive (unused: `F401`)
+src/skim/__init__.py:22:68: RUF100 [*] Unused `noqa` directive (unused: `F401`)
+src/skim/__init__.py:24:11: RUF022 [*] `__all__` is not sorted
+src/skim/cluster.py:26:1: UP035 [*] Import from `collections.abc` instead: `Iterable`
+src/skim/cluster.py:105:28: RUF100 [*] Unused `noqa` directive (unused: `BLE001`)
+src/skim/identity.py:19:1: I001 [*] Import block is un-sorted or un-formatted
+src/skim/identity.py:125:9: TRY004 Prefer `TypeError` exception for invalid type
+src/skim/identity.py:132:9: TRY004 Prefer `TypeError` exception for invalid type
+src/skim/runner.py:36:1: UP035 [*] Import from `collections.abc` instead: `Callable`
+src/skim/store.py:19:1: I001 [*] Import block is un-sorted or un-formatted
+src/skim/store.py:23:1: UP035 [*] Import from `collections.abc` instead: `Iterable`
+src/skim/store.py:56:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/skim/store.py:80:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/skim/store.py:159:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/skim/store.py:191:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/skim/store.py:213:5: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/skim/store.py:263:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+src/skim/store.py:320:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/conftest.py:10:1: I001 [*] Import block is un-sorted or un-formatted
+tests/conftest.py:18:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_agent_invoker.py:8:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_agent_invoker.py:206:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_agent_invoker.py:309:15: RUF059 Unpacked variable `kwargs` is never used
+tests/test_agent_invoker.py:337:15: RUF059 Unpacked variable `kwargs` is never used
+tests/test_agent_invoker.py:419:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_agent_invoker.py:443:31: SIM115 Use a context manager for opening files
+tests/test_agent_invoker.py:467:26: SIM115 Use a context manager for opening files
+tests/test_agent_invoker.py:554:16: PLR0402 [*] Use `from src.backends import kiro` in lieu of alias
+tests/test_agent_invoker.py:567:16: PLR0402 [*] Use `from src.backends import kiro` in lieu of alias
+tests/test_allocation.py:132:14: RUF012 Mutable default value for class attribute
+tests/test_allocation.py:183:16: RUF015 Prefer `next(...)` over single element slice
+tests/test_allocation.py:217:15: RUF059 Unpacked variable `kept_m` is never used
+tests/test_bedrock.py:18:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_budget_order.py:113:25: RUF059 Unpacked variable `th` is never used
+tests/test_budget_order.py:113:29: RUF059 Unpacked variable `ev` is never used
+tests/test_budget_order.py:149:29: RUF059 Unpacked variable `ev` is never used
+tests/test_budget_order.py:174:17: RUF059 Unpacked variable `db` is never used
+tests/test_budget_order.py:201:25: RUF059 Unpacked variable `th` is never used
+tests/test_budget_order.py:223:21: RUF059 Unpacked variable `th` is never used
+tests/test_budget_order.py:236:21: RUF059 Unpacked variable `th` is never used
+tests/test_budget_order.py:250:21: RUF059 Unpacked variable `th` is never used
+tests/test_capture_api.py:16:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_capture_browser.py:139:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_capture_browser.py:157:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_capture_codex_cli.py:3:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_capture_outlook.py:151:15: RUF015 Prefer `next(p["filter"] for t, p in log if t == "get_emails")` over single element slice
+tests/test_capture_outlook_resilience.py:8:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_capture_outlook_resilience.py:20:5: F401 [*] `src.capture.mcp_client.McpToolError` imported but unused
+tests/test_capture_slack.py:131:16: RUF059 Unpacked variable `until` is never used
+tests/test_capture_slack_preflight.py:8:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_classify.py:9:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_classify.py:9:8: F401 [*] `re` imported but unused
+tests/test_claude_code.py:37:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_claude_code.py:405:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_claude_code_stream_json_probe.py:25:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_claude_code_stream_json_probe_preservation.py:32:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_codex.py:17:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_codex.py:160:13: F841 Local variable `i` is assigned to but never used
+tests/test_codex.py:320:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_codex.py:320:53: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+tests/test_codex.py:321:47: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+tests/test_codex.py:322:13: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+tests/test_codex_canary_job.py:3:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_codex_capture.py:7:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_codex_capture.py:19:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_codex_capture_job.py:16:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_consensus.py:12:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_db.py:11:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_depth.py:10:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_depth.py:10:8: F401 [*] `re` imported but unused
+tests/test_digest_properties.py:6:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_digest_properties.py:131:13: F541 [*] f-string without any placeholders
+tests/test_digest_properties.py:168:13: F541 [*] f-string without any placeholders
+tests/test_digest_properties.py:174:13: F541 [*] f-string without any placeholders
+tests/test_digest_properties.py:208:13: F541 [*] f-string without any placeholders
+tests/test_distill.py:3:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_dream_cycle.py:7:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_dream_cycle.py:10:25: F401 [*] `dataclasses.asdict` imported but unused
+tests/test_dream_cycle.py:11:50: F401 [*] `unittest.mock.call` imported but unused
+tests/test_dream_cycle.py:18:5: F401 [*] `src.models.DreamCycleResult` imported but unused
+tests/test_dream_cycle.py:128:72: F841 Local variable `mock_explorer` is assigned to but never used
+tests/test_dream_cycle.py:238:9: F841 Local variable `other_verdicts` is assigned to but never used
+tests/test_dream_cycle.py:239:9: F841 Local variable `other_reasoning_fragments` is assigned to but never used
+tests/test_dream_cycle.py:364:96: F841 Local variable `mock_embed` is assigned to but never used
+tests/test_dream_cycle.py:442:70: F841 Local variable `mock_rel` is assigned to but never used
+tests/test_dream_cycle.py:478:64: F841 Local variable `mock_update` is assigned to but never used
+tests/test_dream_cycle.py:620:86: F841 Local variable `mock_create` is assigned to but never used
+tests/test_dream_cycle.py:697:13: F841 Local variable `result` is assigned to but never used
+tests/test_dream_cycle.py:2044:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_dream_cycle.py:2193:130: F841 Local variable `mock_get` is assigned to but never used
+tests/test_dream_cycle_db.py:7:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_dream_cycle_db.py:10:45: F401 [*] `unittest.mock.call` imported but unused
+tests/test_dream_cycle_db.py:235:9: F841 Local variable `result` is assigned to but never used
+tests/test_dream_cycle_db.py:256:9: F841 Local variable `result` is assigned to but never used
+tests/test_enrich_qd_tags.py:7:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_enrich_qd_tags.py:7:8: F401 [*] `json` imported but unused
+tests/test_enrich_qd_tags.py:12:34: F401 [*] `unittest.mock.MagicMock` imported but unused
+tests/test_enrich_qd_tags.py:13:49: F401 [*] `hypothesis.assume` imported but unused
+tests/test_enrich_qd_tags.py:125:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_enrich_qd_tags.py:259:18: F541 [*] f-string without any placeholders
+tests/test_enrich_qd_tags.py:259:30: F541 [*] f-string without any placeholders
+tests/test_enrich_qd_tags.py:275:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_enrich_qd_tags.py:300:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_enrich_qd_tags.py:303:17: F841 Local variable `stats` is assigned to but never used
+tests/test_enrich_qd_tags.py:316:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_enrich_qd_tags.py:319:17: F841 Local variable `stats1` is assigned to but never used
+tests/test_eval_properties.py:11:8: F401 [*] `pytest` imported but unused
+tests/test_eval_properties.py:17:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_eval_properties.py:17:78: F401 [*] `scripts.eval.eval_common.PRODUCTION_WEIGHTS` imported but unused
+tests/test_express.py:8:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_express.py:15:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_express.py:218:36: RUF100 [*] Unused `noqa` directive (non-enabled: `E402`)
+tests/test_feedback_properties.py:6:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_feedback_properties.py:8:8: F401 [*] `json` imported but unused
+tests/test_grounding.py:7:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_grounding.py:22:12: C408 Unnecessary `dict()` call (rewrite as a literal)
+tests/test_grounding.py:115:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_grounding.py:183:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_ide_chat.py:3:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_ide_chat.py:157:13: RUF059 Unpacked variable `filename` is never used
+tests/test_ingest_doc_chunks.py:3:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_ingest_eventlog.py:3:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_ingest_eventlog.py:186:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_ingest_eventlog.py:201:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_ingest_eventlog.py:203:17: F841 Local variable `stats1` is assigned to but never used
+tests/test_ingest_interactions.py:3:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_ingest_v2.py:7:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_ingest_v2.py:7:8: F401 [*] `uuid` imported but unused
+tests/test_ingest_v2.py:11:41: F401 [*] `hypothesis.assume` imported but unused
+tests/test_ingest_v2.py:14:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_ingest_v2.py:180:13: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_integration.py:18:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_integration.py:20:8: F401 [*] `json` imported but unused
+tests/test_integration.py:21:25: F401 [*] `dataclasses.asdict` imported but unused
+tests/test_integration.py:22:27: F401 [*] `unittest.mock.MagicMock` imported but unused
+tests/test_integration.py:22:45: F401 [*] `unittest.mock.call` imported but unused
+tests/test_integration.py:24:8: F401 [*] `pytest` imported but unused
+tests/test_integration.py:29:5: F401 [*] `src.models.DreamCycleResult` imported but unused
+tests/test_integration.py:172:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_integration.py:412:9: RUF059 Unpacked variable `result` is never used
+tests/test_integration.py:441:25: RUF015 Prefer `next(c for c in store_calls if c[0][3] == "ACCEPTED")` over single element slice
+tests/test_integration.py:449:25: RUF015 Prefer `next(c for c in store_calls if c[0][3] == "REJECTED")` over single element slice
+tests/test_ledger.py:8:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_ledger.py:9:8: PLR0402 [*] Use `from src import dream_cycle_db` in lieu of alias
+tests/test_mcp_client_resilience.py:11:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_mcp_client_resilience.py:62:17: F821 Undefined name `BaseExceptionGroup`. Consider specifying `requires-python = ">= 3.11"` or `tool.ruff.target-version = "py311"` in your `pyproject.toml` file.
+tests/test_mcp_probe.py:13:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_mcp_server.py:86:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_mcp_server.py:133:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_mcp_server.py:137:9: F841 Local variable `now` is assigned to but never used
+tests/test_mcp_server.py:337:16: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_mcp_server.py:368:16: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_mcp_server.py:488:5: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_mcp_server.py:892:13: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_mcp_server.py:907:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_migration.py:15:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_migration.py:370:15: RUF059 Unpacked variable `body` is never used
+tests/test_migration.py:479:16: RUF015 Prefer `next(iter(mapping.values()))` over single element slice
+tests/test_migration.py:532:15: RUF059 Unpacked variable `body` is never used
+tests/test_monitor_jobs.py:22:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_orchestrator_properties.py:6:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_orchestrator_properties.py:8:8: F401 [*] `json` imported but unused
+tests/test_orchestrator_properties.py:9:25: F401 [*] `dataclasses.asdict` imported but unused
+tests/test_orchestrator_properties.py:10:45: F401 [*] `unittest.mock.call` imported but unused
+tests/test_orchestrator_properties.py:12:8: F401 [*] `pytest` imported but unused
+tests/test_orchestrator_properties.py:17:5: F401 [*] `src.models.DreamCycleResult` imported but unused
+tests/test_orchestrator_properties.py:153:13: F841 Local variable `result` is assigned to but never used
+tests/test_orchestrator_properties.py:316:13: F841 Local variable `result` is assigned to but never used
+tests/test_panel_prompts.py:6:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_panel_replay.py:2:8: F401 [*] `json` imported but unused
+tests/test_panel_replay.py:3:8: F401 [*] `sys` imported but unused
+tests/test_panel_replay.py:136:15: SIM115 Use a context manager for opening files
+tests/test_panel_replay.py:137:101: FURB167 [*] Use of regular expression alias `re.I`
+tests/test_pool_properties.py:8:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_pool_properties.py:10:34: F401 [*] `unittest.mock.MagicMock` imported but unused
+tests/test_pool_properties.py:15:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_pool_properties.py:16:8: PLR0402 [*] Use `from src import search` in lieu of alias
+tests/test_pool_properties.py:17:8: PLR0402 [*] Use `from src import dream_cycle_db` in lieu of alias
+tests/test_pool_properties.py:18:48: F401 [*] `src.db._pool` imported but unused
+tests/test_pool_properties.py:62:9: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_pool_properties.py:91:9: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_pool_properties.py:114:13: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_pool_properties.py:301:9: SIM117 [*] Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_project.py:6:8: F401 [*] `pytest` imported but unused
+tests/test_project.py:177:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_project.py:189:10: ISC004 Unparenthesized implicit string concatenation in collection
+tests/test_project.py:210:22: RUF059 Unpacked variable `markdown` is never used
+tests/test_project.py:269:15: RUF059 Unpacked variable `body` is never used
+tests/test_project.py:275:15: RUF059 Unpacked variable `body` is never used
+tests/test_project.py:285:15: RUF059 Unpacked variable `body` is never used
+tests/test_project.py:294:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_project.py:294:34: F401 [*] `unittest.mock.MagicMock` imported but unused
+tests/test_project.py:295:8: F401 [*] `asyncio` imported but unused
+tests/test_project.py:361:8: F811 [*] Redefinition of unused `json` from line 177: `json` redefined here
+tests/test_project.py:365:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_project_properties.py:7:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_project_properties.py:260:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_project_properties.py:356:12: F541 [*] f-string without any placeholders
+tests/test_project_properties.py:363:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_project_properties.py:363:34: F401 [*] `unittest.mock.MagicMock` imported but unused
+tests/test_project_properties.py:605:27: F811 [*] Redefinition of unused `patch` from line 363: `patch` redefined here
+tests/test_project_properties.py:607:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_project_properties.py:610:28: F401 [*] `tests.conftest._deterministic_embedding` imported but unused
+tests/test_project_properties.py:794:17: I001 [*] Import block is un-sorted or un-formatted
+tests/test_project_properties.py:824:17: I001 [*] Import block is un-sorted or un-formatted
+tests/test_prompt_contracts.py:14:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_prompt_contracts.py:18:27: F401 [*] `unittest.mock.MagicMock` imported but unused
+tests/test_prompt_contracts.py:20:8: F401 [*] `pytest` imported but unused
+tests/test_prompts.py:12:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_qd_migration.py:3:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_qd_migration.py:3:8: F401 [*] `json` imported but unused
+tests/test_qd_migration.py:12:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_question_search.py:8:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_question_search.py:204:17: SIM114 [*] Combine `if` branches using logical `or` operator
+tests/test_question_search.py:237:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_question_search.py:239:8: F401 [*] `pytest` imported but unused
+tests/test_question_search.py:241:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_question_search.py:672:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_repo_hygiene.py:15:8: F401 [*] `pytest` imported but unused
+tests/test_repo_hygiene.py:44:15: PLW1510 `subprocess.run` without explicit `check` argument
+tests/test_repo_hygiene.py:69:16: PLW1510 `subprocess.run` without explicit `check` argument
+tests/test_rerank.py:6:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_rerank.py:21:9: SIM114 [*] Combine `if` branches using logical `or` operator
+tests/test_rerank.py:137:9: F841 Local variable `results` is assigned to but never used
+tests/test_rerank.py:197:9: F841 Local variable `results` is assigned to but never used
+tests/test_rerank.py:352:9: F841 Local variable `original_datetime` is assigned to but never used
+tests/test_rerank_drift.py:27:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_rerank_drift.py:27:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_rerank_drift.py:259:5: I001 [*] Import block is un-sorted or un-formatted
+tests/test_resolver.py:8:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_search.py:9:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_search.py:15:8: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_search.py:309:13: F841 Local variable `recent_id` is assigned to but never used
+tests/test_search.py:377:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_search_properties.py:45:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_search_properties.py:46:8: F401 [*] `math` imported but unused
+tests/test_search_properties.py:47:8: F401 [*] `re` imported but unused
+tests/test_search_properties.py:48:42: F401 [*] `datetime.timedelta` imported but unused
+tests/test_search_properties.py:63:27: DTZ001 `datetime.datetime()` called without a `tzinfo` argument
+tests/test_search_properties.py:64:27: DTZ001 `datetime.datetime()` called without a `tzinfo` argument
+tests/test_search_properties.py:172:23: RUF012 Mutable default value for class attribute
+tests/test_search_properties.py:181:17: RUF012 Mutable default value for class attribute
+tests/test_search_properties.py:185:16: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_search_properties.py:191:16: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_skim_cluster.py:11:8: F401 [*] `pytest` imported but unused
+tests/test_skim_faithfulness.py:6:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_skim_faithfulness.py:8:8: F401 [*] `pytest` imported but unused
+tests/test_skim_orchestrator.py:25:24: F401 [*] `src.models.EvaluatorVerdict` imported but unused
+tests/test_skim_orchestrator.py:173:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_skim_orchestrator.py:392:16: RUF012 Mutable default value for class attribute
+tests/test_skim_probe.py:264:15: SIM115 Use a context manager for opening files
+tests/test_skim_probe.py:265:87: FURB167 [*] Use of regular expression alias `re.I`
+tests/test_skim_prompt.py:11:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_skim_prompt.py:194:56: DTZ001 `datetime.datetime()` called without a `tzinfo` argument
+tests/test_skim_runner.py:19:22: F401 [*] `src.skim.runner` imported but unused
+tests/test_slack_graph.py:3:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_slack_graph.py:192:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_slack_graph.py:193:16: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_slack_graph.py:199:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_slack_graph.py:207:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_slack_graph.py:208:16: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_slack_graph.py:213:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_slack_graph.py:219:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_slack_graph.py:220:16: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_slack_graph.py:232:9: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_slack_graph.py:238:9: I001 [*] Import block is un-sorted or un-formatted
+tests/test_slack_graph.py:239:16: PLR0402 [*] Use `from src import db` in lieu of alias
+tests/test_slack_graph.py:252:13: SIM117 Use a single `with` statement with multiple contexts instead of nested `with` statements
+tests/test_weekly_digest_backend.py:14:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_weekly_digest_backend.py:296:19: DTZ011 `datetime.date.today()` used
+Found 601 errors.
+[*] 360 fixable with the `--fix` option (73 hidden fixes can be enabled with the `--unsafe-fixes` option).

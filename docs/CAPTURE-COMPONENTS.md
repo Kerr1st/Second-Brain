@@ -1,276 +1,49 @@
-# Capture — Component Architecture
+# Capture components
 
-**Status: reference for the component build-out.** Captures the target structure so each
-piece can be built, tested, scheduled, and replaced **independently**. Grounded in the
-2026-06-08 capture/ingest audit. YouTube (`src/capture/youtube.py`) is the first component
-and the reference implementation for the contract below.
+Source adapters acquire evidence; common ingestion stores it atomically. A capture report is evidence about that attempt, not proof that every source surface was observed. Code: `src/capture/`, `src/parsers/`, `src/ingest.py`; schedules in [scheduling/README.md](../scheduling/README.md).
 
-The maintained ownership boundary, entry points, tests, and operational status
-are indexed in the canonical [Capture component contract](components/capture.md).
+| Surface | Entry point (job) | Identity and evidence boundary |
+|---|---|---|
+| Codex tasks | `src/capture/codex.py`, `src/capture/sources/codex_turns.py` (`codex-capture`, every 6 h) | User prompt plus visible final outcome, stable task/turn identity (`RolloutTurnAssembler`, drop counters, `rollout_fingerprint`); excludes hidden reasoning, tool output and delegated activity. The paid semantic pass is a separate metered role with its own run threshold |
+| Kiro IDE and CLI chats | `src/capture/chats.py`, `src/parsers/kiro_sessions.py`, `src/parsers/{ide_chat,cli_chat}.py` (`chat-capture`, 02:30) | Native IDE `~/.kiro/sessions/<workspace>/<session>/session.json` + `messages.jsonl`, user and assistant `Say` only; legacy `.chat` exports and CLI JSONL; bounded 50 sessions per run per channel, newest first; incomplete sessions reported, not failed; a session UUID is never a project |
+| Slack | `src/capture/slack.py` (`capture-slack`, 01:00) | Conversation-day identity, original timestamps and links; honours `Retry-After` within a bounded budget; a day still lost after the budget is a failure |
+| Outlook mail and calendar | `src/capture/outlook.py` (`capture-outlook`, 00:45) | Per-message / per-event identity; mail and calendar are different channels; an item without a timestamp is one failed item, not an aborted run |
+| Browser | `src/capture/browser.py` (`capture-browser`, 01:15) | Chrome history from a SQLite backup copy, canonical URL filtering (`filters.py`); a history visit is not a page capture; missing History is a failure. Reading (public pages read ≥ 60 s) goes through the bookmarks Crawlee batch; per-URL reading failures are advisory and only a broken or systemic scrape fails the run; per-URL outcomes go to the reading ledger, and bot-walled hosts are skipped (see [Browser reading](#browser-reading)) |
+| YouTube | `src/capture/youtube.py` (`youtube`, 01:30) | Video identity and transcript availability (yt-dlp); blocked or missing transcripts are reported; a non-zero enumeration with partial entries is `partial_enumeration`; a 429 on the subtitle track is `no_transcript` plus `stats.subtitle_429` (WARNING, retried nightly) and fails the run only when every fetched video (at least 3) gets it and nothing was processed; a 429 on the page, player or playlist request is still a failure |
+| Quick Desktop | `src/capture/qd.py` with stages `facts, tags, feed, chats` (`qd-sync`, hourly) | Typed upstream records (`qd://memory/<id>`, `qd://entity/<id>`, `qd-feed://`, `qd-chat://`); refreshes the eligible snapshot every run, no cursor file; `qd://` parents that left the selection are retired as superseded (`metadata.capture_retired` with a per-row reason, reactivated on return; a namespace losing more than max(25, 10 %) is refused without `--allow-mass-retire`; never on the legacy profile fallback or a non-default threshold); private/incognito chat sessions are never selected; the document channel (`qd_docs.py`) and the Slack knowledge-graph writer are retired — the `graph` stage was removed in R7 together with its tables |
+| Crawlee and bookmarks | `src/capture/crawlee.py`, `scripts/crawlee_ingest.py` (`crawlee-ingest`, 03:00); `scripts/scrape_bookmarks.py` (`bookmarks`, Friday 10:00) | Index-verified scraped pages; at most `--max-unindexed` (25) never-indexed internal documents per run; unresolved index rows are reported, not failed; bookmarks has its own exit and routing rules (below) |
+| Manual / MCP / HTTP | `src/mcp_server.py` (`memory_create`, `memory_learn`), `src/capture_api.py` (`capture-api`, service) | Explicit caller-provided evidence; endpoint availability is not observed capture volume |
 
-Codex Desktop is the reference implementation for agent-task capture. Its schema specification,
-single capture interface, simplification deletion list, and verification path are recorded in
-[`CODEX-TASK-CAPTURE-BUILD-PLAN.md`](CODEX-TASK-CAPTURE-BUILD-PLAN.md).
+Quick Desktop, Amazon Quick, Amazon Q Developer, Kiro and Codex are distinct source identities. Do not collapse them because an older document used the names interchangeably.
 
-## Why components
-Today capture is the most sprawled part of the system: ~15 scripts, an external Node tool,
-and **3 duplicate storage paths**. The goal is to make capture a set of small components with
-clear boundaries so we can work on one without touching the others, and so the shared spine
-(storage, distillation, retrieval) stays consistent across every source.
+## Common flow
 
-## System components (top level)
-Second Brain is four components with clean boundaries (verified: the core does not import
-capture):
+`src/capture/framework.py` supplies preflight → collection/window → render and identity validation → ingestion → outcome (`run_channel` for documents, `run_records` for typed Quick Desktop records). `render.py` owns the one-line underscore-only metadata headers and HTML-to-text conversion; `window.py` owns zoneinfo-aware local-day windows including 23- and 25-hour days; `filters.py` owns the URL exclusion vocabulary and the indexed-URL inventory.
 
-```
-CAPTURE  →  RETRIEVAL substrate  →  SYNTHESIS (dream cycle)  →  DELIVERY (Express)
-```
+`processed` counts stored work. Dry runs report `planned` and classify each record `new` / `changed` / `unchanged` by reading the stored row; processed stays zero. A failed item is counted in `CaptureBatch.failed`, logged with its identity, and makes `main()` exit non-zero (exit 1; 3/4 for auth/transport in the MCP-backed channels) while the rest of the batch continues; bookmarks is the exception (see [Bookmarks](#bookmarks)). Empty source identities never reach embeddings or storage; a repeated URL in a batch is handled once. Every channel runs under the job runner, so a failure is also a durable status and a liveness finding ([OPERATIONS.md](OPERATIONS.md)).
 
-- **Retrieval** — `db`, `embeddings`, `search` (hybrid BM25+vector+RRF + cognitive rerank).
-- **Synthesis** — `dream_cycle/*` (Explorer → Thinker → 4 evaluators), consensus-gated.
-- **Delivery** — `express` (`brief` / push / `memory_brief`).
-- **Capture** — the subject of this doc; decomposed below.
+Growing sessions refresh a stable raw parent and keep previous children as superseded evidence when they are cited. Source replacement prepares embeddings before the transaction; existing complete data survives failure. Metadata patches merge keys (tags are merged, not overwritten); a refreshed row keeps `created_at`, which liveness uses as the capture-time column.
 
-This doc decomposes **Capture**. The same component treatment can later apply to the others.
+The native IDE format is qualified with synthetic fixtures (`tests/fixtures/`); finding a session directory proves format presence, not complete historic coverage. Historical `.chat` data remains distinct from native sessions and is never refreshed.
 
-## Capture = source connectors + a shared spine
+## Codex semantic capture
 
-```
-                       ┌─────────── source connectors ───────────┐
-   youtube  kiro_chat  web  quick_desktop        (each: enumerate + fetch)
-                       └──────────────────┬──────────────────────┘
-                                          ▼
-                          SPINE:  store → ingest (chunk + parent/chunk + relationships)
-                                          ▼
-                                  distill  (raw → semantic decision/insight)   ← the value step
-                                          ▼
-                              memories (Postgres/pgvector)  → retrieval → synthesis
-```
+Raw tasks and turns are preserved independently of the paid semantic pass (`codex_semantic` role, Bedrock). New turns are processed in frozen bounded batches with bounded previous-segment context; oversize turns stay verbatim with an explicit report; validated semantic output is cached before embeddings and persistence so a storage retry never buys the same inference again. Contract failures and infrastructure failures are distinct. No contract miss (`SemanticResultError`) fails the job: each is a recorded attempt, bounded at 3 per frozen batch and then abandoned, counted as `semantic_contract_retrying` or `semantic_contract_abandoned`, and only contract misses carry the broken rule in `failures[].message`. Two consecutive runs with misses raise the `[backlog.codex-capture]` liveness advisory; the streak resets only on a clean run with `semantic_processed > 0` (runs with no model call, outages and spend-incomplete runs leave it unchanged), and deleting `logs/jobs/codex-capture.backlog.json` clears it. New arrivals do not revive an abandoned batch; one run-wide spend tracker covers the pass and exhaustion skips later semantics while raw capture continues. Open findings: F-086 (legacy turn identity wins over the native one), F-094 (private/incognito Quick Desktop chats are filtered only by message count and deletion), F-090 (Quick Desktop rows that fell out of the eligible selection stay active) — tracked in [PLAN-refactor.md](PLAN-refactor.md).
 
-A **connector** owns only *"how do I reach this source and normalize it to markdown."*
-Everything after that (dedup, storage, chunking, distillation, retrieval) is **shared spine**.
+## Bookmarks
 
-## The connector contract (what makes a source separately-workable)
-Every source connector implements three things — nothing more:
+`scripts/scrape_bookmarks.py` exits 1 only for a run-level break: Crawlee broken (missing node/node_modules, or a non-zero exit with no parseable output); eligible URLs, internal or public (new, not cooling off, not `deferred_auth`, not pre-skipped `unsupported`), with none attempted (budget-deferred URLs are not attempts); public URLs eligible and at least one Crawlee batch run, but the batches produced no output (no mark, no Crawlee record naming a URL, no index addition), even if internal URLs were attempted in the same run; or a systemic state in which no URL reached a page and at least 3 failed URLs (internal auth excluded) are not in ledger cool-off. Per-URL outcomes go to the unreachable ledger (`src/capture/unreachable.py`), not the exit code. A `too_short` result cools the URL off for 30 days on its first attempt, with no strike threshold and internal URLs included, so JS/SPA shells such as meetings.amazon.com and ivy-help-center pages land there. URLs in a killed Crawlee batch were never attempted: they are deferred, gain `deferred_runs`, go first next run and take a timeout strike on the third deferral. Crawlee records are parsed multi-line with ANSI colour stripped; each batch log is kept as `logs/bookmarks-crawlee-<n>.log` (mode 600).
 
-```python
-SOURCE_TYPE = "youtube"                 # 1. its label
+Routing (`filters.py` and `scrape_bookmarks.py`, host-anchored): internal URLs (`needs_cookies`) are split three ways. Private, LAN and reserved hosts are skipped. URLs that Python and a browser could route differently (a backslash before the query or fragment, userinfo, whitespace or control characters, a non-http(s) scheme, or a host that is not plain ASCII LDH, e.g. `https://evil.io\@docs.hub.amazon.dev/`) are `skipped_invalid_url`: never fetched, no strike. The user's own records (`PERSONAL_PAGES`, e.g. the help.awsentral home) are `skipped_personal`: never fetched, no strike. `BROWSER_HOSTS` (`*.amazon.dev`, `*.aws.dev`, gather.a2z.com, collaborate-corp.amazon.com, including docs.hub, sage, hyperbadge and help.awsentral) take the browser path below; every other internal host (w.amazon.com, broadcast, `*.corp.amazon.com`, …) takes the cookie path. Internal fetches use `~/.midway/cookie` plus Chrome cookies under a strict cookie policy. An expired Midway cookie defers the internal URLs (`deferred_auth`, a WARNING, retried without limit); three such runs raise the `[backlog.bookmarks-midway]` liveness advisory, and a run with a valid cookie resets it. Internal auth is judged on the final response (a successful Midway round-trip through idp.federate/midway-auth is not auth); a sign-in URL pattern counts only off-host or on a sign-in host, and a 200 after a Midway hop with `error=login_required`-style parameters or a sign-in title is auth. Hosts Midway cannot authenticate (SharePoint, A to Z, Coupa, sign-in hosts) are pre-skipped as `unsupported`; other bare-403/sign-in answers are `unsupported_auth` (no strike) and three such runs raise `[backlog.bookmarks-unsupported]`. When a valid session still yields ≥3 auth results and no page, the job fetches the canary `w.amazon.com/bin/view/Main/`: if it loads, the strikes stand; if not, the URLs are deferred and the bookmarks-midway advisory records the cause. The `BATCH_SCRAPE_*` options passed to Crawlee take effect only with the patch in `~/Work/Tools/Crawlee/batch-scrape.js` (applied 2026-10-13, uncommitted in that repository); the script warns when it is absent.
 
-def enumerate() -> Iterable[Item]:      # 2. list what's available (id/url, title, metadata)
-    ...
+Browser path (`src/capture/browser_fetch.py`, midway-playwright over stdio, after the cookie path and before Crawlee). All browser URLs share one server session, started in a private temp cwd (its `.playwright-mcp/` dumps are deleted with it) with a minimal env (HOME, PATH, USER, LOGNAME, TMPDIR, LANG, SHELL). It navigates only to the re-serialized URL. A page is read as innerText of `main`/`article`, falling back to the accessibility snapshot for iframe-heavy pages. It is ready when the text has been stable for 2 s, or for 5 s (`STABLE_AFTER_REDIRECT_S`) after a client-side redirect (the navigate reply's URL differs from the requested one, the execution context was destroyed, or the route changed; Sage's new UI shows a ~300-char shell for ~2 s first), capped at 30 s; text counts as still loading only while it is under 300 chars or starts with "Loading". Classification uses the navigation entry's HTTP status (401/403/407 → `auth`, other ≥ 400 → `error`), a final host of midway-auth or sentry, the cookie path's sign-in markers on the final URL (including a same-host final path different from the requested one that matches the sign-in URL pattern) and a sign-in title. Saved pages carry `fetched_via: browser`. Bounds: `BROWSER_PAGE_TIMEOUT_S` (45 s) per page, `BROWSER_MAX_PAGES` (60), 60 s to launch, 15 s to close. The run budget is min(`BROWSER_RUN_BUDGET_S` (1500 s) within the job deadline, Midway session left − 10 min), recomputed right before the pass; under 60 s, every browser URL is deferred with no launch and no strike: `deferred_auth` (`[backlog.bookmarks-midway]`) when the Midway session is what is short, detail `budget` (`[backlog.bookmarks-browser]`, cause "the job deadline left < 60 s for the browser pass") when the job deadline is. A failed or timed-out launch is torn down with a bounded `__aexit__`. The server runs in its own session, so its process group is recorded and killed after the pass and at exit, and a SIGTERM during the pass becomes `SystemExit` so that cleanup runs. Preflight: when the Midway session expires within 30 min at job start, browser URLs are `deferred_auth` (`[backlog.bookmarks-midway]`, cause "expires within 30 min"), and the cookie path still runs. Browser-only systemic check, independent of the cookie path: ≥ 3 browser attempts, all ending on Midway's own sign-in (midway-auth / sentry / idp.federate or the server's "run mwinit" error) and none `ok` → `deferred_auth` with no strikes (HTTP 401/403 permission pages keep their strikes), cause "browser sign-in failed for every page (Midway mint) — run mwinit". Fallback: a cookie-path `unsupported_auth`/`tls_error` is retried in the browser in the same run only on Amazon-owned suffixes (amazon.com, amazon.dev, aws.dev, a2z.com, amazon.work, workshops.aws, host-anchored; bookmarks-only, `filters.INTERNAL_DOMAINS` is unchanged). Third-party SaaS (highspot, quip-amazon, chronus, …) and look-alikes such as `w.amazon.com.evil.io` never reach the browser. A fallback that ends on a non-Midway login stays `unsupported_auth`. URLs the pass does not attempt (`launch`, `server_down`, `budget`, `max_pages`) are deferred without a strike. They go to `logs/jobs/bookmarks-browser.backlog.json`, which raises the `[backlog.bookmarks-browser]` advisory after one run, with a cause per detail; they are no longer counted in `[backlog.bookmarks]`. Schedule: the job runs Fri 10:00 on the morning's mwinit. If mwinit happens after 10:00, the run finds no fresh session, the internal path is `deferred_auth` for that week, and the user can run the job manually after mwinit (`scripts/jobs/job_wrapper.sh scripts/scrape_bookmarks.py bookmarks`; `scheduling/README.md`).
 
-def fetch(item) -> str | None:          # 3. produce markdown + metadata header, or None to skip
-    ...
-```
+## Browser reading
 
-A shared **runner** then does the cross-cutting work once, for every connector:
-dedup (`get_processed_source_urls(SOURCE_TYPE)`), `ingest_content(md, source_type=...)`,
-stats, `--limit`/`--dry-run`, and request backoff. (Today `youtube.py` inlines its own
-runner; the refactor lifts that into a shared `run(connector, ...)`.)
+`src/capture/browser.py` sends reading URLs (deduped against Crawlee's index, at most `BROWSER_MAX_READ_URLS` (60) per run) to `scrape_with_crawlee` from `scripts/scrape_bookmarks.py`, with `BATCH_SCRAPE_ENV` (1 retry per URL, no session rotations, downloads aborted) and a 1800 s budget. A URL that ends `auth`, `timeout`, `error` or `too_short` never fails the job: each is logged on its own line (URL and class only, never page text), followed by one `reading summary` line with the counts. The job exits 1 for a run-level break: Crawlee broken, a batch exiting non-zero without naming a failed URL, a batch killed at its timeout, or a systemic outage, named in the summary line as `systemic: …`: (a) at least one batch ran and none produced output; (b) no page was reached (`ok + too_short == 0`; too_short counts as reaching the page) and at least 3 URLs ended `auth`/`timeout`/`error` across at least 2 hosts, so several reads of one walled site do not fail the job; (c) URLs were sent but none was attempted (e.g. all deferred by the budget). Each batch log is kept as `logs/capture-browser-crawlee-<n>.log` (mode 600), separate from the bookmarks logs. Per-URL outcomes are recorded in the reading ledger `logs/jobs/capture-browser.unreachable.json` (`src/capture/reading_ledger.py`; strikes and cool-off, `ok` clears), and URLs cooling off there are not sent. URLs on bot-walled hosts are skipped before the scrape: a curated seed list plus a dynamic rule derived from repeated auth results in the ledgers; Amazon-internal hosts are never bot-walled.
 
-### Agentic-assistant capture standard
+## Retired paths and maintenance
 
-Agentic assistants have a stronger shared contract than general documents. Kiro, Amazon Quick,
-Quick Desktop, Amazon Q Developer, Claude Code, Codex, and future assistants are separate source
-integrations; each normalizes its source task into:
+The two-phase staging hop (`chat_extract.py` → `staging/chats` → `ingest_staged.sh`), the one-shot `scripts/migrate/` migrators, `codex-canary`, the Quick Desktop document channel and the Slack knowledge-graph writer are gone; `scripts/maintenance/drain_staged_chats.py` remains for staged leftovers. `quick_desktop_doc` is historical vocabulary, not a source.
 
-- an evidence-based Task Ownership classification of `user-owned`, `delegated`, or `unknown`;
-- a stable source task identity and source timestamps;
-- an ordered sequence of complete **Agent Turns**;
-- one user prompt and one visible agent outcome per turn; and
-- source provenance such as assistant, workspace, and source-defined project when available.
-
-Only User-Owned Tasks continue to eligibility. Delegated Tasks are excluded as separate capture
-sources, and Unknown-Ownership Tasks are skipped rather than presumed user-owned; both exclusions
-are reported. System and developer instructions, hidden reasoning, tool calls and results,
-delegated-agent activity within the retained task, and progress commentary are also excluded. An
-integration may use its own eligibility policy, but a later source update refreshes the same
-Captured Task rather than creating a duplicate.
-
-Task Ownership behavior is universal, while evidence is source-specific. Codex uses
-`thread_source`, `thread_spawn_edges`, `agent_path`, and structured `source` metadata. Later
-connectors must document their native evidence and retain native-shape fixtures before activation.
-Kiro's current transcript-content heuristic is not yet sufficient proof of ownership for the
-shared standard. See the canonical [Task Ownership contract](components/capture.md#task-ownership-contract)
-and [ADR 0008](adr/0008-classify-task-ownership-before-capture.md).
-
-Native task identity is always namespaced by integration. Amazon Quick is web-based and Quick
-Desktop is a desktop application; both call their task units **sessions**, but they store them in
-different locations and require separate connectors. An Amazon Quick Session and a Quick Desktop
-Session never identify the same Agent Task merely because their native session IDs match.
-
-The common behavior above does not imply a source-neutral runtime interface. Codex remains the
-reference implementation. Shared runtime code and shared test helpers are extracted only after a
-second connector demonstrates which seam is genuinely common; until then, connector-specific code
-implements the common observable contract directly.
-
-#### Exact provenance
-
-For agent-task capture, Exact Provenance is one readable traceability chain:
-
-```text
-Decision, Insight, or Correction Episode
-  → supporting Agent Turn IDs
-  → Topic Segment
-  → Captured Task
-  → native Agent Task identity
-```
-
-The Captured Task preserves the source integration, native task identity and title, source
-timestamps, and available native project, workspace, and repository context. The Topic Segment
-preserves its ordered Agent Turn IDs. A derived decision, insight, or Correction Episode links to
-its Topic Segment and identifies the supporting turns. A Correction Episode cites both the visible
-outcome containing the misalignment and the correcting user prompt. Because the Captured Task and
-Topic Segment retain the original prompts and visible outcomes, the chain reaches the exact source
-evidence.
-
-When an Agent Turn includes an image or file, its Attachment Descriptor remains associated with
-that turn as an audit trail. It records that the attachment existed and preserves available source
-metadata, but it does not copy, interpret, embed, or retain the attachment bytes. Exact Provenance
-therefore reaches the attachment record, not the attachment's contents.
-
-Model and prompt versions, content or provenance hashes, timing, usage, and other processing
-telemetry are diagnostics—not Exact Provenance—and are not Codex v1 requirements.
-
-#### Project attribution policy
-
-Source location and semantic subject are separate. A connector always preserves its native project
-or grouping, workspace history, and repository context as provenance. Those values describe where
-an Agent Task ran; they do not automatically populate `memories.project`. Topic Segments and
-task-distilled memories receive a semantic project only when the task content clearly establishes
-that subject. Otherwise, `project` remains unset. See
-[`ADR 0004`](adr/0004-separate-source-provenance-from-semantic-project.md).
-Codex Build 1 does not yet classify semantic project from content, so all of its Captured Tasks,
-Topic Segments, and derived memories leave `project` unset while retaining source provenance.
-
-#### Real-data testing policy
-
-Real agent-task history may be used throughout connector, capture, segmentation, distillation,
-retrieval, and evaluation tests, and raw real-data fixtures may be committed to Git. Second Brain
-does not require synthetic or redacted source substitutes. Persistence tests still use an isolated
-test database so test mutations cannot damage the live memory store. Automated tests may inject
-deterministic model and embedding boundaries while retaining real Task evidence; the bounded live
-Proof Gate exercises the configured services. See
-[`ADR 0005`](adr/0005-use-real-agent-task-data-throughout-testing.md).
-
-#### Monotonic capture policy
-
-The shared spine treats each Captured Task as an append-only evidence record:
-
-- Once an Agent Turn is stored, its prompt, visible outcome, and position are immutable.
-- A refresh appends only unseen complete turns, in their newly observed order.
-- Changed, missing, or reordered previously captured turns are **Source Drift**. Codex v1 ignores
-  that drift without extra state and does not rewrite, delete, or move established evidence.
-- Source Drift without unseen complete turns is a no-op: it does not write capture state or trigger
-  the Task Semantic Pass.
-- Source-native title, archive, project, workspace, Git, and timestamp metadata may refresh without
-  a new turn. That provenance-only refresh preserves stored turns and does not trigger the Task
-  Semantic Pass.
-- A genuine correction must arrive as a new Agent Turn so both the original evidence and the
-  correction remain available to later semantic processing.
-
-For example, if Second Brain has captured `A B C` and later observes `A C changed-B D E`, the
-durable task becomes `A B C D E`. Semantic processing reconsiders the previous active tail with
-the appended turns—in this example, `C D E`—without reopening the full task history. This policy
-governs source observations that can be read. The Codex proof gate does not track an entirely
-unavailable source: captured evidence remains intact, and normal recurring inventory can rediscover
-the source if it returns. Availability states and persistent disappearance retries are deferred
-until operational evidence demonstrates a need. See
-[`ADR 0003`](adr/0003-accumulate-captured-task-history-monotonically.md).
-
-The shared spine groups adjacent complete turns into **Topic Segments**. A proposed segment
-must have a distinct purpose, be coherent under one title, and have independent value for
-search or distillation. Brief asides and uncertain boundaries merge into the surrounding
-segment. Every qualifying segment is stored and searchable even if Task Distillation produces
-no decision, insight, or Correction Episode from it.
-
-On refresh, completed segments remain stable by default. Only the prior tail segment and new
-turns are reconsidered, so a resumed topic can continue without reorganizing the entire task.
-After source capture commits, the same scheduled run invokes one **Task Semantic Pass** over that
-tail. The single model response returns the Topic Segments and zero or more supported decisions,
-insights, or Correction Episodes for each segment. A segment consists of a title plus its original
-Agent Turns; it does not require a separate summary. Topic Segmentation and Task Distillation remain
-useful concepts, but they are not separate model calls in Codex v1.
-
-The combined semantic result is stored atomically. If the model call, validation, or semantic write
-fails, the Captured Task remains successful and no partial segments or derived memories are kept.
-The Semantic Processing Cursor stays on the last successfully processed Agent Turn, and the next
-capture invocation retries the whole unprocessed tail. Once hourly scheduling is separately
-approved, that invocation will normally be the next hourly run. Codex v1 has no separate
-segmentation or distillation status, cursor, or stage-specific retry.
-
-The Dream Cycle is not part of this same-run workflow; on its separate schedule, it later creates
-evaluator-gated, higher-order synthesis across memories, including contradiction discovery. Build 1
-stores Correction Episodes as searchable evidence but does not create Steering Candidates, active
-rules, or automatic context. Build 2 is specified in the Codex build plan and remains unimplemented
-in this build; its prerequisite real-data Correction Episode Proof Gate passed on 2026-07-23.
-Codex v1 does not run a separate
-contradiction planner or create immediate `contradicts` links. See
-[`ADR 0002`](adr/0002-standardize-agent-task-capture.md) and
-[`ADR 0006`](adr/0006-combine-task-segmentation-and-distillation.md), plus
-[`ADR 0007`](adr/0007-capture-correction-episodes-before-steering.md).
-
-Markdown each connector emits uses a metadata header the ingest pipeline parses:
-```
-# <title>
-Source: <url>
-Type: <source-specific>
-Engagement: <tier>        # e.g. liked | watch_later — interest signal for Phase 2
----
-<body>
-```
-
-## Source connectors (status)
-
-| Connector | Signal | Current home | State / work to bring into structure |
-|---|---|---|---|
-| **youtube** ✅ | Liked + Watch Later transcripts | `src/capture/youtube.py` | Done — reference impl. Refactor: split connector vs. shared runner. |
-| **kiro_chat** | Kiro IDE + CLI chat sessions | `chat_extract.py`, `batch_ingest_{parallel,staged}.py`, `ingest_chats.py`, `parsers/{ide,cli}_chat.py` | Consolidate 4 scripts → one connector. IDE source idle since 2026-02-18 (resumes when editor is used). |
-| **amazon_quick** | Amazon Quick web sessions | Future connector | Separate from Quick Desktop; source access and storage discovery remain integration-specific work. |
-| **amazon_q_developer** | Amazon Q Developer sessions | Future connector | Separate from Kiro; source access and storage discovery remain integration-specific work. |
-| **web** | Articles / bookmarks | `crawlee_ingest.py`, `scrape_bookmarks.py`, `parsers/crawlee.py` (+ external Node) | Bring in-repo (drop external Crawlee dependency), like youtube. |
-| **quick_desktop** | Quick Desktop docs / feed / sessions / 9 micro-cats | `migrate/{ingest_doc_chunks,ingest_eventlog,migrate_quick_desktop}.py`, `ingest_qd_chats.py`, `qd_sync.sh`, `qd_profile.py` | Separate from Amazon Quick. Consolidate. **Bug:** micro-cats (~1,140 recs) created with **no embeddings** → invisible to vector search. |
-| ~~capture_api~~ | Slack / browser / email (HTTP) | `src/capture_api.py` + `capture-api` launchd job + `test_capture_api.py` | **Retire** — 0 captures ever. |
-| ~~migrations~~ | Claude / ChatGPT / Notion (one-time) | `migrate/migrate_{claude,chatgpt,notion}.py` | **Archive** — 0 rows present. |
-
-## Shared spine
-
-- **store** — the single primitive: `embed → classify → depth → create_memory`.
-  *Currently triplicated* (`ingest.ingest_content`, `capture_api._store_memory`,
-  `mcp_server.memory_create`) → collapse to one `store.py`; the other two call it.
-- **ingest / pipeline** — metadata-header parse + section chunking + parent (unembedded) +
-  embedded chunks + relationship discovery. Healthy today (`src/ingest.py`); keep
-  `ingest_content`'s signature stable (6 callers).
-- **distill** — raw chunks → semantic `decision`/`insight` memories. **The value-multiplier**
-  (synthesis cites distilled memories, not raw chunks). Today: chat-only, and only ~8% of IDE
-  sessions distilled (459/5,493). Target: generalize to any `source_type` + backfill; agentic
-  assistant sources distill stable Topic Segments rather than whole transcripts or fixed chunks.
-
-## Target layout
-```
-src/capture/
-  store.py            # the one storage primitive (all writers route here)
-  pipeline.py         # chunk + parent/chunk + relationships  (today's ingest.py)
-  distill.py          # raw → semantic, generalized to any source_type
-  runner.py           # shared capture loop: enumerate → dedup → fetch → ingest → stats
-  sources/
-    youtube.py  ✅
-    kiro_chat.py    web.py    quick_desktop.py
-```
-
-## Migration path (incremental — never a big-bang rewrite)
-1. **Retire dead** — `capture_api` (+ job + test), one-off migrations, the `import_slack_graph`/entity-KG path. (Verify-before-cut; each its own commit.)
-2. **Lift one connector at a time** onto the shared spine, newest pattern first
-   (`youtube` ✅ → `kiro_chat` → `web` → `quick_desktop`), retiring its scattered scripts as it lands.
-3. **Collapse the 3 store paths → 1** (`store.py`); point `mcp_server`/any HTTP writer at it.
-4. **Generalize `distill`** to any source_type + backfill (the highest-leverage step for synthesis).
-5. Keep the test suite green and commit per step (origin + mini).
-
-## Status snapshot
-- ✅ `youtube` connector shipped (`ac3054d`); reference contract established.
-- ▢ Extract shared `runner.py` from `youtube.py`.
-- ▢ Collapse the 3 store paths → `store.py`.
-- ▢ Lift `kiro_chat`, `web`, `quick_desktop` connectors.
-- ▢ Generalize `distill` + backfill (IDE remainder, youtube, articles).
-- ▢ Retire `capture_api` + one-off migrations.
-- ▢ Fix `quick_desktop` micro-category embeddings.
+Deduplication and rechunking are separate resumable maintenance programs (`scripts/maintenance/dedup_corpus.py`, `rechunk_and_embed.py`, `prepare_release.py`); their dry-run manifests enumerate identity, references, row versions and prospective embedding work before any mutation, and application is the pending R6 step ([RELEASES.md](RELEASES.md)). Identical text is insufficient to merge independent projects.

@@ -5,6 +5,13 @@ Agent Turn capture, one combined semantic pass, and atomic semantic persistence.
 The Captured Task commits before semantic processing so a transient model or
 embedding failure never loses source evidence; the unchanged cursor causes the
 whole unprocessed tail to retry on the next run.
+
+Semantic work uses a dedicated controlled backend and one spend threshold per
+capture run. Fixed, persisted batches prevent newly arriving turns from reviving
+a failed batch. Only invalid model results consume the contract retry budget;
+provider, embedding, and database outages remain operational failures. Validated
+results are cached before embedding so a storage retry need not pay for the same
+generation again. The verbatim Captured Task is always retained.
 """
 
 from __future__ import annotations
@@ -14,13 +21,15 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 import fcntl
 import json
+import logging
 import os
 from pathlib import Path
 import tempfile
 from typing import Any, Callable
 
 import src.db as db
-from src.backends.resolver import default_resolver
+from src.backends.cost import SpendCapExceeded, SpendTracker, cap_from_env, invoke_metered
+from src.backends.resolver import CODEX_SEMANTIC_ROLE, default_resolver, resolve_stage
 from src.capture.agent_tasks import (
     AgentTaskSnapshot,
     AgentTurn,
@@ -29,13 +38,41 @@ from src.capture.agent_tasks import (
     TaskSemanticResult,
     TopicSegment,
 )
-from src.capture.sources.codex import CodexDesktopSource
+from src.capture.sources.codex import CodexDesktopSource, CodexSourceMissing
 from src.embeddings import generate_embedding
 
 
 IDLE_THRESHOLD = timedelta(hours=6)
 TASK_SOURCE_TYPE = "codex_task"
 MEMORY_SOURCE_TYPE = "distilled_agent_task"
+
+#: Version of the semantic contract (system prompt below). Bumping it retires
+#: every recorded attempt count and abandonment, so a reworked prompt gets a
+#: fresh budget on tails an earlier prompt could never satisfy.
+SEMANTIC_PROMPT_VERSION = "codex-semantic-v2-bounded"
+
+# Payload limits are deliberately conservative. Oversized individual turns stay
+# captured verbatim and are reported for review, never silently truncated.
+SEMANTIC_BATCH_TURNS = 8
+SEMANTIC_BATCH_CHARS = 48_000
+SEMANTIC_PREVIOUS_CHARS = 12_000
+#: Characters per embedding call from this writer -- the corpus chunk bound
+#: (``chunk_by_section`` / ``plan_rechunk`` default). Longer rows get chunks.
+MAX_CHUNK_CHARS = 4_000
+SEMANTIC_COST_CAP_ENV = "SECOND_BRAIN_CODEX_SEMANTIC_COST_CAP_USD"
+
+#: Maximum invalid model results for one frozen batch of one Codex Task
+#: before semantic processing is abandoned. Overridable at runtime by
+#: ``SECOND_BRAIN_CODEX_SEMANTIC_MAX_ATTEMPTS`` (a positive integer).
+SEMANTIC_MAX_ATTEMPTS = 3
+SEMANTIC_MAX_ATTEMPTS_ENV = "SECOND_BRAIN_CODEX_SEMANTIC_MAX_ATTEMPTS"
+
+SEMANTIC_ABANDON_REASON = (
+    "the semantic pass did not satisfy the evidence contract within the "
+    "attempt budget"
+)
+
+logger = logging.getLogger(__name__)
 
 
 _SEMANTIC_SYSTEM_PROMPT = """You perform one semantic pass over a Codex Task.
@@ -83,11 +120,22 @@ For a correction episode:
 Do not emit processing telemetry, hashes, or versions."""
 
 
+#: Longest failure message kept in a TaskFailure / log line.
+FAILURE_MESSAGE_CHARS = 200
+
+
 @dataclass(frozen=True, slots=True)
 class TaskFailure:
     task_id: str
     stage: str
     error_type: str
+    #: Set only for a SemanticResultError: its sanitized ``str(error)``
+    #: (whitespace collapsed, at most FAILURE_MESSAGE_CHARS), naming the broken
+    #: contract rule. Every raise site uses a fixed sentence (plus at most a
+    #: cause type name), never model output or turn text. "" for every other
+    #: failure: DB errors (psycopg DETAIL: Key (...)=(...)) and CLI stderr can
+    #: carry row values and turn text.
+    message: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,15 +146,40 @@ class CaptureReport:
     eligible: int = 0
     skipped_recent: int = 0
     skipped_archived: int = 0
+    #: Indexed Tasks whose rollout exists in no known Codex layout (deleted by
+    #: Codex). Not a failure: it is re-checked each run but never fails the job,
+    #: unless *every* attempted source read was missing (a broken reader).
+    skipped_missing_source: int = 0
     incomplete: int = 0
     captured: int = 0
     refreshed: int = 0
     unchanged: int = 0
     semantic_processed: int = 0
     semantic_retried: int = 0
+    semantic_abandoned: int = 0
+    #: Subset of ``failed``: every invalid model result (SemanticResultError)
+    #: this run, whether its batch will be retried or was abandoned. The attempt
+    #: is recorded and the verbatim task kept, so it is not an infrastructure
+    #: failure and does not make the command exit non-zero (since 2026-10-13;
+    #: before, only the abandoning attempt was exempt). Always equals
+    #: ``semantic_contract_retrying + semantic_contract_abandoned``.
+    semantic_contract_failed: int = 0
+    #: Contract misses whose batch still has attempts left (retried next run).
+    semantic_contract_retrying: int = 0
+    #: Contract misses that used the last attempt and abandoned the batch.
+    semantic_contract_abandoned: int = 0
+    semantic_skipped_budget: int = 0
+    semantic_cost_usd: float = 0.0
+    semantic_metered_calls: int = 0
+    semantic_spend_incomplete: bool = False
     failed: int = 0
     dry_run: bool = False
     failures: tuple[TaskFailure, ...] = ()
+
+    @property
+    def infrastructure_failed(self) -> int:
+        """Failures that should make the run exit non-zero."""
+        return max(0, self.failed - self.semantic_contract_failed)
 
 
 @dataclass(slots=True)
@@ -143,13 +216,27 @@ class SemanticResultError(ValueError):
     """The combined semantic result does not preserve the evidence contract."""
 
 
+class SemanticBatchTooLarge(ValueError):
+    """A complete turn cannot fit the bounded semantic payload."""
+
+
 class _BackendSemanticPass:
-    """Lazily resolve the configured Thinker only when semantic work exists."""
+    """One lazy, metered semantic stage shared by every task in this run."""
+
+    def __init__(self):
+        self.tracker = SpendTracker(cap_from_env(SEMANTIC_COST_CAP_ENV, 2.0))
+
+    @property
+    def contract_id(self) -> str:
+        """Prompt version plus resolved model — the attempt budget's identity."""
+        try:
+            model = default_resolver().spec_for(CODEX_SEMANTIC_ROLE).model
+        except Exception:  # pragma: no cover - resolution fails later anyway
+            return SEMANTIC_PROMPT_VERSION
+        return f"{SEMANTIC_PROMPT_VERSION}:{model}"
 
     def run(self, *, previous_segment, turns):
-        resolver = default_resolver()
-        spec = resolver.spec_for("thinker")
-        invoker = resolver.invoker_for("thinker")
+        invoker, spec = resolve_stage(CODEX_SEMANTIC_ROLE)
         payload = {
             "previous_segment": (
                 {
@@ -162,12 +249,27 @@ class _BackendSemanticPass:
             ),
             "new_turns": [_turn_dict(turn) for turn in turns],
         }
-        result = invoker.invoke(
-            _SEMANTIC_SYSTEM_PROMPT,
-            json.dumps(payload, ensure_ascii=False),
-            tools=False,
-            effort=spec.effort,
-        )
+        try:
+            result = invoke_metered(
+                invoker, spec, self.tracker,
+                _SEMANTIC_SYSTEM_PROMPT,
+                json.dumps(payload, ensure_ascii=False),
+                tools=False,
+                effort=spec.effort,
+            )
+        except SpendCapExceeded:
+            raise
+        except Exception as exc:
+            if getattr(exc, "model_response_received", False):
+                # Only the cause's type name (JSONDecodeError, ModelRefusalError,
+                # ...) is appended, never its message: that may carry model output.
+                # (``from exc`` makes exc the __cause__, so this is
+                # type(error.__cause__).__name__.)
+                raise SemanticResultError(
+                    "model response failed the semantic contract; "
+                    f"cause={type(exc).__name__}"
+                ) from exc
+            raise
         return _parse_semantic_output(result["output"])
 
 
@@ -229,15 +331,24 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         "eligible": 0,
         "skipped_recent": 0,
         "skipped_archived": 0,
+        "skipped_missing_source": 0,
         "incomplete": 0,
         "captured": 0,
         "refreshed": 0,
         "unchanged": 0,
         "semantic_processed": 0,
         "semantic_retried": 0,
+        "semantic_abandoned": 0,
+        "semantic_contract_failed": 0,
+        "semantic_contract_retrying": 0,
+        "semantic_contract_abandoned": 0,
+        "semantic_skipped_budget": 0,
         "failed": 0,
     }
     failures: list[TaskFailure] = []
+    missing_sources: list[tuple[str, CodexSourceMissing]] = []
+    source_reads_ok = 0
+    semantic_budget_stopped = False
     refs = tuple(services.source.enumerate_tasks(now))
     counts["enumerated"] = len(refs)
     counts["skipped_delegated"] = services.source.skipped_delegated
@@ -258,9 +369,13 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
 
         try:
             snapshot = services.source.fetch_task(ref)
+        except CodexSourceMissing as exc:
+            missing_sources.append((ref.native_task_id, exc))
+            continue
         except Exception as exc:
             _record_failure(counts, failures, ref.native_task_id, "source_read", exc)
             continue
+        source_reads_ok += 1
         if now - snapshot.source_updated_at < IDLE_THRESHOLD:
             counts["skipped_recent"] += 1
             continue
@@ -282,21 +397,141 @@ def _run(*, now, task_id, backfill, dry_run, services) -> CaptureReport:
         tail = _unprocessed_tail(captured.turns, captured.metadata.get("semantic_cursor"))
         if not tail:
             continue
+        if semantic_budget_stopped:
+            counts["semantic_skipped_budget"] += 1
+            continue
+        try:
+            tail = _semantic_batch(captured, tail, services)
+        except Exception as exc:
+            _record_failure(counts, failures, ref.native_task_id, "semantic_input", exc)
+            continue
+        attempt_key = _attempt_key(captured, tail, services)
+        bound = _semantic_max_attempts()
+        spent = _recorded_attempts(captured.metadata, attempt_key)
+        if _is_abandoned(captured.metadata, attempt_key) or spent >= bound:
+            if not _is_abandoned(captured.metadata, attempt_key):
+                # The bound was lowered after the attempts were spent.
+                _record_abandonment(
+                    captured, attempt_key, spent, None, now, services.connect
+                )
+                logger.warning(
+                    "Codex task %s abandoned semantically: %d attempt(s) "
+                    "already spent meets the bound of %d. The verbatim "
+                    "Captured Task is kept; no further model calls.",
+                    ref.native_task_id,
+                    spent,
+                    bound,
+                )
+            counts["semantic_abandoned"] += 1
+            logger.info(
+                "Codex task %s stays semantically abandoned; %d unprocessed "
+                "Agent Turn(s) kept verbatim, no model call",
+                ref.native_task_id,
+                len(tail),
+            )
+            continue
         if captured.disposition == "unchanged":
             counts["semantic_retried"] += 1
-
+        attempt = spent + 1
         try:
             _process_semantics(captured, tail, services)
+        except SpendCapExceeded as exc:
+            _record_failure(counts, failures, ref.native_task_id, "semantic_budget", exc)
+            semantic_budget_stopped = True
+            continue  # Stop inference, but retain every remaining raw task.
+        except SemanticResultError as exc:
+            _record_attempt(captured, attempt_key, attempt, now, services.connect)
+            # Every contract miss is a recorded, bounded attempt, never an
+            # infrastructure failure: it does not fail the run whether or not
+            # attempts remain. One WARNING per miss names the broken rule.
+            counts["semantic_contract_failed"] += 1
+            rule = _failure_message(exc)
+            if attempt >= bound:
+                _record_abandonment(
+                    captured, attempt_key, attempt, type(exc).__name__, now,
+                    services.connect,
+                )
+                counts["semantic_abandoned"] += 1
+                counts["semantic_contract_abandoned"] += 1
+                logger.warning(
+                    "Codex task %s abandoned semantically after attempt %d/%d: "
+                    "%s (%s: %s). The verbatim Captured Task is kept; no further "
+                    "model calls will be made for these Agent Turns.",
+                    ref.native_task_id,
+                    attempt,
+                    bound,
+                    SEMANTIC_ABANDON_REASON,
+                    type(exc).__name__,
+                    rule,
+                )
+            else:
+                counts["semantic_contract_retrying"] += 1
+                logger.warning(
+                    "Codex task %s semantic contract miss on attempt %d/%d, "
+                    "retried next run (%s: %s)",
+                    ref.native_task_id,
+                    attempt,
+                    bound,
+                    type(exc).__name__,
+                    rule,
+                )
+            _record_failure(counts, failures, ref.native_task_id, "semantic", exc)
+            continue
         except Exception as exc:
+            # Outages must not permanently abandon valid source evidence.
+            if getattr(getattr(services.semantic, "tracker", None), "blocked_reason", None):
+                semantic_budget_stopped = True
             _record_failure(counts, failures, ref.native_task_id, "semantic", exc)
             continue
         counts["semantic_processed"] += 1
 
+    _settle_missing_sources(counts, failures, missing_sources, source_reads_ok)
     return CaptureReport(
         **counts,
         dry_run=dry_run,
         failures=tuple(failures),
+        semantic_cost_usd=getattr(getattr(services.semantic, "tracker", None), "total_usd", 0.0),
+        semantic_metered_calls=getattr(getattr(services.semantic, "tracker", None), "calls", 0),
+        semantic_spend_incomplete=bool(getattr(getattr(services.semantic, "tracker", None), "blocked_reason", None)),
     )
+
+
+def _settle_missing_sources(counts, failures, missing, source_reads_ok) -> None:
+    """Skip truly-gone rollouts, unless no source could be read at all.
+
+    A few deleted rollouts are Codex housekeeping and must not fail the job. If
+    every attempted read was missing, the reader (or its path layout) is broken,
+    so each one is reported as a ``source_read`` failure instead.
+    """
+    if not missing:
+        return
+    if source_reads_ok == 0:
+        for task_id, exc in missing:
+            _record_failure(counts, failures, task_id, "source_read", exc)
+        logger.error(
+            "Codex capture: all %d attempted Task source read(s) found no rollout "
+            "on disk; treating as a broken source reader",
+            len(missing),
+        )
+        return
+    counts["skipped_missing_source"] = len(missing)
+    logger.warning(
+        "Codex capture: skipped %d Task(s) whose indexed rollout no longer exists "
+        "on disk (skipped_missing_source; not a failure)",
+        len(missing),
+    )
+
+
+def _failure_message(error: BaseException) -> str:
+    """``str(error)`` on one line, at most FAILURE_MESSAGE_CHARS characters.
+
+    Only the exception's own message is used, never its ``__cause__`` (which
+    for a wrapped backend error may carry raw model output).
+    """
+    text = " ".join(str(error).split())
+    if len(text) > FAILURE_MESSAGE_CHARS:
+        text = text[: FAILURE_MESSAGE_CHARS - 1] + "…"
+    return text
 
 
 def _record_failure(counts, failures, task_id, stage, error) -> None:
@@ -306,6 +541,7 @@ def _record_failure(counts, failures, task_id, stage, error) -> None:
             task_id=task_id,
             stage=stage,
             error_type=type(error).__name__,
+            message=_failure_message(error) if isinstance(error, SemanticResultError) else "",
         )
     )
 
@@ -423,6 +659,11 @@ def _metadata_for_snapshot(
         "turns": [_turn_dict(turn) for turn in turns],
         "semantic_cursor": semantic_cursor,
     }
+    # The semantic retry budget lives beside the cursor and must survive a
+    # refresh; its key, not this copy, decides when it resets.
+    for key in ("semantic_attempts", "semantic_abandoned", "semantic_batch", "semantic_pending"):
+        if key in previous:
+            metadata[key] = previous[key]
     if native_title:
         metadata["native_title"] = native_title
     return metadata
@@ -581,6 +822,150 @@ def _unprocessed_tail(
     raise RuntimeError("semantic cursor does not identify a stored Agent Turn")
 
 
+def _semantic_max_attempts() -> int:
+    """The attempt bound: the module default unless the environment overrides it."""
+    raw = os.environ.get(SEMANTIC_MAX_ATTEMPTS_ENV)
+    if raw is None or not raw.strip():
+        return SEMANTIC_MAX_ATTEMPTS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        logger.warning(
+            "%s=%r is not a positive integer; using the default bound of %d",
+            SEMANTIC_MAX_ATTEMPTS_ENV,
+            raw,
+            SEMANTIC_MAX_ATTEMPTS,
+        )
+        return SEMANTIC_MAX_ATTEMPTS
+    return value
+
+
+def _semantic_contract(services) -> str:
+    contract = getattr(services.semantic, "contract_id", None)
+    return contract if isinstance(contract, str) and contract else SEMANTIC_PROMPT_VERSION
+
+
+def _semantic_batch(captured, tail, services):
+    """Freeze the oldest bounded prefix until it succeeds or is reviewed.
+
+    New arrivals cannot reset an abandoned batch. A changed prompt/model may
+    retry it under a new contract. Limits include the serialized turn structure.
+    """
+    prior = captured.metadata.get("semantic_batch")
+    ids = [turn.turn_id for turn in tail]
+    if isinstance(prior, dict) and prior.get("contract") == _semantic_contract(services):
+        frozen = prior.get("turn_ids")
+        if isinstance(frozen, list) and frozen and ids[:len(frozen)] == frozen:
+            return tail[:len(frozen)]
+    selected = []
+    size = 0
+    for turn in tail[:SEMANTIC_BATCH_TURNS]:
+        turn_size = len(json.dumps(_turn_dict(turn), ensure_ascii=False))
+        if size + turn_size > SEMANTIC_BATCH_CHARS:
+            if not selected:
+                raise SemanticBatchTooLarge("one Agent Turn exceeds the semantic input limit")
+            break
+        selected.append(turn)
+        size += turn_size
+    batch = tuple(selected)
+    _update_task_metadata(captured, {"semantic_batch": {
+        "contract": _semantic_contract(services),
+        "turn_ids": [turn.turn_id for turn in batch],
+    }}, services.connect, drop=("semantic_pending",))
+    return batch
+
+
+def _attempt_key(captured: _CapturedTask, tail, services) -> str:
+    """Identity of the frozen batch, independent of later arriving turns."""
+    cursor = captured.metadata.get("semantic_cursor") or ""
+    return f"{_semantic_contract(services)}|{cursor}|{tail[-1].turn_id}"
+
+
+def _recorded_attempts(metadata: dict[str, Any], key: str) -> int:
+    record = metadata.get("semantic_attempts")
+    if not isinstance(record, dict) or record.get("key") != key:
+        return 0
+    try:
+        return max(0, int(record.get("count", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_abandoned(metadata: dict[str, Any], key: str) -> bool:
+    record = metadata.get("semantic_abandoned")
+    return isinstance(record, dict) and record.get("key") == key
+
+
+def _record_attempt(captured, key, attempt, now, connect) -> None:
+    """Persist only an observed model-contract failure, never an outage."""
+    _update_task_metadata(
+        captured,
+        {
+            "semantic_attempts": {
+                "key": key,
+                "count": attempt,
+                "last_attempt_at": now.isoformat(),
+            }
+        },
+        connect,
+        # Any abandonment mark still present belongs to a retired budget.
+        drop=("semantic_abandoned",),
+    )
+
+
+def _record_abandonment(captured, key, attempt, error_type, now, connect) -> None:
+    """Mark the tail abandoned. The verbatim Captured Task is left untouched."""
+    _update_task_metadata(
+        captured,
+        {
+            "semantic_abandoned": {
+                "key": key,
+                "attempts": attempt,
+                "reason": SEMANTIC_ABANDON_REASON,
+                "error_type": error_type,
+                "abandoned_at": now.isoformat(),
+            }
+        },
+        connect,
+    )
+
+
+def _update_task_metadata(
+    captured, updates: dict[str, Any], connect, *, drop: tuple[str, ...] = ()
+) -> None:
+    with connect() as connection:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT metadata FROM memories WHERE id = %s FOR UPDATE",
+                    (captured.memory_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuntimeError("the Captured Task row disappeared")
+                metadata = dict(row[0])
+                for key in drop:
+                    metadata.pop(key, None)
+                metadata.update(updates)
+                cursor.execute(
+                    """
+                    UPDATE memories
+                    SET metadata = %s, updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (json.dumps(metadata), captured.memory_id),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+    for key in drop:
+        captured.metadata.pop(key, None)
+    captured.metadata.update(updates)
+
+
 def _last_segment(captured: _CapturedTask, connect) -> _StoredSegment | None:
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute(
@@ -612,19 +997,35 @@ def _last_segment(captured: _CapturedTask, connect) -> _StoredSegment | None:
 
 def _process_semantics(captured, tail, services) -> None:
     previous = _last_segment(captured, services.connect)
-    result = services.semantic.run(
-        previous_segment=previous.segment if previous is not None else None,
-        turns=tail,
-    )
-    _validate_semantic_result(result, previous, tail)
+    # Long previous segments are retained, but cannot grow the next prompt
+    # without bound. A fresh segment is then required, with full provenance.
+    context = previous
+    if context is not None and len(json.dumps(asdict(context.segment), ensure_ascii=False)) > SEMANTIC_PREVIOUS_CHARS:
+        context = None
+    key = _attempt_key(captured, tail, services)
+    pending = captured.metadata.get("semantic_pending")
+    if isinstance(pending, dict) and pending.get("key") == key:
+        result = _parse_semantic_output(pending["result"])
+    else:
+        result = services.semantic.run(
+            previous_segment=context.segment if context is not None else None,
+            turns=tail,
+        )
+    _validate_semantic_result(result, context, tail)
+    if not isinstance(pending, dict) or pending.get("key") != key:
+        _update_task_metadata(captured, {"semantic_pending": {
+            "key": key, "result": asdict(result),
+        }}, services.connect)
 
     turn_lookup = {turn.turn_id: turn for turn in captured.turns}
     segment_contents = tuple(
         _render_segment(segment, turn_lookup) for segment in result.segments
     )
-    segment_embeddings = tuple(services.embed(text) for text in segment_contents)
+    segment_embeddings = tuple(
+        _prepare_embedding(text, services.embed) for text in segment_contents
+    )
     memory_embeddings = tuple(
-        services.embed(memory.content) for memory in result.memories
+        _prepare_embedding(memory.content, services.embed) for memory in result.memories
     )
     _store_semantic_result(
         captured=captured,
@@ -692,6 +1093,65 @@ def _render_segment(
     )
 
 
+@dataclass(frozen=True)
+class _PreparedEmbedding:
+    """One row's vectors: its own (``vector``) or, when oversize, its chunks'."""
+
+    vector: list[float] | None
+    chunks: tuple[tuple[str, list[float]], ...] = ()
+
+    @property
+    def stored_vector(self) -> str | None:
+        return None if self.vector is None else str(self.vector)
+
+
+def _prepare_embedding(text: str, embed) -> _PreparedEmbedding:
+    """Never send more than ``MAX_CHUNK_CHARS`` characters per embedding call.
+
+    Text within the bound is embedded whole. Longer text keeps its full content
+    on the row and is represented in the vector index by lossless
+    ``chunk_by_section`` children, exactly as the rechunk planner would lay it
+    out, so a later plan has nothing to repair.
+    """
+    from src.ingest import chunk_by_section
+
+    if len(text) <= MAX_CHUNK_CHARS:
+        return _PreparedEmbedding(vector=embed(text))
+    pieces = [piece for piece in chunk_by_section(text, MAX_CHUNK_CHARS) if piece.strip()]
+    return _PreparedEmbedding(vector=None, chunks=tuple((piece, embed(piece)) for piece in pieces))
+
+
+def _install_chunks(connection, parent_id, prepared: _PreparedEmbedding, *, fields, metadata) -> None:
+    """Replace the row's chunk set (possibly with none) in the caller's transaction.
+
+    The parent row must already be locked by the caller's UPDATE/INSERT. Old
+    chunks are superseded; those nothing cites are deleted, as in apply_rechunk.
+    """
+    from src.db.maintenance import install_chunk_set, purge_superseded_chunks
+
+    if not prepared.chunks:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM memories WHERE parent_id = %s AND status = 'active' LIMIT 1",
+                (parent_id,),
+            )
+            if cursor.fetchone() is None:
+                return
+    superseded = install_chunk_set(
+        connection, parent_id, list(prepared.chunks),
+        fields=fields, metadata=metadata, mem_class=fields["mem_class"],
+    )
+    if prepared.vector is not None:
+        # A row that fits one embedding again keeps its own vector.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE memories SET embedding = %s WHERE id = %s",
+                (prepared.stored_vector, parent_id),
+            )
+    if superseded:
+        purge_superseded_chunks(connection, parent_id)
+
+
 def _store_semantic_result(
     *,
     captured,
@@ -725,7 +1185,7 @@ def _store_semantic_result(
                 next_index = previous.index + 1 if previous is not None else 0
                 for result_index, segment in enumerate(result.segments):
                     content = segment_contents[result_index]
-                    embedding = segment_embeddings[result_index]
+                    prepared = segment_embeddings[result_index]
                     if result_index == 0 and extends_previous:
                         segment_index = previous.index
                         segment_id = previous.memory_id
@@ -745,7 +1205,7 @@ def _store_semantic_result(
                             (
                                 segment.title,
                                 content,
-                                str(embedding),
+                                prepared.stored_vector,
                                 json.dumps(metadata),
                                 segment_id,
                                 captured.memory_id,
@@ -776,7 +1236,7 @@ def _store_semantic_result(
                             (
                                 segment.title,
                                 content,
-                                str(embedding),
+                                prepared.stored_vector,
                                 f"{captured.source_url}#segment-{segment_index}",
                                 TASK_SOURCE_TYPE,
                                 json.dumps(metadata),
@@ -785,9 +1245,19 @@ def _store_semantic_result(
                             ),
                         )
                         segment_id = cursor.fetchone()[0]
+                    _install_chunks(
+                        connection, segment_id, prepared, metadata=metadata,
+                        fields={
+                            "type": "source", "title": segment.title,
+                            "source_url": f"{captured.source_url}#segment-{segment_index}",
+                            "source_type": TASK_SOURCE_TYPE, "project": None,
+                            "tags": ["codex", "topic-segment"], "mem_class": "source",
+                            "encoding_context": "Original Agent Turns grouped as one Topic Segment.",
+                        },
+                    )
                     segment_ids.append(segment_id)
 
-                for memory, embedding in zip(
+                for memory, prepared in zip(
                     result.memories, memory_embeddings, strict=True
                 ):
                     mem_class = (
@@ -823,7 +1293,7 @@ def _store_semantic_result(
                             memory.kind,
                             memory.title,
                             memory.content,
-                            str(embedding),
+                            prepared.stored_vector,
                             captured.source_url,
                             MEMORY_SOURCE_TYPE,
                             json.dumps(metadata),
@@ -832,6 +1302,16 @@ def _store_semantic_result(
                         ),
                     )
                     memory_id = cursor.fetchone()[0]
+                    _install_chunks(
+                        connection, memory_id, prepared, metadata=metadata,
+                        fields={
+                            "type": memory.kind, "title": memory.title,
+                            "source_url": captured.source_url,
+                            "source_type": MEMORY_SOURCE_TYPE, "project": None,
+                            "tags": ["codex", "task-memory"], "mem_class": mem_class,
+                            "encoding_context": encoding_context,
+                        },
+                    )
                     cursor.execute(
                         """
                         INSERT INTO memory_relationships (
@@ -847,6 +1327,11 @@ def _store_semantic_result(
                     )
 
                 current_metadata["semantic_cursor"] = tail[-1].turn_id
+                # The tail is processed: retire its retry budget.
+                current_metadata.pop("semantic_attempts", None)
+                current_metadata.pop("semantic_abandoned", None)
+                current_metadata.pop("semantic_batch", None)
+                current_metadata.pop("semantic_pending", None)
                 cursor.execute(
                     """
                     UPDATE memories
@@ -868,6 +1353,19 @@ def _parse_semantic_output(output: Any) -> TaskSemanticResult:
     memories_value = output.get("memories")
     if not isinstance(segments_value, list) or not isinstance(memories_value, list):
         raise SemanticResultError("semantic output needs segments and memories arrays")
+    def strings(value):
+        return isinstance(value, list) and all(isinstance(item, str) and item for item in value)
+
+    for value in segments_value:
+        if (not isinstance(value, dict) or not isinstance(value.get("title"), str)
+                or not strings(value.get("turn_ids"))):
+            raise SemanticResultError("segment title and turn IDs have invalid types")
+    for value in memories_value:
+        if (not isinstance(value, dict)
+                or type(value.get("segment")) is not int
+                or not all(isinstance(value.get(key), str) for key in ("kind", "title", "content"))
+                or not strings(value.get("supporting_turn_ids"))):
+            raise SemanticResultError("memory fields have invalid types")
     try:
         segments = tuple(
             TopicSegment(
@@ -888,4 +1386,7 @@ def _parse_semantic_output(output: Any) -> TaskSemanticResult:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SemanticResultError("semantic output has an invalid shape") from exc
-    return TaskSemanticResult(segments=segments, memories=memories)
+    try:
+        return TaskSemanticResult(segments=segments, memories=memories)
+    except (TypeError, ValueError) as exc:
+        raise SemanticResultError("semantic output has an invalid shape") from exc
